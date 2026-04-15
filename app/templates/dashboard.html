@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>입금 요청 관리</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <h1>입금 요청 관리 대시보드</h1>
+
+    <p class="muted">로그인 없이 사용하되, 각 변경 요청 시 actor 관리자 ID를 함께 남겨 감사로그를 보관합니다.</p>
+
+    <div class="grid">
+      <section>
+        <h2>관리자 등록 (super만 가능)</h2>
+        <form method="post" action="/admins/form">
+          <input name="name" placeholder="이름" required />
+          <input name="email" type="email" placeholder="이메일" required />
+          <select name="role">
+            <option value="general">general</option>
+            <option value="super">super</option>
+          </select>
+          <input name="actor_admin_id" type="number" placeholder="수행자(super) ID" />
+          <button type="submit">등록</button>
+        </form>
+        <ul>
+          {% for a in admins %}
+          <li>{{a.id}} - {{a.name}} ({{a.email}} / {{a.role}})</li>
+          {% endfor %}
+        </ul>
+      </section>
+
+      <section>
+        <h2>브랜드 등록</h2>
+        <form method="post" action="/brands/form">
+          <input name="name" placeholder="브랜드명" required />
+          <input name="contact_name" placeholder="담당자" />
+          <input name="contact_email" type="email" placeholder="담당 이메일" />
+          <input name="google_sheet_url" placeholder="구글시트 URL" />
+          <select name="sync_mode">
+            <option value="manual">manual</option>
+            <option value="immediate">immediate</option>
+          </select>
+          <input name="template_columns" placeholder="가변 열 (콤마구분: 옵션A,옵션B)" />
+          <input name="actor_admin_id" type="number" placeholder="수행자 ID" />
+          <button type="submit">등록</button>
+        </form>
+        <ul>
+          {% for b in brands %}
+          <li>
+            {{b.id}} - {{b.name}} ({{b.sync_mode}})
+            <a href="/brands/{{b.id}}/export.csv">CSV</a>
+            <form method="post" action="/brands/{{b.id}}/archive" class="inline-form">
+              <input name="actor_admin_id" type="number" placeholder="수행자 ID" />
+              <button type="submit">수동 동기화</button>
+            </form>
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+    </div>
+
+    <section>
+      <h2>입금 요청 등록</h2>
+      <form method="post" action="/deposit-requests/form" class="wide-form">
+        <input name="brand_id" type="number" placeholder="브랜드 ID" required />
+        <input name="order_number" placeholder="주문번호(권장)" />
+        <input name="customer_name" placeholder="고객명" />
+        <input name="payer_name" placeholder="입금자명" />
+        <select name="name_source">
+          <option value="customer">이름=고객명</option>
+          <option value="payer">이름=입금자명</option>
+        </select>
+        <input name="amount" type="number" step="0.01" placeholder="입금액" />
+        <select name="fee_mode">
+          <option value="">수수료 계산방식</option>
+          <option value="commission">판매 수수료 기준</option>
+          <option value="supply_price_list">공급가 리스트 기준</option>
+        </select>
+        <select name="promotion_type">
+          <option value="">프로모션</option>
+          <option value="none">없음</option>
+          <option value="item_discount">상품별 할인</option>
+          <option value="bulk_discount">일괄 할인</option>
+        </select>
+        <input name="discount_amount" type="number" step="0.01" placeholder="할인액" />
+        <input name="extra_fields" placeholder='가변필드 JSON, 예: {"옵션A":"값"}' />
+        <input name="memo" placeholder="메모" />
+        <input name="created_by_admin_id" type="number" placeholder="수행자 관리자 ID" />
+        <button type="submit">등록</button>
+      </form>
+      <p class="muted">중복은 차단하지 않고, 동일 브랜드+주문번호+고객명+입금액일 때 경고 대상으로 기록됩니다.</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Brand</th>
+            <th>주문번호</th>
+            <th>고객명</th>
+            <th>입금자명</th>
+            <th>금액</th>
+            <th>상태</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in deposit_requests %}
+          <tr>
+            <td>{{r.id}}</td>
+            <td>{{r.brand_id}}</td>
+            <td>{{r.order_number or '-'}}</td>
+            <td>{{r.customer_name or '-'}}</td>
+            <td>{{r.payer_name or '-'}}</td>
+            <td>{{r.amount}} {{r.currency}}</td>
+            <td>{{r.status}}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>최근 감사 로그</h2>
+      <ul>
+        {% for row in audits %}
+        <li>#{{row[0]}} | {{row[1]}} | {{row[2]}} | {{row[3]}}</li>
+        {% endfor %}
+      </ul>
+    </section>
+  </body>
+</html>

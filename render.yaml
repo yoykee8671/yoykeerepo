@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: deposit-request-app
+    runtime: docker
+    plan: starter
+    autoDeploy: true
+    envVars:
+      - key: GOOGLE_SHEETS_SYNC_ENABLED
+        value: "false"
+      - key: APP_BASE_URL
+        sync: false
