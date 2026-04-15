@@ -21,7 +21,7 @@
 4. 브랜드별 CSV 추출
 5. 브랜드별 구글시트 아카이브 동기화 트리거
 
-## 빠른 시작
+## 로컬 실행
 
 ```bash
 python -m venv .venv
@@ -31,6 +31,28 @@ uvicorn app.main:app --reload
 ```
 
 브라우저에서 `http://127.0.0.1:8000` 접속.
+
+## Docker 실행
+
+```bash
+docker build -t deposit-request-app .
+docker run --rm -p 8000:8000 \
+  -e GOOGLE_SHEETS_SYNC_ENABLED=false \
+  -e APP_BASE_URL=http://localhost:8000 \
+  deposit-request-app
+```
+
+## 배포 (Render 기준)
+
+이 저장소에는 `render.yaml`이 포함되어 있어 바로 배포 가능합니다.
+
+1. GitHub에 이 저장소를 push
+2. Render 대시보드 → **New +** → **Blueprint** 선택
+3. 저장소 연결 후 배포
+4. 배포 완료 후 발급 URL 접속 (예: `https://deposit-request-app.onrender.com`)
+5. 상태 확인: `https://<배포도메인>/healthz`
+
+> 운영 권장: Render 환경변수 `APP_BASE_URL`를 실제 배포 도메인으로 설정
 
 ## 환경 변수
 

@@ -33,6 +33,11 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
 
 
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+
 VALID_ROLES = {"super", "general"}
 VALID_SYNC_MODES = {"immediate", "manual"}
 
