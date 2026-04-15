@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{brand.name}} 정산 조회</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <h1>{{brand.name}} 조회 전용 페이지</h1>
+    <p class="muted">이 페이지는 읽기 전용입니다. 수정/삭제 권한이 없습니다.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>요청일</th>
+          <th>주문번호</th>
+          <th>고객명</th>
+          <th>입금자명</th>
+          <th>입금액</th>
+          <th>상태</th>
+          <th>메모</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td>{{r.request_date}}</td>
+          <td>{{r.order_number or '-'}}</td>
+          <td>{{r.customer_name or '-'}}</td>
+          <td>{{r.payer_name or '-'}}</td>
+          <td>{{r.amount}} {{r.currency}}</td>
+          <td>{{r.status}}</td>
+          <td>{{r.memo or '-'}}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </body>
+</html>

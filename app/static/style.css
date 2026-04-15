@@ -1,0 +1,56 @@
+body {
+  font-family: Arial, sans-serif;
+  margin: 20px;
+  line-height: 1.4;
+}
+
+h1,
+h2 {
+  margin-bottom: 8px;
+}
+
+.muted {
+  color: #666;
+  font-size: 13px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+form {
+  margin-bottom: 12px;
+}
+
+input,
+select {
+  margin: 2px;
+  padding: 6px 8px;
+}
+
+button {
+  padding: 6px 10px;
+}
+
+.inline-form {
+  display: inline;
+}
+
+.wide-form input,
+.wide-form select {
+  min-width: 130px;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  border: 1px solid #ccc;
+  padding: 6px;
+  text-align: left;
+}
