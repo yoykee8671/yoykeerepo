@@ -3,7 +3,7 @@ services:
     name: wooofpay
     runtime: docker
     plan: free
-    autoDeploy: false
+    autoDeploy: true
     healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
