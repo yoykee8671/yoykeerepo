@@ -1,0 +1,14 @@
+node_modules
+npm-debug.log
+.DS_Store
+.git
+.gitignore
+.env
+.env.*
+.omc
+docs
+data/*.backup.*
+data/*.xlsx
+data/*.xls
+data/*.csv
+scripts/__pycache__

@@ -1,0 +1,12 @@
+node_modules/
+.DS_Store
+data/db.json
+data/*.backup.*
+data/*.xlsx
+data/*.xls
+data/*.csv
+.env
+.env.*
+!.env.example
+.omc/
+scripts/__pycache__/

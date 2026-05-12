@@ -1,0 +1,17 @@
+{
+  "name": "wooofpay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "push:db": "node scripts/push_db_json_to_postgres.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "pg": "^8.20.0"
+  }
+}
