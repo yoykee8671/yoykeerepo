@@ -15,13 +15,14 @@ UPLOAD_HEADERS = [
     "브랜드명",
     "품목코드",
     "품목명",
-    "규격",
-    "단위",
+    "옵션",
+    "수량",
     "공급가",
     "원판매가",
     "할인가",
     "현재판매가",
     "적용시작일",
+    "적용종료일",
     "바코드",
     "사용상태",
     "메모",
@@ -50,9 +51,9 @@ def normalize_action(value):
 
 def normalize_bool(value):
     text = str(value or "").strip().lower()
-    if text in {"", "사용", "true", "1", "y", "yes", "o"}:
+    if text in {"", "y", "사용", "true", "1", "yes", "o"}:
         return True
-    if text in {"중지", "false", "0", "n", "no", "x"}:
+    if text in {"n", "중지", "false", "0", "no", "x"}:
         return False
     return True
 
@@ -113,8 +114,9 @@ def export_workbook(input_path, output_path):
             row.get("discountPrice", 0),
             row.get("salePrice", 0),
             row.get("effectiveFrom", ""),
+            row.get("effectiveTo", ""),
             row.get("barcode", ""),
-            "사용" if row.get("isActive", True) else "중지",
+            "Y" if row.get("isActive", True) else "N",
             row.get("note", ""),
         ])
 
@@ -131,9 +133,10 @@ def export_workbook(input_path, output_path):
         "J": 12,
         "K": 12,
         "L": 14,
-        "M": 18,
-        "N": 10,
-        "O": 28,
+        "M": 14,
+        "N": 18,
+        "O": 10,
+        "P": 28,
     }
     for key, width in widths.items():
         ws.column_dimensions[key].width = width
@@ -145,8 +148,9 @@ def export_workbook(input_path, output_path):
     guide["A4"] = "3. 신규 행은 entryId를 비우고 처리유형을 '신규'로 두면 됩니다."
     guide["A5"] = "4. 기존 품목의 새 단가 이력을 추가하려면 처리유형을 '개정추가'로 바꾸고 적용시작일을 새로 넣습니다."
     guide["A6"] = "5. 삭제하려면 처리유형을 '삭제'로 바꾸고 entryId는 유지합니다."
+    guide["A10"] = "8. 적용종료일을 비우면 종료일 없이 상시 적용됩니다. 일시 할인/판촉 단가에 종료일을 지정하세요."
     guide["A7"] = "6. 원판매가/할인가/현재판매가를 나눠 입력할 수 있습니다. 요청 계산은 현재판매가를 기준으로 합니다."
-    guide["A8"] = "7. 사용상태는 사용/중지 또는 true/false 모두 허용합니다."
+    guide["A8"] = "7. 사용상태는 Y/N으로 입력합니다 (이전 양식의 사용/중지, true/false도 허용)."
     guide["A9"] = f"대상 브랜드: {brand_name}"
     guide.column_dimensions["A"].width = 110
 
@@ -173,13 +177,14 @@ def import_workbook(input_path):
             "brandName": str(raw.get("브랜드명") or "").strip(),
             "itemCode": str(raw.get("품목코드") or "").strip(),
             "itemName": str(raw.get("품목명") or "").strip(),
-            "spec": str(raw.get("규격") or "").strip(),
-            "unit": str(raw.get("단위") or "").strip(),
+            "spec": str(raw.get("옵션") or raw.get("규격") or "").strip(),
+            "unit": str(raw.get("수량") or raw.get("단위") or "").strip(),
             "supplyPrice": normalize_number(raw.get("공급가")),
             "originalPrice": normalize_number(raw.get("원판매가") or raw.get("소비자가")),
             "discountPrice": normalize_number(raw.get("할인가")),
             "salePrice": normalize_number(raw.get("현재판매가") or raw.get("판매가")),
             "effectiveFrom": normalize_date(raw.get("적용시작일")),
+            "effectiveTo": normalize_date(raw.get("적용종료일")),
             "barcode": str(raw.get("바코드") or "").strip(),
             "isActive": normalize_bool(raw.get("사용상태")),
             "note": str(raw.get("메모") or "").strip(),

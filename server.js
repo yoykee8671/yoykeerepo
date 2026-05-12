@@ -979,9 +979,11 @@ function sanitizePromotionTargets(raw) {
 }
 
 function getLatestPriceCatalog(db, brandId = "") {
+  const today = now().slice(0, 10);
   const grouped = new Map();
   for (const entry of (db.priceEntries || []).filter((item) => item.isActive !== false)) {
     if (brandId && entry.brandId !== brandId) continue;
+    if (entry.effectiveTo && entry.effectiveTo < today) continue;
     const key = `${entry.brandId}::${normalizeItemKey(entry.itemCode, entry.itemName)}`;
     const current = grouped.get(key);
     const currentDate = current?.effectiveFrom || "";
@@ -1099,6 +1101,7 @@ function applyImportedPriceWorkbook(db, actor, brand, rows) {
         salePrice: row.salePrice
       }),
       effectiveFrom: dateOnly(row.effectiveFrom) || now().slice(0, 10),
+      effectiveTo: dateOnly(row.effectiveTo) || "",
       note: String(row.note || "").trim(),
       isActive: row.isActive !== false && row.isActive !== "false"
     };
@@ -1579,6 +1582,7 @@ async function routeApi(req, res, url) {
       supplyPrice: number(body.supplyPrice),
       ...normalizePriceFields(body),
       effectiveFrom: dateOnly(body.effectiveFrom) || now().slice(0, 10),
+      effectiveTo: dateOnly(body.effectiveTo) || "",
       note: String(body.note || "").trim(),
       isActive: body.isActive !== false && body.isActive !== "false",
       createdAt: now(),
@@ -1636,6 +1640,7 @@ async function routeApi(req, res, url) {
     }
     Object.assign(entry, normalizePriceFields(entry));
     if ("effectiveFrom" in body) entry.effectiveFrom = dateOnly(body.effectiveFrom) || entry.effectiveFrom;
+    if ("effectiveTo" in body) entry.effectiveTo = dateOnly(body.effectiveTo) || "";
     if ("isActive" in body) entry.isActive = body.isActive !== false && body.isActive !== "false";
     entry.updatedAt = now();
     addAudit(db, actor, "update", "price_entry", entry.id, `${entry.itemName || entry.itemCode} 단가 이력 수정`, before, entry);

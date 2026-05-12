@@ -741,7 +741,7 @@ function renderPrices() {
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>브랜드</th><th>코드</th><th>품목명</th><th>규격</th><th>공급가</th><th>원판매가</th><th>할인가</th><th>현재 판매가</th><th>적용일</th><th>작업</th></tr></thead>
+            <thead><tr><th>브랜드</th><th>코드</th><th>품목명</th><th>옵션</th><th>공급가</th><th>원판매가</th><th>할인가</th><th>현재 판매가</th><th>적용 시작</th><th>적용 종료</th><th>작업</th></tr></thead>
             <tbody>
               ${rows.map((item) => `
                 <tr>
@@ -754,8 +754,9 @@ function renderPrices() {
                   <td>${money.format(Number(item.discountPrice || 0))}원</td>
                   <td>${money.format(Number(item.salePrice || 0))}원</td>
                   <td>${h(item.effectiveFrom)}</td>
-                  <td><div class="row-actions"><button data-clone-price-entry="${item.id}">개정 추가</button><button data-edit-price-entry="${item.id}">수정</button></div></td>
-                </tr>`).join("") || `<tr><td colspan="10" class="empty">등록된 품목이 없습니다.</td></tr>`}
+                  <td>${h(item.effectiveTo || "상시")}</td>
+                  <td><div class="row-actions"><button data-clone-price-entry="${item.id}">개정 추가</button><button data-edit-price-entry="${item.id}">수정</button><button class="danger" data-delete-price-entry="${item.id}">삭제</button></div></td>
+                </tr>`).join("") || `<tr><td colspan="11" class="empty">등록된 품목이 없습니다.</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -763,7 +764,7 @@ function renderPrices() {
           <h3 style="margin-top:0">개정 이력</h3>
           <div class="table-wrap" style="max-height:280px">
             <table>
-              <thead><tr><th>브랜드</th><th>코드</th><th>품목명</th><th>공급가</th><th>원판매가</th><th>할인가</th><th>현재 판매가</th><th>적용일</th><th>작업</th></tr></thead>
+              <thead><tr><th>브랜드</th><th>코드</th><th>품목명</th><th>공급가</th><th>원판매가</th><th>할인가</th><th>현재 판매가</th><th>적용 시작</th><th>적용 종료</th><th>작업</th></tr></thead>
               <tbody>
                 ${revisions.map((item) => `
                   <tr>
@@ -775,8 +776,9 @@ function renderPrices() {
                     <td>${money.format(Number(item.discountPrice || 0))}원</td>
                     <td>${money.format(Number(item.salePrice || 0))}원</td>
                     <td>${h(item.effectiveFrom)}</td>
+                    <td>${h(item.effectiveTo || "상시")}</td>
                     <td><div class="row-actions"><button data-edit-price-entry="${item.id}">수정</button><button class="danger" data-delete-price-entry="${item.id}">삭제</button></div></td>
-                  </tr>`).join("") || `<tr><td colspan="9" class="empty">개정 이력이 없습니다.</td></tr>`}
+                  </tr>`).join("") || `<tr><td colspan="10" class="empty">개정 이력이 없습니다.</td></tr>`}
               </tbody>
             </table>
           </div>
@@ -828,13 +830,14 @@ function renderPriceEntryForm() {
         <div><label>품목명</label><input name="itemName" value="${h(item.itemName)}" required></div>
       </div>
       <div class="field two">
-        <div><label>규격</label><input name="spec" value="${h(item.spec)}"></div>
-        <div><label>단위</label><input name="unit" value="${h(item.unit)}"></div>
+        <div><label>옵션</label><input name="spec" value="${h(item.spec)}"></div>
+        <div><label>수량</label><input name="unit" value="${h(item.unit)}"></div>
       </div>
       <div class="field two">
         <div><label>공급가</label><input name="supplyPrice" type="number" min="0" value="${h(item.supplyPrice || "")}" required></div>
         <div><label>적용 시작일</label><input name="effectiveFrom" type="date" value="${h(item.effectiveFrom || new Date().toISOString().slice(0, 10))}" required></div>
       </div>
+      <div class="field"><label>적용 종료일 (비우면 상시)</label><input name="effectiveTo" type="date" value="${h(item.effectiveTo || "")}"></div>
       <div class="field three">
         <div><label>원판매가</label><input name="originalPrice" type="number" min="0" value="${h((item.originalPrice ?? item.consumerPrice) || "")}"></div>
         <div><label>할인가</label><input name="discountPrice" type="number" min="0" value="${h(item.discountPrice || "")}"></div>
@@ -842,7 +845,7 @@ function renderPriceEntryForm() {
       </div>
       <div class="field"><label>바코드</label><input name="barcode" value="${h(item.barcode)}"></div>
       <div class="field"><label>메모</label><textarea name="note">${h(item.note)}</textarea></div>
-      <div class="field"><label>사용 상태</label><select name="isActive"><option value="true" ${item.isActive !== false ? "selected" : ""}>사용</option><option value="false" ${item.isActive === false ? "selected" : ""}>중지</option></select></div>
+      <div class="field"><label>사용 상태</label><select name="isActive"><option value="true" ${item.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${item.isActive === false ? "selected" : ""}>N</option></select></div>
       <div class="toolbar">
         <button class="primary" type="submit">${item.id ? "수정 저장" : "개정 등록"}</button>
         ${state.editingPriceEntry ? `<button type="button" data-cancel-price-entry>취소</button>` : ""}
@@ -897,7 +900,7 @@ function renderPriceAliasForm() {
         <div><label>적용 종료일</label><input name="validTo" type="date" value="${h(item.validTo || "")}"></div>
       </div>
       <div class="field"><label>메모</label><input name="note" value="${h(item.note || "")}"></div>
-      <div class="field"><label>상태</label><select name="isActive"><option value="true" ${item.isActive !== false ? "selected" : ""}>사용</option><option value="false" ${item.isActive === false ? "selected" : ""}>중지</option></select></div>
+      <div class="field"><label>상태</label><select name="isActive"><option value="true" ${item.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${item.isActive === false ? "selected" : ""}>N</option></select></div>
       <div class="toolbar">
         <button class="primary" type="submit">수정 저장</button>
         <button type="button" data-cancel-price-alias>취소</button>
@@ -1014,7 +1017,7 @@ function renderBrandForm() {
       <div class="field"><label>브랜드명</label><input name="name" value="${h(b.name)}" required></div>
       <div class="field two">
         <div><label>구분</label><select name="type"><option value="brand" ${(b.type || "brand") === "brand" ? "selected" : ""}>브랜드</option><option value="reference" ${b.type === "reference" ? "selected" : ""}>참고시트</option></select></div>
-        <div><label>활성</label><select name="isActive"><option value="true" ${b.isActive !== false ? "selected" : ""}>활성</option><option value="false" ${b.isActive === false ? "selected" : ""}>비활성</option></select></div>
+        <div><label>사용</label><select name="isActive"><option value="true" ${b.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${b.isActive === false ? "selected" : ""}>N</option></select></div>
       </div>
       <div class="field">
         <label>정산유형</label>
@@ -1125,7 +1128,7 @@ function renderPromotionRuleForm() {
       </div>
       <div class="field two">
         <div><label>적용 수수료율(%)</label><input name="commissionRate" type="number" min="0" max="100" step="0.1" value="${h(item.commissionRate || "")}" required></div>
-        <div><label>상태</label><select name="isActive"><option value="true" ${item.isActive !== false ? "selected" : ""}>사용</option><option value="false" ${item.isActive === false ? "selected" : ""}>중지</option></select></div>
+        <div><label>상태</label><select name="isActive"><option value="true" ${item.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${item.isActive === false ? "selected" : ""}>N</option></select></div>
       </div>
       <div class="field" data-promotion-target-wrap style="${(item.scopeType || "all") === "items" ? "" : "display:none"}">
         <label>대상 품목</label>
@@ -1201,7 +1204,7 @@ function renderAdminRow(admin) {
       <td>${h(admin.name)}</td>
       <td>${h(admin.email)}</td>
       <td><span class="badge">${h(admin.role)}</span></td>
-      <td>${admin.isActive ? "활성" : "비활성"}</td>
+      <td>${admin.isActive ? "Y" : "N"}</td>
       <td>${fmtDate(admin.createdAt)}</td>
       <td><div class="row-actions"><button data-edit-admin="${admin.id}">수정</button><button class="danger" data-delete-admin="${admin.id}" ${admin.id === state.admin.id ? "disabled" : ""}>삭제</button></div></td>
     </tr>
@@ -1216,7 +1219,7 @@ function renderAdminForm() {
       <div class="field"><label>이메일</label><input name="email" type="email" value="${h(a.email)}" ${state.editingAdmin ? "disabled" : "required"}></div>
       <div class="field two">
         <div><label>역할</label><select name="role">${["owner", "manager", "operator", "viewer"].map((r) => `<option value="${r}" ${(a.role || "operator") === r ? "selected" : ""}>${r}</option>`).join("")}</select></div>
-        <div><label>상태</label><select name="isActive"><option value="true" ${a.isActive !== false ? "selected" : ""}>활성</option><option value="false" ${a.isActive === false ? "selected" : ""}>비활성</option></select></div>
+        <div><label>상태</label><select name="isActive"><option value="true" ${a.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${a.isActive === false ? "selected" : ""}>N</option></select></div>
       </div>
       <div class="field"><label>비밀번호 ${state.editingAdmin ? "(변경 시에만 입력)" : ""}</label><input name="password" type="password" ${state.editingAdmin ? "" : "required"}></div>
       <div class="toolbar">
