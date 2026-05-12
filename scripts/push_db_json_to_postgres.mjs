@@ -14,7 +14,7 @@ if (!DATABASE_URL) {
 
 const pool = new pg.Pool({
   connectionString: DATABASE_URL,
-  ssl: DATABASE_URL.includes("supabase.co") ? { rejectUnauthorized: false } : undefined
+  ssl: /supabase\.(co|com)/.test(DATABASE_URL) ? { rejectUnauthorized: false } : undefined
 });
 
 const state = JSON.parse(await readFile(DB_PATH, "utf8"));

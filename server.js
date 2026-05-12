@@ -20,7 +20,7 @@ const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
 const POSTGRES_STATE_ROW_ID = "primary";
 const pgPool = DATABASE_URL ? new pg.Pool({
   connectionString: DATABASE_URL,
-  ssl: DATABASE_URL.includes("supabase.co") ? { rejectUnauthorized: false } : undefined
+  ssl: /supabase\.(co|com)/.test(DATABASE_URL) ? { rejectUnauthorized: false } : undefined
 }) : null;
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
