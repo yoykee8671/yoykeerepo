@@ -532,7 +532,12 @@ function buildInitialDb() {
   };
 }
 
+let ensureDbPromise = null;
 async function ensureDb() {
+  if (!ensureDbPromise) ensureDbPromise = doEnsureDb();
+  return ensureDbPromise;
+}
+async function doEnsureDb() {
   if (pgPool) {
     await ensurePostgresDb();
     return;
@@ -658,15 +663,21 @@ function migrateDb(db) {
   return { db, changed };
 }
 
+let cachedDb = null;
 async function readDb() {
   await ensureDb();
-  if (pgPool) return readPostgresDb();
+  if (pgPool) {
+    if (cachedDb) return cachedDb;
+    cachedDb = await readPostgresDb();
+    return cachedDb;
+  }
   return JSON.parse(await readFile(DB_PATH, "utf8"));
 }
 
 async function writeDb(db) {
   if (pgPool) {
     await writePostgresDb(db);
+    cachedDb = db;
     return;
   }
   await writeJson(DB_PATH, db);
