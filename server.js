@@ -2403,7 +2403,8 @@ async function serveStatic(req, res, pathname) {
           : ext === ".js"
             ? "text/javascript; charset=utf-8"
             : "application/octet-stream";
-    res.writeHead(200, { "content-type": type });
+    const cacheControl = ext === ".html" ? "no-cache" : "public, max-age=300";
+    res.writeHead(200, { "content-type": type, "cache-control": cacheControl });
     res.end(content);
   } catch {
     res.writeHead(302, { location: "/" });
