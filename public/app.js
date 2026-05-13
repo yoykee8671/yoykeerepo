@@ -1877,6 +1877,7 @@ function bindRequests() {
     body.lineItems = body.lineItemsJson || "[]";
     delete body.brandSearch;
     delete body.lineItemsJson;
+    const wasEditing = !!state.editingRequest;
     if (state.editingRequest) {
       await api(`/api/requests/${state.editingRequest.id}`, { method: "PUT", body });
     } else {
@@ -1888,7 +1889,8 @@ function bindRequests() {
       window.opener?.postMessage({ type: "requestSaved" }, location.origin);
     }
     await refreshAndRender();
-    if (isRequestPopup) focusRequestForm();
+    showToast(wasEditing ? "수정되었습니다." : "저장되었습니다.");
+    focusRequestForm();
   });
   app.querySelector("[data-cancel-edit]")?.addEventListener("click", () => {
     state.editingRequest = null;
@@ -2025,6 +2027,26 @@ function updateRequestCalculation(form) {
   }
   if (statusInput && settlementType === "consignment" && statusInput.value === "pending") statusInput.value = "consignment_unpaid";
   if (statusInput && settlementType !== "consignment" && statusInput.value === "consignment_unpaid") statusInput.value = "pending";
+}
+
+function showToast(text, kind = "success") {
+  let el = document.getElementById("toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "toast";
+    Object.assign(el.style, {
+      position: "fixed", bottom: "24px", left: "50%", transform: "translateX(-50%)",
+      padding: "12px 20px", borderRadius: "8px", color: "#fff", fontSize: "14px",
+      fontWeight: "500", zIndex: "9999", boxShadow: "0 10px 26px rgba(0,0,0,0.18)",
+      opacity: "0", transition: "opacity 180ms ease-out", pointerEvents: "none"
+    });
+    document.body.appendChild(el);
+  }
+  el.style.background = kind === "error" ? "#b42318" : "#287d3c";
+  el.textContent = text;
+  el.style.opacity = "1";
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.style.opacity = "0"; }, 1800);
 }
 
 function focusRequestForm() {
