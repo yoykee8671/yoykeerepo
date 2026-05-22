@@ -47,6 +47,20 @@ window.addEventListener("message", async (event) => {
   if (type === "brandSaved") {
     if (isRequestPopup) {
       await loadAll();
+      const form = app.querySelector("[data-request-form]");
+      const brandId = form?.querySelector("[name='brandId']")?.value;
+      const updatedBrandId = event.data.brandId;
+      if (form && brandId && (!updatedBrandId || brandId === updatedBrandId)) {
+        const brand = state.brands.find((b) => b.id === brandId);
+        if (brand) {
+          const baseShipping = form.querySelector("[name='baseShippingFee']");
+          const wasBaseManual = baseShipping?.dataset.manual === "1";
+          applyBrandDefaults(form, brand);
+          if (wasBaseManual && baseShipping) baseShipping.dataset.manual = "1";
+          updateRequestCalculation(form);
+        }
+      }
+      showToast("브랜드 정보가 반영되었습니다.");
       return;
     }
     await refreshAndRender();
@@ -798,7 +812,10 @@ function renderRequestForm() {
       </div>
       <div class="field two">
         <div><label>입금 예정일</label><input name="expectedDepositDate" type="date" value="${h(item.expectedDepositDate)}"></div>
-        <div><label>실입금액</label><input name="paidAmount" type="number" min="0" value="${h(item.paidAmount || "")}"></div>
+        <div>
+          <label>조정 반영 후 최종 입금액 <span class="muted" style="font-weight:400">(자동 계산, 직접 수정 가능)</span></label>
+          <input name="paidAmount" type="number" min="0" value="${h(item.paidAmount || "")}" data-manual="${item.paidAmount ? "1" : ""}">
+        </div>
       </div>
       <div class="field">
         <label>입금일시</label>
@@ -2121,11 +2138,14 @@ function bindRequests() {
         : `추가 ${added}건, 합산 ${merged}건`;
   });
   requestForm
-    .querySelectorAll("[name='productSalesAmount'], [name='extraShippingFee'], [name='commissionRate'], [name='supplyAmount'], [name='expectedDepositDate']")
+    .querySelectorAll("[name='productSalesAmount'], [name='extraShippingFee'], [name='commissionRate'], [name='supplyAmount'], [name='expectedDepositDate'], [name='overpaidAmount'], [name='creditUsedAmount']")
     .forEach((input) => input.addEventListener("input", () => updateRequestCalculation(requestForm)));
   requestForm.querySelector("[name='baseShippingFee']")?.addEventListener("input", (event) => {
     event.target.dataset.manual = "1";
     updateRequestCalculation(requestForm);
+  });
+  requestForm.querySelector("[name='paidAmount']")?.addEventListener("input", (event) => {
+    event.target.dataset.manual = "1";
   });
   updateRequestCalculation(requestForm);
   requestForm.addEventListener("submit", async (event) => {
@@ -2269,6 +2289,28 @@ function updateRequestCalculation(form) {
   if (totalShippingInput) totalShippingInput.value = String(shippingFee || "");
   if (depositInput) depositInput.value = String(depositAmount || "");
   if (deductionInput) deductionInput.value = String(receivableDeduction || "");
+  const creditUsedAmount = value("creditUsedAmount");
+  const paidAmountInput = form.querySelector("[name='paidAmount']");
+  const paidManual = paidAmountInput?.dataset.manual === "1";
+  const finalPaidAmount = Math.max(0, depositAmount - creditUsedAmount);
+  if (paidAmountInput && !paidManual) paidAmountInput.value = finalPaidAmount ? String(finalPaidAmount) : "";
+  const creditHint = form.querySelector("[data-brand-credit-hint]");
+  if (creditHint) {
+    if (brand) {
+      const prior = state.editingRequest && state.editingRequest.brandId === brand.id ? state.editingRequest : null;
+      const liveBalance =
+        Number(brand.creditBalance || 0)
+        + (value("overpaidAmount") - Number(prior?.overpaidAmount || 0))
+        - (creditUsedAmount - Number(prior?.creditUsedAmount || 0));
+      const baseline = `${h(brand.name)} 외상 잔액: ${renderCreditBalance(brand.creditBalance)}`;
+      const adjustedNote = creditUsedAmount || value("overpaidAmount") || prior
+        ? ` <span class="muted">→ 이번 건 반영 시 ${renderCreditBalance(liveBalance)}</span>`
+        : "";
+      creditHint.innerHTML = baseline + adjustedNote;
+    } else {
+      creditHint.innerHTML = "브랜드를 선택하면 잔액이 표시됩니다.";
+    }
+  }
   if (receivableField) receivableField.style.display = settlementType === "prepay_debt" || (settlementType === "prepay_supply" && hasReceivable) ? "" : "none";
   if (receivableLabel) receivableLabel.textContent = receivableDeductionLabel(settlementType, brand);
   if (supplyAmountField) supplyAmountField.style.display = settlementType === "prepay_supply" ? "" : "none";
@@ -2679,8 +2721,11 @@ function bindBrands() {
       await api(`/api/promotion-rules/${button.dataset.deletePromotionRule}`, { method: "DELETE" });
       state.editingPromotionRule = null;
       if (isBrandPopup) {
-        window.opener?.postMessage({ type: "brandSaved" }, location.origin);
+        const brandId = state.editingBrand?.id || "";
+        window.opener?.postMessage({ type: "brandSaved", brandId }, location.origin);
+        showToast("프로모션 규칙 삭제 완료");
         await loadAll();
+        state.editingBrand = state.brands.find((b) => b.id === brandId) || state.editingBrand;
         renderApp();
         return;
       }
@@ -2708,10 +2753,9 @@ function bindBrands() {
       savedId = created?.brand?.id || savedId;
     }
     if (isBrandPopup) {
-      window.opener?.postMessage({ type: "brandSaved" }, location.origin);
-      await loadAll();
-      state.editingBrand = state.brands.find((item) => item.id === savedId) || null;
-      renderApp();
+      window.opener?.postMessage({ type: "brandSaved", brandId: savedId }, location.origin);
+      showToast("브랜드 정보 수정 완료");
+      setTimeout(() => window.close(), 700);
       return;
     }
     state.editingBrand = null;
@@ -2737,8 +2781,11 @@ function bindBrands() {
     }
     state.editingPromotionRule = null;
     if (isBrandPopup) {
-      window.opener?.postMessage({ type: "brandSaved" }, location.origin);
+      const brandId = state.editingBrand?.id || "";
+      window.opener?.postMessage({ type: "brandSaved", brandId }, location.origin);
+      showToast("프로모션 규칙 저장 완료");
       await loadAll();
+      state.editingBrand = state.brands.find((b) => b.id === brandId) || state.editingBrand;
       renderApp();
       return;
     }
