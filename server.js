@@ -875,10 +875,14 @@ function canManageAdmins(actor) {
   return actor?.role === "owner" || actor?.role === "manager";
 }
 
+function finalDepositAmount(item) {
+  return Math.max(0, Number(item.depositAmount || 0) - Number(item.creditUsedAmount || 0));
+}
+
 function brandSummary(db, brandId) {
   const requests = db.requests.filter((item) => item.brandId === brandId);
   const pending = requests.filter((item) => item.status === "pending").length;
-  const total = requests.reduce((sum, item) => sum + Number(item.depositAmount || 0), 0);
+  const total = requests.reduce((sum, item) => sum + finalDepositAmount(item), 0);
   const liveRequests = requests.filter((item) => item.status !== "deleted");
   const receivableDeducted = liveRequests.reduce((sum, item) => sum + Number(item.receivableDeduction || 0), 0);
   const creditBalance = liveRequests.reduce(
@@ -916,9 +920,9 @@ function dashboard(db) {
     requestCount: outstanding.length,
     pendingCount: pending.length,
     paidCount: paid.length,
-    totalPendingAmount: pending.reduce((sum, item) => sum + Number(item.depositAmount || 0), 0),
+    totalPendingAmount: pending.reduce((sum, item) => sum + finalDepositAmount(item), 0),
     consignmentUnpaidCount: consignmentUnpaid.length,
-    consignmentUnpaidAmount: consignmentUnpaid.reduce((sum, item) => sum + Number(item.depositAmount || 0), 0),
+    consignmentUnpaidAmount: consignmentUnpaid.reduce((sum, item) => sum + finalDepositAmount(item), 0),
     brandCount: db.brands.filter((item) => item.type === "brand").length,
     recentAudits: db.auditLogs.slice(0, 8),
     sourceRules: [

@@ -176,6 +176,10 @@ function renderRequestMemoCell(item) {
   return parts.length ? parts.join("<br>") : "-";
 }
 
+function finalDepositAmount(item) {
+  return Math.max(0, Number(item?.depositAmount || 0) - Number(item?.creditUsedAmount || 0));
+}
+
 function renderCreditBalance(value) {
   const n = Number(value || 0);
   if (!n) return `<span class="muted">-</span>`;
@@ -678,7 +682,7 @@ function renderRequestRow(item) {
       <td>${h(item.customerName)}</td>
       <td>${money.format(Number(item.productSalesAmount || 0))}원</td>
       <td>${money.format(Number(item.shippingFee || 0))}원</td>
-      <td><strong class="amount-emphasis">${money.format(Number(item.depositAmount || 0))}원</strong></td>
+      <td><strong class="amount-emphasis">${money.format(finalDepositAmount(item))}원</strong>${Number(item.creditUsedAmount || 0) > 0 ? `<br><span class="muted" style="font-size:11px">원 ${money.format(Number(item.depositAmount || 0))}원 − 외상 ${money.format(Number(item.creditUsedAmount || 0))}원</span>` : ""}</td>
       <td class="wrap">${h(summarizeAppliedPromotions(item) || "-")}</td>
       <td>${h(item.expectedDepositDate)}</td>
       <td>${formatPaidAtCell(item.paidAt)}</td>
@@ -1520,7 +1524,7 @@ async function renderShare(token) {
                   <td><span class="badge ${h(item.status)}">${statusLabel(item.status)}</span></td>
                   <td>${h(item.orderNo)}</td>
                   <td>${h(item.customerName)}</td>
-                  <td>${money.format(Number(item.depositAmount || 0))}원</td>
+                  <td>${money.format(finalDepositAmount(item))}원</td>
                   <td>${h(item.expectedDepositDate)}</td>
                   <td class="wrap">${h(item.cutoffNote || item.requiredMemo)}</td>
                   <td>${h(item.sourceSheet)} ${item.sourceRow ? `#${h(item.sourceRow)}` : ""}</td>
