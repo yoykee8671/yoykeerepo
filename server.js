@@ -908,8 +908,9 @@ function dashboard(db) {
   const pending = realtimeRequests.filter((item) => item.status === "pending");
   const paid = activeRequests.filter((item) => item.status === "paid");
   const consignmentUnpaid = activeRequests.filter((item) => item.status === "consignment_unpaid");
+  const outstanding = activeRequests.filter((item) => item.status !== "paid");
   return {
-    requestCount: activeRequests.length,
+    requestCount: outstanding.length,
     pendingCount: pending.length,
     paidCount: paid.length,
     totalPendingAmount: pending.reduce((sum, item) => sum + Number(item.depositAmount || 0), 0),
@@ -2083,6 +2084,7 @@ async function routeApi(req, res, url) {
       status: body.status || (calc.settlementType === "consignment" ? "consignment_unpaid" : "pending"),
       paidAmount: body.paidAmount || "",
       paidAt: body.paidAt || "",
+      notes: String(body.notes || "").trim(),
       createdAt: now(),
       updatedAt: now()
     };
@@ -2107,11 +2109,16 @@ async function routeApi(req, res, url) {
       sendJson(res, 400, { error: "입금완료 처리할 요청을 선택하세요." });
       return;
     }
-    const paidAt = String(body.paidAt || "").trim() || now().slice(0, 10);
+    const paidAt = String(body.paidAt || "").trim() || now();
     const batchId = ids.length > 1 ? id("paybatch") : "";
     const touchedBrands = new Set();
     const updated = [];
+    const skipped = [];
     for (const request of db.requests.filter((item) => ids.includes(item.id) && item.status !== "deleted")) {
+      if (request.status === "paid" && request.paidAt) {
+        skipped.push(request);
+        continue;
+      }
       const before = { ...request };
       request.status = "paid";
       request.paidAt = paidAt;
@@ -2122,15 +2129,15 @@ async function routeApi(req, res, url) {
       if (request.brandId) touchedBrands.add(request.brandId);
       updated.push(request);
     }
-    if (!updated.length) {
+    if (!updated.length && !skipped.length) {
       sendJson(res, 404, { error: "처리할 입금요청을 찾지 못했습니다." });
       return;
     }
     for (const brandId of touchedBrands) {
       await syncArchive(db, actor, brandId, "request_paid");
     }
-    await writeDb(db);
-    sendJson(res, 200, { updatedRequests: updated, batchId });
+    if (updated.length) await writeDb(db);
+    sendJson(res, 200, { updatedRequests: updated, skippedRequestIds: skipped.map((item) => item.id), batchId });
     return;
   }
 
@@ -2201,7 +2208,8 @@ async function routeApi(req, res, url) {
       "depositorName",
       "status",
       "paidAmount",
-      "paidAt"
+      "paidAt",
+      "notes"
     ]) {
       if (key in body) request[key] = key === "sourceRow" ? Number(body[key] || 0) : body[key];
     }
@@ -2385,6 +2393,15 @@ async function routeApi(req, res, url) {
   sendJson(res, 404, { error: "API를 찾을 수 없습니다." });
 }
 
+async function computeAssetVersion() {
+  const targets = ["app.js", "styles.css"];
+  const stats = await Promise.all(
+    targets.map((name) => stat(path.join(PUBLIC_DIR, name)).catch(() => null))
+  );
+  const latest = stats.reduce((acc, s) => (s && s.mtimeMs > acc ? s.mtimeMs : acc), 0);
+  return Math.floor(latest).toString(36);
+}
+
 async function serveStatic(req, res, pathname) {
   const staticPath = pathname === "/" || pathname.startsWith("/share/") ? "/index.html" : pathname;
   const filePath = path.normalize(path.join(PUBLIC_DIR, staticPath));
@@ -2393,7 +2410,6 @@ async function serveStatic(req, res, pathname) {
     return;
   }
   try {
-    const content = await readFile(filePath);
     const ext = path.extname(filePath);
     const type =
       ext === ".html"
@@ -2403,7 +2419,19 @@ async function serveStatic(req, res, pathname) {
           : ext === ".js"
             ? "text/javascript; charset=utf-8"
             : "application/octet-stream";
-    const cacheControl = ext === ".html" ? "no-cache" : "public, max-age=300";
+    let content;
+    let cacheControl;
+    if (ext === ".html") {
+      const raw = await readFile(filePath, "utf8");
+      const version = await computeAssetVersion();
+      content = raw
+        .replaceAll("/styles.css", `/styles.css?v=${version}`)
+        .replaceAll("/app.js", `/app.js?v=${version}`);
+      cacheControl = "no-cache";
+    } else {
+      content = await readFile(filePath);
+      cacheControl = "public, max-age=31536000, immutable";
+    }
     res.writeHead(200, { "content-type": type, "cache-control": cacheControl });
     res.end(content);
   } catch {

@@ -79,6 +79,13 @@ textarea {
   padding: 8px 10px;
 }
 
+input[type="checkbox"],
+input[type="radio"] {
+  width: auto;
+  min-height: 0;
+  padding: 0;
+}
+
 textarea {
   min-height: 76px;
   resize: vertical;
@@ -297,6 +304,17 @@ td.wrap {
   color: var(--primary);
   font-size: 16px;
   font-weight: 800;
+}
+
+.order-link {
+  color: var(--primary);
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.order-link:hover {
+  color: #0a4d7a;
 }
 
 .multi-filter {

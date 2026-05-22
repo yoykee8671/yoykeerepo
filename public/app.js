@@ -31,13 +31,26 @@ const app = document.querySelector("#app");
 const money = new Intl.NumberFormat("ko-KR");
 const uiParams = new URLSearchParams(location.search);
 const isRequestPopup = uiParams.get("request-popup") === "1";
+const isBrandPopup = uiParams.get("brand-popup") === "1";
 const popupRequestId = uiParams.get("request-id") || "";
+const popupBrandId = uiParams.get("brand-id") || "";
 const RECENT_BRANDS_KEY = "wooofpay_recent_brands";
 
 window.addEventListener("message", async (event) => {
   if (event.origin !== location.origin) return;
-  if (event.data?.type !== "requestSaved" || isRequestPopup || !state.admin) return;
-  await refreshAndRender();
+  if (!state.admin) return;
+  const type = event.data?.type;
+  if (type === "requestSaved" && !isRequestPopup) {
+    await refreshAndRender();
+    return;
+  }
+  if (type === "brandSaved") {
+    if (isRequestPopup) {
+      await loadAll();
+      return;
+    }
+    await refreshAndRender();
+  }
 });
 
 async function api(path, options = {}) {
@@ -108,6 +121,41 @@ function fmtDate(value) {
   return new Date(value).toLocaleString("ko-KR", { dateStyle: "short", timeStyle: "short" });
 }
 
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+function nowLocalDateTime() {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+function combinePaidDateTime(dateStr) {
+  if (dateStr && /^\d{4}-\d{2}-\d{2}T/.test(dateStr)) return dateStr;
+  const d = new Date();
+  const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+  const date = dateStr || `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  return `${date}T${time}`;
+}
+
+function toDatetimeLocal(value) {
+  if (!value) return "";
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return "";
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+function formatPaidAtCell(value) {
+  if (!value) return "-";
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return h(String(value));
+  const datePart = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  const hasTime = String(value).includes("T") || String(value).includes(":");
+  if (!hasTime) return h(datePart);
+  const timePart = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+  return `${h(datePart)}<br><span class="muted">${h(timePart)}</span>`;
+}
+
 async function init() {
   if (location.pathname.startsWith("/share/")) {
     await renderShare(location.pathname.split("/").pop());
@@ -123,6 +171,11 @@ async function init() {
   if (isRequestPopup) {
     state.tab = "requests";
     state.editingRequest = state.requests.find((item) => item.id === popupRequestId) || null;
+  }
+  if (isBrandPopup) {
+    state.tab = "brands";
+    state.editingBrand = state.brands.find((item) => item.id === popupBrandId) || null;
+    state.editingPromotionRule = null;
   }
   renderApp();
 }
@@ -228,6 +281,17 @@ function renderApp() {
     });
     return;
   }
+  if (isBrandPopup) {
+    app.innerHTML = renderBrandPopup();
+    bindBrands();
+    app.querySelector("[data-close-popup]")?.addEventListener("click", () => window.close());
+    app.querySelector("[data-logout]").addEventListener("click", async () => {
+      await api("/api/logout", { method: "POST" });
+      state.admin = null;
+      renderLogin();
+    });
+    return;
+  }
   const tabs = [
     ["dashboard", "대시보드"],
     ["requests", "입금요청"],
@@ -285,6 +349,57 @@ function renderRequestPopup() {
       <section class="panel">
         <div class="panel-body">${renderRequestForm()}</div>
       </section>
+    </main>
+  `;
+}
+
+function renderBrandPopup() {
+  const brand = state.editingBrand;
+  const brandRules = brand
+    ? state.promotionRules.filter((rule) => rule.brandId === brand.id)
+    : [];
+  const headerTitle = brand ? `브랜드 수정 · ${brand.name || ""}` : "브랜드를 찾지 못했습니다";
+  return `
+    <main class="popup-shell">
+      ${pageHead(
+        headerTitle,
+        "브랜드 정보와 프로모션 규칙을 수정한 뒤 입금요청 창으로 돌아가세요.",
+        `
+          <button type="button" data-close-popup>닫기</button>
+          <button class="ghost" type="button" data-logout>로그아웃</button>
+        `
+      )}
+      ${brand ? `
+        <section class="panel">
+          <div class="panel-head"><h2>브랜드 정보</h2></div>
+          <div class="panel-body">${renderBrandForm()}</div>
+        </section>
+        <section class="panel" style="margin-top:14px">
+          <div class="panel-head">
+            <h2>${state.editingPromotionRule ? "프로모션 규칙 수정" : "프로모션 규칙 등록"}</h2>
+            <span class="muted">현재 브랜드 규칙 ${brandRules.length}건</span>
+          </div>
+          <div class="panel-body">
+            <div class="table-wrap" style="max-height:240px;margin-bottom:14px">
+              <table>
+                <thead><tr><th>프로모션</th><th>범위</th><th>수수료율</th><th>기간</th><th>상태</th><th>작업</th></tr></thead>
+                <tbody>
+                  ${brandRules.map((item) => `
+                    <tr>
+                      <td>${h(item.name)}</td>
+                      <td class="wrap">${h(item.scopeType === "items" ? (item.targetItemLabels || []).join(", ") || "특정 품목" : "브랜드 전체")}</td>
+                      <td>${h(item.commissionRate)}%</td>
+                      <td>${h(item.validFrom || "-")}${item.validTo ? ` ~ ${h(item.validTo)}` : " ~ 상시"}</td>
+                      <td>${promotionRuleStatusLabel(item)}</td>
+                      <td><div class="row-actions"><button data-edit-promotion-rule="${item.id}">수정</button><button class="danger" data-delete-promotion-rule="${item.id}">삭제</button></div></td>
+                    </tr>`).join("") || `<tr><td colspan="6" class="empty">등록된 프로모션 규칙이 없습니다.</td></tr>`}
+                </tbody>
+              </table>
+            </div>
+            ${renderPromotionRuleForm()}
+          </div>
+        </section>
+      ` : `<section class="panel"><div class="panel-body empty">URL에 지정된 브랜드를 찾지 못했습니다. 창을 닫고 다시 시도하세요.</div></section>`}
     </main>
   `;
 }
@@ -460,9 +575,9 @@ function renderRequests() {
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th><input type="checkbox" data-select-all-requests ${allSelected ? "checked" : ""}></th><th>상태</th><th>정산유형</th><th>브랜드</th><th>주문번호</th><th>주문자</th><th>제품매출</th><th>배송비</th><th>입금액</th><th>적용 프로모션</th><th>예정일</th><th>입금일</th><th>출고/정산</th><th>작업</th></tr></thead>
+              <thead><tr><th><input type="checkbox" data-select-all-requests ${allSelected ? "checked" : ""}></th><th>상태</th><th>정산유형</th><th>브랜드</th><th>주문번호</th><th>주문자</th><th>제품매출</th><th>배송비</th><th>입금액</th><th>적용 프로모션</th><th>예정일</th><th>입금일시</th><th>출고/정산</th><th>메모</th><th>작업</th></tr></thead>
               <tbody>
-                ${rows.map(renderRequestRow).join("") || `<tr><td colspan="14" class="empty">표시할 입금요청이 없습니다.</td></tr>`}
+                ${rows.map(renderRequestRow).join("") || `<tr><td colspan="15" class="empty">표시할 입금요청이 없습니다.</td></tr>`}
               </tbody>
             </table>
           </div>
@@ -510,15 +625,16 @@ function renderRequestRow(item) {
       <td><span class="badge ${h(item.status)}">${statusLabel(item.status)}</span></td>
       <td>${settlementLabel(item.settlementType)}</td>
       <td>${h(item.brandName)}</td>
-      <td>${h(item.orderNo)}</td>
+      <td><a href="#" class="order-link" data-open-edit-request-popup="${item.id}">${h(item.orderNo)}</a></td>
       <td>${h(item.customerName)}</td>
       <td>${money.format(Number(item.productSalesAmount || 0))}원</td>
       <td>${money.format(Number(item.shippingFee || 0))}원</td>
       <td><strong class="amount-emphasis">${money.format(Number(item.depositAmount || 0))}원</strong></td>
       <td class="wrap">${h(summarizeAppliedPromotions(item) || "-")}</td>
       <td>${h(item.expectedDepositDate)}</td>
-      <td>${h(item.paidAt || "-")}</td>
+      <td>${formatPaidAtCell(item.paidAt)}</td>
       <td class="wrap">${h(item.cutoffNote || item.requiredMemo)}</td>
+      <td class="wrap">${h(item.notes || "-")}</td>
       <td><div class="row-actions">${item.status !== "paid" ? `<button data-pay-request="${item.id}">입금완료</button>` : ""}<button data-open-edit-request-popup="${item.id}">수정</button><button class="danger" data-delete-request="${item.id}">삭제</button></div></td>
     </tr>
   `;
@@ -543,8 +659,10 @@ function renderRequestForm() {
   const extraShippingEnabled = Number(item.extraShippingFee || 0) > 0 || Boolean(item.extraShippingNote);
   const commissionDisplay = item.commissionRate ?? selectedBrand?.commissionRate ?? "";
   const promotion = findActivePromotionRule(selectedBrand?.id, item.expectedDepositDate);
-  const defaultBaseShippingFee =
-    item.baseShippingFee ?? calculateBrandShippingFee(selectedBrand, Number(item.productSalesAmount || item.depositAmount || 0));
+  const autoBaseShippingFee = calculateBrandShippingFee(selectedBrand, Number(item.productSalesAmount || item.depositAmount || 0));
+  const defaultBaseShippingFee = item.baseShippingFee ?? autoBaseShippingFee;
+  const baseShippingManual =
+    item.baseShippingFee != null && Number(item.baseShippingFee) !== Number(autoBaseShippingFee || 0);
   const defaultExtraShippingFee = item.extraShippingFee ?? 0;
   const defaultShippingFee = item.shippingFee ?? (Number(defaultBaseShippingFee || 0) + Number(defaultExtraShippingFee || 0));
   return `
@@ -563,7 +681,10 @@ function renderRequestForm() {
         <datalist id="request-brand-options">
           ${brandOptions.map((b) => `<option value="${h(b.name)}"></option>`).join("")}
         </datalist>
-        <div class="muted">최근 사용한 브랜드 10개가 상단에 우선 노출됩니다.</div>
+        <div class="toolbar" style="margin-top:4px">
+          <button type="button" data-open-brand-popup ${item.brandId ? "" : "disabled"}>브랜드/프로모션 수정</button>
+          <span class="muted">최근 사용한 브랜드 10개가 상단에 우선 노출됩니다.</span>
+        </div>
       </div>
       <section class="fixed-summary">
         <div class="fixed-summary-title">브랜드 자동 적용값</div>
@@ -588,7 +709,10 @@ function renderRequestForm() {
       </div>
       <div class="field two">
         <div><label>제품매출</label><input name="productSalesAmount" type="number" min="0" value="${h(item.productSalesAmount || item.depositAmount || "")}"></div>
-        <div><label>기본 배송비</label><input name="baseShippingFee" type="number" readonly value="${h(defaultBaseShippingFee || "")}"></div>
+        <div>
+          <label>기본 배송비 <span class="muted" style="font-weight:400">(수동 변경 가능)</span></label>
+          <input name="baseShippingFee" type="number" min="0" value="${h(defaultBaseShippingFee || "")}" data-manual="${baseShippingManual ? "1" : ""}">
+        </div>
       </div>
       <div class="field">
         <label class="checkbox-line"><input name="useExtraShippingFee" type="checkbox" ${extraShippingEnabled ? "checked" : ""}> 지역/예외 추가배송비 직접 입력</label>
@@ -642,8 +766,12 @@ function renderRequestForm() {
         <div><label>실입금액</label><input name="paidAmount" type="number" min="0" value="${h(item.paidAmount || "")}"></div>
       </div>
       <div class="field">
-        <label>입금일</label>
-        <input name="paidAt" type="date" value="${h(item.paidAt || "")}">
+        <label>입금일시</label>
+        <input name="paidAt" type="datetime-local" step="1" value="${h(toDatetimeLocal(item.paidAt))}">
+      </div>
+      <div class="field">
+        <label>주문 메모</label>
+        <textarea name="notes" placeholder="해당 입금건에 대한 메모 (예: 통화 내용, 특이사항 등)">${h(item.notes || "")}</textarea>
       </div>
       <div class="field two">
         <div><label>상태</label><select name="status">${["pending", "consignment_unpaid", "paid", "hold", "error"].map((s) => `<option value="${s}" ${(item.status || ((item.settlementType || selectedBrand?.settlementType) === "consignment" ? "consignment_unpaid" : "pending")) === s ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}</select></div>
@@ -1352,6 +1480,35 @@ async function refreshAndRender() {
   renderApp();
 }
 
+function bindSearchInput(selector, applyValue) {
+  const input = app.querySelector(selector);
+  if (!input) return;
+  let composing = false;
+  const rerenderRestoringFocus = () => {
+    renderApp();
+    const next = app.querySelector(selector);
+    if (!next) return;
+    next.focus();
+    const len = next.value.length;
+    try {
+      next.setSelectionRange(len, len);
+    } catch {}
+  };
+  input.addEventListener("compositionstart", () => {
+    composing = true;
+  });
+  input.addEventListener("compositionend", (event) => {
+    composing = false;
+    applyValue(event.target.value);
+    rerenderRestoringFocus();
+  });
+  input.addEventListener("input", (event) => {
+    applyValue(event.target.value);
+    if (composing || event.isComposing) return;
+    rerenderRestoringFocus();
+  });
+}
+
 function bindRequests() {
   const syncSelectedRequestIds = () => {
     const validIds = new Set(filteredRequests().filter((item) => item.status !== "deleted").map((item) => item.id));
@@ -1363,16 +1520,23 @@ function bindRequests() {
       alert("입금완료 처리할 요청을 선택하세요.");
       return;
     }
-    await api("/api/requests/mark-paid", {
+    const result = await api("/api/requests/mark-paid", {
       method: "POST",
       body: {
         requestIds: ids,
-        paidAt: paidAt || state.bulkPaidAt || new Date().toISOString().slice(0, 10)
+        paidAt: combinePaidDateTime(paidAt || state.bulkPaidAt)
       }
     });
     state.selectedRequestIds = state.selectedRequestIds.filter((id) => !ids.includes(id));
     state.editingRequest = null;
     await refreshAndRender();
+    const skipped = result?.skippedRequestIds?.length || 0;
+    const updated = result?.updatedRequests?.length || 0;
+    if (skipped && !updated) {
+      showToast("이미 입금완료된 건이라 입금일시는 유지됩니다.", "error");
+    } else if (skipped) {
+      showToast(`입금완료 ${updated}건 처리, 이미 완료된 ${skipped}건은 유지`, "success");
+    }
   };
   const deleteRequests = async (requestIds) => {
     const ids = Array.from(new Set(requestIds)).filter(Boolean);
@@ -1410,10 +1574,9 @@ function bindRequests() {
       toggleFilterGroup(key, values);
     });
   });
-  app.querySelector("[data-filter-q]")?.addEventListener("input", (event) => {
-    state.filters.q = event.target.value;
+  bindSearchInput("[data-filter-q]", (value) => {
+    state.filters.q = value;
     syncSelectedRequestIds();
-    renderApp();
   });
   app.querySelector("[data-filter-promotion]")?.addEventListener("change", (event) => {
     state.filters.promotionRuleId = event.target.value;
@@ -1463,7 +1626,8 @@ function bindRequests() {
     });
   });
   app.querySelectorAll("[data-open-edit-request-popup]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
       window.open(`/?request-popup=1&request-id=${encodeURIComponent(button.dataset.openEditRequestPopup)}`, "wooofpay-request", "width=760,height=940,resizable=yes,scrollbars=yes");
     });
   });
@@ -1755,9 +1919,14 @@ function bindRequests() {
   setLineItems(getLineItems());
   setUnmatchedItems([]);
   refreshLineItemOptions();
+  const brandPopupButton = requestForm.querySelector("[data-open-brand-popup]");
+  const syncBrandPopupButton = () => {
+    if (brandPopupButton) brandPopupButton.disabled = !brandIdInput.value;
+  };
   brandSearch.addEventListener("input", () => {
     const brand = findBrandByInput(brandSearch.value);
     brandIdInput.value = brand?.id || "";
+    syncBrandPopupButton();
     refreshLineItemOptions();
     updateRequestCalculation(requestForm);
   });
@@ -1768,9 +1937,19 @@ function bindRequests() {
       pushRecentBrand(brand.id);
       applyBrandDefaults(requestForm, brand);
     }
+    syncBrandPopupButton();
     setUnmatchedItems([]);
     refreshLineItemOptions();
     updateRequestCalculation(requestForm);
+  });
+  brandPopupButton?.addEventListener("click", () => {
+    const brandId = brandIdInput.value;
+    if (!brandId) return;
+    window.open(
+      `/?brand-popup=1&brand-id=${encodeURIComponent(brandId)}`,
+      `wooofpay-brand-${brandId}`,
+      "width=860,height=940,resizable=yes,scrollbars=yes"
+    );
   });
   extraShippingToggle?.addEventListener("change", () => {
     const enabled = extraShippingToggle.checked;
@@ -1866,6 +2045,10 @@ function bindRequests() {
   requestForm
     .querySelectorAll("[name='productSalesAmount'], [name='extraShippingFee'], [name='commissionRate'], [name='supplyAmount'], [name='expectedDepositDate']")
     .forEach((input) => input.addEventListener("input", () => updateRequestCalculation(requestForm)));
+  requestForm.querySelector("[name='baseShippingFee']")?.addEventListener("input", (event) => {
+    event.target.dataset.manual = "1";
+    updateRequestCalculation(requestForm);
+  });
   updateRequestCalculation(requestForm);
   requestForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1928,6 +2111,8 @@ function applyBrandDefaults(form, brand) {
   setValue("businessName", brand.businessName || "");
   setValue("businessNumber", brand.businessNumber || "");
   setValue("depositorName", brand.depositorName || "");
+  const baseShippingInput = form.querySelector("[name='baseShippingFee']");
+  if (baseShippingInput) baseShippingInput.dataset.manual = "";
   updateRequestCalculation(form);
 }
 
@@ -1947,7 +2132,9 @@ function updateRequestCalculation(form) {
   const settlementType = form.querySelector("[name='settlementType']")?.value || "prepay_fee";
   const derivedProductSalesAmount = lineItems.reduce((sum, item) => sum + Number(item.totalSaleAmount || 0), 0);
   const productSalesAmount = derivedProductSalesAmount > 0 ? derivedProductSalesAmount : value("productSalesAmount");
-  const baseShippingFee = calculateBrandShippingFee(brand, productSalesAmount);
+  const baseShippingInputEl = form.querySelector("[name='baseShippingFee']");
+  const baseManual = baseShippingInputEl?.dataset.manual === "1";
+  const baseShippingFee = baseManual ? value("baseShippingFee") : calculateBrandShippingFee(brand, productSalesAmount);
   const extraShippingFee = value("extraShippingFee");
   const shippingFee = baseShippingFee + extraShippingFee;
   const promotionContext = buildPromotionPreview(brand, lineItems, form.querySelector("[name='expectedDepositDate']")?.value);
@@ -2000,7 +2187,7 @@ function updateRequestCalculation(form) {
   if (promotionRuleInput) promotionRuleInput.value = promotionContext?.name || "";
   if (productSalesInput && derivedProductSalesAmount > 0) productSalesInput.value = String(productSalesAmount || "");
   if (supplyInput && lineItems.length) supplyInput.value = String(supplyAmount || "");
-  if (baseShippingInput) baseShippingInput.value = String(baseShippingFee || "");
+  if (baseShippingInput && !baseManual) baseShippingInput.value = String(baseShippingFee || "");
   if (totalShippingInput) totalShippingInput.value = String(shippingFee || "");
   if (depositInput) depositInput.value = String(depositAmount || "");
   if (deductionInput) deductionInput.value = String(receivableDeduction || "");
@@ -2387,11 +2574,10 @@ function bindPrices() {
 }
 
 function bindBrands() {
-  app.querySelector("[data-brand-filter-q]")?.addEventListener("input", (event) => {
-    state.brandFilterQ = event.target.value;
-    renderApp();
+  bindSearchInput("[data-brand-filter-q]", (value) => {
+    state.brandFilterQ = value;
   });
-  app.querySelector("[data-new-brand]").addEventListener("click", () => {
+  app.querySelector("[data-new-brand]")?.addEventListener("click", () => {
     state.editingBrand = null;
     state.editingPromotionRule = null;
     renderApp();
@@ -2414,6 +2600,12 @@ function bindBrands() {
       if (!confirm("이 프로모션 수수료 규칙을 삭제할까요?")) return;
       await api(`/api/promotion-rules/${button.dataset.deletePromotionRule}`, { method: "DELETE" });
       state.editingPromotionRule = null;
+      if (isBrandPopup) {
+        window.opener?.postMessage({ type: "brandSaved" }, location.origin);
+        await loadAll();
+        renderApp();
+        return;
+      }
       await refreshAndRender();
     });
   });
@@ -2424,16 +2616,25 @@ function bindBrands() {
       await refreshAndRender();
     });
   });
-  app.querySelector("[data-brand-form]").addEventListener("submit", async (event) => {
+  app.querySelector("[data-brand-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = formObject(event.currentTarget);
     body.isActive = body.isActive === "true";
     body.hasReceivable = body.hasReceivable === "true";
     body.starred = false;
+    let savedId = state.editingBrand?.id || "";
     if (state.editingBrand) {
       await api(`/api/brands/${state.editingBrand.id}`, { method: "PUT", body });
     } else {
-      await api("/api/brands", { method: "POST", body });
+      const created = await api("/api/brands", { method: "POST", body });
+      savedId = created?.brand?.id || savedId;
+    }
+    if (isBrandPopup) {
+      window.opener?.postMessage({ type: "brandSaved" }, location.origin);
+      await loadAll();
+      state.editingBrand = state.brands.find((item) => item.id === savedId) || null;
+      renderApp();
+      return;
     }
     state.editingBrand = null;
     await refreshAndRender();
@@ -2457,6 +2658,12 @@ function bindBrands() {
       await api("/api/promotion-rules", { method: "POST", body });
     }
     state.editingPromotionRule = null;
+    if (isBrandPopup) {
+      window.opener?.postMessage({ type: "brandSaved" }, location.origin);
+      await loadAll();
+      renderApp();
+      return;
+    }
     await refreshAndRender();
   });
   const promotionForm = app.querySelector("[data-promotion-rule-form]");
