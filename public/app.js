@@ -145,6 +145,41 @@ function toDatetimeLocal(value) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 
+function renderRequestMemoCell(item) {
+  const parts = [];
+  if (item.notes) parts.push(h(item.notes));
+  const over = Number(item.overpaidAmount || 0);
+  if (over > 0) {
+    const reason = item.overpaidReason ? ` · ${h(overpaidReasonLabel(item.overpaidReason))}` : "";
+    const note = item.overpaidNote ? `<br><span class="muted">${h(item.overpaidNote)}</span>` : "";
+    parts.push(`<span style="color:var(--green);font-weight:600">+${money.format(over)}원 외상발생${reason}</span>${note}`);
+  }
+  const used = Number(item.creditUsedAmount || 0);
+  if (used > 0) {
+    const note = item.creditUsedNote ? `<br><span class="muted">${h(item.creditUsedNote)}</span>` : "";
+    parts.push(`<span style="color:var(--red);font-weight:600">-${money.format(used)}원 외상차감</span>${note}`);
+  }
+  return parts.length ? parts.join("<br>") : "-";
+}
+
+function renderCreditBalance(value) {
+  const n = Number(value || 0);
+  if (!n) return `<span class="muted">-</span>`;
+  const color = n > 0 ? "var(--green)" : "var(--red)";
+  const prefix = n > 0 ? "+" : "";
+  return `<strong style="color:${color}">${prefix}${money.format(n)}원</strong>`;
+}
+
+function overpaidReasonLabel(value) {
+  return {
+    overpay: "오입금",
+    sold_out: "품절",
+    price_change: "가격변경",
+    mispay: "오송금",
+    manual: "수동"
+  }[value] || value || "";
+}
+
 function formatPaidAtCell(value) {
   if (!value) return "-";
   const d = new Date(value);
@@ -634,7 +669,7 @@ function renderRequestRow(item) {
       <td>${h(item.expectedDepositDate)}</td>
       <td>${formatPaidAtCell(item.paidAt)}</td>
       <td class="wrap">${h(item.cutoffNote || item.requiredMemo)}</td>
-      <td class="wrap">${h(item.notes || "-")}</td>
+      <td class="wrap">${renderRequestMemoCell(item)}</td>
       <td><div class="row-actions">${item.status !== "paid" ? `<button data-pay-request="${item.id}">입금완료</button>` : ""}<button data-open-edit-request-popup="${item.id}">수정</button><button class="danger" data-delete-request="${item.id}">삭제</button></div></td>
     </tr>
   `;
@@ -773,6 +808,38 @@ function renderRequestForm() {
         <label>주문 메모</label>
         <textarea name="notes" placeholder="해당 입금건에 대한 메모 (예: 통화 내용, 특이사항 등)">${h(item.notes || "")}</textarea>
       </div>
+      <section class="fixed-summary">
+        <div class="fixed-summary-title">외상 처리 <span class="muted" style="font-weight:400">(품절·가격변경·오입금 등 정산 조정용)</span></div>
+        <div data-brand-credit-hint class="muted" style="margin-bottom:8px">${
+          selectedBrand
+            ? `${h(selectedBrand.name)} 외상 잔액: ${renderCreditBalance(selectedBrand.creditBalance)}`
+            : "브랜드를 선택하면 잔액이 표시됩니다."
+        }</div>
+        <div class="field two">
+          <div>
+            <label>과입금(외상 발생)</label>
+            <input name="overpaidAmount" type="number" min="0" value="${h(item.overpaidAmount || "")}" placeholder="0">
+          </div>
+          <div>
+            <label>과입금 사유</label>
+            <select name="overpaidReason">
+              ${["", "overpay", "sold_out", "price_change", "mispay", "manual"].map((v) => `<option value="${v}" ${(item.overpaidReason || "") === v ? "selected" : ""}>${v ? overpaidReasonLabel(v) : "선택 안 함"}</option>`).join("")}
+            </select>
+          </div>
+        </div>
+        <div class="field"><label>과입금 메모</label><input name="overpaidNote" value="${h(item.overpaidNote || "")}" placeholder="예: 품절로 ₩5,000 환불 대신 외상 처리"></div>
+        <div class="field two">
+          <div>
+            <label>외상 차감(이번 송금 시 차감)</label>
+            <input name="creditUsedAmount" type="number" min="0" value="${h(item.creditUsedAmount || "")}" placeholder="0">
+          </div>
+          <div>
+            <label>외상 차감 메모</label>
+            <input name="creditUsedNote" value="${h(item.creditUsedNote || "")}" placeholder="예: 20260518-001 과입금 차감">
+          </div>
+        </div>
+        <div class="muted">실제 송금액 ≒ 업체 실 입금액 − 외상 차감. 차감 금액은 직접 입력하세요.</div>
+      </section>
       <div class="field two">
         <div><label>상태</label><select name="status">${["pending", "consignment_unpaid", "paid", "hold", "error"].map((s) => `<option value="${s}" ${(item.status || ((item.settlementType || selectedBrand?.settlementType) === "consignment" ? "consignment_unpaid" : "pending")) === s ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}</select></div>
         <div><label>계산 수수료</label><input name="commissionAmount" type="number" readonly value="${h(item.commissionAmount || "")}"></div>
@@ -798,8 +865,8 @@ function renderBrands() {
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>브랜드</th><th>정산유형</th><th>요청</th><th>금액/채권잔액</th><th>사업자</th><th>프로모션</th><th>공유</th><th>작업</th></tr></thead>
-            <tbody>${brandRows.map(renderBrandRow).join("") || `<tr><td colspan="8" class="empty">표시할 브랜드가 없습니다.</td></tr>`}</tbody>
+            <thead><tr><th>브랜드</th><th>정산유형</th><th>요청</th><th>금액/채권잔액</th><th>외상잔액</th><th>사업자</th><th>프로모션</th><th>공유</th><th>작업</th></tr></thead>
+            <tbody>${brandRows.map(renderBrandRow).join("") || `<tr><td colspan="9" class="empty">표시할 브랜드가 없습니다.</td></tr>`}</tbody>
           </table>
         </div>
         <div class="panel-body">
@@ -1130,6 +1197,7 @@ function renderBrandRow(brand) {
       <td><span class="badge">${brand.type === "reference" ? "참고시트" : settlementLabel(brand.settlementType)}</span></td>
       <td>${money.format(brand.requestCount || 0)}건</td>
       <td>${brand.hasReceivable ? `${money.format(brand.receivableRemaining || 0)}원` : `${money.format(brand.totalAmount || 0)}원`}</td>
+      <td>${renderCreditBalance(brand.creditBalance)}</td>
       <td class="wrap">${h(brand.businessName || "-")}<br><span class="muted">${h(cutoffLabel(brand))}</span></td>
       <td class="wrap">${h(brand.promotionSummary || "-")}</td>
       <td><a href="${share}" target="_blank" rel="noreferrer">공유 보기</a></td>
@@ -1923,10 +1991,19 @@ function bindRequests() {
   const syncBrandPopupButton = () => {
     if (brandPopupButton) brandPopupButton.disabled = !brandIdInput.value;
   };
+  const brandCreditHint = requestForm.querySelector("[data-brand-credit-hint]");
+  const syncBrandCreditHint = () => {
+    if (!brandCreditHint) return;
+    const brand = state.brands.find((b) => b.id === brandIdInput.value);
+    brandCreditHint.innerHTML = brand
+      ? `${h(brand.name)} 외상 잔액: ${renderCreditBalance(brand.creditBalance)}`
+      : "브랜드를 선택하면 잔액이 표시됩니다.";
+  };
   brandSearch.addEventListener("input", () => {
     const brand = findBrandByInput(brandSearch.value);
     brandIdInput.value = brand?.id || "";
     syncBrandPopupButton();
+    syncBrandCreditHint();
     refreshLineItemOptions();
     updateRequestCalculation(requestForm);
   });
@@ -1938,6 +2015,7 @@ function bindRequests() {
       applyBrandDefaults(requestForm, brand);
     }
     syncBrandPopupButton();
+    syncBrandCreditHint();
     setUnmatchedItems([]);
     refreshLineItemOptions();
     updateRequestCalculation(requestForm);

@@ -879,13 +879,16 @@ function brandSummary(db, brandId) {
   const requests = db.requests.filter((item) => item.brandId === brandId);
   const pending = requests.filter((item) => item.status === "pending").length;
   const total = requests.reduce((sum, item) => sum + Number(item.depositAmount || 0), 0);
-  const receivableDeducted = requests
-    .filter((item) => item.status !== "deleted")
-    .reduce((sum, item) => sum + Number(item.receivableDeduction || 0), 0);
+  const liveRequests = requests.filter((item) => item.status !== "deleted");
+  const receivableDeducted = liveRequests.reduce((sum, item) => sum + Number(item.receivableDeduction || 0), 0);
+  const creditBalance = liveRequests.reduce(
+    (sum, item) => sum + Number(item.overpaidAmount || 0) - Number(item.creditUsedAmount || 0),
+    0
+  );
   const brand = db.brands.find((item) => item.id === brandId);
   const receivableRemaining = Math.max(0, Number(brand?.receivableTotal || 0) - receivableDeducted);
   const latestCatalogCount = getLatestPriceCatalog(db, brandId).length;
-  return { requestCount: requests.length, pendingCount: pending, totalAmount: total, receivableDeducted, receivableRemaining, latestCatalogCount };
+  return { requestCount: requests.length, pendingCount: pending, totalAmount: total, receivableDeducted, receivableRemaining, creditBalance, latestCatalogCount };
 }
 
 function hydrateBrand(db, brand) {
@@ -2085,6 +2088,11 @@ async function routeApi(req, res, url) {
       paidAmount: body.paidAmount || "",
       paidAt: body.paidAt || "",
       notes: String(body.notes || "").trim(),
+      overpaidAmount: Math.max(0, number(body.overpaidAmount)),
+      overpaidReason: String(body.overpaidReason || "").trim(),
+      overpaidNote: String(body.overpaidNote || "").trim(),
+      creditUsedAmount: Math.max(0, number(body.creditUsedAmount)),
+      creditUsedNote: String(body.creditUsedNote || "").trim(),
       createdAt: now(),
       updatedAt: now()
     };
@@ -2209,9 +2217,22 @@ async function routeApi(req, res, url) {
       "status",
       "paidAmount",
       "paidAt",
-      "notes"
+      "notes",
+      "overpaidAmount",
+      "overpaidReason",
+      "overpaidNote",
+      "creditUsedAmount",
+      "creditUsedNote"
     ]) {
-      if (key in body) request[key] = key === "sourceRow" ? Number(body[key] || 0) : body[key];
+      if (key in body) {
+        if (key === "sourceRow") {
+          request[key] = Number(body[key] || 0);
+        } else if (key === "overpaidAmount" || key === "creditUsedAmount") {
+          request[key] = Math.max(0, number(body[key]));
+        } else {
+          request[key] = body[key];
+        }
+      }
     }
     const brand = db.brands.find((item) => item.id === request.brandId);
     const promotionContext = brand ? buildPromotionContext(db, brand, sanitizeLineItems(body.lineItems || request.lineItems), body.expectedDepositDate || request.expectedDepositDate) : null;
