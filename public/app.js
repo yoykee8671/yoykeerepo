@@ -2043,6 +2043,14 @@ function bindRequests() {
       ? `${h(brand.name)} 외상 잔액: ${renderCreditBalance(brand.creditBalance)}`
       : "브랜드를 선택하면 잔액이 표시됩니다.";
   };
+  brandSearch.addEventListener("focus", (event) => {
+    if (event.target.value) event.target.select();
+  });
+  brandSearch.addEventListener("click", (event) => {
+    if (event.target.value && event.target.selectionStart === event.target.selectionEnd) {
+      event.target.select();
+    }
+  });
   brandSearch.addEventListener("input", () => {
     const brand = findBrandByInput(brandSearch.value);
     brandIdInput.value = brand?.id || "";
