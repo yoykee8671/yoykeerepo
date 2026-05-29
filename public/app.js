@@ -2198,6 +2198,13 @@ function bindRequests() {
     delete event.target.dataset.userTyping;
   });
   updateRequestCalculation(requestForm);
+  requestForm.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    const tag = event.target.tagName;
+    if (tag === "TEXTAREA" || tag === "BUTTON") return;
+    if (event.target.type === "submit") return;
+    event.preventDefault();
+  });
   requestForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = formObject(event.currentTarget);
