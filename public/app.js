@@ -181,6 +181,24 @@ function finalDepositAmount(item) {
   return Math.max(0, Number(item?.depositAmount || 0) - Number(item?.creditUsedAmount || 0));
 }
 
+function splitDirectTotal(total, brand) {
+  const value = Math.max(0, Number(total || 0));
+  if (!brand || !value) return { product: value, shipping: 0 };
+  if (brand.shippingPolicyType === "threshold") {
+    const threshold = Number(brand.shippingThresholdAmount || 0);
+    const fee = Number(brand.shippingThresholdFee || 0);
+    if (threshold > 0 && fee > 0) {
+      if (value >= threshold) return { product: value, shipping: 0 };
+      return { product: Math.max(0, value - fee), shipping: fee };
+    }
+  }
+  if (brand.shippingPolicyType === "flat") {
+    const fee = Number(brand.shippingFlatFee || 0);
+    return { product: Math.max(0, value - fee), shipping: fee };
+  }
+  return { product: value, shipping: 0 };
+}
+
 function renderCreditBalance(value) {
   const n = Number(value || 0);
   if (!n) return `<span class="muted">-</span>`;
@@ -757,19 +775,21 @@ function renderRequestForm() {
         ${settlementNote ? `<div><span>계산 안내</span><strong data-special-settlement-note>${h(settlementNote)}</strong></div>` : `<div style="display:none"><span>계산 안내</span><strong data-special-settlement-note></strong></div>`}
       </div>
       </section>
-      <div class="field two">
+      <div class="field three">
         <div><label>주문번호</label><input name="orderNo" value="${h(item.orderNo)}" required></div>
         <div><label>주문자명</label><input name="customerName" value="${h(item.customerName)}" required></div>
+        <div><label>수량</label><input name="quantity" type="number" min="0" step="1" value="${h(item.quantity || "")}" placeholder="총 수량"></div>
       </div>
-      <div class="field three">
+      <div class="field" data-show-direct="1" style="display:none">
+        <label>총 입금액 (배송비 포함, 역산 입력)</label>
+        <input name="directTotalAmount" type="number" min="0" value="${h(item.depositAmount || "")}" placeholder="예: 8800">
+        <div class="muted" data-direct-breakdown style="margin-top:4px"></div>
+      </div>
+      <div class="field two" data-hide-direct="1">
         <div><label>제품매출</label><input name="productSalesAmount" type="number" min="0" value="${h(item.productSalesAmount || item.depositAmount || "")}"></div>
         <div>
           <label>기본 배송비 <span class="muted" style="font-weight:400">(수동 변경 가능)</span></label>
           <input name="baseShippingFee" type="number" min="0" value="${h(defaultBaseShippingFee || "")}" data-manual="${baseShippingManual ? "1" : ""}">
-        </div>
-        <div>
-          <label>수량</label>
-          <input name="quantity" type="number" min="0" step="1" value="${h(item.quantity || "")}" placeholder="총 수량">
         </div>
       </div>
       <div class="field">
@@ -2154,6 +2174,21 @@ function bindRequests() {
   requestForm.querySelector("[name='paidAmount']")?.addEventListener("input", (event) => {
     event.target.dataset.manual = "1";
   });
+  requestForm.querySelector("[name='directTotalAmount']")?.addEventListener("input", (event) => {
+    event.target.dataset.userTyping = "1";
+    const total = Number(event.target.value || 0);
+    const brand = state.brands.find((b) => b.id === requestForm.querySelector("[name='brandId']")?.value);
+    const split = splitDirectTotal(total, brand);
+    const product = requestForm.querySelector("[name='productSalesAmount']");
+    const base = requestForm.querySelector("[name='baseShippingFee']");
+    if (product) product.value = split.product ? String(split.product) : "";
+    if (base) {
+      base.value = split.shipping ? String(split.shipping) : "";
+      base.dataset.manual = "";
+    }
+    updateRequestCalculation(requestForm);
+    delete event.target.dataset.userTyping;
+  });
   updateRequestCalculation(requestForm);
   requestForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -2327,11 +2362,22 @@ function updateRequestCalculation(form) {
   form.querySelectorAll("[data-hide-direct]").forEach((el) => {
     el.style.display = isDirect ? "none" : "";
   });
+  form.querySelectorAll("[data-show-direct]").forEach((el) => {
+    el.style.display = isDirect ? "" : "none";
+  });
   if (isDirect) {
     if (commissionInput) commissionInput.value = "";
     if (commissionRateInput) commissionRateInput.value = "";
     if (promotionRuleInput) promotionRuleInput.value = "";
     if (supplyInput) supplyInput.value = "";
+    const directInput = form.querySelector("[name='directTotalAmount']");
+    const directBreakdown = form.querySelector("[data-direct-breakdown]");
+    if (directBreakdown) {
+      directBreakdown.innerHTML = depositAmount
+        ? `→ 상품 ₩${money.format(productSalesAmount)} + 배송 ₩${money.format(baseShippingFee)}`
+        : "총액을 입력하면 자동으로 분할됩니다.";
+    }
+    if (directInput && !directInput.dataset.userTyping) directInput.value = depositAmount ? String(depositAmount) : "";
   }
   if (fixedSettlementType) fixedSettlementType.textContent = settlementLabel(settlementType);
   if (fixedCommissionRate) fixedCommissionRate.textContent = commissionRate ? `${commissionRate}%` : "-";
