@@ -718,7 +718,7 @@ function renderRequestForm() {
   const brandInputValue = selectedBrand?.name || item.brandName || "";
   const brandOptions = recentSortedBrands();
   const lineItems = item.lineItems || [];
-  const settlementType = item.settlementType || selectedBrand?.settlementType || "prepay_fee";
+  const settlementType = selectedBrand?.settlementType || item.settlementType || "prepay_fee";
   const showReceivableFields = settlementType === "prepay_debt" || (settlementType === "prepay_supply" && Boolean(selectedBrand?.hasReceivable || Number(item.receivableDeduction || 0) > 0));
   const receivableLabel = receivableDeductionLabel(settlementType, selectedBrand);
   const settlementNote = specialSettlementNote(settlementType, selectedBrand);
@@ -886,7 +886,7 @@ function renderRequestForm() {
         </div>
         <div class="muted">실제 송금액 ≒ 업체 실 입금액 − 외상 차감. 차감 금액은 직접 입력하세요.</div>
       </section>
-      <div class="field"><label>상태</label><select name="status">${["pending", "consignment_unpaid", "paid", "hold", "error"].map((s) => `<option value="${s}" ${(item.status || ((item.settlementType || selectedBrand?.settlementType) === "consignment" ? "consignment_unpaid" : "pending")) === s ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}</select></div>
+      <div class="field"><label>상태</label><select name="status">${["pending", "consignment_unpaid", "paid", "hold", "error"].map((s) => `<option value="${s}" ${(item.status || (settlementType === "consignment" ? "consignment_unpaid" : "pending")) === s ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}</select></div>
       <div class="field" data-hide-direct="1"><label>계산 수수료</label><input name="commissionAmount" type="number" readonly value="${h(item.commissionAmount || "")}"></div>
       <div class="toolbar">
         <button class="primary" type="submit">${state.editingRequest ? "수정 저장" : "요청 추가"}</button>
