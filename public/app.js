@@ -268,7 +268,7 @@ function ensureRequestFilterDefaults() {
   if (!state.filtersInitialized) {
     state.filters.brandIds = brandIds;
     state.filters.settlementTypes = ["prepay_debt", "prepay_fee", "prepay_supply"];
-    state.filters.statusValues = ["pending", "paid", "hold", "error"];
+    state.filters.statusValues = ["pending"];
     state.filtersInitialized = true;
     return;
   }
