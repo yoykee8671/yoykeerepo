@@ -107,7 +107,8 @@ function settlementLabel(type) {
     prepay_debt: "선매입-채권",
     prepay_fee: "선매입-일반(수수료)",
     prepay_supply: "선매입-일반(공급가)",
-    consignment: "위탁"
+    consignment: "위탁",
+    direct_purchase: "직매입(사업자가)"
   }[type] || "선매입-일반(수수료)";
 }
 
@@ -267,7 +268,7 @@ function ensureRequestFilterDefaults() {
   const brandIds = state.brands.filter((b) => b.type === "brand").map((b) => b.id);
   if (!state.filtersInitialized) {
     state.filters.brandIds = brandIds;
-    state.filters.settlementTypes = ["prepay_debt", "prepay_fee", "prepay_supply"];
+    state.filters.settlementTypes = ["prepay_debt", "prepay_fee", "prepay_supply", "direct_purchase"];
     state.filters.statusValues = ["pending"];
     state.filtersInitialized = true;
     return;
@@ -609,7 +610,7 @@ function renderRequests() {
               key: "settlement",
               title: "정산유형",
               allLabel: "전체 정산유형",
-              options: ["prepay_debt", "prepay_fee", "prepay_supply", "consignment"].map((value) => ({ value, label: settlementLabel(value) })),
+              options: ["prepay_debt", "prepay_fee", "prepay_supply", "consignment", "direct_purchase"].map((value) => ({ value, label: settlementLabel(value) })),
               selectedValues: state.filters.settlementTypes || []
             })}
             ${renderMultiFilter({
@@ -760,11 +761,15 @@ function renderRequestForm() {
         <div><label>주문번호</label><input name="orderNo" value="${h(item.orderNo)}" required></div>
         <div><label>주문자명</label><input name="customerName" value="${h(item.customerName)}" required></div>
       </div>
-      <div class="field two">
+      <div class="field three">
         <div><label>제품매출</label><input name="productSalesAmount" type="number" min="0" value="${h(item.productSalesAmount || item.depositAmount || "")}"></div>
         <div>
           <label>기본 배송비 <span class="muted" style="font-weight:400">(수동 변경 가능)</span></label>
           <input name="baseShippingFee" type="number" min="0" value="${h(defaultBaseShippingFee || "")}" data-manual="${baseShippingManual ? "1" : ""}">
+        </div>
+        <div>
+          <label>수량</label>
+          <input name="quantity" type="number" min="0" step="1" value="${h(item.quantity || "")}" placeholder="총 수량">
         </div>
       </div>
       <div class="field">
@@ -778,12 +783,12 @@ function renderRequestForm() {
         <label>총 배송비</label>
         <input name="shippingFee" type="number" readonly value="${h(defaultShippingFee || "")}">
       </div>
-      <div class="field two">
+      <div class="field two" data-hide-direct="1">
         <div><label>수수료율(%)</label><input name="commissionRate" type="number" min="0" max="100" step="0.1" readonly value="${h(item.commissionRate ?? promotion?.commissionRate ?? selectedBrand?.commissionRate ?? "")}"></div>
         <div data-supply-amount-field style="${settlementType === "prepay_supply" ? "" : "display:none"}"><label>공급가 합</label><input name="supplyAmount" type="number" min="0" value="${h(item.supplyAmount || "")}"></div>
       </div>
-      <div class="field"><label>적용 프로모션</label><input name="promotionRuleName" readonly value="${h(item.promotionRuleName || promotion?.name || "")}" placeholder="없음"></div>
-      <div class="field">
+      <div class="field" data-hide-direct="1"><label>적용 프로모션</label><input name="promotionRuleName" readonly value="${h(item.promotionRuleName || promotion?.name || "")}" placeholder="없음"></div>
+      <div class="field" data-hide-direct="1">
         <label>품목별 공급가</label>
         <input name="lineItemsJson" type="hidden" value='${h(JSON.stringify(lineItems))}'>
         <div class="field two">
@@ -861,10 +866,8 @@ function renderRequestForm() {
         </div>
         <div class="muted">실제 송금액 ≒ 업체 실 입금액 − 외상 차감. 차감 금액은 직접 입력하세요.</div>
       </section>
-      <div class="field two">
-        <div><label>상태</label><select name="status">${["pending", "consignment_unpaid", "paid", "hold", "error"].map((s) => `<option value="${s}" ${(item.status || ((item.settlementType || selectedBrand?.settlementType) === "consignment" ? "consignment_unpaid" : "pending")) === s ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}</select></div>
-        <div><label>계산 수수료</label><input name="commissionAmount" type="number" readonly value="${h(item.commissionAmount || "")}"></div>
-      </div>
+      <div class="field"><label>상태</label><select name="status">${["pending", "consignment_unpaid", "paid", "hold", "error"].map((s) => `<option value="${s}" ${(item.status || ((item.settlementType || selectedBrand?.settlementType) === "consignment" ? "consignment_unpaid" : "pending")) === s ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}</select></div>
+      <div class="field" data-hide-direct="1"><label>계산 수수료</label><input name="commissionAmount" type="number" readonly value="${h(item.commissionAmount || "")}"></div>
       <div class="toolbar">
         <button class="primary" type="submit">${state.editingRequest ? "수정 저장" : "요청 추가"}</button>
         ${state.editingRequest ? `<button type="button" data-cancel-edit>취소</button>` : ""}
@@ -1239,7 +1242,7 @@ function renderBrandForm() {
       <div class="field">
         <label>정산유형</label>
         <select name="settlementType">
-          ${["prepay_debt", "prepay_fee", "prepay_supply", "consignment"].map((s) => `<option value="${s}" ${(b.settlementType || "prepay_fee") === s ? "selected" : ""}>${settlementLabel(s)}</option>`).join("")}
+          ${["prepay_debt", "prepay_fee", "prepay_supply", "consignment", "direct_purchase"].map((s) => `<option value="${s}" ${(b.settlementType || "prepay_fee") === s ? "selected" : ""}>${settlementLabel(s)}</option>`).join("")}
         </select>
       </div>
       <div class="field two">
@@ -2249,11 +2252,14 @@ function updateRequestCalculation(form) {
     ? Number(promotionContext.commissionAmount)
     : Math.round(productSalesAmount * (commissionRate / 100));
   const hasReceivable = Boolean(brand?.hasReceivable || settlementType === "prepay_debt");
+  const isDirect = settlementType === "direct_purchase";
   let depositAmount = 0;
   if (settlementType === "prepay_debt") {
     depositAmount = productSalesAmount + shippingFee;
   } else if (settlementType === "prepay_supply") {
     depositAmount = hasReceivable ? productSalesAmount + extraShippingFee : supplyAmount + shippingFee;
+  } else if (isDirect) {
+    depositAmount = productSalesAmount + shippingFee;
   } else {
     depositAmount = productSalesAmount - commissionAmount + shippingFee;
   }
@@ -2315,9 +2321,18 @@ function updateRequestCalculation(form) {
       creditHint.innerHTML = "브랜드를 선택하면 잔액이 표시됩니다.";
     }
   }
-  if (receivableField) receivableField.style.display = settlementType === "prepay_debt" || (settlementType === "prepay_supply" && hasReceivable) ? "" : "none";
+  if (receivableField) receivableField.style.display = !isDirect && (settlementType === "prepay_debt" || (settlementType === "prepay_supply" && hasReceivable)) ? "" : "none";
   if (receivableLabel) receivableLabel.textContent = receivableDeductionLabel(settlementType, brand);
-  if (supplyAmountField) supplyAmountField.style.display = settlementType === "prepay_supply" ? "" : "none";
+  if (supplyAmountField) supplyAmountField.style.display = !isDirect && settlementType === "prepay_supply" ? "" : "none";
+  form.querySelectorAll("[data-hide-direct]").forEach((el) => {
+    el.style.display = isDirect ? "none" : "";
+  });
+  if (isDirect) {
+    if (commissionInput) commissionInput.value = "";
+    if (commissionRateInput) commissionRateInput.value = "";
+    if (promotionRuleInput) promotionRuleInput.value = "";
+    if (supplyInput) supplyInput.value = "";
+  }
   if (fixedSettlementType) fixedSettlementType.textContent = settlementLabel(settlementType);
   if (fixedCommissionRate) fixedCommissionRate.textContent = commissionRate ? `${commissionRate}%` : "-";
   if (fixedBaseShipping) fixedBaseShipping.textContent = `${money.format(Number(baseShippingFee || 0))}원`;

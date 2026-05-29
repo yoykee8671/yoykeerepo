@@ -180,7 +180,7 @@ const importedRequests = [
   }
 ];
 
-const settlementTypes = new Set(["prepay_debt", "prepay_fee", "prepay_supply", "consignment"]);
+const settlementTypes = new Set(["prepay_debt", "prepay_fee", "prepay_supply", "consignment", "direct_purchase"]);
 const shippingPolicyTypes = new Set(["free", "flat", "threshold"]);
 const requestStatuses = new Set(["pending", "paid", "hold", "error", "consignment_unpaid", "deleted"]);
 
@@ -1219,10 +1219,13 @@ function calculateSettlement(input, brand = {}) {
     depositAmount = effectiveProductSalesAmount + shippingFee;
   } else if (settlementType === "prepay_supply") {
     depositAmount = hasReceivable ? effectiveProductSalesAmount + extraShippingFee : supplyAmount + shippingFee;
+  } else if (settlementType === "direct_purchase") {
+    depositAmount = effectiveProductSalesAmount + shippingFee;
   } else if (settlementType === "prepay_fee" || settlementType === "consignment") {
     depositAmount = effectiveProductSalesAmount - commissionAmount + shippingFee;
   }
 
+  const isDirect = settlementType === "direct_purchase";
   return {
     settlementType,
     productSalesAmount: effectiveProductSalesAmount,
@@ -1230,15 +1233,15 @@ function calculateSettlement(input, brand = {}) {
     extraShippingFee,
     extraShippingNote: String(input.extraShippingNote || "").trim(),
     shippingFee,
-    promotionRuleId: promotionContext?.primaryRuleId || "",
-    promotionRuleName: promotionContext?.name || "",
-    appliedPromotionRules: promotionContext?.appliedRules || [],
-    commissionRate,
-    commissionAmount,
-    supplyAmount,
+    promotionRuleId: isDirect ? "" : (promotionContext?.primaryRuleId || ""),
+    promotionRuleName: isDirect ? "" : (promotionContext?.name || ""),
+    appliedPromotionRules: isDirect ? [] : (promotionContext?.appliedRules || []),
+    commissionRate: isDirect ? 0 : commissionRate,
+    commissionAmount: isDirect ? 0 : commissionAmount,
+    supplyAmount: isDirect ? 0 : supplyAmount,
     depositAmount,
-    receivableDeduction: hasReceivable ? (settlementType === "prepay_supply" ? receivableMargin : commissionAmount) : 0,
-    lineItems
+    receivableDeduction: isDirect ? 0 : (hasReceivable ? (settlementType === "prepay_supply" ? receivableMargin : commissionAmount) : 0),
+    lineItems: isDirect ? [] : lineItems
   };
 }
 
@@ -2092,6 +2095,7 @@ async function routeApi(req, res, url) {
       paidAmount: body.paidAmount || "",
       paidAt: body.paidAt || "",
       notes: String(body.notes || "").trim(),
+      quantity: Math.max(0, Number(body.quantity || 0)),
       overpaidAmount: Math.max(0, number(body.overpaidAmount)),
       overpaidReason: String(body.overpaidReason || "").trim(),
       overpaidNote: String(body.overpaidNote || "").trim(),
@@ -2222,6 +2226,7 @@ async function routeApi(req, res, url) {
       "paidAmount",
       "paidAt",
       "notes",
+      "quantity",
       "overpaidAmount",
       "overpaidReason",
       "overpaidNote",
@@ -2231,6 +2236,8 @@ async function routeApi(req, res, url) {
       if (key in body) {
         if (key === "sourceRow") {
           request[key] = Number(body[key] || 0);
+        } else if (key === "quantity") {
+          request[key] = Math.max(0, Number(body[key] || 0));
         } else if (key === "overpaidAmount" || key === "creditUsedAmount") {
           request[key] = Math.max(0, number(body[key]));
         } else {
