@@ -887,7 +887,10 @@ function renderRequestForm() {
         <div class="muted">실제 송금액 ≒ 업체 실 입금액 − 외상 차감. 차감 금액은 직접 입력하세요.</div>
       </section>
       <div class="field"><label>상태</label><select name="status">${["pending", "consignment_unpaid", "paid", "hold", "error"].map((s) => `<option value="${s}" ${(item.status || (settlementType === "consignment" ? "consignment_unpaid" : "pending")) === s ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}</select></div>
-      <div class="field" data-hide-direct="1"><label>계산 수수료</label><input name="commissionAmount" type="number" readonly value="${h(item.commissionAmount || "")}"></div>
+      <div class="field" data-hide-direct="1">
+        <label>계산 수수료 <span class="muted" style="font-weight:400" data-commission-display-hint>${selectedBrand?.hasReceivable ? "(채권 기준 — 프로모션 무시)" : "(실제 차감액)"}</span></label>
+        <input name="commissionAmount" type="number" readonly value="${h(item.commissionAmount || "")}">
+      </div>
       <div class="toolbar">
         <button class="primary" type="submit">${state.editingRequest ? "수정 저장" : "요청 추가"}</button>
         ${state.editingRequest ? `<button type="button" data-cancel-edit>취소</button>` : ""}
@@ -2340,7 +2343,23 @@ function updateRequestCalculation(form) {
   const fixedCutoffNote = form.querySelector("[data-fixed-cutoff-note]");
   const receivableLabel = form.querySelector("[data-receivable-deduction-label]");
   const specialSettlementNoteEl = form.querySelector("[data-special-settlement-note]");
-  if (commissionInput) commissionInput.value = String(commissionAmount || "");
+  let displayedCommissionAmount;
+  if (isDirect) {
+    displayedCommissionAmount = 0;
+  } else if (hasReceivable) {
+    displayedCommissionAmount = Math.round(productSalesAmount * Number(brand?.commissionRate || 0) / 100);
+  } else {
+    displayedCommissionAmount = Math.max(0, productSalesAmount + shippingFee - depositAmount);
+  }
+  if (commissionInput) commissionInput.value = String(displayedCommissionAmount || "");
+  const commissionHint = form.querySelector("[data-commission-display-hint]");
+  if (commissionHint) {
+    commissionHint.textContent = isDirect
+      ? ""
+      : hasReceivable
+        ? "(채권 기준 — 프로모션 무시)"
+        : "(실제 차감액)";
+  }
   if (commissionRateInput) commissionRateInput.value = String(commissionRate || "");
   if (promotionRuleInput) promotionRuleInput.value = promotionContext?.name || "";
   if (productSalesInput && derivedProductSalesAmount > 0) productSalesInput.value = String(productSalesAmount || "");
