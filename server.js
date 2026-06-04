@@ -1271,7 +1271,7 @@ function calculateSettlement(input, brand = {}) {
     commissionAmount: isDirect ? 0 : commissionAmount,
     supplyAmount: isDirect ? 0 : supplyAmount,
     depositAmount,
-    receivableDeduction: isDirect ? 0 : (hasReceivable ? (settlementType === "prepay_supply" ? receivableMargin : commissionAmount) : 0),
+    receivableDeduction: isDirect ? 0 : (hasReceivable ? (settlementType === "prepay_supply" ? receivableMargin : Math.round(effectiveProductSalesAmount * number(brand.commissionRate) / 100)) : 0),
     lineItems: isDirect ? [] : lineItems
   };
 }

@@ -2382,7 +2382,7 @@ function updateRequestCalculation(form) {
   }
   const receivableDeduction =
     settlementType === "prepay_debt"
-      ? commissionAmount
+      ? Math.round(productSalesAmount * Number(brand?.commissionRate || 0) / 100)
       : (settlementType === "prepay_supply" && hasReceivable ? Math.max(0, adjustedProductSales - supplyAmount - baseShippingFee) : 0);
   const commissionInput = form.querySelector("[name='commissionAmount']");
   const depositInput = form.querySelector("[name='depositAmount']");
