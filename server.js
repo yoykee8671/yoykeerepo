@@ -300,6 +300,12 @@ function getActivePromotionRules(db, brandId = "", onDate = "") {
     });
 }
 
+function effectiveRuleRate(rule, brandRate) {
+  if (!rule) return brandRate;
+  if (rule.commissionRate === null || rule.commissionRate === undefined || rule.commissionRate === "") return brandRate;
+  return number(rule.commissionRate);
+}
+
 function buildPromotionContext(db, brand = {}, lineItems = [], onDate = "") {
   const activeRules = getActivePromotionRules(db, brand?.id, onDate);
   const brandRate = number(brand?.commissionRate);
@@ -310,7 +316,7 @@ function buildPromotionContext(db, brand = {}, lineItems = [], onDate = "") {
     return {
       primaryRuleId: allRule.id,
       name: allRule.name,
-      commissionRate: number(allRule.commissionRate),
+      commissionRate: effectiveRuleRate(allRule, brandRate),
       commissionAmount: null,
       appliedRules: [promotionRuleWithRefs(db, allRule)]
     };
@@ -326,7 +332,7 @@ function buildPromotionContext(db, brand = {}, lineItems = [], onDate = "") {
     const key = normalizeItemKey(item.itemCode, item.itemName);
     const itemRule = itemRules.find((rule) => sanitizePromotionTargets(rule.targetItems).some((target) => target.key === key)) || null;
     const matchedRule = itemRule || allRule;
-    const rate = matchedRule ? number(matchedRule.commissionRate) : brandRate;
+    const rate = effectiveRuleRate(matchedRule, brandRate);
     commissionTotal += Math.round(lineSales * (rate / 100));
     if (matchedRule && !seen.has(matchedRule.id)) {
       seen.add(matchedRule.id);
@@ -336,7 +342,7 @@ function buildPromotionContext(db, brand = {}, lineItems = [], onDate = "") {
   if (!appliedRules.length) return allRule ? {
     primaryRuleId: allRule.id,
     name: allRule.name,
-    commissionRate: number(allRule.commissionRate),
+    commissionRate: effectiveRuleRate(allRule, brandRate),
     commissionAmount: null,
     appliedRules: [promotionRuleWithRefs(db, allRule)]
   } : null;
@@ -1861,7 +1867,7 @@ async function routeApi(req, res, url) {
       name,
       scopeType,
       targetItems,
-      commissionRate: number(body.commissionRate),
+      commissionRate: body.commissionRate === "" || body.commissionRate == null ? null : number(body.commissionRate),
       discountKind: String(body.discountKind || "").trim(),
       discountDetails: String(body.discountDetails || "").trim(),
       validFrom,
@@ -1921,7 +1927,9 @@ async function routeApi(req, res, url) {
     rule.name = name;
     rule.scopeType = scopeType;
     rule.targetItems = targetItems;
-    if ("commissionRate" in body) rule.commissionRate = number(body.commissionRate);
+    if ("commissionRate" in body) {
+      rule.commissionRate = body.commissionRate === "" || body.commissionRate == null ? null : number(body.commissionRate);
+    }
     if ("discountKind" in body) rule.discountKind = String(body.discountKind || "").trim();
     if ("discountDetails" in body) rule.discountDetails = String(body.discountDetails || "").trim();
     if ("note" in body) rule.note = String(body.note || "").trim();

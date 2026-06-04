@@ -1388,7 +1388,7 @@ function renderPromotionRuleForm() {
         </select>
       </div>
       <div class="field two">
-        <div><label>적용 수수료율(%) <span class="muted" style="font-weight:400">(수수료 변경 없으면 비워두세요)</span></label><input name="commissionRate" type="number" min="0" max="100" step="0.1" value="${h(item.commissionRate || "")}"></div>
+        <div><label>적용 수수료율(%) <span class="muted" style="font-weight:400">(수수료 변경 없으면 비워두세요 — 비우면 브랜드 계약율 적용)</span></label><input name="commissionRate" type="number" min="0" max="100" step="0.1" value="${h(item.commissionRate ?? "")}"></div>
         <div><label>상태</label><select name="isActive"><option value="true" ${item.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${item.isActive === false ? "selected" : ""}>N</option></select></div>
       </div>
       <div class="field two">
@@ -2556,7 +2556,7 @@ function buildPromotionPreview(brand, lineItems = [], effectiveDate = "") {
     return allRule ? {
       primaryRule: allRule,
       name: allRule.name,
-      commissionRate: Number(allRule.commissionRate || 0),
+      commissionRate: Number(allRule.commissionRate ?? brand.commissionRate ?? 0),
       commissionAmount: null
     } : null;
   }
