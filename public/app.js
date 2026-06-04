@@ -207,6 +207,22 @@ function renderCreditBalance(value) {
   return `<strong style="color:${color}">${prefix}${money.format(n)}원</strong>`;
 }
 
+function discountKindLabel(value) {
+  return {
+    permanent: "상시할인",
+    period: "기간할인",
+    coupon: "쿠폰할인",
+    quantity: "구매수량별"
+  }[value] || "";
+}
+
+function renderPromotionDiscountCell(item) {
+  if (!item.discountKind && !item.discountDetails) return `<span class="muted">-</span>`;
+  const kind = item.discountKind ? `<strong>${h(discountKindLabel(item.discountKind))}</strong>` : "";
+  const details = item.discountDetails ? `<br><span class="muted">${h(item.discountDetails)}</span>` : "";
+  return `${kind}${details}`;
+}
+
 function overpaidReasonLabel(value) {
   return {
     overpay: "오입금",
@@ -454,17 +470,18 @@ function renderBrandPopup() {
           <div class="panel-body">
             <div class="table-wrap" style="max-height:240px;margin-bottom:14px">
               <table>
-                <thead><tr><th>프로모션</th><th>범위</th><th>수수료율</th><th>기간</th><th>상태</th><th>작업</th></tr></thead>
+                <thead><tr><th>프로모션</th><th>범위</th><th>수수료율</th><th>가격 할인</th><th>기간</th><th>상태</th><th>작업</th></tr></thead>
                 <tbody>
                   ${brandRules.map((item) => `
                     <tr>
                       <td>${h(item.name)}</td>
                       <td class="wrap">${h(item.scopeType === "items" ? (item.targetItemLabels || []).join(", ") || "특정 품목" : "브랜드 전체")}</td>
-                      <td>${h(item.commissionRate)}%</td>
+                      <td>${item.commissionRate || item.commissionRate === 0 ? `${h(item.commissionRate)}%` : `<span class="muted">-</span>`}</td>
+                      <td class="wrap">${renderPromotionDiscountCell(item)}</td>
                       <td>${h(item.validFrom || "-")}${item.validTo ? ` ~ ${h(item.validTo)}` : " ~ 상시"}</td>
                       <td>${promotionRuleStatusLabel(item)}</td>
                       <td><div class="row-actions"><button data-edit-promotion-rule="${item.id}">수정</button><button class="danger" data-delete-promotion-rule="${item.id}">삭제</button></div></td>
-                    </tr>`).join("") || `<tr><td colspan="6" class="empty">등록된 프로모션 규칙이 없습니다.</td></tr>`}
+                    </tr>`).join("") || `<tr><td colspan="7" class="empty">등록된 프로모션 규칙이 없습니다.</td></tr>`}
                 </tbody>
               </table>
             </div>
@@ -917,21 +934,22 @@ function renderBrands() {
           </table>
         </div>
         <div class="panel-body">
-          <h3 style="margin-top:0">기간 프로모션 수수료 규칙</h3>
+          <h3 style="margin-top:0">프로모션 규칙 (수수료 / 가격할인)</h3>
           <div class="table-wrap" style="max-height:280px">
             <table>
-              <thead><tr><th>브랜드</th><th>프로모션</th><th>범위</th><th>수수료율</th><th>기간</th><th>상태</th><th>작업</th></tr></thead>
+              <thead><tr><th>브랜드</th><th>프로모션</th><th>범위</th><th>수수료율</th><th>가격 할인</th><th>기간</th><th>상태</th><th>작업</th></tr></thead>
               <tbody>
                 ${rules.map((item) => `
                   <tr>
                     <td>${h(item.brandName)}</td>
                     <td>${h(item.name)}</td>
                     <td class="wrap">${h(item.scopeType === "items" ? (item.targetItemLabels || []).join(", ") || "특정 품목" : "브랜드 전체")}</td>
-                    <td>${h(item.commissionRate)}%</td>
+                    <td>${item.commissionRate || item.commissionRate === 0 ? `${h(item.commissionRate)}%` : `<span class="muted">-</span>`}</td>
+                    <td class="wrap">${renderPromotionDiscountCell(item)}</td>
                     <td>${h(item.validFrom || "-")}${item.validTo ? ` ~ ${h(item.validTo)}` : " ~ 상시"}</td>
                     <td>${promotionRuleStatusLabel(item)}</td>
                     <td><div class="row-actions"><button data-edit-promotion-rule="${item.id}">수정</button><button class="danger" data-delete-promotion-rule="${item.id}">삭제</button></div></td>
-                  </tr>`).join("") || `<tr><td colspan="7" class="empty">등록된 프로모션 규칙이 없습니다.</td></tr>`}
+                  </tr>`).join("") || `<tr><td colspan="8" class="empty">등록된 프로모션 규칙이 없습니다.</td></tr>`}
               </tbody>
             </table>
           </div>
@@ -1370,8 +1388,26 @@ function renderPromotionRuleForm() {
         </select>
       </div>
       <div class="field two">
-        <div><label>적용 수수료율(%)</label><input name="commissionRate" type="number" min="0" max="100" step="0.1" value="${h(item.commissionRate || "")}" required></div>
+        <div><label>적용 수수료율(%) <span class="muted" style="font-weight:400">(수수료 변경 없으면 비워두세요)</span></label><input name="commissionRate" type="number" min="0" max="100" step="0.1" value="${h(item.commissionRate || "")}"></div>
         <div><label>상태</label><select name="isActive"><option value="true" ${item.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${item.isActive === false ? "selected" : ""}>N</option></select></div>
+      </div>
+      <div class="field two">
+        <div>
+          <label>가격 할인 종류</label>
+          <select name="discountKind">
+            ${[
+              ["", "없음"],
+              ["permanent", "상시할인"],
+              ["period", "기간할인"],
+              ["coupon", "쿠폰할인"],
+              ["quantity", "구매수량별할인"]
+            ].map(([v, label]) => `<option value="${v}" ${(item.discountKind || "") === v ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+        </div>
+        <div>
+          <label>할인 세부정보</label>
+          <input name="discountDetails" value="${h(item.discountDetails || "")}" placeholder="예: 10%, 1000원, 5개 이상 10%, WELCOME10">
+        </div>
       </div>
       <div class="field" data-promotion-target-wrap style="${(item.scopeType || "all") === "items" ? "" : "display:none"}">
         <label>대상 품목</label>

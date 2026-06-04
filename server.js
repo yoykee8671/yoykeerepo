@@ -658,6 +658,8 @@ function migrateDb(db) {
   touch(db, "promotionRules", []);
   for (const rule of db.promotionRules || []) {
     touch(rule, "scopeType", "all");
+    touch(rule, "discountKind", "");
+    touch(rule, "discountDetails", "");
     touch(rule, "targetItems", []);
   }
   return { db, changed };
@@ -1860,6 +1862,8 @@ async function routeApi(req, res, url) {
       scopeType,
       targetItems,
       commissionRate: number(body.commissionRate),
+      discountKind: String(body.discountKind || "").trim(),
+      discountDetails: String(body.discountDetails || "").trim(),
       validFrom,
       validTo,
       note: String(body.note || "").trim(),
@@ -1918,6 +1922,8 @@ async function routeApi(req, res, url) {
     rule.scopeType = scopeType;
     rule.targetItems = targetItems;
     if ("commissionRate" in body) rule.commissionRate = number(body.commissionRate);
+    if ("discountKind" in body) rule.discountKind = String(body.discountKind || "").trim();
+    if ("discountDetails" in body) rule.discountDetails = String(body.discountDetails || "").trim();
     if ("note" in body) rule.note = String(body.note || "").trim();
     rule.validFrom = validFrom;
     rule.validTo = validTo;
