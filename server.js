@@ -1271,7 +1271,7 @@ function calculateSettlement(input, brand = {}) {
     commissionAmount: isDirect ? 0 : commissionAmount,
     supplyAmount: isDirect ? 0 : supplyAmount,
     depositAmount,
-    receivableDeduction: isDirect ? 0 : (hasReceivable ? (settlementType === "prepay_supply" ? receivableMargin : Math.round(effectiveProductSalesAmount * number(brand.commissionRate) / 100)) : 0),
+    receivableDeduction: isDirect ? 0 : (hasReceivable ? (settlementType === "prepay_supply" ? receivableMargin : Math.round(effectiveProductSalesAmount * number(brand.commissionRate) / 100) + Math.round(number(input.cancelledAmount) * (1 - number(brand.commissionRate) / 100))) : 0),
     lineItems: isDirect ? [] : lineItems
   };
 }
@@ -2137,6 +2137,9 @@ async function routeApi(req, res, url) {
       paidAt: body.paidAt || "",
       notes: String(body.notes || "").trim(),
       quantity: Math.max(0, Number(body.quantity || 0)),
+      cancelledAmount: Math.max(0, number(body.cancelledAmount)),
+      cancelledReason: String(body.cancelledReason || "").trim(),
+      cancelledNote: String(body.cancelledNote || "").trim(),
       overpaidAmount: Math.max(0, number(body.overpaidAmount)),
       overpaidReason: String(body.overpaidReason || "").trim(),
       overpaidNote: String(body.overpaidNote || "").trim(),
@@ -2268,6 +2271,9 @@ async function routeApi(req, res, url) {
       "paidAt",
       "notes",
       "quantity",
+      "cancelledAmount",
+      "cancelledReason",
+      "cancelledNote",
       "overpaidAmount",
       "overpaidReason",
       "overpaidNote",
@@ -2279,7 +2285,7 @@ async function routeApi(req, res, url) {
           request[key] = Number(body[key] || 0);
         } else if (key === "quantity") {
           request[key] = Math.max(0, Number(body[key] || 0));
-        } else if (key === "overpaidAmount" || key === "creditUsedAmount") {
+        } else if (key === "overpaidAmount" || key === "creditUsedAmount" || key === "cancelledAmount") {
           request[key] = Math.max(0, number(body[key]));
         } else {
           request[key] = body[key];

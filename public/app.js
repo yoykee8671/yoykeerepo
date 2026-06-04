@@ -909,6 +909,31 @@ function renderRequestForm() {
         </div>
         <div class="muted">실제 송금액 ≒ 업체 실 입금액 − 외상 차감. 차감 금액은 직접 입력하세요.</div>
       </section>
+      <section class="fixed-summary">
+        <div class="fixed-summary-title">환불·취소 처리 <span class="muted" style="font-weight:400">(품절·반품·부분취소)</span></div>
+        <div class="muted" style="margin-bottom:8px">
+          채권: 입력 시 채권차감액에 자동 누적(수수료 중복 방지). 선매입: 외상 처리 섹션 활용. 위탁: 별도 환불 행 생성 필요.
+        </div>
+        <div class="field two">
+          <div>
+            <label>환불·취소 금액</label>
+            <input name="cancelledAmount" type="number" min="0" value="${h(item.cancelledAmount || "")}" placeholder="0">
+          </div>
+          <div>
+            <label>사유</label>
+            <select name="cancelledReason">
+              ${[
+                ["", "선택 안 함"],
+                ["sold_out", "품절"],
+                ["return", "반품"],
+                ["partial_cancel", "부분 취소"],
+                ["manual", "수동/기타"]
+              ].map(([v, label]) => `<option value="${v}" ${(item.cancelledReason || "") === v ? "selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </div>
+        </div>
+        <div class="field"><label>환불/취소 메모</label><input name="cancelledNote" value="${h(item.cancelledNote || "")}" placeholder="예: 사료 1포 품절 4,000원"></div>
+      </section>
       <div class="field"><label>상태</label><select name="status">${["pending", "consignment_unpaid", "paid", "hold", "error"].map((s) => `<option value="${s}" ${(item.status || (settlementType === "consignment" ? "consignment_unpaid" : "pending")) === s ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}</select></div>
       <div class="field" data-hide-direct="1">
         <label>계산 수수료 <span class="muted" style="font-weight:400" data-commission-display-hint>${selectedBrand?.hasReceivable ? "(채권 기준 — 프로모션 무시)" : "(실제 차감액)"}</span></label>
@@ -2232,7 +2257,7 @@ function bindRequests() {
         : `추가 ${added}건, 합산 ${merged}건`;
   });
   requestForm
-    .querySelectorAll("[name='productSalesAmount'], [name='extraShippingFee'], [name='commissionRate'], [name='supplyAmount'], [name='expectedDepositDate'], [name='overpaidAmount'], [name='creditUsedAmount']")
+    .querySelectorAll("[name='productSalesAmount'], [name='extraShippingFee'], [name='commissionRate'], [name='supplyAmount'], [name='expectedDepositDate'], [name='overpaidAmount'], [name='creditUsedAmount'], [name='cancelledAmount']")
     .forEach((input) => input.addEventListener("input", () => updateRequestCalculation(requestForm)));
   requestForm.querySelector("[name='baseShippingFee']")?.addEventListener("input", (event) => {
     event.target.dataset.manual = "1";
@@ -2380,9 +2405,11 @@ function updateRequestCalculation(form) {
   } else {
     depositAmount = adjustedProductSales - commissionAmount + shippingFee;
   }
+  const cancelledAmount = value("cancelledAmount");
   const receivableDeduction =
     settlementType === "prepay_debt"
       ? Math.round(productSalesAmount * Number(brand?.commissionRate || 0) / 100)
+        + Math.round(cancelledAmount * (1 - Number(brand?.commissionRate || 0) / 100))
       : (settlementType === "prepay_supply" && hasReceivable ? Math.max(0, adjustedProductSales - supplyAmount - baseShippingFee) : 0);
   const commissionInput = form.querySelector("[name='commissionAmount']");
   const depositInput = form.querySelector("[name='depositAmount']");
@@ -2410,6 +2437,8 @@ function updateRequestCalculation(form) {
   let displayedCommissionAmount;
   if (isDirect) {
     displayedCommissionAmount = 0;
+  } else if (hasReceivable && settlementType === "prepay_debt") {
+    displayedCommissionAmount = receivableDeduction;
   } else if (hasReceivable) {
     displayedCommissionAmount = Math.round(productSalesAmount * Number(brand?.commissionRate || 0) / 100);
   } else {
