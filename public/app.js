@@ -217,10 +217,16 @@ function discountKindLabel(value) {
 }
 
 function renderPromotionDiscountCell(item) {
-  if (!item.discountKind && !item.discountDetails) return `<span class="muted">-</span>`;
-  const kind = item.discountKind ? `<strong>${h(discountKindLabel(item.discountKind))}</strong>` : "";
-  const details = item.discountDetails ? `<br><span class="muted">${h(item.discountDetails)}</span>` : "";
-  return `${kind}${details}`;
+  const hasValue = Number(item.discountValue || 0) > 0 && item.discountValueType;
+  if (!item.discountKind && !item.discountDetails && !hasValue) return `<span class="muted">-</span>`;
+  const parts = [];
+  if (item.discountKind) parts.push(`<strong>${h(discountKindLabel(item.discountKind))}</strong>`);
+  if (hasValue) {
+    const unit = item.discountValueType === "percent" ? "%" : "원";
+    parts.push(`<span style="color:var(--red);font-weight:600">−${money.format(Number(item.discountValue))}${unit}</span>`);
+  }
+  if (item.discountDetails) parts.push(`<span class="muted">${h(item.discountDetails)}</span>`);
+  return parts.join("<br>");
 }
 
 function overpaidReasonLabel(value) {
@@ -1391,7 +1397,7 @@ function renderPromotionRuleForm() {
         <div><label>적용 수수료율(%) <span class="muted" style="font-weight:400">(수수료 변경 없으면 비워두세요 — 비우면 브랜드 계약율 적용)</span></label><input name="commissionRate" type="number" min="0" max="100" step="0.1" value="${h(item.commissionRate ?? "")}"></div>
         <div><label>상태</label><select name="isActive"><option value="true" ${item.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${item.isActive === false ? "selected" : ""}>N</option></select></div>
       </div>
-      <div class="field two">
+      <div class="field three">
         <div>
           <label>가격 할인 종류</label>
           <select name="discountKind">
@@ -1405,9 +1411,23 @@ function renderPromotionRuleForm() {
           </select>
         </div>
         <div>
-          <label>할인 세부정보</label>
-          <input name="discountDetails" value="${h(item.discountDetails || "")}" placeholder="예: 10%, 1000원, 5개 이상 10%, WELCOME10">
+          <label>할인 값</label>
+          <input name="discountValue" type="number" min="0" step="0.01" value="${h(item.discountValue ?? "")}" placeholder="예: 10">
         </div>
+        <div>
+          <label>단위</label>
+          <select name="discountValueType">
+            ${[
+              ["", "선택 안 함"],
+              ["percent", "% (정률)"],
+              ["fixed", "원 (정액)"]
+            ].map(([v, label]) => `<option value="${v}" ${(item.discountValueType || "") === v ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>할인 메모 <span class="muted" style="font-weight:400">(쿠폰코드·수량 구간 등 자유 기재 — 계산엔 영향 없음)</span></label>
+        <input name="discountDetails" value="${h(item.discountDetails || "")}" placeholder="예: WELCOME10, 5개 이상부터 적용">
       </div>
       <div class="field" data-promotion-target-wrap style="${(item.scopeType || "all") === "items" ? "" : "display:none"}">
         <label>대상 품목</label>
@@ -2334,28 +2354,36 @@ function updateRequestCalculation(form) {
   const promotionContext = buildPromotionPreview(brand, lineItems, form.querySelector("[name='expectedDepositDate']")?.value);
   const promotion = promotionContext?.primaryRule || null;
   const commissionRate = Number(promotionContext?.commissionRate ?? brand?.commissionRate ?? value("commissionRate"));
+  const discountAmount = (() => {
+    const dv = Number(promotionContext?.discountValue || 0);
+    if (!dv) return 0;
+    if (promotionContext?.discountValueType === "percent") return Math.round(productSalesAmount * dv / 100);
+    if (promotionContext?.discountValueType === "fixed") return Math.min(dv, productSalesAmount);
+    return 0;
+  })();
+  const adjustedProductSales = Math.max(0, productSalesAmount - discountAmount);
   const supplyAmount = lineItems.length
     ? lineItems.reduce((sum, item) => sum + Number(item.totalSupplyPrice || 0), 0)
     : value("supplyAmount");
-  const commissionAmount = Number.isFinite(promotionContext?.commissionAmount)
+  const commissionAmount = Number.isFinite(promotionContext?.commissionAmount) && !discountAmount
     ? Number(promotionContext.commissionAmount)
-    : Math.round(productSalesAmount * (commissionRate / 100));
+    : Math.round(adjustedProductSales * (commissionRate / 100));
   const hasReceivable = Boolean(brand?.hasReceivable || settlementType === "prepay_debt");
   const isDirect = settlementType === "direct_purchase";
   let depositAmount = 0;
   if (settlementType === "prepay_debt") {
-    depositAmount = productSalesAmount + shippingFee;
+    depositAmount = adjustedProductSales + shippingFee;
   } else if (settlementType === "prepay_supply") {
-    depositAmount = hasReceivable ? productSalesAmount + extraShippingFee : supplyAmount + shippingFee;
+    depositAmount = hasReceivable ? adjustedProductSales + extraShippingFee : supplyAmount + shippingFee;
   } else if (isDirect) {
-    depositAmount = productSalesAmount + shippingFee;
+    depositAmount = adjustedProductSales + shippingFee;
   } else {
-    depositAmount = productSalesAmount - commissionAmount + shippingFee;
+    depositAmount = adjustedProductSales - commissionAmount + shippingFee;
   }
   const receivableDeduction =
     settlementType === "prepay_debt"
       ? commissionAmount
-      : (settlementType === "prepay_supply" && hasReceivable ? Math.max(0, productSalesAmount - supplyAmount - baseShippingFee) : 0);
+      : (settlementType === "prepay_supply" && hasReceivable ? Math.max(0, adjustedProductSales - supplyAmount - baseShippingFee) : 0);
   const commissionInput = form.querySelector("[name='commissionAmount']");
   const depositInput = form.querySelector("[name='depositAmount']");
   const deductionInput = form.querySelector("[name='receivableDeduction']");
@@ -2385,7 +2413,7 @@ function updateRequestCalculation(form) {
   } else if (hasReceivable) {
     displayedCommissionAmount = Math.round(productSalesAmount * Number(brand?.commissionRate || 0) / 100);
   } else {
-    displayedCommissionAmount = Math.max(0, productSalesAmount + shippingFee - depositAmount);
+    displayedCommissionAmount = Math.max(0, adjustedProductSales + shippingFee - depositAmount);
   }
   if (commissionInput) commissionInput.value = String(displayedCommissionAmount || "");
   const commissionHint = form.querySelector("[data-commission-display-hint]");
@@ -2557,7 +2585,9 @@ function buildPromotionPreview(brand, lineItems = [], effectiveDate = "") {
       primaryRule: allRule,
       name: allRule.name,
       commissionRate: Number(allRule.commissionRate ?? brand.commissionRate ?? 0),
-      commissionAmount: null
+      commissionAmount: null,
+      discountValueType: allRule.discountValueType || "",
+      discountValue: Number(allRule.discountValue || 0)
     } : null;
   }
   let salesTotal = 0;
@@ -2582,6 +2612,8 @@ function buildPromotionPreview(brand, lineItems = [], effectiveDate = "") {
     name: applied.length === 1 ? applied[0].name : applied.length > 1 ? `품목별 프로모션 ${applied.length}건` : "",
     commissionRate: salesTotal > 0 ? Number(((commissionTotal / salesTotal) * 100).toFixed(2)) : Number(brand.commissionRate || 0),
     commissionAmount: commissionTotal,
+    discountValueType: allRule?.discountValueType || "",
+    discountValue: allRule ? Number(allRule.discountValue || 0) : 0,
     appliedRules: applied
   };
 }

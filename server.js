@@ -306,6 +306,19 @@ function effectiveRuleRate(rule, brandRate) {
   return number(rule.commissionRate);
 }
 
+function computeDiscountAmount(rule, productSales) {
+  if (!rule) return 0;
+  const value = number(rule.discountValue);
+  if (!value) return 0;
+  if (rule.discountValueType === "percent") {
+    return Math.round((number(productSales) * value) / 100);
+  }
+  if (rule.discountValueType === "fixed") {
+    return Math.min(value, number(productSales));
+  }
+  return 0;
+}
+
 function buildPromotionContext(db, brand = {}, lineItems = [], onDate = "") {
   const activeRules = getActivePromotionRules(db, brand?.id, onDate);
   const brandRate = number(brand?.commissionRate);
@@ -318,6 +331,8 @@ function buildPromotionContext(db, brand = {}, lineItems = [], onDate = "") {
       name: allRule.name,
       commissionRate: effectiveRuleRate(allRule, brandRate),
       commissionAmount: null,
+      discountValueType: allRule.discountValueType || "",
+      discountValue: number(allRule.discountValue),
       appliedRules: [promotionRuleWithRefs(db, allRule)]
     };
   }
@@ -344,6 +359,8 @@ function buildPromotionContext(db, brand = {}, lineItems = [], onDate = "") {
     name: allRule.name,
     commissionRate: effectiveRuleRate(allRule, brandRate),
     commissionAmount: null,
+    discountValueType: allRule.discountValueType || "",
+    discountValue: number(allRule.discountValue),
     appliedRules: [promotionRuleWithRefs(db, allRule)]
   } : null;
   return {
@@ -351,6 +368,8 @@ function buildPromotionContext(db, brand = {}, lineItems = [], onDate = "") {
     name: appliedRules.length === 1 ? appliedRules[0].name : `품목별 프로모션 ${appliedRules.length}건`,
     commissionRate: salesTotal > 0 ? Number(((commissionTotal / salesTotal) * 100).toFixed(2)) : brandRate,
     commissionAmount: commissionTotal,
+    discountValueType: allRule?.discountValueType || "",
+    discountValue: allRule ? number(allRule.discountValue) : 0,
     appliedRules
   };
 }
@@ -665,6 +684,8 @@ function migrateDb(db) {
   for (const rule of db.promotionRules || []) {
     touch(rule, "scopeType", "all");
     touch(rule, "discountKind", "");
+    touch(rule, "discountValueType", "");
+    touch(rule, "discountValue", 0);
     touch(rule, "discountDetails", "");
     touch(rule, "targetItems", []);
   }
@@ -1213,24 +1234,26 @@ function calculateSettlement(input, brand = {}) {
   const promotionContext = input._promotionContext || null;
   const derivedProductSalesAmount = lineItems.reduce((sum, item) => sum + number(item.totalSaleAmount), 0);
   const effectiveProductSalesAmount = derivedProductSalesAmount > 0 ? derivedProductSalesAmount : productSalesAmount;
+  const discountAmount = computeDiscountAmount(promotionContext, effectiveProductSalesAmount);
+  const adjustedProductSales = Math.max(0, effectiveProductSalesAmount - discountAmount);
   const commissionRate = promotionContext ? number(promotionContext.commissionRate) : number(input.commissionRate, number(brand.commissionRate));
   const derivedSupplyAmount = lineItems.reduce((sum, item) => sum + number(item.totalSupplyPrice), 0);
   const supplyAmount = lineItems.length ? derivedSupplyAmount : number(input.supplyAmount);
-  const commissionAmount = Number.isFinite(promotionContext?.commissionAmount)
+  const commissionAmount = Number.isFinite(promotionContext?.commissionAmount) && !discountAmount
     ? number(promotionContext.commissionAmount)
-    : Math.round(effectiveProductSalesAmount * (commissionRate / 100));
+    : Math.round(adjustedProductSales * (commissionRate / 100));
   const hasReceivable = input.hasReceivable === true || input.hasReceivable === "true" || brand.hasReceivable || settlementType === "prepay_debt";
-  const receivableMargin = Math.max(0, effectiveProductSalesAmount - supplyAmount - (settlementType === "prepay_supply" && hasReceivable ? baseShippingFee : 0));
+  const receivableMargin = Math.max(0, adjustedProductSales - supplyAmount - (settlementType === "prepay_supply" && hasReceivable ? baseShippingFee : 0));
 
   let depositAmount = number(input.depositAmount);
   if (settlementType === "prepay_debt") {
-    depositAmount = effectiveProductSalesAmount + shippingFee;
+    depositAmount = adjustedProductSales + shippingFee;
   } else if (settlementType === "prepay_supply") {
-    depositAmount = hasReceivable ? effectiveProductSalesAmount + extraShippingFee : supplyAmount + shippingFee;
+    depositAmount = hasReceivable ? adjustedProductSales + extraShippingFee : supplyAmount + shippingFee;
   } else if (settlementType === "direct_purchase") {
-    depositAmount = effectiveProductSalesAmount + shippingFee;
+    depositAmount = adjustedProductSales + shippingFee;
   } else if (settlementType === "prepay_fee" || settlementType === "consignment") {
-    depositAmount = effectiveProductSalesAmount - commissionAmount + shippingFee;
+    depositAmount = adjustedProductSales - commissionAmount + shippingFee;
   }
 
   const isDirect = settlementType === "direct_purchase";
@@ -1869,6 +1892,8 @@ async function routeApi(req, res, url) {
       targetItems,
       commissionRate: body.commissionRate === "" || body.commissionRate == null ? null : number(body.commissionRate),
       discountKind: String(body.discountKind || "").trim(),
+      discountValueType: String(body.discountValueType || "").trim(),
+      discountValue: Math.max(0, number(body.discountValue)),
       discountDetails: String(body.discountDetails || "").trim(),
       validFrom,
       validTo,
@@ -1931,6 +1956,8 @@ async function routeApi(req, res, url) {
       rule.commissionRate = body.commissionRate === "" || body.commissionRate == null ? null : number(body.commissionRate);
     }
     if ("discountKind" in body) rule.discountKind = String(body.discountKind || "").trim();
+    if ("discountValueType" in body) rule.discountValueType = String(body.discountValueType || "").trim();
+    if ("discountValue" in body) rule.discountValue = Math.max(0, number(body.discountValue));
     if ("discountDetails" in body) rule.discountDetails = String(body.discountDetails || "").trim();
     if ("note" in body) rule.note = String(body.note || "").trim();
     rule.validFrom = validFrom;
