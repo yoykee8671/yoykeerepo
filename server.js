@@ -1654,7 +1654,7 @@ async function routeApi(req, res, url) {
 
   if (pathname === "/api/price-entries/import" && method === "POST") {
     const body = await readBody(req);
-    const brand = db.brands.find((item) => item.id === body.brandId && item.type === "brand");
+    const brand = db.brands.find((item) => item.id === body.brandId);
     if (!brand) {
       sendJson(res, 400, { error: "브랜드를 먼저 선택하세요." });
       return;

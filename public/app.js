@@ -305,7 +305,7 @@ async function loadAll() {
 }
 
 function ensureRequestFilterDefaults() {
-  const brandIds = state.brands.filter((b) => b.type === "brand").map((b) => b.id);
+  const brandIds = state.brands.filter((b) => b.isActive !== false).map((b) => b.id);
   if (!state.filtersInitialized) {
     state.filters.brandIds = brandIds;
     state.filters.settlementTypes = ["prepay_debt", "prepay_fee", "prepay_supply", "direct_purchase"];
@@ -558,7 +558,7 @@ function recentSortedBrands() {
   const recentIds = getRecentBrandIds();
   const rank = new Map(recentIds.map((id, index) => [id, index]));
   return state.brands
-    .filter((b) => b.type === "brand")
+    .filter((b) => b.isActive !== false)
     .slice()
     .sort((a, b) => {
       const aRank = rank.has(a.id) ? rank.get(a.id) : 9999;
@@ -644,7 +644,7 @@ function renderRequests() {
               key: "brand",
               title: "브랜드",
               allLabel: "전체 브랜드",
-              options: state.brands.filter((b) => b.type === "brand").map((b) => ({ value: b.id, label: b.name })),
+              options: state.brands.filter((b) => b.isActive !== false).map((b) => ({ value: b.id, label: b.name })),
               selectedValues: state.filters.brandIds || []
             })}
             ${renderMultiFilter({
@@ -2326,8 +2326,8 @@ function findBrandByInput(value) {
   const query = String(value || "").trim().toLowerCase();
   if (!query) return null;
   return (
-    state.brands.find((brand) => brand.type === "brand" && brand.name.toLowerCase() === query) ||
-    state.brands.find((brand) => brand.type === "brand" && brand.name.toLowerCase().includes(query))
+    state.brands.find((brand) => brand.isActive !== false && brand.name.toLowerCase() === query) ||
+    state.brands.find((brand) => brand.isActive !== false && brand.name.toLowerCase().includes(query))
   );
 }
 
