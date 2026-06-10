@@ -625,6 +625,10 @@ function renderRequests() {
   const rows = filteredRequests();
   const selectableRows = rows.filter((item) => item.status !== "deleted");
   const allSelected = selectableRows.length > 0 && selectableRows.every((item) => state.selectedRequestIds.includes(item.id));
+  const selectedIdSet = new Set(state.selectedRequestIds);
+  const selectedTotal = state.requests
+    .filter((item) => selectedIdSet.has(item.id))
+    .reduce((sum, item) => sum + finalDepositAmount(item), 0);
   return `
     ${pageHead("입금요청", "주문번호, 업체 실 입금액, 입금 예정일과 정산 메모를 관리합니다.", actions)}
     <section class="layout single">
@@ -637,6 +641,7 @@ function renderRequests() {
             <button type="button" class="danger" data-delete-selected-requests ${state.selectedRequestIds.length ? "" : "disabled"}>선택 삭제</button>
             <button type="button" data-clear-selection ${state.selectedRequestIds.length ? "" : "disabled"}>선택 해제</button>
             <span class="muted">선택 ${state.selectedRequestIds.length}건</span>
+            ${state.selectedRequestIds.length ? `<span class="muted" style="margin-left:auto">선택 합계 <strong class="amount-emphasis">${money.format(selectedTotal)}원</strong></span>` : ""}
           </div>
           <div class="filters request-filters">
             <input data-filter-q placeholder="주문번호, 주문자, 브랜드 검색" value="${h(state.filters.q)}">
