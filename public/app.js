@@ -2296,6 +2296,10 @@ function bindRequests() {
   });
   requestForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const submitBtn = event.currentTarget.querySelector('[type="submit"]');
+    // Guard against accidental double-submit: ignore while a save is in flight.
+    if (submitBtn?.disabled) return;
+    if (submitBtn) submitBtn.disabled = true;
     const body = formObject(event.currentTarget);
     const brand = state.brands.find((item) => item.id === body.brandId) || findBrandByInput(body.brandSearch);
     if (brand) body.brandName = brand.name;
@@ -2305,19 +2309,24 @@ function bindRequests() {
     delete body.brandSearch;
     delete body.lineItemsJson;
     const wasEditing = !!state.editingRequest;
-    if (state.editingRequest) {
-      await api(`/api/requests/${state.editingRequest.id}`, { method: "PUT", body });
-    } else {
-      await api("/api/requests", { method: "POST", body });
+    try {
+      if (state.editingRequest) {
+        await api(`/api/requests/${state.editingRequest.id}`, { method: "PUT", body });
+      } else {
+        await api("/api/requests", { method: "POST", body });
+      }
+      state.editingRequest = null;
+      if (isRequestPopup) {
+        history.replaceState({}, "", "/?request-popup=1");
+        window.opener?.postMessage({ type: "requestSaved" }, location.origin);
+      }
+      await refreshAndRender();
+      showToast(wasEditing ? "수정되었습니다." : "저장되었습니다.");
+      focusRequestForm();
+    } finally {
+      const liveBtn = requestForm.querySelector('[type="submit"]');
+      if (liveBtn) liveBtn.disabled = false;
     }
-    state.editingRequest = null;
-    if (isRequestPopup) {
-      history.replaceState({}, "", "/?request-popup=1");
-      window.opener?.postMessage({ type: "requestSaved" }, location.origin);
-    }
-    await refreshAndRender();
-    showToast(wasEditing ? "수정되었습니다." : "저장되었습니다.");
-    focusRequestForm();
   });
   app.querySelector("[data-cancel-edit]")?.addEventListener("click", () => {
     state.editingRequest = null;

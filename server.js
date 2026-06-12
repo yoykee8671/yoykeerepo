@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import os from "node:os";
+import { gzipSync } from "node:zlib";
 import pg from "pg";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -754,23 +755,36 @@ function addAudit(db, actor, action, entityType, entityId, summary, before, afte
   db.auditLogs = db.auditLogs.slice(0, 2000);
 }
 
+// gzip-compress text responses when the client supports it; cuts transfer size
+// of large JSON payloads (request lists, audit logs) dramatically. Small bodies
+// are sent raw since compression overhead isn't worth it under ~1KB.
+function endMaybeGzip(res, status, headers, body) {
+  const buffer = Buffer.isBuffer(body) ? body : Buffer.from(body);
+  const accept = res.req?.headers?.["accept-encoding"] || "";
+  if (buffer.length >= 1024 && /\bgzip\b/.test(accept)) {
+    const zipped = gzipSync(buffer);
+    res.writeHead(status, { ...headers, "content-encoding": "gzip", vary: "accept-encoding" });
+    res.end(zipped);
+    return;
+  }
+  res.writeHead(status, headers);
+  res.end(buffer);
+}
+
 function sendJson(res, status, data, headers = {}) {
-  const body = JSON.stringify(data);
-  res.writeHead(status, {
+  endMaybeGzip(res, status, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     ...headers
-  });
-  res.end(body);
+  }, JSON.stringify(data));
 }
 
 function sendText(res, status, text, type = "text/plain; charset=utf-8", headers = {}) {
-  res.writeHead(status, {
+  endMaybeGzip(res, status, {
     "content-type": type,
     "cache-control": "no-store",
     ...headers
-  });
-  res.end(text);
+  }, text);
 }
 
 function sendBuffer(res, status, content, type = "application/octet-stream", headers = {}) {
@@ -1465,6 +1479,25 @@ async function syncArchive(db, actor, brandId = "", reason = "manual") {
   return { archive, payload };
 }
 
+// Fire-and-forget archive sync: keeps the slow Google Sheet webhook off the
+// HTTP critical path. The primary mutation is already persisted by the handler
+// before this runs; here we sync each affected brand then persist the archive
+// records in one extra write. Errors are logged, never surfaced to the client.
+function syncArchiveInBackground(db, actor, brandIds, reason) {
+  const ids = (Array.isArray(brandIds) ? brandIds : [brandIds]).filter(Boolean);
+  if (!ids.length) return;
+  (async () => {
+    try {
+      for (const brandId of ids) {
+        await syncArchive(db, actor, brandId, reason);
+      }
+      await writeDb(db);
+    } catch (error) {
+      console.error("background archive sync failed", error);
+    }
+  })();
+}
+
 function addPaymentLog(db, actor, request, { paidAt, paidAmount, mode = "single", batchId = "" }) {
   db.paymentLogs.unshift({
     id: id("paylog"),
@@ -2152,13 +2185,23 @@ async function routeApi(req, res, url) {
       sendJson(res, 400, { error: "주문번호와 주문자명은 필수입니다." });
       return;
     }
+    // Idempotency guard: drop accidental double-submits of the same request.
+    const duplicate = db.requests.find(
+      (existing) =>
+        existing.orderNo === request.orderNo &&
+        existing.brandId === request.brandId &&
+        existing.customerName === request.customerName &&
+        Date.now() - new Date(existing.createdAt).getTime() < 60000
+    );
+    if (duplicate) {
+      sendJson(res, 200, { request: duplicate, deduped: true });
+      return;
+    }
     db.requests.unshift(request);
     addAudit(db, actor, "create", "request", request.id, `${request.orderNo} 입금요청 생성`, null, request);
-    if (request.brandId) {
-      await syncArchive(db, actor, request.brandId, "request_created");
-    }
     await writeDb(db);
     sendJson(res, 201, { request });
+    syncArchiveInBackground(db, actor, request.brandId, "request_created");
     return;
   }
 
@@ -2193,11 +2236,9 @@ async function routeApi(req, res, url) {
       sendJson(res, 404, { error: "처리할 입금요청을 찾지 못했습니다." });
       return;
     }
-    for (const brandId of touchedBrands) {
-      await syncArchive(db, actor, brandId, "request_paid");
-    }
     if (updated.length) await writeDb(db);
     sendJson(res, 200, { updatedRequests: updated, skippedRequestIds: skipped.map((item) => item.id), batchId });
+    if (updated.length) syncArchiveInBackground(db, actor, [...touchedBrands], "request_paid");
     return;
   }
 
@@ -2222,11 +2263,9 @@ async function routeApi(req, res, url) {
       sendJson(res, 404, { error: "삭제할 입금요청을 찾지 못했습니다." });
       return;
     }
-    for (const brandId of touchedBrands) {
-      await syncArchive(db, actor, brandId, "request_deleted");
-    }
     await writeDb(db);
     sendJson(res, 200, { deletedRequests: updated });
+    syncArchiveInBackground(db, actor, [...touchedBrands], "request_deleted");
     return;
   }
 
@@ -2302,11 +2341,9 @@ async function routeApi(req, res, url) {
     request.updatedAt = now();
     addAudit(db, actor, "update", "request", request.id, `${request.orderNo} 입금요청 수정`, before, request);
     const brandIds = new Set([before.brandId, request.brandId].filter(Boolean));
-    for (const brandId of brandIds) {
-      await syncArchive(db, actor, brandId, "request_updated");
-    }
     await writeDb(db);
     sendJson(res, 200, { request });
+    syncArchiveInBackground(db, actor, [...brandIds], "request_updated");
     return;
   }
 
@@ -2320,11 +2357,9 @@ async function routeApi(req, res, url) {
     request.status = "deleted";
     request.updatedAt = now();
     addAudit(db, actor, "delete", "request", request.id, `${request.orderNo} 입금요청 삭제`, before, request);
-    if (before.brandId) {
-      await syncArchive(db, actor, before.brandId, "request_deleted");
-    }
     await writeDb(db);
     sendJson(res, 200, { ok: true });
+    syncArchiveInBackground(db, actor, before.brandId, "request_deleted");
     return;
   }
 
@@ -2511,8 +2546,7 @@ async function serveStatic(req, res, pathname) {
       content = await readFile(filePath);
       cacheControl = "public, max-age=31536000, immutable";
     }
-    res.writeHead(200, { "content-type": type, "cache-control": cacheControl });
-    res.end(content);
+    endMaybeGzip(res, 200, { "content-type": type, "cache-control": cacheControl }, content);
   } catch {
     res.writeHead(302, { location: "/" });
     res.end();
