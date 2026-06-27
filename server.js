@@ -11,7 +11,7 @@ import pg from "pg";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
-const DATA_DIR = path.join(__dirname, "data");
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const DB_PATH = path.join(DATA_DIR, "db.json");
 const PRICE_WORKBOOK_SCRIPT = path.join(__dirname, "scripts", "price_entry_excel.py");
 const PORT = Number(process.env.PORT || 4173);
@@ -337,19 +337,26 @@ function buildPromotionContext(db, brand = {}, lineItems = [], onDate = "") {
       appliedRules: [promotionRuleWithRefs(db, allRule)]
     };
   }
+  const rulesById = new Map(activeRules.map((rule) => [rule.id, rule]));
   let salesTotal = 0;
   let commissionTotal = 0;
+  let discountTotal = 0;
   const appliedRules = [];
   const seen = new Set();
   for (const item of lineItems) {
     const lineSales = number(item.totalSaleAmount);
     if (!lineSales) continue;
     salesTotal += lineSales;
+    // Rule resolution priority: explicit per-line pick (ignores targetItems) >
+    // auto-match by item key > brand-wide "all" rule.
     const key = normalizeItemKey(item.itemCode, item.itemName);
-    const itemRule = itemRules.find((rule) => sanitizePromotionTargets(rule.targetItems).some((target) => target.key === key)) || null;
+    const explicitRule = item.promotionRuleId ? rulesById.get(item.promotionRuleId) || null : null;
+    const itemRule = explicitRule || itemRules.find((rule) => sanitizePromotionTargets(rule.targetItems).some((target) => target.key === key)) || null;
     const matchedRule = itemRule || allRule;
+    const lineDiscount = computeDiscountAmount(matchedRule, lineSales);
     const rate = effectiveRuleRate(matchedRule, brandRate);
-    commissionTotal += Math.round(lineSales * (rate / 100));
+    discountTotal += lineDiscount;
+    commissionTotal += Math.round(Math.max(0, lineSales - lineDiscount) * (rate / 100));
     if (matchedRule && !seen.has(matchedRule.id)) {
       seen.add(matchedRule.id);
       appliedRules.push(promotionRuleWithRefs(db, matchedRule));
@@ -364,11 +371,13 @@ function buildPromotionContext(db, brand = {}, lineItems = [], onDate = "") {
     discountValue: number(allRule.discountValue),
     appliedRules: [promotionRuleWithRefs(db, allRule)]
   } : null;
+  const netSalesTotal = Math.max(0, salesTotal - discountTotal);
   return {
     primaryRuleId: appliedRules.length === 1 ? appliedRules[0].id : "",
     name: appliedRules.length === 1 ? appliedRules[0].name : `품목별 프로모션 ${appliedRules.length}건`,
-    commissionRate: salesTotal > 0 ? Number(((commissionTotal / salesTotal) * 100).toFixed(2)) : brandRate,
+    commissionRate: netSalesTotal > 0 ? Number(((commissionTotal / netSalesTotal) * 100).toFixed(2)) : brandRate,
     commissionAmount: commissionTotal,
+    discountAmount: discountTotal,
     discountValueType: allRule?.discountValueType || "",
     discountValue: allRule ? number(allRule.discountValue) : 0,
     appliedRules
@@ -1009,6 +1018,7 @@ function sanitizeLineItems(raw) {
         totalSupplyPrice,
         unitSalePrice,
         totalSaleAmount,
+        promotionRuleId: String(item.promotionRuleId || "").trim(),
         effectiveFrom: dateOnly(item.effectiveFrom)
       };
     })
@@ -1248,12 +1258,17 @@ function calculateSettlement(input, brand = {}) {
   const promotionContext = input._promotionContext || null;
   const derivedProductSalesAmount = lineItems.reduce((sum, item) => sum + number(item.totalSaleAmount), 0);
   const effectiveProductSalesAmount = derivedProductSalesAmount > 0 ? derivedProductSalesAmount : productSalesAmount;
-  const discountAmount = computeDiscountAmount(promotionContext, effectiveProductSalesAmount);
+  // When line items are present, the promotion context already aggregated the
+  // per-line discount (each line may carry its own rule); use it directly.
+  // Otherwise fall back to the order-level discount from the brand-wide rule.
+  const discountAmount = Number.isFinite(promotionContext?.discountAmount)
+    ? number(promotionContext.discountAmount)
+    : computeDiscountAmount(promotionContext, effectiveProductSalesAmount);
   const adjustedProductSales = Math.max(0, effectiveProductSalesAmount - discountAmount);
   const commissionRate = promotionContext ? number(promotionContext.commissionRate) : number(input.commissionRate, number(brand.commissionRate));
   const derivedSupplyAmount = lineItems.reduce((sum, item) => sum + number(item.totalSupplyPrice), 0);
   const supplyAmount = lineItems.length ? derivedSupplyAmount : number(input.supplyAmount);
-  const commissionAmount = Number.isFinite(promotionContext?.commissionAmount) && !discountAmount
+  const commissionAmount = Number.isFinite(promotionContext?.commissionAmount)
     ? number(promotionContext.commissionAmount)
     : Math.round(adjustedProductSales * (commissionRate / 100));
   const hasReceivable = input.hasReceivable === true || input.hasReceivable === "true" || brand.hasReceivable || settlementType === "prepay_debt";

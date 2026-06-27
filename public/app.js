@@ -1130,7 +1130,7 @@ function renderPriceEntryForm() {
         <div><label>수량</label><input name="unit" value="${h(item.unit)}"></div>
       </div>
       <div class="field two">
-        <div><label>공급가</label><input name="supplyPrice" type="number" min="0" value="${h(item.supplyPrice || "")}" required></div>
+        <div><label>공급가 <span class="muted" style="font-weight:400">(수수료 기준 브랜드는 비워두세요)</span></label><input name="supplyPrice" type="number" min="0" value="${h(item.supplyPrice || "")}"></div>
         <div><label>적용 시작일</label><input name="effectiveFrom" type="date" value="${h(item.effectiveFrom || new Date().toISOString().slice(0, 10))}" required></div>
       </div>
       <div class="field"><label>적용 종료일 (비우면 상시)</label><input name="effectiveTo" type="date" value="${h(item.effectiveTo || "")}"></div>
@@ -1205,12 +1205,19 @@ function renderPriceAliasForm() {
   `;
 }
 
-function renderRequestLineItems(items) {
+function renderRequestLineItems(items, promotionOptions = []) {
   if (!items.length) return `<div class="empty">추가된 품목이 없습니다.</div>`;
+  const promotionCell = (item) => {
+    if (!promotionOptions.length) return `<span class="muted">규칙 없음</span>`;
+    const options = [`<option value="">(자동)</option>`]
+      .concat(promotionOptions.map((rule) => `<option value="${rule.id}" ${item.promotionRuleId === rule.id ? "selected" : ""}>${h(rule.name)}</option>`))
+      .join("");
+    return `<select data-line-promotion="${item.id}" aria-label="프로모션">${options}</select>`;
+  };
   return `
     <div class="table-wrap" style="max-height:220px">
       <table>
-        <thead><tr><th>코드</th><th>품목명</th><th>수량</th><th>공급가</th><th>판매단가</th><th>판매합계</th><th>공급가합</th><th>작업</th></tr></thead>
+        <thead><tr><th>코드</th><th>품목명</th><th>수량</th><th>공급가</th><th>판매단가</th><th>판매합계</th><th>공급가합</th><th>프로모션</th><th>작업</th></tr></thead>
         <tbody>
           ${items.map((item) => `
             <tr>
@@ -1230,6 +1237,7 @@ function renderRequestLineItems(items) {
               <td><input type="number" min="0" value="${h(item.unitSalePrice || "")}" data-line-sale-price="${item.id}" aria-label="판매단가"></td>
               <td>${money.format(Number(item.totalSaleAmount || 0))}원</td>
               <td>${money.format(Number(item.totalSupplyPrice || 0))}원</td>
+              <td>${promotionCell(item)}</td>
               <td><button type="button" data-remove-line-item="${item.id}">삭제</button></td>
             </tr>`).join("")}
         </tbody>
@@ -1879,15 +1887,36 @@ function bindRequests() {
           quantity,
           unitSupplyPrice,
           unitSalePrice,
+          promotionRuleId: String(item.promotionRuleId || ""),
           totalSupplyPrice: quantity * unitSupplyPrice,
           totalSaleAmount: quantity * unitSalePrice
         };
       })
       .filter((item) => item.itemCode || item.itemName);
+  const lineItemPromotionOptions = () => {
+    const brand = getSelectedBrand();
+    if (!brand) return [];
+    const targetDate = getEffectiveDate();
+    return state.promotionRules.filter((rule) => {
+      if (rule.brandId !== brand.id || rule.isActive === false) return false;
+      const from = rule.validFrom || "0000-01-01";
+      const to = rule.validTo || "9999-12-31";
+      return from <= targetDate && targetDate <= to;
+    });
+  };
   const setLineItems = (items) => {
     const normalized = normalizeLineItems(items);
     lineItemsInput.value = JSON.stringify(normalized);
-    lineItemsTable.innerHTML = renderRequestLineItems(normalized);
+    lineItemsTable.innerHTML = renderRequestLineItems(normalized, lineItemPromotionOptions());
+    lineItemsTable.querySelectorAll("[data-line-promotion]").forEach((select) => {
+      select.addEventListener("change", () => {
+        const updated = getLineItems().map((item) =>
+          item.id === select.dataset.linePromotion ? { ...item, promotionRuleId: select.value } : item
+        );
+        setLineItems(updated);
+        updateRequestCalculation(requestForm);
+      });
+    });
     lineItemsTable.querySelectorAll("[data-remove-line-item]").forEach((button) => {
       button.addEventListener("click", () => {
         setLineItems(getLineItems().filter((item) => item.id !== button.dataset.removeLineItem));
@@ -2393,18 +2422,20 @@ function updateRequestCalculation(form) {
   const promotionContext = buildPromotionPreview(brand, lineItems, form.querySelector("[name='expectedDepositDate']")?.value);
   const promotion = promotionContext?.primaryRule || null;
   const commissionRate = Number(promotionContext?.commissionRate ?? brand?.commissionRate ?? value("commissionRate"));
-  const discountAmount = (() => {
-    const dv = Number(promotionContext?.discountValue || 0);
-    if (!dv) return 0;
-    if (promotionContext?.discountValueType === "percent") return Math.round(productSalesAmount * dv / 100);
-    if (promotionContext?.discountValueType === "fixed") return Math.min(dv, productSalesAmount);
-    return 0;
-  })();
+  const discountAmount = Number.isFinite(promotionContext?.discountAmount)
+    ? Number(promotionContext.discountAmount)
+    : (() => {
+        const dv = Number(promotionContext?.discountValue || 0);
+        if (!dv) return 0;
+        if (promotionContext?.discountValueType === "percent") return Math.round(productSalesAmount * dv / 100);
+        if (promotionContext?.discountValueType === "fixed") return Math.min(dv, productSalesAmount);
+        return 0;
+      })();
   const adjustedProductSales = Math.max(0, productSalesAmount - discountAmount);
   const supplyAmount = lineItems.length
     ? lineItems.reduce((sum, item) => sum + Number(item.totalSupplyPrice || 0), 0)
     : value("supplyAmount");
-  const commissionAmount = Number.isFinite(promotionContext?.commissionAmount) && !discountAmount
+  const commissionAmount = Number.isFinite(promotionContext?.commissionAmount)
     ? Number(promotionContext.commissionAmount)
     : Math.round(adjustedProductSales * (commissionRate / 100));
   const hasReceivable = Boolean(brand?.hasReceivable || settlementType === "prepay_debt");
@@ -2633,32 +2664,55 @@ function buildPromotionPreview(brand, lineItems = [], effectiveDate = "") {
       discountValue: Number(allRule.discountValue || 0)
     } : null;
   }
+  const rulesById = new Map(activeRules.map((rule) => [rule.id, rule]));
   let salesTotal = 0;
   let commissionTotal = 0;
+  let discountTotal = 0;
   const applied = [];
   const seen = new Set();
   for (const line of salesLines) {
-    const key = normalizeItemKey(line.itemCode, line.itemName);
-    const matchedItemRule = itemRules.find((rule) => (rule.targetItems || []).some((target) => normalizeItemKey(target.itemCode, target.itemName) === key)) || null;
-    const rule = matchedItemRule || allRule;
-    const rate = Number(rule?.commissionRate ?? brand.commissionRate ?? 0);
     const sales = Number(line.totalSaleAmount || 0);
     salesTotal += sales;
-    commissionTotal += Math.round(sales * (rate / 100));
+    // Priority: explicit per-line pick (ignores targetItems) > auto-match > all-rule.
+    const key = normalizeItemKey(line.itemCode, line.itemName);
+    const explicitRule = line.promotionRuleId ? rulesById.get(line.promotionRuleId) || null : null;
+    const matchedItemRule = explicitRule || itemRules.find((rule) => (rule.targetItems || []).some((target) => normalizeItemKey(target.itemCode, target.itemName) === key)) || null;
+    const rule = matchedItemRule || allRule;
+    const lineDiscount = previewDiscountAmount(rule, sales);
+    const rate = previewRuleRate(rule, Number(brand.commissionRate || 0));
+    discountTotal += lineDiscount;
+    commissionTotal += Math.round(Math.max(0, sales - lineDiscount) * (rate / 100));
     if (rule && !seen.has(rule.id)) {
       seen.add(rule.id);
       applied.push(rule);
     }
   }
+  const netSalesTotal = Math.max(0, salesTotal - discountTotal);
   return {
     primaryRule: applied.length === 1 ? applied[0] : null,
     name: applied.length === 1 ? applied[0].name : applied.length > 1 ? `품목별 프로모션 ${applied.length}건` : "",
-    commissionRate: salesTotal > 0 ? Number(((commissionTotal / salesTotal) * 100).toFixed(2)) : Number(brand.commissionRate || 0),
+    commissionRate: netSalesTotal > 0 ? Number(((commissionTotal / netSalesTotal) * 100).toFixed(2)) : Number(brand.commissionRate || 0),
     commissionAmount: commissionTotal,
+    discountAmount: discountTotal,
     discountValueType: allRule?.discountValueType || "",
     discountValue: allRule ? Number(allRule.discountValue || 0) : 0,
     appliedRules: applied
   };
+}
+
+// Client mirrors of server effectiveRuleRate / computeDiscountAmount.
+function previewRuleRate(rule, brandRate) {
+  if (!rule) return brandRate;
+  if (rule.commissionRate === null || rule.commissionRate === undefined || rule.commissionRate === "") return brandRate;
+  return Number(rule.commissionRate) || 0;
+}
+function previewDiscountAmount(rule, sales) {
+  if (!rule) return 0;
+  const value = Number(rule.discountValue || 0);
+  if (!value) return 0;
+  if (rule.discountValueType === "percent") return Math.round((Number(sales || 0) * value) / 100);
+  if (rule.discountValueType === "fixed") return Math.min(value, Number(sales || 0));
+  return 0;
 }
 
 function describeShippingRule(brand = {}) {
