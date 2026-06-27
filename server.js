@@ -1377,7 +1377,7 @@ const exportColumns = [
   ["requiredMemo", "필수 메모 및 계좌번호 확인 (필요시)"],
   ["businessName", "사업자명"],
   ["businessNumber", "사업자번호"],
-  ["depositorName", "입금자명"],
+  ["depositorName", "계좌예금주명"],
   ["status", "상태"],
   ["paidAmount", "실입금액"],
   ["paidAt", "입금일"]

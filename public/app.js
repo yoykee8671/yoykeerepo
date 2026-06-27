@@ -794,7 +794,7 @@ function renderRequestForm() {
           <div class="fixed-card"><span>기본 배송비</span><strong data-fixed-base-shipping>${money.format(Number(defaultBaseShippingFee || 0))}원</strong></div>
           <div class="fixed-card"><span>출고 기준</span><strong data-fixed-cutoff>${h(cutoffLabel(selectedBrand || { cutoffNote: resolvedCutoffNote, cutoffType: item.cutoffType, cutoffHour: item.cutoffHour })) || "-"}</strong></div>
           <div class="fixed-card"><span>원본 시트</span><strong data-fixed-source-sheet>${h(resolvedSourceSheet || "-")}</strong></div>
-          <div class="fixed-card"><span>입금자명</span><strong data-fixed-depositor>${h(resolvedDepositorName || "-")}</strong></div>
+          <div class="fixed-card"><span>계좌예금주명</span><strong data-fixed-depositor>${h(resolvedDepositorName || "-")}</strong></div>
         </div>
         <div class="fixed-summary-notes">
         <div><span>사업자</span><strong data-fixed-business>${h(resolvedBusinessName || "-")}${resolvedBusinessNumber ? ` (${h(resolvedBusinessNumber)})` : ""}</strong></div>
@@ -1383,10 +1383,7 @@ function renderBrandForm() {
         <div><label>입금은행명</label><input name="bankName" value="${h(b.bankName)}"></div>
         <div><label>통장계좌번호</label><input name="bankAccount" value="${h(b.bankAccount)}"></div>
       </div>
-      <div class="field two">
-        <div><label>계좌예금주명</label><input name="accountHolder" value="${h(b.accountHolder)}"></div>
-        <div><label>입금자명</label><input name="depositorName" value="${h(b.depositorName)}"></div>
-      </div>
+      <div class="field"><label>계좌예금주명</label><input name="depositorName" value="${h(b.depositorName)}"></div>
       <div class="field"><label>Google Sheets 아카이브 URL</label><input name="googleSheetUrl" value="${h(b.googleSheetUrl)}" placeholder="브랜드별 공유용 스프레드시트 링크"></div>
       <div class="toolbar">
         <button class="primary" type="submit">${state.editingBrand ? "수정 저장" : "브랜드 추가"}</button>
