@@ -3040,10 +3040,16 @@ function bindBrands() {
     event.preventDefault();
     const body = formObject(event.currentTarget);
     body.isActive = body.isActive === "true";
-    if (state.editingPromotionRule) {
-      await api(`/api/promotion-rules/${state.editingPromotionRule.id}`, { method: "PUT", body });
-    } else {
-      await api("/api/promotion-rules", { method: "POST", body });
+    try {
+      if (state.editingPromotionRule) {
+        await api(`/api/promotion-rules/${state.editingPromotionRule.id}`, { method: "PUT", body });
+      } else {
+        await api("/api/promotion-rules", { method: "POST", body });
+      }
+    } catch (error) {
+      // Surface the server reason (e.g. overlap conflict) instead of failing silently.
+      showToast(error.message || "프로모션 규칙 저장에 실패했습니다.", "error");
+      return;
     }
     state.editingPromotionRule = null;
     if (isBrandPopup) {
@@ -3055,6 +3061,7 @@ function bindBrands() {
       renderApp();
       return;
     }
+    showToast("프로모션 규칙 저장 완료");
     await refreshAndRender();
   });
   const promotionForm = app.querySelector("[data-promotion-rule-form]");
