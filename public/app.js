@@ -2651,8 +2651,10 @@ function buildPromotionPreview(brand, lineItems = [], effectiveDate = "") {
     if ((a.scopeType || "all") !== (b.scopeType || "all")) return (a.scopeType || "all") === "items" ? -1 : 1;
     return (b.validFrom || "").localeCompare(a.validFrom || "");
   });
-  const allRule = activeRules.find((item) => (item.scopeType || "all") === "all") || null;
-  const itemRules = activeRules.filter((item) => (item.scopeType || "all") === "items");
+  // Price-discount rules are pick-only (never auto-apply); baseline rules keep auto behavior.
+  const autoRules = activeRules.filter((item) => !(Number(item.discountValue || 0) > 0));
+  const allRule = autoRules.find((item) => (item.scopeType || "all") === "all") || null;
+  const itemRules = autoRules.filter((item) => (item.scopeType || "all") === "items");
   const salesLines = lineItems.filter((item) => Number(item.totalSaleAmount || 0) > 0);
   if (!salesLines.length) {
     return allRule ? {

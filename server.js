@@ -323,8 +323,11 @@ function computeDiscountAmount(rule, productSales) {
 function buildPromotionContext(db, brand = {}, lineItems = [], onDate = "") {
   const activeRules = getActivePromotionRules(db, brand?.id, onDate);
   const brandRate = number(brand?.commissionRate);
-  const allRule = activeRules.find((rule) => (rule.scopeType || "all") === "all") || null;
-  const itemRules = activeRules.filter((rule) => (rule.scopeType || "all") === "items");
+  // Price-discount rules apply ONLY when explicitly picked per line; they never
+  // auto-apply. Baseline rules (no price discount) keep their auto behavior.
+  const autoRules = activeRules.filter((rule) => !(number(rule.discountValue) > 0));
+  const allRule = autoRules.find((rule) => (rule.scopeType || "all") === "all") || null;
+  const itemRules = autoRules.filter((rule) => (rule.scopeType || "all") === "items");
   if (!lineItems.length) {
     if (!allRule) return null;
     return {
@@ -1919,8 +1922,12 @@ async function routeApi(req, res, url) {
       sendJson(res, 400, { error: "종료일은 시작일보다 빠를 수 없습니다." });
       return;
     }
-    const hasOverlap = isActive && (db.promotionRules || []).some((rule) => {
+    // Discount rules are pick-only (never auto-apply), so they never conflict.
+    // Only baseline (no-discount) rules with the same scope/target are guarded.
+    const newHasDiscount = number(body.discountValue) > 0;
+    const hasOverlap = isActive && !newHasDiscount && (db.promotionRules || []).some((rule) => {
       if (rule.brandId !== brand.id || rule.isActive === false) return false;
+      if (number(rule.discountValue) > 0) return false;
       if (!rangesOverlap(rule.validFrom, rule.validTo, validFrom, validTo)) return false;
       const ruleScope = rule.scopeType || "all";
       if (scopeType === "all") return ruleScope === "all";
@@ -1984,8 +1991,10 @@ async function routeApi(req, res, url) {
       sendJson(res, 400, { error: "종료일은 시작일보다 빠를 수 없습니다." });
       return;
     }
-    const hasOverlap = isActive && (db.promotionRules || []).some((item) => {
+    const newHasDiscount = number("discountValue" in body ? body.discountValue : rule.discountValue) > 0;
+    const hasOverlap = isActive && !newHasDiscount && (db.promotionRules || []).some((item) => {
       if (item.id === rule.id || item.brandId !== rule.brandId || item.isActive === false) return false;
+      if (number(item.discountValue) > 0) return false;
       if (!rangesOverlap(item.validFrom, item.validTo, validFrom, validTo)) return false;
       const itemScope = item.scopeType || "all";
       if (scopeType === "all") return itemScope === "all";
