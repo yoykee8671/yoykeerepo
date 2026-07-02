@@ -503,48 +503,56 @@ td.wrap {
 }
 
 /* Inline status editor styled as the pill badge */
-/* Native <select> (keeps its own arrow + text so the value always renders).
-   No fixed height — let padding + line-height size it so the text is never
-   clipped at any browser zoom level. */
+/* Slim pill status editor. appearance:none + a small custom chevron; sized by
+   padding + line-height (no fixed height) so the text never clips at any zoom.
+   Status classes set background-COLOR only, so the chevron image is preserved. */
 select.status-select {
   display: inline-block;
-  box-sizing: content-box;
+  box-sizing: border-box;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  width: auto;
   font-size: 12px;
   font-weight: 600;
-  line-height: 1.5;
-  padding: 4px 8px;
-  border-radius: 8px;
+  line-height: 1.4;
+  padding: 3px 22px 3px 11px;
+  border-radius: 999px;
   border: 1px solid var(--line);
-  background: #fff;
+  background-color: #fff;
   color: #374151;
   cursor: pointer;
-  min-width: 88px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6' viewBox='0 0 9 6'%3E%3Cpath fill='%23999' d='M0 0l4.5 6L9 0z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 9px 6px;
 }
 select.status-select.status-pending {
-  background: #fff7df;
+  background-color: #fff7df;
   border-color: #f5d48a;
   color: #8a6d1a;
 }
 select.status-select.status-await_deposit {
-  background: #eef2ff;
+  background-color: #eef2ff;
   border-color: #c3cef7;
   color: #3949ab;
 }
 select.status-select.status-paid {
-  background: #e9f7ee;
+  background-color: #e9f7ee;
   border-color: #b7e2c1;
   color: #1f7a3d;
 }
 select.status-select.status-hold,
 select.status-select.status-error,
 select.status-select.status-consignment_unpaid {
-  background: #fff0ef;
+  background-color: #fff0ef;
   border-color: #f3b7b2;
   color: #c0392b;
 }
 select.status-select option {
   color: #111827;
   background: #fff;
+  font-weight: 500;
 }
 select.status-select:hover {
   filter: brightness(0.97);
