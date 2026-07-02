@@ -112,7 +112,7 @@ function renderRowStatusSelect(item) {
   const options = values
     .map((v) => `<option value="${h(v)}" ${item.status === v ? "selected" : ""}>${h(statusLabel(v))}</option>`)
     .join("");
-  return `<select class="status-select badge ${h(item.status)}" data-row-status="${item.id}">${options}</select>`;
+  return `<select class="status-select status-${h(item.status)}" data-row-status="${item.id}">${options}</select>`;
 }
 
 // Fast inline/bulk status change: optimistic UI + lightweight endpoint, then

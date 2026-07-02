@@ -172,6 +172,21 @@ a {
   flex-shrink: 0;
 }
 
+/* Logout button sits on the dark top bar — force a visible light label. */
+.sidebar-footer .ghost {
+  color: #ffffff;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 8px;
+  height: 30px;
+  padding: 0 14px;
+  font-size: 13px;
+}
+.sidebar-footer .ghost:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
 .main {
   min-width: 0;
   padding: 24px;
@@ -488,21 +503,45 @@ td.wrap {
 }
 
 /* Inline status editor styled as the pill badge */
+/* Native <select> (keeps its own arrow + text so the value always renders). */
 select.status-select {
-  /* A native <select> must not be display:flex (inherited from .badge) or
-     Chrome renders the selected value blank — force inline-block. */
   display: inline-block;
-  height: 24px;
-  line-height: 22px;
-  vertical-align: middle;
-  -webkit-appearance: none;
-  appearance: none;
-  padding-right: 22px;
+  height: 28px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: #374151;
   cursor: pointer;
-  font-weight: 500;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='6' viewBox='0 0 8 6'%3E%3Cpath fill='%23888' d='M0 0l4 6 4-6z'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 7px center;
+  max-width: 130px;
+}
+select.status-select.status-pending {
+  background: #fff7df;
+  border-color: #f5d48a;
+  color: #8a6d1a;
+}
+select.status-select.status-await_deposit {
+  background: #eef2ff;
+  border-color: #c3cef7;
+  color: #3949ab;
+}
+select.status-select.status-paid {
+  background: #e9f7ee;
+  border-color: #b7e2c1;
+  color: #1f7a3d;
+}
+select.status-select.status-hold,
+select.status-select.status-error,
+select.status-select.status-consignment_unpaid {
+  background: #fff0ef;
+  border-color: #f3b7b2;
+  color: #c0392b;
+}
+select.status-select option {
+  color: #111827;
+  background: #fff;
 }
 select.status-select:hover {
   filter: brightness(0.97);
