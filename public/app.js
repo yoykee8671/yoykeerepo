@@ -12,7 +12,7 @@ const state = {
   audits: [],
   archives: [],
   dashboard: null,
-  filters: { q: "", statusValues: null, brandIds: null, settlementTypes: null, promotionRuleId: "" },
+  filters: { q: "", statusValues: null, brandIds: null, settlementTypes: null, promotionRuleId: "", dateFrom: "", dateTo: "" },
   filtersInitialized: false,
   editingRequest: null,
   editingBrand: null,
@@ -95,12 +95,13 @@ function h(value) {
 
 function statusLabel(status) {
   return {
-    pending: "대기",
+    pending: "입금요청",
+    await_deposit: "입금대기",
     paid: "입금완료",
     hold: "보류",
     error: "오류",
     consignment_unpaid: "위탁-입금전"
-  }[status] || status || "대기";
+  }[status] || status || "입금요청";
 }
 
 function settlementLabel(type) {
@@ -310,7 +311,7 @@ function ensureRequestFilterDefaults() {
   if (!state.filtersInitialized) {
     state.filters.brandIds = brandIds;
     state.filters.settlementTypes = ["prepay_debt", "prepay_fee", "prepay_supply", "direct_purchase"];
-    state.filters.statusValues = ["pending"];
+    state.filters.statusValues = ["pending", "await_deposit"];
     state.filtersInitialized = true;
     return;
   }
@@ -648,6 +649,9 @@ function renderRequests() {
           </div>
           <div class="filters request-filters">
             <input data-filter-q placeholder="주문번호, 주문자, 브랜드 검색" value="${h(state.filters.q)}">
+            <label class="date-range">주문일 <input type="date" data-filter-date-from value="${h(state.filters.dateFrom || "")}"></label>
+            <label class="date-range">~ <input type="date" data-filter-date-to value="${h(state.filters.dateTo || "")}"></label>
+            ${state.filters.dateFrom || state.filters.dateTo ? `<button type="button" class="ghost" data-filter-date-clear>기간 초기화</button>` : ""}
             ${renderMultiFilter({
               key: "brand",
               title: "브랜드",
@@ -666,7 +670,7 @@ function renderRequests() {
               key: "status",
               title: "상태",
               allLabel: "전체 상태",
-              options: ["pending", "consignment_unpaid", "paid", "hold", "error"].map((value) => ({ value, label: statusLabel(value) })),
+              options: ["pending", "await_deposit", "consignment_unpaid", "paid", "hold", "error"].map((value) => ({ value, label: statusLabel(value) })),
               selectedValues: state.filters.statusValues || []
             })}
             <select data-filter-promotion>
@@ -705,6 +709,17 @@ function filteredRequests() {
       if (state.filters.promotionRuleId === "__with__") return appliedRules.length > 0 || Boolean(item.promotionRuleName);
       if (state.filters.promotionRuleId === "__without__") return appliedRules.length === 0 && !item.promotionRuleName;
       return appliedRules.some((rule) => rule.id === state.filters.promotionRuleId) || item.promotionRuleId === state.filters.promotionRuleId;
+    })
+    .filter((item) => {
+      // 고객주문일 = 주문번호 앞 8자리(YYYYMMDD)
+      const from = (state.filters.dateFrom || "").replaceAll("-", "");
+      const to = (state.filters.dateTo || "").replaceAll("-", "");
+      if (!from && !to) return true;
+      const orderDate = String(item.orderNo || "").slice(0, 8);
+      if (!/^\d{8}$/.test(orderDate)) return false;
+      if (from && orderDate < from) return false;
+      if (to && orderDate > to) return false;
+      return true;
     })
     .filter((item) => {
       if (!q) return true;
@@ -942,7 +957,7 @@ function renderRequestForm() {
         </div>
         <div class="field"><label>환불/취소 메모</label><input name="cancelledNote" value="${h(item.cancelledNote || "")}" placeholder="예: 사료 1포 품절 4,000원"></div>
       </section>
-      <div class="field"><label>상태</label><select name="status">${["pending", "consignment_unpaid", "paid", "hold", "error"].map((s) => `<option value="${s}" ${(item.status || (settlementType === "consignment" ? "consignment_unpaid" : "pending")) === s ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}</select></div>
+      <div class="field"><label>상태</label><select name="status">${["pending", "await_deposit", "consignment_unpaid", "paid", "hold", "error"].map((s) => `<option value="${s}" ${(item.status || (settlementType === "consignment" ? "consignment_unpaid" : "pending")) === s ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}</select></div>
       <div class="field" data-hide-direct="1">
         <label>계산 수수료 <span class="muted" style="font-weight:400" data-commission-display-hint>${selectedBrand?.hasReceivable ? "(채권 기준 — 프로모션 무시)" : "(실제 차감액)"}</span></label>
         <input name="commissionAmount" type="number" readonly value="${h(item.commissionAmount || "")}">
@@ -1238,8 +1253,8 @@ function renderRequestLineItems(items, promotionOptions = []) {
               </td>
               <td><input type="number" min="0" value="${h(item.unitSupplyPrice || "")}" data-line-supply-price="${item.id}" aria-label="공급가"></td>
               <td><input type="number" min="0" value="${h(item.unitSalePrice || "")}" data-line-sale-price="${item.id}" aria-label="판매단가"></td>
-              <td>${money.format(Number(item.totalSaleAmount || 0))}원</td>
-              <td>${money.format(Number(item.totalSupplyPrice || 0))}원</td>
+              <td data-line-saletotal="${item.id}">${money.format(Number(item.totalSaleAmount || 0))}원</td>
+              <td data-line-supplytotal="${item.id}">${money.format(Number(item.totalSupplyPrice || 0))}원</td>
               <td>${promotionCell(item)}</td>
               <td><button type="button" data-remove-line-item="${item.id}">삭제</button></td>
             </tr>`).join("")}
@@ -1792,6 +1807,22 @@ function bindRequests() {
     state.filters.q = value;
     syncSelectedRequestIds();
   });
+  app.querySelector("[data-filter-date-from]")?.addEventListener("change", (event) => {
+    state.filters.dateFrom = event.target.value || "";
+    syncSelectedRequestIds();
+    renderApp();
+  });
+  app.querySelector("[data-filter-date-to]")?.addEventListener("change", (event) => {
+    state.filters.dateTo = event.target.value || "";
+    syncSelectedRequestIds();
+    renderApp();
+  });
+  app.querySelector("[data-filter-date-clear]")?.addEventListener("click", () => {
+    state.filters.dateFrom = "";
+    state.filters.dateTo = "";
+    syncSelectedRequestIds();
+    renderApp();
+  });
   app.querySelector("[data-filter-promotion]")?.addEventListener("change", (event) => {
     state.filters.promotionRuleId = event.target.value;
     syncSelectedRequestIds();
@@ -1940,54 +1971,49 @@ function bindRequests() {
         updateRequestCalculation(requestForm);
       });
     });
-    lineItemsTable.querySelectorAll("[data-line-qty]").forEach((input) => {
-      input.addEventListener("input", () => {
-        const updated = getLineItems().map((item) =>
-          item.id === input.dataset.lineQty
-            ? { ...item, quantity: Math.max(1, Number(input.value || 1)) }
-            : item
-        );
-        setLineItems(updated);
-        updateRequestCalculation(requestForm);
+    // In-place field edit: update the data model + this row's computed cells
+    // WITHOUT rebuilding the table, so the focused input is never destroyed
+    // (fixes the "types one char then loses focus" bug).
+    const patchLine = (id, patch) => {
+      const items = getLineItems().map((item) => {
+        if (item.id !== id) return item;
+        const merged = { ...item, ...patch };
+        const quantity = Math.max(1, Number(merged.quantity || 1));
+        const unitSupplyPrice = Math.max(0, Number(merged.unitSupplyPrice || 0));
+        const unitSalePrice = Math.max(0, Number(merged.unitSalePrice || 0));
+        return {
+          ...merged,
+          quantity,
+          unitSupplyPrice,
+          unitSalePrice,
+          totalSupplyPrice: quantity * unitSupplyPrice,
+          totalSaleAmount: quantity * unitSalePrice
+        };
       });
+      lineItemsInput.value = JSON.stringify(items);
+      const item = items.find((x) => x.id === id);
+      if (item) {
+        const saleCell = lineItemsTable.querySelector(`[data-line-saletotal='${id}']`);
+        const supplyCell = lineItemsTable.querySelector(`[data-line-supplytotal='${id}']`);
+        if (saleCell) saleCell.textContent = `${money.format(Number(item.totalSaleAmount || 0))}원`;
+        if (supplyCell) supplyCell.textContent = `${money.format(Number(item.totalSupplyPrice || 0))}원`;
+      }
+      updateRequestCalculation(requestForm);
+    };
+    lineItemsTable.querySelectorAll("[data-line-qty]").forEach((input) => {
+      input.addEventListener("input", () => patchLine(input.dataset.lineQty, { quantity: Math.max(1, Number(input.value || 1)) }));
     });
     lineItemsTable.querySelectorAll("[data-line-sale-price]").forEach((input) => {
-      input.addEventListener("input", () => {
-        const updated = getLineItems().map((item) =>
-          item.id === input.dataset.lineSalePrice
-            ? { ...item, unitSalePrice: Math.max(0, Number(input.value || 0)) }
-            : item
-        );
-        setLineItems(updated);
-        updateRequestCalculation(requestForm);
-      });
+      input.addEventListener("input", () => patchLine(input.dataset.lineSalePrice, { unitSalePrice: Math.max(0, Number(input.value || 0)) }));
     });
     lineItemsTable.querySelectorAll("[data-line-supply-price]").forEach((input) => {
-      input.addEventListener("input", () => {
-        const updated = getLineItems().map((item) =>
-          item.id === input.dataset.lineSupplyPrice
-            ? { ...item, unitSupplyPrice: Math.max(0, Number(input.value || 0)) }
-            : item
-        );
-        setLineItems(updated);
-        updateRequestCalculation(requestForm);
-      });
+      input.addEventListener("input", () => patchLine(input.dataset.lineSupplyPrice, { unitSupplyPrice: Math.max(0, Number(input.value || 0)) }));
     });
     lineItemsTable.querySelectorAll("[data-line-code]").forEach((input) => {
-      input.addEventListener("input", () => {
-        const updated = getLineItems().map((item) =>
-          item.id === input.dataset.lineCode ? { ...item, itemCode: input.value } : item
-        );
-        setLineItems(updated);
-      });
+      input.addEventListener("input", () => patchLine(input.dataset.lineCode, { itemCode: input.value }));
     });
     lineItemsTable.querySelectorAll("[data-line-name]").forEach((input) => {
-      input.addEventListener("input", () => {
-        const updated = getLineItems().map((item) =>
-          item.id === input.dataset.lineName ? { ...item, itemName: input.value } : item
-        );
-        setLineItems(updated);
-      });
+      input.addEventListener("input", () => patchLine(input.dataset.lineName, { itemName: input.value }));
     });
   };
   const refreshLineItemOptions = () => {

@@ -185,7 +185,9 @@ const importedRequests = [
 
 const settlementTypes = new Set(["prepay_debt", "prepay_fee", "prepay_supply", "consignment", "direct_purchase"]);
 const shippingPolicyTypes = new Set(["free", "flat", "threshold"]);
-const requestStatuses = new Set(["pending", "paid", "hold", "error", "consignment_unpaid", "deleted"]);
+const requestStatuses = new Set(["pending", "await_deposit", "paid", "hold", "error", "consignment_unpaid", "deleted"]);
+// Statuses that still represent an unpaid, live obligation (counted in 대기금액).
+const PENDING_STATUSES = ["pending", "await_deposit"];
 
 function inferSettlementType(row = {}) {
   const text = `${row.cutoffNote || ""} ${row.requiredMemo || ""}`;
@@ -1232,7 +1234,7 @@ function finalDepositAmount(item) {
 
 function brandSummary(db, brandId) {
   const requests = db.requests.filter((item) => item.brandId === brandId);
-  const pending = requests.filter((item) => item.status === "pending").length;
+  const pending = requests.filter((item) => PENDING_STATUSES.includes(item.status)).length;
   const total = requests.reduce((sum, item) => sum + finalDepositAmount(item), 0);
   const liveRequests = requests.filter((item) => item.status !== "deleted");
   const receivableDeducted = liveRequests.reduce((sum, item) => sum + Number(item.receivableDeduction || 0), 0);
@@ -1263,7 +1265,7 @@ function hydrateBrand(db, brand) {
 function dashboard(db) {
   const activeRequests = db.requests.filter((item) => item.status !== "deleted");
   const realtimeRequests = activeRequests.filter((item) => item.settlementType !== "consignment" && item.status !== "consignment_unpaid");
-  const pending = realtimeRequests.filter((item) => item.status === "pending");
+  const pending = realtimeRequests.filter((item) => PENDING_STATUSES.includes(item.status));
   const paid = activeRequests.filter((item) => item.status === "paid");
   const consignmentUnpaid = activeRequests.filter((item) => item.status === "consignment_unpaid");
   const outstanding = activeRequests.filter((item) => item.status !== "paid");
@@ -1614,6 +1616,8 @@ function requestRows(db, brandId = "") {
   return db.requests
     .filter((item) => !brandId || item.brandId === brandId)
     .filter((item) => item.status !== "deleted")
+    .slice()
+    .sort((a, b) => String(a.orderNo || "").localeCompare(String(b.orderNo || ""), "en", { numeric: true }))
     .map((item) => {
       const brand = db.brands.find((b) => b.id === item.brandId);
       return {
