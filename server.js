@@ -14,6 +14,8 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const DB_PATH = path.join(DATA_DIR, "db.json");
 const PRICE_WORKBOOK_SCRIPT = path.join(__dirname, "scripts", "price_entry_excel.py");
+const SETTLEMENT_SCRIPT = path.join(__dirname, "scripts", "settlement_excel.py");
+const XLSX_PARSE_SCRIPT = path.join(__dirname, "scripts", "xlsx_to_json.py");
 const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.HOST || "0.0.0.0";
 const execFileAsync = promisify(execFile);
@@ -888,6 +890,300 @@ async function parsePriceWorkbookUpload(body = {}) {
   } finally {
     await safeUnlink(tmpPath);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Monthly settlement engine (정산): reconcile data1(입금요청, DB) ×
+// data2(카페24 CSV) × data3(은행 XLSX) and render a 정산내역서 xlsx.
+// ---------------------------------------------------------------------------
+
+// Minimal RFC-4180-ish CSV parser (handles quotes, embedded commas/newlines).
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+  const s = text.replace(/^﻿/, "");
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (s[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += ch;
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      row.push(field); field = "";
+    } else if (ch === "\n") {
+      row.push(field); rows.push(row); row = []; field = "";
+    } else if (ch === "\r") {
+      // ignore; handled by \n
+    } else field += ch;
+  }
+  if (field !== "" || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function parseCafe24Csv(base64) {
+  const buf = Buffer.from(base64, "base64");
+  // cafe24 exports UTF-8 (with BOM); fall back to raw utf8.
+  const text = buf.toString("utf8");
+  const rows = parseCsv(text).filter((r) => r.some((c) => String(c).trim() !== ""));
+  if (!rows.length) return [];
+  const header = rows[0].map((h) => String(h).trim());
+  return rows.slice(1).map((r) => {
+    const obj = {};
+    header.forEach((h, i) => { obj[h] = r[i] != null ? String(r[i]).trim() : ""; });
+    return obj;
+  });
+}
+
+async function parseBankXlsxUpload(base64) {
+  const buf = Buffer.from(base64, "base64");
+  const tmpPath = path.join(os.tmpdir(), `wooofpay-bank-${crypto.randomBytes(8).toString("hex")}.xlsx`);
+  try {
+    await writeFile(tmpPath, buf);
+    const { stdout } = await execFileAsync("python3", [XLSX_PARSE_SCRIPT, "--input", tmpPath], {
+      cwd: __dirname,
+      maxBuffer: 20 * 1024 * 1024
+    });
+    const parsed = JSON.parse(stdout || "{}");
+    const sheets = parsed.sheets || {};
+    const firstKey = Object.keys(sheets)[0];
+    return firstKey ? sheets[firstKey] : [];
+  } finally {
+    await safeUnlink(tmpPath);
+  }
+}
+
+function distinctCafe24Suppliers(rows) {
+  const map = new Map();
+  for (const r of rows) {
+    const code = r["공급사"] || "";
+    const name = r["공급사명"] || "";
+    const key = code || name;
+    if (!key) continue;
+    if (!map.has(key)) map.set(key, { code, name, count: 0 });
+    map.get(key).count++;
+  }
+  return [...map.values()].sort((a, b) => b.count - a.count);
+}
+
+// Does a cafe24 row belong to the given brand's supplier mapping?
+function cafe24RowMatchesBrand(row, brand) {
+  const target = String(brand.cafe24Supplier || "").trim().toUpperCase();
+  if (!target) return false;
+  const code = String(row["공급사"] || "").trim().toUpperCase();
+  const name = String(row["공급사명"] || "").trim().toUpperCase();
+  return target === code || target === name;
+}
+
+function cafe24RowIsCancelled(row) {
+  return Boolean(
+    String(row["환불완료일"] || "").trim() ||
+    String(row["취소처리중[환불완료] 처리일"] || "").trim() ||
+    String(row["환불상태"] || "").trim() ||
+    number(row["총 실제 환불금액"]) > 0
+  );
+}
+
+// Sum bank withdrawals (출금) attributable to a brand for the given month.
+function bankWithdrawalTotal(bankRows, brand, monthPrefix) {
+  const labels = [String(brand.bankLabel || "").trim(), String(brand.name || "").trim()]
+    .filter(Boolean)
+    .map((s) => s.toUpperCase());
+  const wantYm = { y: Number(monthPrefix.slice(0, 4)), m: Number(monthPrefix.slice(4, 6)) };
+  let total = 0;
+  const matched = [];
+  for (const r of bankRows) {
+    const out = number(r["출금"]);
+    if (!out) continue;
+    const label = String(r["거래처 라벨"] || "").trim().toUpperCase();
+    const payer = String(r["거래자명"] || "").trim().toUpperCase();
+    const memo = String(r["적요"] || "").trim().toUpperCase();
+    const hit = labels.some((l) => l && (label === l || payer.includes(l) || memo.includes(l)));
+    if (!hit) continue;
+    // restrict to the settlement month when the bank rows carry a month column
+    const y = Number(r["거래 연도"] || 0);
+    const m = Number(r["거래 월"] || 0);
+    if (y && m && (y !== wantYm.y || m !== wantYm.m)) continue;
+    total += out;
+    matched.push({ date: r["거래일시"] || "", amount: out, memo: r["적요"] || "" });
+  }
+  return { total, matched };
+}
+
+// Core reconciliation. Returns { needsMapping, suppliers, errors, warnings,
+// summary, lines, cancels, excludedCount, settlementType }.
+function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
+  const monthPrefix = `${year}${String(month).padStart(2, "0")}`;
+  const settlementType = brand.settlementType || "prepay_fee";
+  const rate = number(brand.commissionRate);
+  const suppliers = distinctCafe24Suppliers(cafe24Rows);
+
+  if (!String(brand.cafe24Supplier || "").trim()) {
+    return { needsMapping: true, suppliers, settlementType };
+  }
+
+  // data2: cafe24 rows for this brand
+  const brandRows = cafe24Rows.filter((r) => cafe24RowMatchesBrand(r, brand));
+
+  const cancels = [];
+  const includedByOrder = new Map(); // orderNo -> [cafe24 rows]
+  let excludedCount = 0;
+  for (const r of brandRows) {
+    const orderNo = String(r["주문번호"] || "").trim();
+    const orderDate = orderNo.slice(0, 8);
+    const delivered = Boolean(String(r["배송완료일"] || "").trim());
+    if (cafe24RowIsCancelled(r)) {
+      cancels.push({
+        itemNo: r["품목별 주문번호"] || orderNo,
+        name: r["주문상품명(기본)"] || "",
+        qty: number(r["수량"]),
+        saleTotal: number(r["판매가"]) * number(r["수량"]),
+        reason: r["환불상태"] || (r["환불완료일"] ? "환불완료" : "취소/교환"),
+        note: r["환불완료일"] || r["취소처리중[환불완료] 처리일"] || ""
+      });
+      continue;
+    }
+    if (orderDate.startsWith(monthPrefix) && delivered) {
+      if (!includedByOrder.has(orderNo)) includedByOrder.set(orderNo, []);
+      includedByOrder.get(orderNo).push(r);
+    } else {
+      excludedCount++;
+    }
+  }
+
+  // data1: wooofpay 입금요청 for this brand, keyed by orderNo
+  const reqByOrder = new Map();
+  for (const req of db.requests) {
+    if (req.brandId !== brand.id || req.status === "deleted") continue;
+    reqByOrder.set(String(req.orderNo || "").trim(), req);
+  }
+
+  const errors = [];
+  const warnings = [];
+  const lines = [];
+  let seq = 0;
+  for (const [orderNo, rowsOfOrder] of includedByOrder) {
+    const req = reqByOrder.get(orderNo);
+    if (!req) {
+      errors.push({ orderNo, type: "missing_request", message: `카페24 배송완료 주문이 입금요청에 없습니다: ${orderNo}` });
+      continue;
+    }
+    const paid = req.status === "paid" || Boolean(req.paidAt);
+    if (!paid) {
+      errors.push({ orderNo, type: "unpaid", message: `입금완료되지 않은 주문입니다: ${orderNo}` });
+    }
+    // amount cross-check: cafe24 판매액 vs wooofpay 제품매출
+    const cafeSales = rowsOfOrder.reduce((s, r) => s + number(r["판매가"]) * number(r["수량"]), 0);
+    const wooofSales = number(req.productSalesAmount);
+    if (cafeSales && wooofSales && Math.abs(cafeSales - wooofSales) > 1) {
+      errors.push({
+        orderNo,
+        type: "amount_mismatch",
+        message: `금액 불일치 ${orderNo}: 카페24 ${cafeSales.toLocaleString()} vs 입금요청 ${wooofSales.toLocaleString()}`
+      });
+    }
+    // Build detail lines from wooofpay lineItems (billing truth). One order's
+    // shipping is charged once (attached to the first line).
+    const items = sanitizeLineItems(req.lineItems);
+    const detail = items.length ? items : [{
+      itemName: rowsOfOrder[0]?.["주문상품명(기본)"] || "",
+      quantity: number(req.quantity) || 1,
+      unitSalePrice: wooofSales,
+      totalSaleAmount: wooofSales,
+      totalSupplyPrice: number(req.supplyAmount)
+    }];
+    const orderShip = number(req.shippingFee);
+    detail.forEach((it, idx) => {
+      seq++;
+      const saleTotal = number(it.totalSaleAmount, number(it.unitSalePrice) * number(it.quantity));
+      const commissionWon = Math.round(saleTotal * (rate / 100));
+      lines.push({
+        itemNo: `${orderNo}-${String(idx + 1).padStart(2, "0")}`,
+        name: it.itemName || it.itemCode || "",
+        qty: number(it.quantity) || 1,
+        consumer: number(it.unitSalePrice),
+        saleTotal,
+        ship: idx === 0 ? orderShip : 0,
+        refundShip: 0,
+        ratePct: rate,
+        commissionWon,
+        supplyAmt: saleTotal - commissionWon,
+        payDate: req.paidAt || "",
+        note: ""
+      });
+    });
+  }
+
+  const salesTotal = lines.reduce((s, l) => s + l.saleTotal, 0);
+  const shipTotal = lines.reduce((s, l) => s + l.ship, 0);
+  const refundShipTotal = lines.reduce((s, l) => s + l.refundShip, 0);
+  const commissionTotal = lines.reduce((s, l) => s + l.commissionWon, 0);
+  const isDebt = settlementType === "prepay_debt";
+  const deliveredSupply = isDebt ? salesTotal : salesTotal - commissionTotal;
+  const finalAmount = deliveredSupply + shipTotal + refundShipTotal;
+
+  // data3: bank withdrawal reconciliation
+  const bank = bankWithdrawalTotal(bankRows, brand, monthPrefix);
+  if (bankRows.length) {
+    if (Math.abs(bank.total - finalAmount) > 1) {
+      errors.push({
+        type: "bank_mismatch",
+        message: `은행 출금 합계 ${bank.total.toLocaleString()}원 ≠ 최종 정산금액 ${finalAmount.toLocaleString()}원`
+      });
+    }
+  } else {
+    warnings.push("은행 파일이 업로드되지 않아 출금 대조를 건너뜁니다.");
+  }
+
+  return {
+    needsMapping: false,
+    suppliers,
+    settlementType,
+    rate,
+    errors,
+    warnings,
+    excludedCount,
+    cancels,
+    lines,
+    summary: {
+      salesTotal, shipTotal, refundShipTotal, commissionTotal,
+      deliveredSupply, finalAmount, bankTotal: bank.total, orderCount: includedByOrder.size
+    }
+  };
+}
+
+async function generateSettlementXlsx(spec) {
+  const tmpBase = path.join(os.tmpdir(), `wooofpay-settlement-${crypto.randomBytes(8).toString("hex")}`);
+  const inputPath = `${tmpBase}.json`;
+  const outputPath = `${tmpBase}.xlsx`;
+  try {
+    await writeFile(inputPath, JSON.stringify(spec), "utf8");
+    await execFileAsync("python3", [SETTLEMENT_SCRIPT, "--input", inputPath, "--output", outputPath], {
+      cwd: __dirname,
+      maxBuffer: 20 * 1024 * 1024
+    });
+    return await readFile(outputPath);
+  } finally {
+    await safeUnlink(inputPath);
+    await safeUnlink(outputPath);
+  }
+}
+
+function settlementSpecFromResult(brand, year, month, result) {
+  const supplierName = String(brand.cafe24Supplier || brand.name || "").trim();
+  return {
+    type: result.settlementType,
+    supplierName,
+    year: Number(year),
+    monthLabel: `${Number(month)}/1-${Number(month)}/${new Date(Number(year), Number(month), 0).getDate()}`,
+    rate: number(result.rate) / 100,
+    lines: result.lines,
+    cancels: result.cancels
+  };
 }
 
 function normalizeImportedAction(row = {}) {
@@ -2067,6 +2363,8 @@ async function routeApi(req, res, url) {
       cutoffHour: body.cutoffHour || inferCutoffHour(body.cutoffNote || ""),
       requiredMemo: body.requiredMemo || "",
       googleSheetUrl: body.googleSheetUrl || "",
+      cafe24Supplier: String(body.cafe24Supplier || "").trim(),
+      bankLabel: String(body.bankLabel || "").trim(),
       shareToken: crypto.randomBytes(12).toString("hex"),
       createdAt: now(),
       updatedAt: now()
@@ -2117,7 +2415,9 @@ async function routeApi(req, res, url) {
       "cutoffType",
       "cutoffHour",
       "requiredMemo",
-      "googleSheetUrl"
+      "googleSheetUrl",
+      "cafe24Supplier",
+      "bankLabel"
     ]) {
       if (key in body) brand[key] = body[key];
     }
@@ -2525,6 +2825,62 @@ async function routeApi(req, res, url) {
 
   if (pathname === "/api/payment-logs" && method === "GET") {
     sendJson(res, 200, { paymentLogs: db.paymentLogs });
+    return;
+  }
+
+  if (pathname === "/api/settlement/run" && method === "POST") {
+    const body = await readBody(req);
+    const brand = db.brands.find((item) => item.id === body.brandId);
+    if (!brand) { sendJson(res, 400, { error: "브랜드를 선택하세요." }); return; }
+    if (!body.year || !body.month) { sendJson(res, 400, { error: "정산 연/월을 선택하세요." }); return; }
+    let cafe24Rows = [];
+    let bankRows = [];
+    try {
+      if (body.cafe24Csv) cafe24Rows = parseCafe24Csv(body.cafe24Csv);
+      if (body.bankXlsx) bankRows = await parseBankXlsxUpload(body.bankXlsx);
+    } catch (error) {
+      sendJson(res, 400, { error: `파일 파싱 실패: ${error.message}` });
+      return;
+    }
+    if (!cafe24Rows.length) { sendJson(res, 400, { error: "카페24 주문내역(CSV)을 업로드하세요." }); return; }
+    const result = computeSettlementResult(db, brand, body.year, body.month, cafe24Rows, bankRows);
+    sendJson(res, 200, {
+      brand: { id: brand.id, name: brand.name, settlementType: brand.settlementType, cafe24Supplier: brand.cafe24Supplier || "" },
+      ...result,
+      lines: result.needsMapping ? [] : result.lines
+    });
+    return;
+  }
+
+  if (pathname === "/api/settlement/export" && method === "POST") {
+    const body = await readBody(req);
+    const brand = db.brands.find((item) => item.id === body.brandId);
+    if (!brand) { sendJson(res, 400, { error: "브랜드를 선택하세요." }); return; }
+    let cafe24Rows = [];
+    let bankRows = [];
+    try {
+      if (body.cafe24Csv) cafe24Rows = parseCafe24Csv(body.cafe24Csv);
+      if (body.bankXlsx) bankRows = await parseBankXlsxUpload(body.bankXlsx);
+    } catch (error) {
+      sendJson(res, 400, { error: `파일 파싱 실패: ${error.message}` });
+      return;
+    }
+    const result = computeSettlementResult(db, brand, body.year, body.month, cafe24Rows, bankRows);
+    if (result.needsMapping) { sendJson(res, 409, { error: "먼저 카페24 공급사 매핑을 저장하세요." }); return; }
+    if (result.errors.length && !body.force) {
+      sendJson(res, 409, { error: "정산 오류가 있어 출력할 수 없습니다.", errors: result.errors });
+      return;
+    }
+    const spec = settlementSpecFromResult(brand, body.year, body.month, result);
+    try {
+      const buffer = await generateSettlementXlsx(spec);
+      const ym = `${body.year}${String(body.month).padStart(2, "0")}`;
+      sendBuffer(res, 200, buffer,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        { "content-disposition": contentDisposition(`(우프) ${spec.supplierName}_${ym}.xlsx`) });
+    } catch (error) {
+      sendJson(res, 500, { error: `정산서 생성 실패: ${error.message}` });
+    }
     return;
   }
 

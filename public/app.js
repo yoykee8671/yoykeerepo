@@ -24,7 +24,8 @@ const state = {
   priceImportStatus: null,
   brandFilterQ: "",
   selectedRequestIds: [],
-  bulkPaidAt: new Date().toISOString().slice(0, 10)
+  bulkPaidAt: new Date().toISOString().slice(0, 10),
+  settlement: { year: new Date().getFullYear(), month: new Date().getMonth() + 1, brandId: "", cafe24: null, bank: null, result: null, running: false }
 };
 
 const app = document.querySelector("#app");
@@ -393,7 +394,8 @@ function renderApp() {
     ["brands", "브랜드"],
     ["admins", "관리자"],
     ["audits", "이력"],
-    ["archive", "아카이브"]
+    ["archive", "아카이브"],
+    ["settlement", "정산"]
   ];
   app.innerHTML = `
     <div class="shell">
@@ -515,6 +517,7 @@ function renderCurrentTab() {
   if (state.tab === "admins") return renderAdmins();
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
+  if (state.tab === "settlement") return renderSettlement();
   return renderDashboard();
 }
 
@@ -1384,6 +1387,10 @@ function renderBrandForm() {
         <div><label>통장계좌번호</label><input name="bankAccount" value="${h(b.bankAccount)}"></div>
       </div>
       <div class="field"><label>계좌예금주명</label><input name="depositorName" value="${h(b.depositorName)}"></div>
+      <div class="field two">
+        <div><label>카페24 공급사명/코드 <span class="muted" style="font-weight:400">(정산 매칭용)</span></label><input name="cafe24Supplier" value="${h(b.cafe24Supplier || "")}" placeholder="예: KOGONGCAT 또는 S000000W"></div>
+        <div><label>은행 거래처 라벨 <span class="muted" style="font-weight:400">(비우면 브랜드명)</span></label><input name="bankLabel" value="${h(b.bankLabel || "")}" placeholder="예: 고공캣"></div>
+      </div>
       <div class="field"><label>Google Sheets 아카이브 URL</label><input name="googleSheetUrl" value="${h(b.googleSheetUrl)}" placeholder="브랜드별 공유용 스프레드시트 링크"></div>
       <div class="toolbar">
         <button class="primary" type="submit">${state.editingBrand ? "수정 저장" : "브랜드 추가"}</button>
@@ -1662,6 +1669,7 @@ function bindCurrentTab() {
   if (state.tab === "brands") bindBrands();
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
+  if (state.tab === "settlement") bindSettlement();
 }
 
 function formObject(form) {
@@ -3174,6 +3182,163 @@ function priceAliasStatusLabel(item) {
   if (item.validTo && item.validTo < today) return "만료";
   if (item.validFrom && item.validFrom > today) return "예정";
   return "적용중";
+}
+
+function renderSettlement() {
+  const s = state.settlement;
+  const ym = `${s.year}-${String(s.month).padStart(2, "0")}`;
+  const brands = [...state.brands].sort((a, b) => a.name.localeCompare(b.name, "ko"));
+  const brandOptions = brands
+    .map((b) => `<option value="${b.id}" ${s.brandId === b.id ? "selected" : ""}>${h(b.name)} · ${h(settlementLabel(b.settlementType))}</option>`)
+    .join("");
+  return `
+    ${pageHead("정산", "카페24 주문내역 · 은행 거래내역 · 입금요청(자동)을 대조하여 월별 정산서를 생성합니다.")}
+    <section class="panel">
+      <div class="panel-head"><h2>정산 조건</h2></div>
+      <div class="panel-body">
+        <div class="field two">
+          <div><label>정산 연/월</label><input type="month" data-settlement-ym value="${ym}"></div>
+          <div><label>공급사(브랜드)</label><select data-settlement-brand><option value="">브랜드 선택</option>${brandOptions}</select></div>
+        </div>
+        <div class="field two">
+          <div><label>카페24 주문내역 (CSV)</label><input type="file" accept=".csv" data-settlement-cafe24>
+            <span class="muted">${s.cafe24 ? h(s.cafe24.name) : "월 전체 공급사 포함 파일"}</span></div>
+          <div><label>은행 거래내역 (XLSX, 선택)</label><input type="file" accept=".xlsx" data-settlement-bank>
+            <span class="muted">${s.bank ? h(s.bank.name) : "출금 대조용 (선택)"}</span></div>
+        </div>
+        <div class="toolbar">
+          <button class="primary" data-settlement-run ${s.running ? "disabled" : ""}>${s.running ? "정산 중…" : "정산 시작"}</button>
+          <span class="muted">입금요청 데이터는 시스템에서 자동 조회됩니다.</span>
+        </div>
+      </div>
+    </section>
+    ${renderSettlementResult(s.result)}
+  `;
+}
+
+function renderSettlementResult(result) {
+  if (!result) return "";
+  if (result.needsMapping) {
+    const opts = (result.suppliers || [])
+      .map((sup) => `<option value="${h(sup.code || sup.name)}">${h(sup.name)} (${h(sup.code)}) · ${sup.count}건</option>`)
+      .join("");
+    return `
+      <section class="panel">
+        <div class="panel-head"><h2>카페24 공급사 매핑 필요</h2></div>
+        <div class="panel-body">
+          <p class="muted">이 브랜드에 연결된 카페24 공급사를 한 번만 지정하면 다음부터 자동 적용됩니다.</p>
+          <div class="field"><label>카페24 공급사</label><select data-settlement-supplier>${opts}</select></div>
+          <div class="toolbar"><button class="primary" data-settlement-save-supplier>매핑 저장 후 재정산</button></div>
+        </div>
+      </section>`;
+  }
+  const sum = result.summary || {};
+  const errs = result.errors || [];
+  const warns = result.warnings || [];
+  const money0 = (n) => `${money.format(Math.round(Number(n || 0)))}원`;
+  const errorBlock = errs.length
+    ? `<div class="panel-body"><h3 style="color:var(--red)">오류 ${errs.length}건 — 데이터 확인 후 다시 업로드하세요</h3>
+        <ul>${errs.map((e) => `<li style="color:var(--red)">${h(e.message)}</li>`).join("")}</ul></div>`
+    : `<div class="panel-body"><h3 style="color:#137333">오류 없음 — 정산서를 출력할 수 있습니다</h3></div>`;
+  const cancelBlock = (result.cancels || []).length
+    ? `<div class="panel-body"><h3>취소/교환 ${result.cancels.length}건 (정산 제외)</h3>
+        <ul>${result.cancels.map((c) => `<li>${h(c.itemNo)} ${h(c.name)} · ${money0(c.saleTotal)} · ${h(c.reason)}</li>`).join("")}</ul></div>`
+    : "";
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>정산 결과</h2></div>
+      <div class="panel-body">
+        <div class="fixed-summary-grid">
+          <div class="fixed-card"><span>포함 주문</span><strong>${sum.orderCount || 0}건</strong></div>
+          <div class="fixed-card"><span>판매합계</span><strong>${money0(sum.salesTotal)}</strong></div>
+          <div class="fixed-card"><span>수수료${result.settlementType === "prepay_debt" ? "(미공제)" : ""}</span><strong>${money0(sum.commissionTotal)}</strong></div>
+          <div class="fixed-card"><span>배송비</span><strong>${money0(sum.shipTotal)}</strong></div>
+          <div class="fixed-card"><span>최종 정산금액</span><strong>${money0(sum.finalAmount)}</strong></div>
+          <div class="fixed-card"><span>은행 출금합</span><strong>${money0(sum.bankTotal)}</strong></div>
+        </div>
+        ${result.excludedCount ? `<p class="muted">미배송/기간외 제외: ${result.excludedCount}건</p>` : ""}
+      </div>
+      ${warns.length ? `<div class="panel-body">${warns.map((w) => `<p class="muted">⚠ ${h(w)}</p>`).join("")}</div>` : ""}
+      ${errorBlock}
+      ${cancelBlock}
+      <div class="panel-body toolbar">
+        <button class="primary" data-settlement-export ${errs.length ? "disabled" : ""}>정산서 엑셀 다운로드</button>
+        ${errs.length ? `<span class="muted">오류 해결 후 다운로드할 수 있습니다.</span>` : ""}
+      </div>
+    </section>`;
+}
+
+function bindSettlement() {
+  const s = state.settlement;
+  app.querySelector("[data-settlement-ym]")?.addEventListener("change", (e) => {
+    const [y, m] = e.target.value.split("-");
+    s.year = Number(y); s.month = Number(m);
+  });
+  app.querySelector("[data-settlement-brand]")?.addEventListener("change", (e) => {
+    s.brandId = e.target.value; s.result = null; renderApp();
+  });
+  app.querySelector("[data-settlement-cafe24]")?.addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    s.cafe24 = file ? { name: file.name, base64: await readFileAsBase64(file) } : null;
+    renderApp();
+  });
+  app.querySelector("[data-settlement-bank]")?.addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    s.bank = file ? { name: file.name, base64: await readFileAsBase64(file) } : null;
+    renderApp();
+  });
+  app.querySelector("[data-settlement-run]")?.addEventListener("click", async () => {
+    if (!s.brandId) return showToast("브랜드를 선택하세요.", "error");
+    if (!s.cafe24) return showToast("카페24 CSV를 업로드하세요.", "error");
+    s.running = true; renderApp();
+    try {
+      s.result = await api("/api/settlement/run", {
+        method: "POST",
+        body: { brandId: s.brandId, year: s.year, month: s.month, cafe24Csv: s.cafe24.base64, bankXlsx: s.bank?.base64 || "" }
+      });
+    } catch (error) {
+      showToast(error.message || "정산 실행 실패", "error");
+    } finally {
+      s.running = false; renderApp();
+    }
+  });
+  app.querySelector("[data-settlement-save-supplier]")?.addEventListener("click", async () => {
+    const sel = app.querySelector("[data-settlement-supplier]");
+    if (!sel?.value) return;
+    try {
+      await api(`/api/brands/${s.brandId}`, { method: "PUT", body: { cafe24Supplier: sel.value } });
+      await loadAll();
+      showToast("공급사 매핑을 저장했습니다.");
+      app.querySelector("[data-settlement-run]")?.click();
+    } catch (error) {
+      showToast(error.message || "매핑 저장 실패", "error");
+    }
+  });
+  app.querySelector("[data-settlement-export]")?.addEventListener("click", async () => {
+    try {
+      const res = await fetch("/api/settlement/export", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ brandId: s.brandId, year: s.year, month: s.month, cafe24Csv: s.cafe24.base64, bankXlsx: s.bank?.base64 || "" })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return showToast(err.error || "정산서 생성 실패", "error");
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const brand = state.brands.find((b) => b.id === s.brandId);
+      a.download = `(우프) ${brand?.cafe24Supplier || brand?.name}_${s.year}${String(s.month).padStart(2, "0")}.xlsx`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      showToast("정산서를 다운로드했습니다.");
+    } catch (error) {
+      showToast(error.message || "다운로드 실패", "error");
+    }
+  });
 }
 
 init().catch((error) => {
