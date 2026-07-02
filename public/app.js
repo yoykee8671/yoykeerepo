@@ -363,15 +363,14 @@ function renderLogin(error = "") {
       <form class="login-panel" data-login>
         <h1>WooofPay</h1>
         <p>입금 요청, 브랜드 아카이브, 관리자 이력을 한 곳에서 관리합니다.</p>
-        <div class="notice">초기 계정: owner@wooofpay.local / change-me-now</div>
         <div class="form-grid" style="margin-top:16px">
           <div class="field">
             <label>이메일</label>
-            <input name="email" autocomplete="username" value="owner@wooofpay.local">
+            <input name="email" autocomplete="username" placeholder="이메일" value="">
           </div>
           <div class="field">
             <label>비밀번호</label>
-            <input name="password" type="password" autocomplete="current-password" value="change-me-now">
+            <input name="password" type="password" autocomplete="current-password" placeholder="비밀번호" value="">
           </div>
           <div class="error-text">${h(error)}</div>
           <button class="primary" type="submit">로그인</button>

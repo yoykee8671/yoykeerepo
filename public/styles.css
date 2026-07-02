@@ -97,29 +97,37 @@ a {
 
 .shell {
   min-height: 100vh;
-  display: grid;
-  grid-template-columns: 236px minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
 }
 
 .sidebar {
   background: #111827;
   color: #fff;
-  padding: 20px 14px;
+  padding: 8px 20px;
   display: flex;
-  flex-direction: column;
-  gap: 18px;
+  flex-direction: row;
+  align-items: center;
+  gap: 16px;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  overflow-x: auto;
 }
 
 .brandmark {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 0 6px 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 16px 0 0;
+  border-right: 1px solid rgba(255, 255, 255, 0.14);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .brandmark strong {
-  font-size: 20px;
+  font-size: 18px;
 }
 
 .brandmark span {
@@ -128,18 +136,21 @@ a {
 }
 
 .nav {
-  display: grid;
+  display: flex;
+  flex-direction: row;
   gap: 6px;
+  flex: 1;
 }
 
 .nav button {
-  width: 100%;
+  width: auto;
   border: 0;
-  justify-content: flex-start;
-  text-align: left;
+  justify-content: center;
+  text-align: center;
+  white-space: nowrap;
   background: transparent;
   color: #d8dee9;
-  padding: 0 10px;
+  padding: 0 14px;
 }
 
 .nav button.active,
@@ -149,11 +160,16 @@ a {
 }
 
 .sidebar-footer {
-  margin-top: auto;
-  display: grid;
-  gap: 8px;
+  margin-top: 0;
+  margin-left: auto;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
   color: #c5cedb;
   font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .main {
@@ -473,9 +489,15 @@ td.wrap {
 
 /* Inline status editor styled as the pill badge */
 select.status-select {
+  /* A native <select> must not be display:flex (inherited from .badge) or
+     Chrome renders the selected value blank — force inline-block. */
+  display: inline-block;
+  height: 24px;
+  line-height: 22px;
+  vertical-align: middle;
   -webkit-appearance: none;
   appearance: none;
-  padding-right: 20px;
+  padding-right: 22px;
   cursor: pointer;
   font-weight: 500;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='6' viewBox='0 0 8 6'%3E%3Cpath fill='%23888' d='M0 0l4 6 4-6z'/%3E%3C/svg%3E");
@@ -708,30 +730,8 @@ select.bulk-status,
 }
 
 @media (max-width: 1080px) {
-  .shell {
-    grid-template-columns: 1fr;
-  }
-
-  .sidebar {
-    position: sticky;
-    top: 0;
-    z-index: 10;
-    flex-direction: row;
-    align-items: center;
-    overflow-x: auto;
-  }
-
-  .brandmark,
-  .sidebar-footer {
+  .brandmark span {
     display: none;
-  }
-
-  .nav {
-    display: flex;
-  }
-
-  .nav button {
-    white-space: nowrap;
   }
 
   .layout,
