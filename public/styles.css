@@ -503,19 +503,22 @@ td.wrap {
 }
 
 /* Inline status editor styled as the pill badge */
-/* Native <select> (keeps its own arrow + text so the value always renders). */
+/* Native <select> (keeps its own arrow + text so the value always renders).
+   No fixed height — let padding + line-height size it so the text is never
+   clipped at any browser zoom level. */
 select.status-select {
   display: inline-block;
-  height: 28px;
+  box-sizing: content-box;
   font-size: 12px;
   font-weight: 600;
-  padding: 2px 6px;
+  line-height: 1.5;
+  padding: 4px 8px;
   border-radius: 8px;
   border: 1px solid var(--line);
   background: #fff;
   color: #374151;
   cursor: pointer;
-  max-width: 130px;
+  min-width: 88px;
 }
 select.status-select.status-pending {
   background: #fff7df;
