@@ -1176,7 +1176,8 @@ async function generateSettlementXlsx(spec) {
 }
 
 function settlementSpecFromResult(brand, year, month, result) {
-  const supplierName = String(brand.cafe24Supplier || brand.name || "").trim();
+  // Statement title & filename use the wooofpay brand name (not the cafe24 supplier code).
+  const supplierName = String(brand.name || brand.cafe24Supplier || "").trim();
   return {
     type: result.settlementType,
     supplierName,
