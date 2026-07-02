@@ -104,6 +104,43 @@ function statusLabel(status) {
   }[status] || status || "입금요청";
 }
 
+// Statuses selectable inline / in bulk (excludes deleted).
+const STATUS_CHOICES = ["pending", "await_deposit", "paid", "hold", "error"];
+
+function renderRowStatusSelect(item) {
+  const values = STATUS_CHOICES.includes(item.status) ? STATUS_CHOICES : [item.status, ...STATUS_CHOICES];
+  const options = values
+    .map((v) => `<option value="${h(v)}" ${item.status === v ? "selected" : ""}>${h(statusLabel(v))}</option>`)
+    .join("");
+  return `<select class="status-select badge ${h(item.status)}" data-row-status="${item.id}">${options}</select>`;
+}
+
+// Fast inline/bulk status change: optimistic UI + lightweight endpoint, then
+// merge the server response without a full reload (keeps it snappy).
+async function changeRequestStatus(ids, status, paidAt = "") {
+  const clean = Array.from(new Set(ids)).filter(Boolean);
+  if (!clean.length || !status) return;
+  const prev = new Map();
+  state.requests.forEach((r) => {
+    if (clean.includes(r.id)) {
+      prev.set(r.id, r.status);
+      r.status = status;
+    }
+  });
+  renderApp();
+  try {
+    const result = await api("/api/requests/set-status", { method: "POST", body: { requestIds: clean, status, paidAt } });
+    const map = new Map((result.updatedRequests || []).map((r) => [r.id, r]));
+    state.requests = state.requests.map((r) => (map.has(r.id) ? { ...r, ...map.get(r.id) } : r));
+    renderApp();
+    showToast(clean.length > 1 ? `${clean.length}건 상태 변경` : "상태를 변경했습니다.");
+  } catch (error) {
+    state.requests.forEach((r) => { if (prev.has(r.id)) r.status = prev.get(r.id); });
+    renderApp();
+    showToast(error.message || "상태 변경 실패", "error");
+  }
+}
+
 function settlementLabel(type) {
   return {
     prepay_debt: "선매입-채권",
@@ -642,6 +679,12 @@ function renderRequests() {
           <div class="toolbar" style="margin-bottom:12px">
             <label style="display:flex;align-items:center;gap:6px"><span>일괄 입금일</span><input type="date" data-bulk-paid-at value="${h(state.bulkPaidAt)}"></label>
             <button type="button" data-mark-selected-paid ${state.selectedRequestIds.length ? "" : "disabled"}>선택 입금완료</button>
+            <span style="display:flex;align-items:center;gap:4px">
+              <select data-bulk-status ${state.selectedRequestIds.length ? "" : "disabled"}>
+                <option value="">선택 상태 변경…</option>
+                ${STATUS_CHOICES.map((v) => `<option value="${v}">${h(statusLabel(v))}로 변경</option>`).join("")}
+              </select>
+            </span>
             <button type="button" class="danger" data-delete-selected-requests ${state.selectedRequestIds.length ? "" : "disabled"}>선택 삭제</button>
             <button type="button" data-clear-selection ${state.selectedRequestIds.length ? "" : "disabled"}>선택 해제</button>
             <span class="muted">선택 ${state.selectedRequestIds.length}건</span>
@@ -740,7 +783,7 @@ function renderRequestRow(item) {
   return `
     <tr>
       <td><input type="checkbox" data-select-request="${item.id}" ${state.selectedRequestIds.includes(item.id) ? "checked" : ""}></td>
-      <td><span class="badge ${h(item.status)}">${statusLabel(item.status)}</span></td>
+      <td>${renderRowStatusSelect(item)}</td>
       <td>${settlementLabel(item.settlementType)}</td>
       <td>${h(item.brandName)}</td>
       <td><a href="#" class="order-link" data-open-edit-request-popup="${item.id}">${h(item.orderNo)}</a></td>
@@ -1869,6 +1912,18 @@ function bindRequests() {
     button.addEventListener("click", async () => {
       await markRequestsPaid([button.dataset.payRequest], state.bulkPaidAt);
     });
+  });
+  app.querySelectorAll("[data-row-status]").forEach((select) => {
+    select.addEventListener("change", async (event) => {
+      await changeRequestStatus([select.dataset.rowStatus], event.target.value, state.bulkPaidAt);
+    });
+  });
+  app.querySelector("[data-bulk-status]")?.addEventListener("change", async (event) => {
+    const status = event.target.value;
+    event.target.value = "";
+    if (!status) return;
+    if (!state.selectedRequestIds.length) return showToast("상태를 변경할 요청을 선택하세요.", "error");
+    await changeRequestStatus(state.selectedRequestIds, status, state.bulkPaidAt);
   });
   app.querySelectorAll("[data-open-edit-request-popup]").forEach((button) => {
     button.addEventListener("click", (event) => {

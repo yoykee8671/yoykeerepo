@@ -457,12 +457,42 @@ td.wrap {
   color: var(--green);
 }
 
+.badge.await_deposit {
+  background: #eef2ff;
+  border-color: #c3cef7;
+  color: #3f51b5;
+}
+
 .badge.hold,
 .badge.error,
 .badge.consignment_unpaid {
   background: #fff0ef;
   border-color: #f3b7b2;
   color: var(--red);
+}
+
+/* Inline status editor styled as the pill badge */
+select.status-select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 20px;
+  cursor: pointer;
+  font-weight: 500;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='6' viewBox='0 0 8 6'%3E%3Cpath fill='%23888' d='M0 0l4 6 4-6z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+}
+select.status-select:hover {
+  filter: brightness(0.97);
+}
+select.bulk-status,
+[data-bulk-status] {
+  min-height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  padding: 0 8px;
+  background: #fff;
+  cursor: pointer;
 }
 
 .form-grid {

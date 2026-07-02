@@ -2598,6 +2598,42 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // Fast status change (single or bulk) — no settlement recalculation, so it is
+  // far quicker than the full PUT edit path. Archive sync runs in background.
+  if (pathname === "/api/requests/set-status" && method === "POST") {
+    const body = await readBody(req);
+    const ids = Array.isArray(body.requestIds) ? body.requestIds : [];
+    const status = String(body.status || "").trim();
+    const allowed = new Set(["pending", "await_deposit", "paid", "hold", "error", "consignment_unpaid"]);
+    if (!ids.length) { sendJson(res, 400, { error: "상태를 변경할 요청을 선택하세요." }); return; }
+    if (!allowed.has(status)) { sendJson(res, 400, { error: "허용되지 않은 상태입니다." }); return; }
+    const paidAt = String(body.paidAt || "").trim() || now();
+    const batchId = ids.length > 1 ? id("statusbatch") : "";
+    const touchedBrands = new Set();
+    const updated = [];
+    for (const request of db.requests.filter((item) => ids.includes(item.id) && item.status !== "deleted")) {
+      if (request.status === status) continue;
+      const before = { ...request };
+      if (status === "paid") {
+        request.status = "paid";
+        request.paidAt = request.paidAt || paidAt;
+        request.paidAmount = number(request.paidAmount, number(request.depositAmount));
+        addPaymentLog(db, actor, request, { paidAt: request.paidAt, paidAmount: request.paidAmount, mode: ids.length > 1 ? "bulk" : "single", batchId });
+      } else {
+        request.status = status;
+      }
+      request.updatedAt = now();
+      addAudit(db, actor, "update", "request_status", request.id, `${request.orderNo} 상태 변경 → ${status}`, before, request);
+      if (request.brandId) touchedBrands.add(request.brandId);
+      updated.push(request);
+    }
+    if (!updated.length) { sendJson(res, 200, { updatedRequests: [] }); return; }
+    await writeDb(db);
+    sendJson(res, 200, { updatedRequests: updated });
+    syncArchiveInBackground(db, actor, [...touchedBrands], "status_changed");
+    return;
+  }
+
   const requestMatch = pathname.match(/^\/api\/requests\/([^/]+)$/);
   if (requestMatch && method === "PUT") {
     const body = await readBody(req);
