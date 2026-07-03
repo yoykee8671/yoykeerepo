@@ -723,8 +723,8 @@ function renderRequests() {
             </select>
           </div>
           <div class="table-wrap">
-            <table>
-              <thead><tr><th><input type="checkbox" data-select-all-requests ${allSelected ? "checked" : ""}></th><th>상태</th><th>정산유형</th><th>브랜드</th><th>주문번호</th><th>주문자</th><th>제품매출</th><th>배송비</th><th>입금액</th><th>적용 프로모션</th><th>예정일</th><th>입금일시</th><th>출고/정산</th><th>메모</th><th>작업</th></tr></thead>
+            <table class="requests-table">
+              <thead><tr><th><input type="checkbox" data-select-all-requests ${allSelected ? "checked" : ""}></th><th>작업</th><th>상태</th><th>정산유형</th><th>브랜드</th><th>주문번호</th><th>주문자</th><th>제품매출</th><th>배송비</th><th>입금액</th><th>적용 프로모션</th><th>예정일</th><th>입금일시</th><th>출고/정산</th><th>메모</th></tr></thead>
               <tbody>
                 ${rows.map(renderRequestRow).join("") || `<tr><td colspan="15" class="empty">표시할 입금요청이 없습니다.</td></tr>`}
               </tbody>
@@ -782,6 +782,7 @@ function renderRequestRow(item) {
   return `
     <tr>
       <td><input type="checkbox" data-select-request="${item.id}" ${state.selectedRequestIds.includes(item.id) ? "checked" : ""}></td>
+      <td><div class="row-actions">${item.status !== "paid" ? `<button data-pay-request="${item.id}">입금완료</button>` : ""}<button data-open-edit-request-popup="${item.id}">수정</button><button class="danger" data-delete-request="${item.id}">삭제</button></div></td>
       <td>${renderRowStatusSelect(item)}</td>
       <td>${settlementLabel(item.settlementType)}</td>
       <td>${h(item.brandName)}</td>
@@ -795,7 +796,6 @@ function renderRequestRow(item) {
       <td>${formatPaidAtCell(item.paidAt)}</td>
       <td class="wrap">${h(item.cutoffNote || item.requiredMemo)}</td>
       <td class="wrap">${renderRequestMemoCell(item)}</td>
-      <td><div class="row-actions">${item.status !== "paid" ? `<button data-pay-request="${item.id}">입금완료</button>` : ""}<button data-open-edit-request-popup="${item.id}">수정</button><button class="danger" data-delete-request="${item.id}">삭제</button></div></td>
     </tr>
   `;
 }
@@ -1268,10 +1268,11 @@ function renderRequestLineItems(items, promotionOptions = []) {
   return `
     <div class="table-wrap line-items-wrap" style="max-height:300px">
       <table class="line-items-table">
-        <thead><tr><th>코드</th><th>품목명</th><th>수량</th><th>공급가</th><th>원판매가</th><th>할인가</th><th>현재판매가</th><th>적용시작</th><th>적용종료</th><th>판매합계</th><th>프로모션</th><th>작업</th></tr></thead>
+        <thead><tr><th>작업</th><th>코드</th><th>품목명</th><th>수량</th><th>공급가</th><th>원판매가</th><th>할인가</th><th>현재판매가</th><th>적용시작</th><th>적용종료</th><th>판매합계</th><th>프로모션</th></tr></thead>
         <tbody>
           ${items.map((item) => `
             <tr>
+              <td><button type="button" class="danger" data-remove-line-item="${item.id}">삭제</button></td>
               <td><input value="${h(item.itemCode || "")}" data-line-code="${item.id}" aria-label="품목코드" placeholder="코드"></td>
               <td><input value="${h(item.itemName || "")}" data-line-name="${item.id}" aria-label="품목명" placeholder="품목명"></td>
               <td>
@@ -1289,7 +1290,6 @@ function renderRequestLineItems(items, promotionOptions = []) {
               <td><input type="date" value="${h(item.effectiveTo || "")}" data-line-to="${item.id}" aria-label="적용종료"></td>
               <td data-line-saletotal="${item.id}">${money.format(Number(item.totalSaleAmount || 0))}원</td>
               <td>${promotionCell(item)}</td>
-              <td><button type="button" class="danger" data-remove-line-item="${item.id}">삭제</button></td>
             </tr>`).join("")}
         </tbody>
       </table>

@@ -652,6 +652,36 @@ select.bulk-status,
   background: #fff;
 }
 
+/* Keep the action column visible during horizontal scroll (pin it left). */
+.line-items-table th:first-child,
+.line-items-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: #fff;
+}
+.line-items-table thead th:first-child {
+  z-index: 3;
+}
+.requests-table th:nth-child(1),
+.requests-table td:nth-child(1) {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: #fff;
+}
+.requests-table th:nth-child(2),
+.requests-table td:nth-child(2) {
+  position: sticky;
+  left: 40px;
+  z-index: 2;
+  background: #fff;
+}
+.requests-table thead th:nth-child(1),
+.requests-table thead th:nth-child(2) {
+  z-index: 3;
+}
+
 /* Compact inputs for the wide per-line price table (코드~적용종료). */
 .line-items-table th,
 .line-items-table td {
