@@ -569,7 +569,18 @@ select.bulk-status,
 
 .form-grid {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
+}
+/* Grid/flex children must be allowed to shrink below content width, otherwise
+   a wide table forces the whole form to overflow instead of scrolling. */
+.form-grid > *,
+.field,
+.field > div {
+  min-width: 0;
+}
+.table-wrap {
+  max-width: 100%;
 }
 
 .field {

@@ -30,6 +30,17 @@ const state = {
 
 const app = document.querySelector("#app");
 const money = new Intl.NumberFormat("ko-KR");
+// Amount helpers: parse a possibly comma-formatted string to a number, and
+// format a number with thousands separators for display in money inputs.
+function parseAmount(value) {
+  const n = Number(String(value ?? "").replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+function formatAmount(value) {
+  if (value === "" || value === null || value === undefined) return "";
+  const n = parseAmount(value);
+  return n ? money.format(n) : (Number(value) === 0 && String(value) !== "" ? "0" : "");
+}
 const uiParams = new URLSearchParams(location.search);
 const isRequestPopup = uiParams.get("request-popup") === "1";
 const isBrandPopup = uiParams.get("brand-popup") === "1";
@@ -870,30 +881,30 @@ function renderRequestForm() {
       </div>
       <div class="field" data-show-direct="1" style="display:none">
         <label>총 입금액 (배송비 포함, 역산 입력)</label>
-        <input name="directTotalAmount" type="number" min="0" value="${h(item.depositAmount || "")}" placeholder="예: 8800">
+        <input name="directTotalAmount" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.depositAmount))}" placeholder="예: 8,800">
         <div class="muted" data-direct-breakdown style="margin-top:4px"></div>
       </div>
       <div class="field two" data-hide-direct="1">
-        <div><label>제품매출</label><input name="productSalesAmount" type="number" min="0" value="${h(item.productSalesAmount || item.depositAmount || "")}"></div>
+        <div><label>제품매출</label><input name="productSalesAmount" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.productSalesAmount || item.depositAmount))}"></div>
         <div>
           <label>기본 배송비 <span class="muted" style="font-weight:400">(수동 변경 가능)</span></label>
-          <input name="baseShippingFee" type="number" min="0" value="${h(defaultBaseShippingFee || "")}" data-manual="${baseShippingManual ? "1" : ""}">
+          <input name="baseShippingFee" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(defaultBaseShippingFee))}" data-manual="${baseShippingManual ? "1" : ""}">
         </div>
       </div>
       <div class="field">
         <label class="checkbox-line"><input name="useExtraShippingFee" type="checkbox" ${extraShippingEnabled ? "checked" : ""}> 지역/예외 추가배송비 직접 입력</label>
       </div>
       <div class="field two" data-extra-shipping-fields style="${extraShippingEnabled ? "" : "display:none"}">
-        <div><label>지역 추가배송비</label><input name="extraShippingFee" type="number" min="0" value="${h(defaultExtraShippingFee || "")}"></div>
+        <div><label>지역 추가배송비</label><input name="extraShippingFee" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(defaultExtraShippingFee))}"></div>
         <div><label>추가배송비 메모</label><input name="extraShippingNote" value="${h(item.extraShippingNote || "")}" placeholder="예: 제주 추가 4,000원"></div>
       </div>
       <div class="field">
         <label>총 배송비</label>
-        <input name="shippingFee" type="number" readonly value="${h(defaultShippingFee || "")}">
+        <input name="shippingFee" type="text" readonly class="money-input" value="${h(formatAmount(defaultShippingFee))}">
       </div>
       <div class="field two" data-hide-direct="1">
         <div><label>수수료율(%)</label><input name="commissionRate" type="number" min="0" max="100" step="0.1" readonly value="${h(item.commissionRate ?? promotion?.commissionRate ?? selectedBrand?.commissionRate ?? "")}"></div>
-        <div data-supply-amount-field style="${settlementType === "prepay_supply" ? "" : "display:none"}"><label>공급가 합</label><input name="supplyAmount" type="number" min="0" value="${h(item.supplyAmount || "")}"></div>
+        <div data-supply-amount-field style="${settlementType === "prepay_supply" ? "" : "display:none"}"><label>공급가 합</label><input name="supplyAmount" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.supplyAmount))}"></div>
       </div>
       <div class="field" data-hide-direct="1"><label>적용 프로모션</label><input name="promotionRuleName" readonly value="${h(item.promotionRuleName || promotion?.name || "")}" placeholder="없음"></div>
       <div class="field" data-hide-direct="1">
@@ -915,14 +926,14 @@ function renderRequestForm() {
         </div>
       </div>
       <div class="field two">
-        <div><label>업체 실 입금액</label><input name="depositAmount" type="number" readonly value="${h(item.depositAmount || "")}"></div>
-        <div data-receivable-deduction-field style="${showReceivableFields ? "" : "display:none"}"><label data-receivable-deduction-label>${h(receivableLabel)}</label><input name="receivableDeduction" type="number" readonly value="${h(item.receivableDeduction || "")}"></div>
+        <div><label>업체 실 입금액</label><input name="depositAmount" type="text" readonly class="money-input" value="${h(formatAmount(item.depositAmount))}"></div>
+        <div data-receivable-deduction-field style="${showReceivableFields ? "" : "display:none"}"><label data-receivable-deduction-label>${h(receivableLabel)}</label><input name="receivableDeduction" type="text" readonly class="money-input" value="${h(formatAmount(item.receivableDeduction))}"></div>
       </div>
       <div class="field two">
         <div><label>입금 예정일</label><input name="expectedDepositDate" type="date" value="${h(item.expectedDepositDate)}"></div>
         <div>
           <label>조정 반영 후 최종 입금액 <span class="muted" style="font-weight:400">(자동 계산, 직접 수정 가능)</span></label>
-          <input name="paidAmount" type="number" min="0" value="${h(item.paidAmount || "")}" data-manual="${item.paidAmount ? "1" : ""}">
+          <input name="paidAmount" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.paidAmount))}" data-manual="${item.paidAmount ? "1" : ""}">
         </div>
       </div>
       <div class="field">
@@ -943,7 +954,7 @@ function renderRequestForm() {
         <div class="field two">
           <div>
             <label>과입금(외상 발생)</label>
-            <input name="overpaidAmount" type="number" min="0" value="${h(item.overpaidAmount || "")}" placeholder="0">
+            <input name="overpaidAmount" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.overpaidAmount))}" placeholder="0">
           </div>
           <div>
             <label>과입금 사유</label>
@@ -956,7 +967,7 @@ function renderRequestForm() {
         <div class="field two">
           <div>
             <label>외상 차감(이번 송금 시 차감)</label>
-            <input name="creditUsedAmount" type="number" min="0" value="${h(item.creditUsedAmount || "")}" placeholder="0">
+            <input name="creditUsedAmount" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.creditUsedAmount))}" placeholder="0">
           </div>
           <div>
             <label>외상 차감 메모</label>
@@ -973,7 +984,7 @@ function renderRequestForm() {
         <div class="field two">
           <div>
             <label>환불·취소 금액</label>
-            <input name="cancelledAmount" type="number" min="0" value="${h(item.cancelledAmount || "")}" placeholder="0">
+            <input name="cancelledAmount" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.cancelledAmount))}" placeholder="0">
           </div>
           <div>
             <label>사유</label>
@@ -993,7 +1004,7 @@ function renderRequestForm() {
       <div class="field"><label>상태</label><select name="status">${["pending", "await_deposit", "consignment_unpaid", "paid", "hold", "error"].map((s) => `<option value="${s}" ${(item.status || (settlementType === "consignment" ? "consignment_unpaid" : "pending")) === s ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}</select></div>
       <div class="field" data-hide-direct="1">
         <label>계산 수수료 <span class="muted" style="font-weight:400" data-commission-display-hint>${selectedBrand?.hasReceivable ? "(채권 기준 — 프로모션 무시)" : "(실제 차감액)"}</span></label>
-        <input name="commissionAmount" type="number" readonly value="${h(item.commissionAmount || "")}">
+        <input name="commissionAmount" type="text" readonly class="money-input" value="${h(formatAmount(item.commissionAmount))}">
       </div>
       <div class="toolbar">
         <button class="primary" type="submit">${state.editingRequest ? "수정 저장" : "요청 추가"}</button>
@@ -1282,10 +1293,10 @@ function renderRequestLineItems(items, promotionOptions = []) {
                   <button type="button" data-line-step="${item.id}" data-step="1" aria-label="수량 증가">+</button>
                 </div>
               </td>
-              <td><input type="number" min="0" value="${h(item.unitSupplyPrice || "")}" data-line-supply-price="${item.id}" aria-label="공급가" placeholder="선택"></td>
-              <td><input type="number" min="0" value="${h(item.originalPrice || "")}" data-line-original="${item.id}" aria-label="원판매가" placeholder="선택"></td>
-              <td><input type="number" min="0" value="${h(item.discountPrice || "")}" data-line-discount="${item.id}" aria-label="할인가" placeholder="선택"></td>
-              <td><input type="number" min="0" value="${h(item.unitSalePrice || "")}" data-line-sale-price="${item.id}" aria-label="현재판매가" placeholder="자동"></td>
+              <td><input type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.unitSupplyPrice))}" data-line-supply-price="${item.id}" aria-label="공급가" placeholder="선택"></td>
+              <td><input type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.originalPrice))}" data-line-original="${item.id}" aria-label="원판매가" placeholder="선택"></td>
+              <td><input type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.discountPrice))}" data-line-discount="${item.id}" aria-label="할인가" placeholder="선택"></td>
+              <td><input type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.unitSalePrice))}" data-line-sale-price="${item.id}" aria-label="현재판매가" placeholder="자동"></td>
               <td><input type="date" value="${h(item.effectiveFrom || "")}" data-line-from="${item.id}" aria-label="적용시작"></td>
               <td><input type="date" value="${h(item.effectiveTo || "")}" data-line-to="${item.id}" aria-label="적용종료"></td>
               <td data-line-saletotal="${item.id}">${money.format(Number(item.totalSaleAmount || 0))}원</td>
@@ -2062,8 +2073,8 @@ function bindRequests() {
         // typing in that very field), without rebuilding the row.
         if (!opts.saleTyped) {
           const saleInput = lineItemsTable.querySelector(`[data-line-sale-price='${id}']`);
-          if (saleInput && String(Number(saleInput.value || 0)) !== String(item.unitSalePrice)) {
-            saleInput.value = item.unitSalePrice ? String(item.unitSalePrice) : "";
+          if (saleInput && parseAmount(saleInput.value) !== Number(item.unitSalePrice)) {
+            saleInput.value = formatAmount(item.unitSalePrice);
           }
         }
       }
@@ -2073,16 +2084,16 @@ function bindRequests() {
       input.addEventListener("input", () => patchLine(input.dataset.lineQty, { quantity: Math.max(1, Number(input.value || 1)) }));
     });
     lineItemsTable.querySelectorAll("[data-line-supply-price]").forEach((input) => {
-      input.addEventListener("input", () => patchLine(input.dataset.lineSupplyPrice, { unitSupplyPrice: Math.max(0, Number(input.value || 0)) }));
+      input.addEventListener("input", () => patchLine(input.dataset.lineSupplyPrice, { unitSupplyPrice: parseAmount(input.value) }));
     });
     lineItemsTable.querySelectorAll("[data-line-original]").forEach((input) => {
-      input.addEventListener("input", () => patchLine(input.dataset.lineOriginal, { originalPrice: Math.max(0, Number(input.value || 0)) }));
+      input.addEventListener("input", () => patchLine(input.dataset.lineOriginal, { originalPrice: parseAmount(input.value) }));
     });
     lineItemsTable.querySelectorAll("[data-line-discount]").forEach((input) => {
-      input.addEventListener("input", () => patchLine(input.dataset.lineDiscount, { discountPrice: Math.max(0, Number(input.value || 0)) }));
+      input.addEventListener("input", () => patchLine(input.dataset.lineDiscount, { discountPrice: parseAmount(input.value) }));
     });
     lineItemsTable.querySelectorAll("[data-line-sale-price]").forEach((input) => {
-      input.addEventListener("input", () => patchLine(input.dataset.lineSalePrice, { unitSalePrice: Math.max(0, Number(input.value || 0)) }, { saleTyped: true }));
+      input.addEventListener("input", () => patchLine(input.dataset.lineSalePrice, { unitSalePrice: parseAmount(input.value) }, { saleTyped: true }));
     });
     lineItemsTable.querySelectorAll("[data-line-from]").forEach((input) => {
       input.addEventListener("input", () => patchLine(input.dataset.lineFrom, { effectiveFrom: input.value }));
@@ -2379,20 +2390,27 @@ function bindRequests() {
   });
   requestForm.querySelector("[name='directTotalAmount']")?.addEventListener("input", (event) => {
     event.target.dataset.userTyping = "1";
-    const total = Number(event.target.value || 0);
+    const total = parseAmount(event.target.value || 0);
     const brand = state.brands.find((b) => b.id === requestForm.querySelector("[name='brandId']")?.value);
     const split = splitDirectTotal(total, brand);
     const product = requestForm.querySelector("[name='productSalesAmount']");
     const base = requestForm.querySelector("[name='baseShippingFee']");
-    if (product) product.value = split.product ? String(split.product) : "";
+    if (product) product.value = formatAmount(split.product);
     if (base) {
-      base.value = split.shipping ? String(split.shipping) : "";
+      base.value = formatAmount(split.shipping);
       base.dataset.manual = "";
     }
     updateRequestCalculation(requestForm);
     delete event.target.dataset.userTyping;
   });
   updateRequestCalculation(requestForm);
+  // Reformat any amount field with thousands separators when it loses focus.
+  requestForm.addEventListener("focusout", (event) => {
+    const el = event.target;
+    if (el?.classList?.contains("money-input") && !el.readOnly) {
+      el.value = formatAmount(el.value);
+    }
+  });
   requestForm.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
     const tag = event.target.tagName;
@@ -2476,7 +2494,7 @@ function applyBrandDefaults(form, brand) {
 }
 
 function updateRequestCalculation(form) {
-  const value = (name) => Number(form.querySelector(`[name='${name}']`)?.value || 0);
+  const value = (name) => parseAmount(form.querySelector(`[name='${name}']`)?.value || 0);
   const brandId = form.querySelector("[name='brandId']")?.value || "";
   const brandSearch = form.querySelector("[name='brandSearch']")?.value || "";
   const brand = state.brands.find((item) => item.id === brandId) || findBrandByInput(brandSearch);
@@ -2566,7 +2584,7 @@ function updateRequestCalculation(form) {
   } else {
     displayedCommissionAmount = Math.max(0, adjustedProductSales + shippingFee - depositAmount);
   }
-  if (commissionInput) commissionInput.value = String(displayedCommissionAmount || "");
+  if (commissionInput) commissionInput.value = formatAmount(displayedCommissionAmount);
   const commissionHint = form.querySelector("[data-commission-display-hint]");
   if (commissionHint) {
     commissionHint.textContent = isDirect
@@ -2577,17 +2595,17 @@ function updateRequestCalculation(form) {
   }
   if (commissionRateInput) commissionRateInput.value = String(commissionRate || "");
   if (promotionRuleInput) promotionRuleInput.value = promotionContext?.name || "";
-  if (productSalesInput && derivedProductSalesAmount > 0) productSalesInput.value = String(productSalesAmount || "");
-  if (supplyInput && lineItems.length) supplyInput.value = String(supplyAmount || "");
-  if (baseShippingInput && !baseManual) baseShippingInput.value = String(baseShippingFee || "");
-  if (totalShippingInput) totalShippingInput.value = String(shippingFee || "");
-  if (depositInput) depositInput.value = String(depositAmount || "");
-  if (deductionInput) deductionInput.value = String(receivableDeduction || "");
+  if (productSalesInput && derivedProductSalesAmount > 0) productSalesInput.value = formatAmount(productSalesAmount);
+  if (supplyInput && lineItems.length) supplyInput.value = formatAmount(supplyAmount);
+  if (baseShippingInput && !baseManual) baseShippingInput.value = formatAmount(baseShippingFee);
+  if (totalShippingInput) totalShippingInput.value = formatAmount(shippingFee);
+  if (depositInput) depositInput.value = formatAmount(depositAmount);
+  if (deductionInput) deductionInput.value = formatAmount(receivableDeduction);
   const creditUsedAmount = value("creditUsedAmount");
   const paidAmountInput = form.querySelector("[name='paidAmount']");
   const paidManual = paidAmountInput?.dataset.manual === "1";
   const finalPaidAmount = Math.max(0, depositAmount - creditUsedAmount);
-  if (paidAmountInput && !paidManual) paidAmountInput.value = finalPaidAmount ? String(finalPaidAmount) : "";
+  if (paidAmountInput && !paidManual) paidAmountInput.value = formatAmount(finalPaidAmount);
   const creditHint = form.querySelector("[data-brand-credit-hint]");
   if (creditHint) {
     if (brand) {
@@ -2626,7 +2644,7 @@ function updateRequestCalculation(form) {
         ? `→ 상품 ₩${money.format(productSalesAmount)} + 배송 ₩${money.format(baseShippingFee)}`
         : "총액을 입력하면 자동으로 분할됩니다.";
     }
-    if (directInput && !directInput.dataset.userTyping) directInput.value = depositAmount ? String(depositAmount) : "";
+    if (directInput && !directInput.dataset.userTyping) directInput.value = formatAmount(depositAmount);
   }
   if (fixedSettlementType) fixedSettlementType.textContent = settlementLabel(settlementType);
   if (fixedCommissionRate) fixedCommissionRate.textContent = commissionRate ? `${commissionRate}%` : "-";

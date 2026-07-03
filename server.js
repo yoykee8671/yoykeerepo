@@ -211,7 +211,8 @@ function inferCutoffHour(note = "") {
 }
 
 function number(value, fallback = 0) {
-  const parsed = Number(value);
+  // Tolerate thousands separators (e.g. "3,000") from comma-formatted inputs.
+  const parsed = Number(typeof value === "string" ? value.replace(/,/g, "").trim() : value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
