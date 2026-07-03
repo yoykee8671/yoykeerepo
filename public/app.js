@@ -905,23 +905,14 @@ function renderRequestForm() {
         </div>
         <datalist id="request-price-options"></datalist>
         <div class="toolbar" style="margin-top:8px">
-          <button type="button" data-add-line-item>품목 추가</button>
-          <button type="button" data-add-manual-line-item>직접 행 추가</button>
-          <span class="muted">최대 30개 행</span>
-        </div>
-        <div class="bulk-paste">
-          <label>품목 일괄 입력</label>
-          <textarea
-            name="lineItemsBulk"
-            placeholder="예시 1) TEST-001[TAB]2&#10;예시 2) 테스트 상품[TAB]3&#10;예시 3) TEST-001[TAB]테스트 상품[TAB]2"
-          ></textarea>
-          <div class="toolbar">
-            <button type="button" data-bulk-add-line-items>붙여넣기 추가</button>
-            <span class="muted" data-bulk-result></span>
-          </div>
-          <div data-bulk-unmatched></div>
+          <button type="button" data-add-line-item>단가표에서 추가</button>
+          <span class="muted" data-bulk-result></span>
         </div>
         <div data-line-items-table>${renderRequestLineItems(lineItems)}</div>
+        <div class="toolbar" style="margin-top:8px">
+          <button type="button" class="primary" data-add-manual-line-item>+ 행 추가</button>
+          <span class="muted">최대 30개 행 · 모든 값은 선택 입력, 현재판매가는 원판매가−할인가 자동(수정 가능)</span>
+        </div>
       </div>
       <div class="field two">
         <div><label>업체 실 입금액</label><input name="depositAmount" type="number" readonly value="${h(item.depositAmount || "")}"></div>
@@ -1275,17 +1266,14 @@ function renderRequestLineItems(items, promotionOptions = []) {
     return `<select data-line-promotion="${item.id}" aria-label="프로모션">${options}</select>`;
   };
   return `
-    <div class="table-wrap" style="max-height:220px">
-      <table>
-        <thead><tr><th>코드</th><th>품목명</th><th>수량</th><th>공급가</th><th>판매단가</th><th>판매합계</th><th>공급가합</th><th>프로모션</th><th>작업</th></tr></thead>
+    <div class="table-wrap line-items-wrap" style="max-height:300px">
+      <table class="line-items-table">
+        <thead><tr><th>코드</th><th>품목명</th><th>수량</th><th>공급가</th><th>원판매가</th><th>할인가</th><th>현재판매가</th><th>적용시작</th><th>적용종료</th><th>판매합계</th><th>프로모션</th><th>작업</th></tr></thead>
         <tbody>
           ${items.map((item) => `
             <tr>
-              <td><input value="${h(item.itemCode || "")}" data-line-code="${item.id}" aria-label="품목코드"></td>
-              <td>
-                <input value="${h(item.itemName || "")}" data-line-name="${item.id}" aria-label="품목명">
-                ${item.spec ? `<br><span class="muted">${h(item.spec)}</span>` : ""}
-              </td>
+              <td><input value="${h(item.itemCode || "")}" data-line-code="${item.id}" aria-label="품목코드" placeholder="코드"></td>
+              <td><input value="${h(item.itemName || "")}" data-line-name="${item.id}" aria-label="품목명" placeholder="품목명"></td>
               <td>
                 <div class="qty-editor">
                   <button type="button" data-line-step="${item.id}" data-step="-1" aria-label="수량 감소">-</button>
@@ -1293,12 +1281,15 @@ function renderRequestLineItems(items, promotionOptions = []) {
                   <button type="button" data-line-step="${item.id}" data-step="1" aria-label="수량 증가">+</button>
                 </div>
               </td>
-              <td><input type="number" min="0" value="${h(item.unitSupplyPrice || "")}" data-line-supply-price="${item.id}" aria-label="공급가"></td>
-              <td><input type="number" min="0" value="${h(item.unitSalePrice || "")}" data-line-sale-price="${item.id}" aria-label="판매단가"></td>
+              <td><input type="number" min="0" value="${h(item.unitSupplyPrice || "")}" data-line-supply-price="${item.id}" aria-label="공급가" placeholder="선택"></td>
+              <td><input type="number" min="0" value="${h(item.originalPrice || "")}" data-line-original="${item.id}" aria-label="원판매가" placeholder="선택"></td>
+              <td><input type="number" min="0" value="${h(item.discountPrice || "")}" data-line-discount="${item.id}" aria-label="할인가" placeholder="선택"></td>
+              <td><input type="number" min="0" value="${h(item.unitSalePrice || "")}" data-line-sale-price="${item.id}" aria-label="현재판매가" placeholder="자동"></td>
+              <td><input type="date" value="${h(item.effectiveFrom || "")}" data-line-from="${item.id}" aria-label="적용시작"></td>
+              <td><input type="date" value="${h(item.effectiveTo || "")}" data-line-to="${item.id}" aria-label="적용종료"></td>
               <td data-line-saletotal="${item.id}">${money.format(Number(item.totalSaleAmount || 0))}원</td>
-              <td data-line-supplytotal="${item.id}">${money.format(Number(item.totalSupplyPrice || 0))}원</td>
               <td>${promotionCell(item)}</td>
-              <td><button type="button" data-remove-line-item="${item.id}">삭제</button></td>
+              <td><button type="button" class="danger" data-remove-line-item="${item.id}">삭제</button></td>
             </tr>`).join("")}
         </tbody>
       </table>
@@ -1944,7 +1935,6 @@ function bindRequests() {
   const lineItemSearch = requestForm.querySelector("[name='lineItemSearch']");
   const lineItemQty = requestForm.querySelector("[name='lineItemQty']");
   const lineItemOptions = requestForm.querySelector("#request-price-options");
-  const bulkInput = requestForm.querySelector("[name='lineItemsBulk']");
   const bulkResult = requestForm.querySelector("[data-bulk-result]");
   const bulkUnmatched = requestForm.querySelector("[data-bulk-unmatched]");
   const extraShippingToggle = requestForm.querySelector("[name='useExtraShippingFee']");
@@ -1971,18 +1961,26 @@ function bindRequests() {
       .map((item) => {
         const quantity = Math.max(1, Number(item.quantity || 1));
         const unitSupplyPrice = Number(item.unitSupplyPrice || 0);
+        const originalPrice = Number(item.originalPrice || 0);
+        const discountPrice = Number(item.discountPrice || 0);
         const unitSalePrice = Number(item.unitSalePrice || item.salePrice || 0);
         return {
           ...item,
           quantity,
           unitSupplyPrice,
+          originalPrice,
+          discountPrice,
           unitSalePrice,
+          effectiveFrom: item.effectiveFrom || "",
+          effectiveTo: item.effectiveTo || "",
+          salePriceManual: item.salePriceManual === true,
           promotionRuleId: String(item.promotionRuleId || ""),
           totalSupplyPrice: quantity * unitSupplyPrice,
           totalSaleAmount: quantity * unitSalePrice
         };
-      })
-      .filter((item) => item.itemCode || item.itemName);
+      });
+  // Empty rows stay visible for editing ([+ 행 추가]); the server drops rows
+  // without a code/name on save, so they never persist.
   const lineItemPromotionOptions = () => {
     const brand = getSelectedBrand();
     if (!brand) return [];
@@ -2028,18 +2026,29 @@ function bindRequests() {
     // In-place field edit: update the data model + this row's computed cells
     // WITHOUT rebuilding the table, so the focused input is never destroyed
     // (fixes the "types one char then loses focus" bug).
-    const patchLine = (id, patch) => {
+    const patchLine = (id, patch, opts = {}) => {
       const items = getLineItems().map((item) => {
         if (item.id !== id) return item;
         const merged = { ...item, ...patch };
         const quantity = Math.max(1, Number(merged.quantity || 1));
         const unitSupplyPrice = Math.max(0, Number(merged.unitSupplyPrice || 0));
-        const unitSalePrice = Math.max(0, Number(merged.unitSalePrice || 0));
+        const originalPrice = Math.max(0, Number(merged.originalPrice || 0));
+        const discountPrice = Math.max(0, Number(merged.discountPrice || 0));
+        // 현재판매가: auto = 원판매가 - 할인가, unless the user typed it directly.
+        let salePriceManual = merged.salePriceManual === true;
+        if (opts.saleTyped) salePriceManual = true;
+        let unitSalePrice = Math.max(0, Number(merged.unitSalePrice || 0));
+        if (!salePriceManual && ("originalPrice" in patch || "discountPrice" in patch)) {
+          unitSalePrice = Math.max(0, originalPrice - discountPrice);
+        }
         return {
           ...merged,
           quantity,
           unitSupplyPrice,
+          originalPrice,
+          discountPrice,
           unitSalePrice,
+          salePriceManual,
           totalSupplyPrice: quantity * unitSupplyPrice,
           totalSaleAmount: quantity * unitSalePrice
         };
@@ -2048,20 +2057,38 @@ function bindRequests() {
       const item = items.find((x) => x.id === id);
       if (item) {
         const saleCell = lineItemsTable.querySelector(`[data-line-saletotal='${id}']`);
-        const supplyCell = lineItemsTable.querySelector(`[data-line-supplytotal='${id}']`);
         if (saleCell) saleCell.textContent = `${money.format(Number(item.totalSaleAmount || 0))}원`;
-        if (supplyCell) supplyCell.textContent = `${money.format(Number(item.totalSupplyPrice || 0))}원`;
+        // Reflect an auto-recomputed 현재판매가 into its input (unless the user is
+        // typing in that very field), without rebuilding the row.
+        if (!opts.saleTyped) {
+          const saleInput = lineItemsTable.querySelector(`[data-line-sale-price='${id}']`);
+          if (saleInput && String(Number(saleInput.value || 0)) !== String(item.unitSalePrice)) {
+            saleInput.value = item.unitSalePrice ? String(item.unitSalePrice) : "";
+          }
+        }
       }
       updateRequestCalculation(requestForm);
     };
     lineItemsTable.querySelectorAll("[data-line-qty]").forEach((input) => {
       input.addEventListener("input", () => patchLine(input.dataset.lineQty, { quantity: Math.max(1, Number(input.value || 1)) }));
     });
-    lineItemsTable.querySelectorAll("[data-line-sale-price]").forEach((input) => {
-      input.addEventListener("input", () => patchLine(input.dataset.lineSalePrice, { unitSalePrice: Math.max(0, Number(input.value || 0)) }));
-    });
     lineItemsTable.querySelectorAll("[data-line-supply-price]").forEach((input) => {
       input.addEventListener("input", () => patchLine(input.dataset.lineSupplyPrice, { unitSupplyPrice: Math.max(0, Number(input.value || 0)) }));
+    });
+    lineItemsTable.querySelectorAll("[data-line-original]").forEach((input) => {
+      input.addEventListener("input", () => patchLine(input.dataset.lineOriginal, { originalPrice: Math.max(0, Number(input.value || 0)) }));
+    });
+    lineItemsTable.querySelectorAll("[data-line-discount]").forEach((input) => {
+      input.addEventListener("input", () => patchLine(input.dataset.lineDiscount, { discountPrice: Math.max(0, Number(input.value || 0)) }));
+    });
+    lineItemsTable.querySelectorAll("[data-line-sale-price]").forEach((input) => {
+      input.addEventListener("input", () => patchLine(input.dataset.lineSalePrice, { unitSalePrice: Math.max(0, Number(input.value || 0)) }, { saleTyped: true }));
+    });
+    lineItemsTable.querySelectorAll("[data-line-from]").forEach((input) => {
+      input.addEventListener("input", () => patchLine(input.dataset.lineFrom, { effectiveFrom: input.value }));
+    });
+    lineItemsTable.querySelectorAll("[data-line-to]").forEach((input) => {
+      input.addEventListener("input", () => patchLine(input.dataset.lineTo, { effectiveTo: input.value }));
     });
     lineItemsTable.querySelectorAll("[data-line-code]").forEach((input) => {
       input.addEventListener("input", () => patchLine(input.dataset.lineCode, { itemCode: input.value }));
@@ -2079,19 +2106,24 @@ function bindRequests() {
     state.brands.find((item) => item.id === brandIdInput.value) || findBrandByInput(brandSearch.value);
   const mergeLineItem = (items, priceItem, quantity) => {
     if (items.length >= 30 && !items.some((item) => item.priceEntryId === priceItem.id || (item.itemCode && item.itemCode === priceItem.itemCode && item.itemName === priceItem.itemName))) {
-      bulkResult.textContent = "품목 행은 최대 30개까지 입력할 수 있습니다.";
+      if (bulkResult) bulkResult.textContent = "품목 행은 최대 30개까지 입력할 수 있습니다.";
       return items;
     }
     const existing = items.find((item) => item.priceEntryId === priceItem.id || (item.itemCode && item.itemCode === priceItem.itemCode && item.itemName === priceItem.itemName));
+    const catalogOriginal = Number(priceItem.originalPrice || priceItem.consumerPrice || 0);
+    const catalogDiscount = Number(priceItem.discountPrice || 0);
     if (existing) {
       existing.quantity = Math.max(1, Number(existing.quantity || 1) + quantity);
       existing.unitSupplyPrice = Number(priceItem.supplyPrice || existing.unitSupplyPrice || 0);
+      existing.originalPrice = catalogOriginal || existing.originalPrice || 0;
+      existing.discountPrice = catalogDiscount || existing.discountPrice || 0;
       existing.unitSalePrice = Number(priceItem.salePrice || existing.unitSalePrice || 0);
       existing.totalSupplyPrice = Number(existing.quantity) * Number(existing.unitSupplyPrice);
       existing.totalSaleAmount = Number(existing.quantity) * Number(existing.unitSalePrice || 0);
       existing.spec = priceItem.spec || existing.spec || "";
       existing.unit = priceItem.unit || existing.unit || "";
       existing.effectiveFrom = priceItem.effectiveFrom || existing.effectiveFrom || "";
+      existing.effectiveTo = priceItem.effectiveTo || existing.effectiveTo || "";
       return items;
     }
     items.push({
@@ -2103,17 +2135,21 @@ function bindRequests() {
       unit: priceItem.unit || "",
       quantity,
       unitSupplyPrice: Number(priceItem.supplyPrice || 0),
+      originalPrice: catalogOriginal,
+      discountPrice: catalogDiscount,
       unitSalePrice: Number(priceItem.salePrice || 0),
+      salePriceManual: Number(priceItem.salePrice || 0) !== Math.max(0, catalogOriginal - catalogDiscount),
       totalSupplyPrice: Number(priceItem.supplyPrice || 0) * quantity,
       totalSaleAmount: Number(priceItem.salePrice || 0) * quantity,
-      effectiveFrom: priceItem.effectiveFrom
+      effectiveFrom: priceItem.effectiveFrom,
+      effectiveTo: priceItem.effectiveTo || ""
     });
     return items;
   };
   const addManualLineItem = () => {
     const items = getLineItems();
     if (items.length >= 30) {
-      bulkResult.textContent = "품목 행은 최대 30개까지 입력할 수 있습니다.";
+      if (bulkResult) bulkResult.textContent = "품목 행은 최대 30개까지 입력할 수 있습니다.";
       return;
     }
     items.push({
@@ -2125,16 +2161,21 @@ function bindRequests() {
       unit: "",
       quantity: 1,
       unitSupplyPrice: 0,
+      originalPrice: 0,
+      discountPrice: 0,
       unitSalePrice: 0,
+      salePriceManual: false,
       totalSupplyPrice: 0,
       totalSaleAmount: 0,
-      effectiveFrom: ""
+      effectiveFrom: "",
+      effectiveTo: ""
     });
     setLineItems(items);
     updateRequestCalculation(requestForm);
   };
   const setUnmatchedItems = (items) => {
     unmatchedItems = items;
+    if (!bulkUnmatched) return;
     bulkUnmatched.innerHTML = renderBulkUnmatchedItems(unmatchedItems);
     bulkUnmatched.querySelectorAll("[data-dismiss-unmatched]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -2148,12 +2189,12 @@ function bindRequests() {
         const input = bulkUnmatched.querySelector(`[data-unmatched-map-input='${button.dataset.applyUnmatchedMap}']`);
         const priceItem = findPriceCatalogByInput(input?.value || "", brand?.id || "", getEffectiveDate());
         if (!missing || !priceItem) {
-          bulkResult.textContent = "기존 단가 매핑 대상을 찾지 못했습니다.";
+          if (bulkResult) bulkResult.textContent = "기존 단가 매핑 대상을 찾지 못했습니다.";
           return;
         }
         setLineItems(mergeLineItem(getLineItems(), priceItem, missing.quantity));
         setUnmatchedItems(unmatchedItems.filter((item) => item.id !== missing.id));
-        bulkResult.textContent = "미일치 품목을 기존 단가에 연결했습니다.";
+        if (bulkResult) bulkResult.textContent = "미일치 품목을 기존 단가에 연결했습니다.";
         updateRequestCalculation(requestForm);
       });
     });
@@ -2168,12 +2209,12 @@ function bindRequests() {
         const validToInput = bulkUnmatched.querySelector(`[data-unmatched-alias-to='${button.dataset.createUnmatchedAlias}']`);
         const priceItem = findPriceCatalogByInput(mapInput?.value || "", brand?.id || "", getEffectiveDate());
         if (!missing || !brand || !priceItem) {
-          bulkResult.textContent = "별칭으로 연결할 기존 단가를 찾지 못했습니다.";
+          if (bulkResult) bulkResult.textContent = "별칭으로 연결할 기존 단가를 찾지 못했습니다.";
           return;
         }
         const aliasText = String(aliasTextInput?.value || "").trim();
         if (!aliasText) {
-          bulkResult.textContent = "자동 인식할 별칭 문구를 입력하세요.";
+          if (bulkResult) bulkResult.textContent = "자동 인식할 별칭 문구를 입력하세요.";
           return;
         }
         await api("/api/price-aliases", {
@@ -2191,7 +2232,7 @@ function bindRequests() {
         refreshLineItemOptions();
         setLineItems(mergeLineItem(getLineItems(), priceItem, missing.quantity));
         setUnmatchedItems(unmatchedItems.filter((item) => item.id !== missing.id));
-        bulkResult.textContent = "기간 별칭을 저장하고 품목에 연결했습니다.";
+        if (bulkResult) bulkResult.textContent = "기간 별칭을 저장하고 품목에 연결했습니다.";
         updateRequestCalculation(requestForm);
       });
     });
@@ -2202,11 +2243,11 @@ function bindRequests() {
         const supplyInput = bulkUnmatched.querySelector(`[data-unmatched-supply-price='${button.dataset.createUnmatchedPrice}']`);
         const supplyPrice = Number(supplyInput?.value || 0);
         if (!missing || !brand) {
-          bulkResult.textContent = "브랜드 또는 미일치 품목 정보가 없습니다.";
+          if (bulkResult) bulkResult.textContent = "브랜드 또는 미일치 품목 정보가 없습니다.";
           return;
         }
         if (!supplyPrice) {
-          bulkResult.textContent = "신규 공급가를 입력하세요.";
+          if (bulkResult) bulkResult.textContent = "신규 공급가를 입력하세요.";
           return;
         }
         const created = await api("/api/price-entries", {
@@ -2226,7 +2267,7 @@ function bindRequests() {
         refreshLineItemOptions();
         setLineItems(mergeLineItem(getLineItems(), created.priceEntry, missing.quantity));
         setUnmatchedItems(unmatchedItems.filter((item) => item.id !== missing.id));
-        bulkResult.textContent = "새 단가를 등록하고 품목에 추가했습니다.";
+        if (bulkResult) bulkResult.textContent = "새 단가를 등록하고 품목에 추가했습니다.";
         updateRequestCalculation(requestForm);
       });
     });
@@ -2234,6 +2275,9 @@ function bindRequests() {
   setLineItems(getLineItems());
   setUnmatchedItems([]);
   refreshLineItemOptions();
+  // Start with one empty row so users can type a line immediately ([+ 행 추가]
+  // adds more). Empty rows are dropped by the server on save.
+  if (!getLineItems().length) addManualLineItem();
   const brandPopupButton = requestForm.querySelector("[data-open-brand-popup]");
   const syncBrandPopupButton = () => {
     if (brandPopupButton) brandPopupButton.disabled = !brandIdInput.value;
@@ -2304,7 +2348,7 @@ function bindRequests() {
     setLineItems(items);
     lineItemSearch.value = "";
     lineItemQty.value = "1";
-    if (bulkResult) bulkResult.textContent = "";
+    if (bulkResult) if (bulkResult) bulkResult.textContent = "";
     setUnmatchedItems([]);
     updateRequestCalculation(requestForm);
     lineItemSearch.focus();
@@ -2322,58 +2366,6 @@ function bindRequests() {
         addSelectedLineItem();
       }
     });
-  });
-  requestForm.querySelector("[data-bulk-add-line-items]").addEventListener("click", () => {
-    const brand = getSelectedBrand();
-    if (!brand) {
-      bulkResult.textContent = "브랜드를 먼저 선택하세요.";
-      return;
-    }
-    const raw = String(bulkInput.value || "").trim();
-    if (!raw) {
-      bulkResult.textContent = "붙여넣은 내용이 없습니다.";
-      return;
-    }
-    const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    const items = getLineItems();
-    let added = 0;
-    let merged = 0;
-    const missing = [];
-    for (const line of lines) {
-      const columns = line.split(/\t+/).map((part) => part.trim()).filter(Boolean);
-      if (!columns.length) continue;
-      const parsed = parseBulkLine(columns);
-      const priceItem =
-        findPriceCatalogByInput(parsed.searchText, brand.id, getEffectiveDate()) ||
-        findPriceCatalogByInput(parsed.itemCode, brand.id, getEffectiveDate()) ||
-        findPriceCatalogByInput(parsed.itemName, brand.id, getEffectiveDate());
-      if (!priceItem) {
-        missing.push({
-          id: cryptoRandomId(),
-          raw: columns.join(" / "),
-          itemCode: parsed.itemCode,
-          itemName: parsed.itemName,
-          quantity: parsed.quantity,
-          suggestedSearch: parsed.searchText,
-          aliasText: parsed.itemName || parsed.itemCode || parsed.searchText,
-          defaultValidFrom: getEffectiveDate(),
-          defaultValidTo: ""
-        });
-        continue;
-      }
-      const existed = items.some((item) => item.priceEntryId === priceItem.id || (item.itemCode && item.itemCode === priceItem.itemCode && item.itemName === priceItem.itemName));
-      mergeLineItem(items, priceItem, parsed.quantity);
-      if (existed) merged += 1;
-      else added += 1;
-    }
-    setLineItems(items);
-    updateRequestCalculation(requestForm);
-    bulkInput.value = "";
-    setUnmatchedItems(missing);
-    bulkResult.textContent =
-      missing.length
-        ? `추가 ${added}건, 합산 ${merged}건, 미일치 ${missing.length}건`
-        : `추가 ${added}건, 합산 ${merged}건`;
   });
   requestForm
     .querySelectorAll("[name='productSalesAmount'], [name='extraShippingFee'], [name='commissionRate'], [name='supplyAmount'], [name='expectedDepositDate'], [name='overpaidAmount'], [name='creditUsedAmount'], [name='cancelledAmount']")

@@ -652,6 +652,23 @@ select.bulk-status,
   background: #fff;
 }
 
+/* Compact inputs for the wide per-line price table (코드~적용종료). */
+.line-items-table th,
+.line-items-table td {
+  padding: 4px 6px;
+  white-space: nowrap;
+}
+.line-items-table input[type="number"] {
+  width: 78px;
+}
+.line-items-table input[type="date"] {
+  width: 130px;
+}
+.line-items-table td:first-child input,
+.line-items-table td:nth-child(2) input {
+  min-width: 90px;
+}
+
 .bulk-paste {
   display: grid;
   gap: 8px;

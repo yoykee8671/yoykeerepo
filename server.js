@@ -1306,7 +1306,13 @@ function sanitizeLineItems(raw) {
       const quantity = Math.max(1, number(item.quantity, 1));
       const unitSupplyPrice = number(item.unitSupplyPrice);
       const totalSupplyPrice = number(item.totalSupplyPrice, quantity * unitSupplyPrice);
-      const unitSalePrice = number(item.unitSalePrice, number(item.salePrice));
+      const originalPrice = number(item.originalPrice, number(item.consumerPrice));
+      const discountPrice = number(item.discountPrice);
+      // 현재판매가(unitSalePrice): explicit value if given, else 원판매가 - 할인가.
+      const unitSalePrice = number(
+        item.unitSalePrice,
+        number(item.salePrice, Math.max(0, originalPrice - discountPrice))
+      );
       const totalSaleAmount = number(item.totalSaleAmount, quantity * unitSalePrice);
       return {
         id: item.id || id("line"),
@@ -1318,10 +1324,13 @@ function sanitizeLineItems(raw) {
         quantity,
         unitSupplyPrice,
         totalSupplyPrice,
+        originalPrice,
+        discountPrice,
         unitSalePrice,
         totalSaleAmount,
         promotionRuleId: String(item.promotionRuleId || "").trim(),
-        effectiveFrom: dateOnly(item.effectiveFrom)
+        effectiveFrom: dateOnly(item.effectiveFrom),
+        effectiveTo: dateOnly(item.effectiveTo)
       };
     })
     .filter((item) => item.itemCode || item.itemName);
