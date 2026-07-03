@@ -3411,7 +3411,7 @@ function bindSettlement() {
       const a = document.createElement("a");
       a.href = url;
       const brand = state.brands.find((b) => b.id === s.brandId);
-      a.download = `(우프) ${brand?.cafe24Supplier || brand?.name}_${s.year}${String(s.month).padStart(2, "0")}.xlsx`;
+      a.download = `(우프) ${brand?.name || brand?.cafe24Supplier}_${s.year}${String(s.month).padStart(2, "0")}.xlsx`;
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
       showToast("정산서를 다운로드했습니다.");
