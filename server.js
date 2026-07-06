@@ -1094,14 +1094,19 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   // data2: cafe24 rows for this brand
   const brandRows = cafe24Rows.filter((r) => cafe24RowMatchesBrand(r, brand));
 
+  // 위탁(consignment)은 [배송완료일]이 정산월인 건을 포함(주문일 무관).
+  // 그 외(채권/수수료)는 [주문일](주문번호 앞 8자리)이 정산월 + 배송완료 건.
+  const isConsignment = settlementType === "consignment";
+  const ymOf = (raw) => String(raw || "").replace(/[^0-9]/g, "").slice(0, 6);
   const cancels = [];
-  const includedByOrder = new Map(); // orderNo -> [delivered cafe24 rows]
+  const includedByOrder = new Map(); // orderNo -> [정산 포함 cafe24 rows]
   const allRowsByOrder = new Map(); // orderNo -> [all non-cancelled rows] (부분배송 대조용)
   let excludedCount = 0;
   for (const r of brandRows) {
     const orderNo = String(r["주문번호"] || "").trim();
     const orderDate = orderNo.slice(0, 8);
-    const delivered = Boolean(String(r["배송완료일"] || "").trim());
+    const deliveredDate = String(r["배송완료일"] || "").trim();
+    const delivered = Boolean(deliveredDate);
     if (cafe24RowIsCancelled(r)) {
       cancels.push({
         itemNo: r["품목별 주문번호"] || orderNo,
@@ -1113,11 +1118,15 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
       });
       continue;
     }
-    if (orderDate.startsWith(monthPrefix)) {
+    const included = isConsignment
+      ? (delivered && ymOf(deliveredDate) === monthPrefix)      // 위탁: 배송완료월 기준
+      : (orderDate.startsWith(monthPrefix) && delivered);       // 그 외: 주문일 기준 + 배송완료
+    const inScope = isConsignment ? included : orderDate.startsWith(monthPrefix);
+    if (inScope) {
       if (!allRowsByOrder.has(orderNo)) allRowsByOrder.set(orderNo, []);
       allRowsByOrder.get(orderNo).push(r);
     }
-    if (orderDate.startsWith(monthPrefix) && delivered) {
+    if (included) {
       if (!includedByOrder.has(orderNo)) includedByOrder.set(orderNo, []);
       includedByOrder.get(orderNo).push(r);
     } else {
@@ -1152,9 +1161,12 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
       errors.push({ orderNo, type: "missing_request", message: `카페24 배송완료 주문이 입금요청에 없습니다: ${orderNo}` });
       continue;
     }
-    const paid = req.status === "paid" || Boolean(req.paidAt);
-    if (!paid) {
-      errors.push({ orderNo, type: "unpaid", message: `입금완료되지 않은 주문입니다: ${orderNo}` });
+    // 위탁은 계산서 발행 후 익월 말 입금이라 정산 시점에 미입금이 정상 → 미입금 체크 제외.
+    if (!isConsignment) {
+      const paid = req.status === "paid" || Boolean(req.paidAt);
+      if (!paid) {
+        errors.push({ orderNo, type: "unpaid", message: `입금완료되지 않은 주문입니다: ${orderNo}` });
+      }
     }
     const wooofSales = number(req.productSalesAmount);
     if (priceBasis === "catalog" && canon.hasCatalog) {
@@ -1259,7 +1271,11 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   // 여러 달을 담고 있어도 정산월에 한정하지 않고 파일 전체 범위에서 찾는다
   // (배송 후 입금하는 업체는 월 경계를 넘어가기도 하므로).
   let bankMonthTotal = 0;
-  if (bankRows.length) {
+  if (isConsignment) {
+    // 위탁은 계산서 발행 후 익월 말에 입금하므로 이번 정산 시점 통장 내역과
+    // 대조할 것이 없다. 은행 대조를 건너뛰고 카페24(배송완료 기준)로만 정산한다.
+    warnings.push("위탁 정산은 익월 말 입금이라 은행 출금 대조를 하지 않습니다 (카페24 배송완료 기준으로만 집계).");
+  } else if (bankRows.length) {
     const { rows: bankBrand, deposits: bankDeposits, coverage } = bankBrandMovements(bankRows, brand);
     const coverageList = [...coverage].sort();
     const coverageLabel = coverageList.length
