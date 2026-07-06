@@ -1000,6 +1000,16 @@ function cafe24UnitPrice(row) {
 function cafe24RowSaleAmount(row) {
   return cafe24UnitPrice(row) * Math.max(1, number(row["수량"], 1));
 }
+// Order-level shipping from cafe24. 공급사 기본 배송비 repeats on each row of an
+// order, so take it once (max); add 개별/지역별 배송비. Handles either export's
+// column names.
+function cafe24OrderShipping(rows) {
+  const maxCol = (name) => Math.max(0, ...rows.map((r) => number(r[name])));
+  const base = Math.max(maxCol("공급사 기본 배송비"), maxCol("기본배송비"));
+  const indiv = maxCol("개별배송비");
+  const region = Math.max(maxCol("지역별 배송비"), maxCol("지역배송비추가"));
+  return base + indiv + region;
+}
 
 // Normalize a bank party/label for fuzzy comparison: uppercase, drop spaces and
 // any bracketed suffix (지점명·법인격 등), keep hangul/latin/digits only.
@@ -1155,6 +1165,39 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   const sumSales = (rows) => rows.reduce((s, r) => s + cafe24RowSaleAmount(r), 0);
   const sumItemDisc = (rows) => rows.reduce((s, r) => s + number(r["상품별 추가할인금액"]), 0);
   const orderCoupon = (rows) => rows.reduce((mx, r) => Math.max(mx, number(r["쿠폰 할인금액(최종)"]), number(r["주문서 쿠폰 할인금액"])), 0);
+
+  // 위탁: 입금요청(data1)이 없다. 카페24 데이터로만 정산서 라인을 구성한다.
+  if (isConsignment) {
+    for (const [orderNo, rowsOfOrder] of includedByOrder) {
+      const orderShip = cafe24OrderShipping(rowsOfOrder);
+      rowsOfOrder.forEach((r, idx) => {
+        seq++;
+        const qty = Math.max(1, number(r["수량"], 1));
+        const original = cafe24UnitPrice(r);               // 소비자가(정가) 단가 = 판매가+옵션
+        const lineDisc = number(r["상품별 추가할인금액"]);  // 라인 총 할인
+        const discountRate = original > 0 && qty > 0 ? Math.max(0, Number((lineDisc / (qty * original)).toFixed(4))) : 0;
+        const unitSale = Math.round(original * (1 - discountRate));
+        const saleTotal = Math.max(0, original * qty - lineDisc);
+        const commissionWon = Math.round(saleTotal * (rate / 100));
+        lines.push({
+          itemNo: r["품목별 주문번호"] || `${orderNo}-${String(idx + 1).padStart(2, "0")}`,
+          name: r["주문상품명(기본)"] || "",
+          qty,
+          consumer: unitSale,
+          original,
+          discountRate,
+          saleTotal,
+          ship: idx === 0 ? orderShip : 0,
+          refundShip: 0,
+          ratePct: rate,
+          commissionWon,
+          supplyAmt: saleTotal - commissionWon,
+          payDate: "",
+          note: r["상품별 추가할인 상세"] || ""
+        });
+      });
+    }
+  } else
   for (const [orderNo, rowsOfOrder] of includedByOrder) {
     const req = reqByOrder.get(orderNo);
     if (!req) {
