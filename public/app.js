@@ -228,7 +228,8 @@ function renderRequestMemoCell(item) {
 }
 
 function finalDepositAmount(item) {
-  return Math.max(0, Number(item?.depositAmount || 0) - Number(item?.creditUsedAmount || 0));
+  // 남은(이번에 지급할) 금액 = 업체실입금 − 외상차감 − 기지급(이미 보낸 부분).
+  return Math.max(0, Number(item?.depositAmount || 0) - Number(item?.creditUsedAmount || 0) - Number(item?.priorPaidAmount || 0));
 }
 
 function splitDirectTotal(total, brand) {
@@ -801,7 +802,7 @@ function renderRequestRow(item) {
       <td>${h(item.customerName)}</td>
       <td>${money.format(Number(item.productSalesAmount || 0))}원</td>
       <td>${money.format(Number(item.shippingFee || 0))}원</td>
-      <td><strong class="amount-emphasis">${money.format(finalDepositAmount(item))}원</strong>${Number(item.creditUsedAmount || 0) > 0 ? `<br><span class="muted" style="font-size:11px">원 ${money.format(Number(item.depositAmount || 0))}원 − 외상 ${money.format(Number(item.creditUsedAmount || 0))}원</span>` : ""}</td>
+      <td><strong class="amount-emphasis">${money.format(finalDepositAmount(item))}원</strong>${Number(item.creditUsedAmount || 0) > 0 ? `<br><span class="muted" style="font-size:11px">원 ${money.format(Number(item.depositAmount || 0))}원 − 외상 ${money.format(Number(item.creditUsedAmount || 0))}원</span>` : ""}${Number(item.priorPaidAmount || 0) > 0 ? `<br><span class="muted" style="font-size:11px">총 ${money.format(Number(item.depositAmount || 0))}원 − 기지급 ${money.format(Number(item.priorPaidAmount || 0))}원 = 추가 ${money.format(finalDepositAmount(item))}원</span>` : ""}</td>
       <td class="wrap">${h(summarizeAppliedPromotions(item) || "-")}</td>
       <td>${h(item.expectedDepositDate)}</td>
       <td>${formatPaidAtCell(item.paidAt)}</td>
@@ -929,6 +930,14 @@ function renderRequestForm() {
         <div><label>업체 실 입금액</label><input name="depositAmount" type="text" readonly class="money-input" value="${h(formatAmount(item.depositAmount))}"></div>
         <div data-receivable-deduction-field style="${showReceivableFields ? "" : "display:none"}"><label data-receivable-deduction-label>${h(receivableLabel)}</label><input name="receivableDeduction" type="text" readonly class="money-input" value="${h(formatAmount(item.receivableDeduction))}"></div>
       </div>
+      <div class="field two">
+        <div>
+          <label>기지급액 <span class="muted" style="font-weight:400">(이미 보낸 금액 — 부족분만 추가 지급 시)</span></label>
+          <input name="priorPaidAmount" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.priorPaidAmount))}" placeholder="0">
+        </div>
+        <div><label>기지급 메모</label><input name="priorPaidNote" value="${h(item.priorPaidNote || "")}" placeholder="예: 6/25 수수료 공제분 37,500 선지급"></div>
+      </div>
+      <div class="field" data-prior-paid-hint style="${Number(item.priorPaidAmount || 0) > 0 ? "" : "display:none"}"></div>
       <div class="field two">
         <div><label>입금 예정일</label><input name="expectedDepositDate" type="date" value="${h(item.expectedDepositDate)}"></div>
         <div>
@@ -2386,7 +2395,7 @@ function bindRequests() {
     });
   });
   requestForm
-    .querySelectorAll("[name='productSalesAmount'], [name='extraShippingFee'], [name='commissionRate'], [name='supplyAmount'], [name='expectedDepositDate'], [name='overpaidAmount'], [name='creditUsedAmount'], [name='cancelledAmount']")
+    .querySelectorAll("[name='productSalesAmount'], [name='extraShippingFee'], [name='commissionRate'], [name='supplyAmount'], [name='expectedDepositDate'], [name='overpaidAmount'], [name='creditUsedAmount'], [name='cancelledAmount'], [name='priorPaidAmount']")
     .forEach((input) => input.addEventListener("input", () => updateRequestCalculation(requestForm)));
   requestForm.querySelector("[name='baseShippingFee']")?.addEventListener("input", (event) => {
     event.target.dataset.manual = "1";
@@ -2609,10 +2618,21 @@ function updateRequestCalculation(form) {
   if (depositInput) depositInput.value = formatAmount(depositAmount);
   if (deductionInput) deductionInput.value = formatAmount(receivableDeduction);
   const creditUsedAmount = value("creditUsedAmount");
+  const priorPaidAmount = value("priorPaidAmount");
   const paidAmountInput = form.querySelector("[name='paidAmount']");
   const paidManual = paidAmountInput?.dataset.manual === "1";
-  const finalPaidAmount = Math.max(0, depositAmount - creditUsedAmount);
+  const finalPaidAmount = Math.max(0, depositAmount - creditUsedAmount - priorPaidAmount);
   if (paidAmountInput && !paidManual) paidAmountInput.value = formatAmount(finalPaidAmount);
+  const priorPaidHint = form.querySelector("[data-prior-paid-hint]");
+  if (priorPaidHint) {
+    if (priorPaidAmount > 0) {
+      priorPaidHint.style.display = "";
+      priorPaidHint.innerHTML = `총 지급대상 <strong>${money.format(depositAmount)}원</strong> · 기지급 <strong>${money.format(priorPaidAmount)}원</strong> → 이번 추가 지급 <strong style="color:var(--red)">${money.format(finalPaidAmount)}원</strong>`;
+    } else {
+      priorPaidHint.style.display = "none";
+      priorPaidHint.innerHTML = "";
+    }
+  }
   const creditHint = form.querySelector("[data-brand-credit-hint]");
   if (creditHint) {
     if (brand) {

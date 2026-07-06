@@ -1253,7 +1253,9 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
     for (const [orderNo] of includedByOrder) {
       const req = reqByOrder.get(orderNo);
       if (!req) continue;
-      const expect = Math.round(number(req.paidAmount) || Math.max(0, number(req.depositAmount) - number(req.creditUsedAmount)));
+      // 이번에 실제 나가는 금액 = paidAmount(있으면) 또는
+      // 업체실입금 − 외상차감 − 기지급(부족분만 이번에 송금).
+      const expect = Math.round(number(req.paidAmount) || Math.max(0, number(req.depositAmount) - number(req.creditUsedAmount) - number(req.priorPaidAmount)));
       if (!expect) continue;
       const hit = bankBrand.find((r) => !r.used && Math.abs(r.amount - expect) <= 1);
       if (hit) {
@@ -2650,6 +2652,8 @@ async function routeApi(req, res, url) {
       paidAt: body.paidAt || "",
       notes: String(body.notes || "").trim(),
       quantity: Math.max(0, Number(body.quantity || 0)),
+      priorPaidAmount: Math.max(0, number(body.priorPaidAmount)),
+      priorPaidNote: String(body.priorPaidNote || "").trim(),
       cancelledAmount: Math.max(0, number(body.cancelledAmount)),
       cancelledReason: String(body.cancelledReason || "").trim(),
       cancelledNote: String(body.cancelledNote || "").trim(),
@@ -2833,14 +2837,16 @@ async function routeApi(req, res, url) {
       "overpaidReason",
       "overpaidNote",
       "creditUsedAmount",
-      "creditUsedNote"
+      "creditUsedNote",
+      "priorPaidAmount",
+      "priorPaidNote"
     ]) {
       if (key in body) {
         if (key === "sourceRow") {
           request[key] = Number(body[key] || 0);
         } else if (key === "quantity") {
           request[key] = Math.max(0, Number(body[key] || 0));
-        } else if (key === "overpaidAmount" || key === "creditUsedAmount" || key === "cancelledAmount") {
+        } else if (key === "overpaidAmount" || key === "creditUsedAmount" || key === "cancelledAmount" || key === "priorPaidAmount") {
           request[key] = Math.max(0, number(body[key]));
         } else {
           request[key] = body[key];
