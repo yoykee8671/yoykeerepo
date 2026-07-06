@@ -1243,13 +1243,16 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   const finalAmount = deliveredSupply + shipTotal + refundShipTotal;
 
   // data3: 은행 출금 대조 — 주문건별 매칭. 정산에 포함된 각 주문의 입금액과
-  // 동일한 출금이 브랜드 앞으로 존재하는지 건별 확인한다. (월 합계 비교는
-  // 월 경계에서 어긋나므로 사용하지 않음)
-  const settlementYm = `${year}-${String(month).padStart(2, "0")}`;
+  // 동일한 출금이 브랜드 앞으로 존재하는지 건별 확인한다. 은행 파일이 5~7월 등
+  // 여러 달을 담고 있어도 정산월에 한정하지 않고 파일 전체 범위에서 찾는다
+  // (배송 후 입금하는 업체는 월 경계를 넘어가기도 하므로).
   let bankMonthTotal = 0;
   if (bankRows.length) {
     const { rows: bankBrand, coverage } = bankBrandWithdrawals(bankRows, brand);
-    bankMonthTotal = bankBrand.filter((r) => !r.ym || r.ym === settlementYm).reduce((s, r) => s + r.amount, 0);
+    const coverageList = [...coverage].sort();
+    const coverageLabel = coverageList.length
+      ? (coverageList.length === 1 ? coverageList[0] : `${coverageList[0]}~${coverageList[coverageList.length - 1]}`)
+      : "";
     for (const [orderNo] of includedByOrder) {
       const req = reqByOrder.get(orderNo);
       if (!req) continue;
@@ -1257,14 +1260,17 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
       // 업체실입금 − 외상차감 − 기지급(부족분만 이번에 송금).
       const expect = Math.round(number(req.paidAmount) || Math.max(0, number(req.depositAmount) - number(req.creditUsedAmount) - number(req.priorPaidAmount)));
       if (!expect) continue;
+      // 파일 전체 범위에서 동일 금액 출금을 찾는다(월 무관).
       const hit = bankBrand.find((r) => !r.used && Math.abs(r.amount - expect) <= 1);
       if (hit) {
         hit.used = true;
+        bankMonthTotal += hit.amount;
         continue;
       }
       const paidYm = String(req.paidAt || "").slice(0, 7);
       if (paidYm && coverage.size && !coverage.has(paidYm)) {
-        warnings.push(`은행파일 범위 밖 출금 추정: ${orderNo} (입금액 ${expect.toLocaleString()}원, 입금일 ${paidYm}) — 해당 월 은행 내역으로 확인하세요.`);
+        // 입금일이 업로드된 은행 파일 범위 밖 → 오류 아님(다른 달 파일 확인 필요).
+        warnings.push(`은행 파일 범위(${coverageLabel}) 밖 입금 추정: ${orderNo} (입금액 ${expect.toLocaleString()}원, 입금일 ${paidYm}) — 해당 기간 은행 내역을 함께 올리면 대조됩니다.`);
       } else {
         errors.push({
           orderNo,
@@ -1276,7 +1282,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
     const leftover = bankBrand.filter((r) => !r.used);
     if (leftover.length) {
       const sum = leftover.reduce((s, r) => s + r.amount, 0);
-      warnings.push(`이번 정산과 매칭되지 않은 브랜드 출금 ${leftover.length}건 (합 ${sum.toLocaleString()}원) — 전월분·교환/반품 배송비 등인지 확인하세요.`);
+      warnings.push(`이번 정산과 매칭되지 않은 브랜드 출금 ${leftover.length}건 (합 ${sum.toLocaleString()}원) — 전월/익월분·교환/반품 배송비 등인지 확인하세요.`);
     }
   } else {
     warnings.push("은행 파일이 업로드되지 않아 출금 대조를 건너뜁니다.");
