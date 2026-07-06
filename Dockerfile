@@ -3,7 +3,7 @@ FROM node:20-bookworm-slim
 WORKDIR /app
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 python3-pip python3-openpyxl \
+  && apt-get install -y --no-install-recommends python3 python3-pip python3-openpyxl python3-pil \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json* ./
