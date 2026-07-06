@@ -1450,6 +1450,13 @@ function renderBrandForm() {
         <div><label>카페24 공급사명/코드 <span class="muted" style="font-weight:400">(정산 매칭용)</span></label><input name="cafe24Supplier" value="${h(b.cafe24Supplier || "")}" placeholder="예: KOGONGCAT 또는 S000000W"></div>
         <div><label>은행 거래처 라벨 <span class="muted" style="font-weight:400">(비우면 브랜드명)</span></label><input name="bankLabel" value="${h(b.bankLabel || "")}" placeholder="예: 고공캣"></div>
       </div>
+      <div class="field">
+        <label>정산 금액 기준 <span class="muted" style="font-weight:400">(정가 기준 브랜드는 단가표에 정가 등록 필요 — 예: 고공캣)</span></label>
+        <select name="priceBasis">
+          <option value="cafe24" ${(b.priceBasis || "cafe24") === "cafe24" ? "selected" : ""}>카페24 결제액 기준 (기본)</option>
+          <option value="catalog" ${b.priceBasis === "catalog" ? "selected" : ""}>정가(단가표) 기준</option>
+        </select>
+      </div>
       <div class="field"><label>Google Sheets 아카이브 URL</label><input name="googleSheetUrl" value="${h(b.googleSheetUrl)}" placeholder="브랜드별 공유용 스프레드시트 링크"></div>
       <div class="toolbar">
         <button class="primary" type="submit">${state.editingBrand ? "수정 저장" : "브랜드 추가"}</button>

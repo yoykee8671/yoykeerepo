@@ -992,14 +992,19 @@ function cafe24RowIsCancelled(row) {
 }
 
 // Sum bank withdrawals (출금) attributable to a brand for the given month.
-function bankWithdrawalTotal(bankRows, brand, monthPrefix) {
+// All withdrawal rows in the bank file attributable to this brand (no month
+// filter — per-order matching decides relevance). Each row carries its ym so
+// callers can tell in-month vs out-of-month entries apart.
+function bankBrandWithdrawals(bankRows, brand) {
   const labels = [String(brand.bankLabel || "").trim(), String(brand.name || "").trim()]
     .filter(Boolean)
     .map((s) => s.toUpperCase());
-  const wantYm = { y: Number(monthPrefix.slice(0, 4)), m: Number(monthPrefix.slice(4, 6)) };
-  let total = 0;
-  const matched = [];
+  const rows = [];
+  const coverage = new Set();
   for (const r of bankRows) {
+    const y = Number(r["거래 연도"] || 0);
+    const m = Number(r["거래 월"] || 0);
+    if (y && m) coverage.add(`${y}-${String(m).padStart(2, "0")}`);
     const out = number(r["출금"]);
     if (!out) continue;
     const label = String(r["거래처 라벨"] || "").trim().toUpperCase();
@@ -1007,14 +1012,49 @@ function bankWithdrawalTotal(bankRows, brand, monthPrefix) {
     const memo = String(r["적요"] || "").trim().toUpperCase();
     const hit = labels.some((l) => l && (label === l || payer.includes(l) || memo.includes(l)));
     if (!hit) continue;
-    // restrict to the settlement month when the bank rows carry a month column
-    const y = Number(r["거래 연도"] || 0);
-    const m = Number(r["거래 월"] || 0);
-    if (y && m && (y !== wantYm.y || m !== wantYm.m)) continue;
-    total += out;
-    matched.push({ date: r["거래일시"] || "", amount: out, memo: r["적요"] || "" });
+    rows.push({
+      amount: out,
+      ym: y && m ? `${y}-${String(m).padStart(2, "0")}` : "",
+      date: r["거래일시"] || "",
+      memo: r["적요"] || "",
+      used: false
+    });
   }
-  return { total, matched };
+  return { rows, coverage };
+}
+
+// Canonical(정가) price matcher for catalog-basis brands (예: 고공캣). Matches a
+// cafe24 product name against the brand's price catalog + aliases; the longest
+// matched text wins so "캣모나이트 리필 (3개입)" beats "캣모나이트".
+function buildCanonPriceMatcher(db, brand) {
+  const strip = (s) => String(s || "").toLowerCase().replace(/\s+/g, "");
+  const entries = getLatestPriceCatalog(db, brand.id).map((entry) => ({
+    key: strip(entry.itemName || entry.itemCode),
+    label: entry.itemName || entry.itemCode,
+    price: number(normalizePriceFields(entry).currentSalePrice)
+  })).filter((e) => e.key && e.price > 0);
+  const today = now().slice(0, 10);
+  for (const alias of db.priceAliases || []) {
+    if (alias.brandId !== brand.id || alias.isActive === false) continue;
+    const from = dateOnly(alias.validFrom) || "0000-01-01";
+    const to = dateOnly(alias.validTo) || "9999-12-31";
+    if (today < from || today > to) continue;
+    const target = (db.priceEntries || []).find((item) => item.id === alias.priceEntryId);
+    if (!target) continue;
+    const price = number(normalizePriceFields(target).currentSalePrice);
+    if (price > 0) entries.push({ key: strip(alias.aliasText), label: alias.aliasText, price });
+  }
+  return {
+    hasCatalog: entries.length > 0,
+    match(productName) {
+      const name = strip(productName);
+      let best = null;
+      for (const e of entries) {
+        if (name.includes(e.key) && (!best || e.key.length > best.key.length)) best = e;
+      }
+      return best;
+    }
+  };
 }
 
 // Core reconciliation. Returns { needsMapping, suppliers, errors, warnings,
@@ -1033,7 +1073,8 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   const brandRows = cafe24Rows.filter((r) => cafe24RowMatchesBrand(r, brand));
 
   const cancels = [];
-  const includedByOrder = new Map(); // orderNo -> [cafe24 rows]
+  const includedByOrder = new Map(); // orderNo -> [delivered cafe24 rows]
+  const allRowsByOrder = new Map(); // orderNo -> [all non-cancelled rows] (부분배송 대조용)
   let excludedCount = 0;
   for (const r of brandRows) {
     const orderNo = String(r["주문번호"] || "").trim();
@@ -1049,6 +1090,10 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
         note: r["환불완료일"] || r["취소처리중[환불완료] 처리일"] || ""
       });
       continue;
+    }
+    if (orderDate.startsWith(monthPrefix)) {
+      if (!allRowsByOrder.has(orderNo)) allRowsByOrder.set(orderNo, []);
+      allRowsByOrder.get(orderNo).push(r);
     }
     if (orderDate.startsWith(monthPrefix) && delivered) {
       if (!includedByOrder.has(orderNo)) includedByOrder.set(orderNo, []);
@@ -1069,6 +1114,16 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   const warnings = [];
   const lines = [];
   let seq = 0;
+  // 금액 대조 기준: "catalog"(정가/단가표 — 예: 고공캣)이면 카페24 결제액 대신
+  // 단가표 정가로 기대금액을 재계산해 검증한다. 기본은 카페24 결제액 기준.
+  const priceBasis = brand.priceBasis === "catalog" ? "catalog" : "cafe24";
+  const canon = priceBasis === "catalog" ? buildCanonPriceMatcher(db, brand) : null;
+  if (canon && !canon.hasCatalog) {
+    warnings.push("정가(단가표) 기준 브랜드인데 단가표에 판매가 있는 품목이 없습니다 — 단가표를 먼저 등록하세요.");
+  }
+  const sumSales = (rows) => rows.reduce((s, r) => s + number(r["판매가"]) * number(r["수량"]), 0);
+  const sumItemDisc = (rows) => rows.reduce((s, r) => s + number(r["상품별 추가할인금액"]), 0);
+  const orderCoupon = (rows) => rows.reduce((mx, r) => Math.max(mx, number(r["쿠폰 할인금액(최종)"]), number(r["주문서 쿠폰 할인금액"])), 0);
   for (const [orderNo, rowsOfOrder] of includedByOrder) {
     const req = reqByOrder.get(orderNo);
     if (!req) {
@@ -1079,15 +1134,63 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
     if (!paid) {
       errors.push({ orderNo, type: "unpaid", message: `입금완료되지 않은 주문입니다: ${orderNo}` });
     }
-    // amount cross-check: cafe24 판매액 vs wooofpay 제품매출
-    const cafeSales = rowsOfOrder.reduce((s, r) => s + number(r["판매가"]) * number(r["수량"]), 0);
     const wooofSales = number(req.productSalesAmount);
-    if (cafeSales && wooofSales && Math.abs(cafeSales - wooofSales) > 1) {
-      errors.push({
-        orderNo,
-        type: "amount_mismatch",
-        message: `금액 불일치 ${orderNo}: 카페24 ${cafeSales.toLocaleString()} vs 입금요청 ${wooofSales.toLocaleString()}`
-      });
+    if (priceBasis === "catalog" && canon.hasCatalog) {
+      // 정가 기준: 카페24 품목을 단가표 정가로 환산해 기대금액 계산.
+      let expected = 0;
+      const unmatched = [];
+      for (const r of rowsOfOrder) {
+        const hit = canon.match(r["주문상품명(기본)"]);
+        if (!hit) unmatched.push(String(r["주문상품명(기본)"] || "").trim());
+        else expected += hit.price * Math.max(1, number(r["수량"], 1));
+      }
+      if (unmatched.length) {
+        errors.push({
+          orderNo,
+          type: "catalog_unmatched",
+          message: `정가표 매칭 실패 ${orderNo}: ${[...new Set(unmatched)].join(", ")} — 단가표에 품목 또는 별칭을 등록하세요.`
+        });
+      } else if (wooofSales && Math.abs(expected - wooofSales) > 1) {
+        errors.push({
+          orderNo,
+          type: "amount_mismatch",
+          message: `정가 기준 금액 불일치 ${orderNo}: 정가 ${expected.toLocaleString()} vs 입금요청 ${wooofSales.toLocaleString()}`
+        });
+      } else {
+        const expectedShip = calculateBaseShippingFee(brand, expected);
+        const reqShip = number(req.shippingFee);
+        if (Math.abs(expectedShip - reqShip) > 1) {
+          errors.push({
+            orderNo,
+            type: "ship_mismatch",
+            message: `배송비 불일치 ${orderNo}: 정책상 ${expectedShip.toLocaleString()} vs 입금요청 ${reqShip.toLocaleString()}`
+          });
+        }
+      }
+    } else {
+      // 카페24 결제액 기준: 할인/쿠폰/부분배송을 감안한 후보 금액 중 하나와
+      // 일치하면 통과 (할인 부담 주체가 브랜드별로 달라 후보 방식으로 수용).
+      const allRows = allRowsByOrder.get(orderNo) || rowsOfOrder;
+      const partial = allRows.length > rowsOfOrder.length;
+      const sets = partial ? [rowsOfOrder, allRows] : [rowsOfOrder];
+      const candidates = new Set();
+      for (const rows of sets) {
+        const list = sumSales(rows);
+        const disc = sumItemDisc(rows);
+        const coupon = orderCoupon(rows);
+        [list, list - disc, list - coupon, list - disc - coupon].forEach((v) => candidates.add(Math.round(v)));
+      }
+      const cafeSales = sumSales(rowsOfOrder);
+      if (cafeSales && wooofSales && ![...candidates].some((c) => Math.abs(c - wooofSales) <= 1)) {
+        const cand = [...candidates].filter((c) => c > 0).sort((a, b) => b - a).map((c) => c.toLocaleString()).join(" / ");
+        errors.push({
+          orderNo,
+          type: "amount_mismatch",
+          message: `금액 불일치 ${orderNo}: 입금요청 ${wooofSales.toLocaleString()} — 카페24 기준 후보(정가/할인/쿠폰${partial ? "/부분배송" : ""} 반영): ${cand}`
+        });
+      } else if (partial) {
+        warnings.push(`부분배송 주문 ${orderNo}: 일부 품목만 배송완료 상태입니다 — 정산 포함 범위를 확인하세요.`);
+      }
     }
     // Build detail lines from wooofpay lineItems (billing truth). One order's
     // shipping is charged once (attached to the first line).
@@ -1129,14 +1232,39 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   const deliveredSupply = isDebt ? salesTotal : salesTotal - commissionTotal;
   const finalAmount = deliveredSupply + shipTotal + refundShipTotal;
 
-  // data3: bank withdrawal reconciliation
-  const bank = bankWithdrawalTotal(bankRows, brand, monthPrefix);
+  // data3: 은행 출금 대조 — 주문건별 매칭. 정산에 포함된 각 주문의 입금액과
+  // 동일한 출금이 브랜드 앞으로 존재하는지 건별 확인한다. (월 합계 비교는
+  // 월 경계에서 어긋나므로 사용하지 않음)
+  const settlementYm = `${year}-${String(month).padStart(2, "0")}`;
+  let bankMonthTotal = 0;
   if (bankRows.length) {
-    if (Math.abs(bank.total - finalAmount) > 1) {
-      errors.push({
-        type: "bank_mismatch",
-        message: `은행 출금 합계 ${bank.total.toLocaleString()}원 ≠ 최종 정산금액 ${finalAmount.toLocaleString()}원`
-      });
+    const { rows: bankBrand, coverage } = bankBrandWithdrawals(bankRows, brand);
+    bankMonthTotal = bankBrand.filter((r) => !r.ym || r.ym === settlementYm).reduce((s, r) => s + r.amount, 0);
+    for (const [orderNo] of includedByOrder) {
+      const req = reqByOrder.get(orderNo);
+      if (!req) continue;
+      const expect = Math.round(number(req.paidAmount) || Math.max(0, number(req.depositAmount) - number(req.creditUsedAmount)));
+      if (!expect) continue;
+      const hit = bankBrand.find((r) => !r.used && Math.abs(r.amount - expect) <= 1);
+      if (hit) {
+        hit.used = true;
+        continue;
+      }
+      const paidYm = String(req.paidAt || "").slice(0, 7);
+      if (paidYm && coverage.size && !coverage.has(paidYm)) {
+        warnings.push(`은행파일 범위 밖 출금 추정: ${orderNo} (입금액 ${expect.toLocaleString()}원, 입금일 ${paidYm}) — 해당 월 은행 내역으로 확인하세요.`);
+      } else {
+        errors.push({
+          orderNo,
+          type: "bank_missing",
+          message: `은행 출금 내역 없음: ${orderNo} (입금액 ${expect.toLocaleString()}원)`
+        });
+      }
+    }
+    const leftover = bankBrand.filter((r) => !r.used);
+    if (leftover.length) {
+      const sum = leftover.reduce((s, r) => s + r.amount, 0);
+      warnings.push(`이번 정산과 매칭되지 않은 브랜드 출금 ${leftover.length}건 (합 ${sum.toLocaleString()}원) — 전월분·교환/반품 배송비 등인지 확인하세요.`);
     }
   } else {
     warnings.push("은행 파일이 업로드되지 않아 출금 대조를 건너뜁니다.");
@@ -1154,7 +1282,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
     lines,
     summary: {
       salesTotal, shipTotal, refundShipTotal, commissionTotal,
-      deliveredSupply, finalAmount, bankTotal: bank.total, orderCount: includedByOrder.size
+      deliveredSupply, finalAmount, bankTotal: bankMonthTotal, orderCount: includedByOrder.size
     }
   };
 }
@@ -2380,6 +2508,7 @@ async function routeApi(req, res, url) {
       googleSheetUrl: body.googleSheetUrl || "",
       cafe24Supplier: String(body.cafe24Supplier || "").trim(),
       bankLabel: String(body.bankLabel || "").trim(),
+      priceBasis: body.priceBasis === "catalog" ? "catalog" : "cafe24",
       shareToken: crypto.randomBytes(12).toString("hex"),
       createdAt: now(),
       updatedAt: now()
@@ -2432,10 +2561,12 @@ async function routeApi(req, res, url) {
       "requiredMemo",
       "googleSheetUrl",
       "cafe24Supplier",
-      "bankLabel"
+      "bankLabel",
+      "priceBasis"
     ]) {
       if (key in body) brand[key] = body[key];
     }
+    if (brand.priceBasis !== "catalog") brand.priceBasis = "cafe24";
     brand.commissionRate = number(brand.commissionRate);
     brand.receivableTotal = number(brand.receivableTotal);
     brand.hasReceivable = brand.hasReceivable === true || brand.hasReceivable === "true";
