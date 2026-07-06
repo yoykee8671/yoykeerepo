@@ -1298,10 +1298,25 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
       bankMonthTotal -= depositTotal;
       warnings.push(`브랜드 입금(환불 등) ${bankDeposits.length}건 (합 ${depositTotal.toLocaleString()}원)을 순 출금액에서 차감했습니다 — 오입금 환불 여부를 확인하세요.`);
     }
-    const leftover = bankBrand.filter((r) => !r.used);
-    if (leftover.length) {
-      const sum = leftover.reduce((s, r) => s + r.amount, 0);
-      warnings.push(`이번 정산과 매칭되지 않은 브랜드 출금 ${leftover.length}건 (합 ${sum.toLocaleString()}원) — 전월/익월분·교환/반품 배송비 등인지 확인하세요.`);
+    // 매칭 안 된 출금을 건별 분류: (a)어떤 주문 입금액과도 안 맞으면 과입금/오입금
+    // 의심 → 오류, (b)이번 정산 포함 주문(이미 매칭됨) 금액과 같으면 중복입금 의심
+    // → 오류, (c)타 기간 주문 금액과 같으면 정보(경고). 두 번 입금·잘못 입금을
+    // 놓치지 않도록 반드시 체크해서 알려준다.
+    const allExpects = [];
+    for (const req of reqByOrder.values()) {
+      const e = Math.round(number(req.paidAmount) || Math.max(0, number(req.depositAmount) - number(req.creditUsedAmount) - number(req.priorPaidAmount)));
+      if (e) allExpects.push({ orderNo: String(req.orderNo || "").trim(), expect: e, included: includedByOrder.has(String(req.orderNo || "").trim()) });
+    }
+    for (const lw of bankBrand.filter((r) => !r.used)) {
+      const near = allExpects.filter((a) => Math.abs(a.expect - lw.amount) <= 1);
+      const info = (lw.date ? `${lw.date} ` : "") + (lw.memo || "").trim();
+      if (!near.length) {
+        errors.push({ type: "bank_overpaid", message: `매칭 안 되는 출금 ${lw.amount.toLocaleString()}원 (과입금/오입금 의심) — ${info || "적요 없음"}` });
+      } else if (near.some((a) => a.included)) {
+        errors.push({ type: "bank_duplicate", message: `중복입금 의심 ${lw.amount.toLocaleString()}원 — ${near.find((a) => a.included).orderNo} 입금액과 동일 (${info})` });
+      } else {
+        warnings.push(`타 기간 주문 추정 출금 ${lw.amount.toLocaleString()}원 — ${near[0].orderNo} (${info})`);
+      }
     }
   } else {
     warnings.push("은행 파일이 업로드되지 않아 출금 대조를 건너뜁니다.");
