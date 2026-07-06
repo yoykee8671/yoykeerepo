@@ -992,11 +992,9 @@ function cafe24RowIsCancelled(row) {
 }
 
 // Unit sale price for a cafe24 line = 판매가 + 옵션추가 가격 (options change the
-// price, e.g. 7,900 + 1,000 = 8,900). Prefer an explicit "옵션+판매가" column when
-// the export includes it; otherwise sum the base + option columns.
+// price, e.g. 7,900 + 1,000 = 8,900). Note the "옵션+판매가" column is a UNIT
+// price (does NOT include quantity), so the line total is always unit × 수량.
 function cafe24UnitPrice(row) {
-  const combined = number(row["옵션+판매가"]);
-  if (combined > 0) return combined;
   return number(row["판매가"]) + number(row["옵션추가 가격"]);
 }
 function cafe24RowSaleAmount(row) {
