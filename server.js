@@ -1001,36 +1001,48 @@ function cafe24RowSaleAmount(row) {
   return cafe24UnitPrice(row) * Math.max(1, number(row["수량"], 1));
 }
 
-// Sum bank withdrawals (출금) attributable to a brand for the given month.
-// All withdrawal rows in the bank file attributable to this brand (no month
-// filter — per-order matching decides relevance). Each row carries its ym so
-// callers can tell in-month vs out-of-month entries apart.
-function bankBrandWithdrawals(bankRows, brand) {
-  const labels = [String(brand.bankLabel || "").trim(), String(brand.name || "").trim()]
-    .filter(Boolean)
-    .map((s) => s.toUpperCase());
+// Normalize a bank party/label for fuzzy comparison: uppercase, drop spaces and
+// any bracketed suffix (지점명·법인격 등), keep hangul/latin/digits only.
+// "온힐 송도점" / "베럴즈（BETTERS）" / "김지연(고공캣)" → 온힐 / 베럴즈 / 고공캣 core.
+function normalizeBankParty(value) {
+  return String(value || "")
+    .replace(/[（(【\[].*?[)）】\]]/g, " ")
+    .replace(/주식회사|㈜|\(주\)/g, " ")
+    .toUpperCase()
+    .replace(/[^0-9A-Z가-힣]/g, "");
+}
+// Does a bank row belong to the brand? Similarity match across 거래처 라벨·거래자명·
+// 적요: a brand key matches when it is contained in (or contains) the normalized
+// field, so branch/legal-entity suffixes don't break matching.
+function bankRowMatchesBrand(row, brandKeys) {
+  const fields = [row["거래처 라벨"], row["거래자명"], row["적요"]].map(normalizeBankParty).filter(Boolean);
+  return brandKeys.some((k) => k && fields.some((f) => f.includes(k) || k.includes(f)));
+}
+
+// Collect a brand's bank movements across the whole file. Returns withdrawals
+// (출금, for per-order matching) and the total of deposits (입금, e.g. refunds
+// of mis-payments) so callers can net them — grabbing only 출금 overstates the
+// paid total when a refund came back.
+function bankBrandMovements(bankRows, brand) {
+  const brandKeys = [String(brand.bankLabel || "").trim(), String(brand.name || "").trim()]
+    .map(normalizeBankParty)
+    .filter(Boolean);
   const rows = [];
+  const deposits = [];
   const coverage = new Set();
   for (const r of bankRows) {
     const y = Number(r["거래 연도"] || 0);
     const m = Number(r["거래 월"] || 0);
     if (y && m) coverage.add(`${y}-${String(m).padStart(2, "0")}`);
     const out = number(r["출금"]);
-    if (!out) continue;
-    const label = String(r["거래처 라벨"] || "").trim().toUpperCase();
-    const payer = String(r["거래자명"] || "").trim().toUpperCase();
-    const memo = String(r["적요"] || "").trim().toUpperCase();
-    const hit = labels.some((l) => l && (label === l || payer.includes(l) || memo.includes(l)));
-    if (!hit) continue;
-    rows.push({
-      amount: out,
-      ym: y && m ? `${y}-${String(m).padStart(2, "0")}` : "",
-      date: r["거래일시"] || "",
-      memo: r["적요"] || "",
-      used: false
-    });
+    const inn = number(r["입금"]);
+    if (!out && !inn) continue;
+    if (!bankRowMatchesBrand(r, brandKeys)) continue;
+    const base = { ym: y && m ? `${y}-${String(m).padStart(2, "0")}` : "", date: r["거래일시"] || "", memo: r["적요"] || "" };
+    if (out) rows.push({ ...base, amount: out, used: false });
+    if (inn) deposits.push({ ...base, amount: inn });
   }
-  return { rows, coverage };
+  return { rows, deposits, coverage };
 }
 
 // Canonical(정가) price matcher for catalog-basis brands (예: 고공캣). Matches a
@@ -1248,7 +1260,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   // (배송 후 입금하는 업체는 월 경계를 넘어가기도 하므로).
   let bankMonthTotal = 0;
   if (bankRows.length) {
-    const { rows: bankBrand, coverage } = bankBrandWithdrawals(bankRows, brand);
+    const { rows: bankBrand, deposits: bankDeposits, coverage } = bankBrandMovements(bankRows, brand);
     const coverageList = [...coverage].sort();
     const coverageLabel = coverageList.length
       ? (coverageList.length === 1 ? coverageList[0] : `${coverageList[0]}~${coverageList[coverageList.length - 1]}`)
@@ -1278,6 +1290,13 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
           message: `은행 출금 내역 없음: ${orderNo} (입금액 ${expect.toLocaleString()}원)`
         });
       }
+    }
+    // 입금(환불) 반영: 오입금 환불 등으로 브랜드가 우리에게 돌려준 금액은
+    // 순 지급액에서 차감해야 총액이 맞는다. 은행 출금합 = 매칭 출금 − 입금(환불).
+    const depositTotal = bankDeposits.reduce((s, r) => s + r.amount, 0);
+    if (depositTotal > 0) {
+      bankMonthTotal -= depositTotal;
+      warnings.push(`브랜드 입금(환불 등) ${bankDeposits.length}건 (합 ${depositTotal.toLocaleString()}원)을 순 출금액에서 차감했습니다 — 오입금 환불 여부를 확인하세요.`);
     }
     const leftover = bankBrand.filter((r) => !r.used);
     if (leftover.length) {
