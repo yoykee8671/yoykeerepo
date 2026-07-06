@@ -991,6 +991,18 @@ function cafe24RowIsCancelled(row) {
   );
 }
 
+// Unit sale price for a cafe24 line = 판매가 + 옵션추가 가격 (options change the
+// price, e.g. 7,900 + 1,000 = 8,900). Prefer an explicit "옵션+판매가" column when
+// the export includes it; otherwise sum the base + option columns.
+function cafe24UnitPrice(row) {
+  const combined = number(row["옵션+판매가"]);
+  if (combined > 0) return combined;
+  return number(row["판매가"]) + number(row["옵션추가 가격"]);
+}
+function cafe24RowSaleAmount(row) {
+  return cafe24UnitPrice(row) * Math.max(1, number(row["수량"], 1));
+}
+
 // Sum bank withdrawals (출금) attributable to a brand for the given month.
 // All withdrawal rows in the bank file attributable to this brand (no month
 // filter — per-order matching decides relevance). Each row carries its ym so
@@ -1085,7 +1097,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
         itemNo: r["품목별 주문번호"] || orderNo,
         name: r["주문상품명(기본)"] || "",
         qty: number(r["수량"]),
-        saleTotal: number(r["판매가"]) * number(r["수량"]),
+        saleTotal: cafe24RowSaleAmount(r),
         reason: r["환불상태"] || (r["환불완료일"] ? "환불완료" : "취소/교환"),
         note: r["환불완료일"] || r["취소처리중[환불완료] 처리일"] || ""
       });
@@ -1121,7 +1133,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   if (canon && !canon.hasCatalog) {
     warnings.push("정가(단가표) 기준 브랜드인데 단가표에 판매가 있는 품목이 없습니다 — 단가표를 먼저 등록하세요.");
   }
-  const sumSales = (rows) => rows.reduce((s, r) => s + number(r["판매가"]) * number(r["수량"]), 0);
+  const sumSales = (rows) => rows.reduce((s, r) => s + cafe24RowSaleAmount(r), 0);
   const sumItemDisc = (rows) => rows.reduce((s, r) => s + number(r["상품별 추가할인금액"]), 0);
   const orderCoupon = (rows) => rows.reduce((mx, r) => Math.max(mx, number(r["쿠폰 할인금액(최종)"]), number(r["주문서 쿠폰 할인금액"])), 0);
   for (const [orderNo, rowsOfOrder] of includedByOrder) {
