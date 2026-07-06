@@ -26,10 +26,35 @@ Spec JSON:
 
 import argparse
 import json
+import os
 from datetime import datetime
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+try:
+    from openpyxl.drawing.image import Image as XLImage
+except Exception:  # pragma: no cover
+    XLImage = None
+
+LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wooof_logo.png")
+
+
+def insert_logo(ws, cell="A1"):
+    """Place the WOOOF logo image at the given cell; fall back to green text."""
+    if XLImage and os.path.exists(LOGO_PATH):
+        try:
+            img = XLImage(LOGO_PATH)
+            # sample logo is 410x74; keep aspect, ~2 rows tall.
+            img.width, img.height = 205, 37
+            img.anchor = cell
+            ws.add_image(img)
+            return
+        except Exception:
+            pass
+    ws[cell] = "WOOOF"
+    ws[cell].font = LOGO_FONT
+    ws[cell].alignment = Alignment(horizontal="left", vertical="center")
 
 
 WOOOF_GREEN = "1FA84C"
@@ -171,10 +196,7 @@ def build_summary(ws, spec, sr):
     ws.sheet_view.showGridLines = False
 
     # --- Header band: WOOOF logo (left) + title (right) ---
-    ws.merge_cells("A1:C4")
-    ws["A1"] = "WOOOF"
-    ws["A1"].font = LOGO_FONT
-    ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
+    insert_logo(ws, "A1")
     ws.merge_cells("F1:H2")
     ws["F1"] = "월별 정산내역서"
     ws["F1"].font = TITLE
@@ -317,6 +339,149 @@ def build_cancels(ws, cancels):
         ws.column_dimensions[ws.cell(row=2, column=ci).column_letter].width = w
 
 
+def build_online_consignment(ws, lines):
+    """위탁 온라인 sheet (14 cols with 정가·할인·할인가 breakdown). Returns 합계 row."""
+    headers = ["순번", "품목번호", "Product Name", "Qty", "소비자가", "정가합계",
+               "할인", "할인가", "총판매가", "배송비", "수수료(%)", "수수료(원)", "납품가액", "비고"]
+    for ci, h in enumerate(headers, start=1):
+        c = ws.cell(row=1, column=ci, value=h)
+        c.font = BOLD
+        c.fill = HEAD_FILL
+        c.alignment = CENTER
+        c.border = BORDER
+    r = 2
+    for i, ln in enumerate(lines, start=1):
+        # E 소비자가(원판매가) / G 할인율 / H 할인가=E-E*G / F 정가합계=D*E
+        # I 총판매가=D*H / L 수수료원=I*수수료% / M 납품가=I-L
+        vals = [i, ln.get("itemNo", ""), ln.get("name", ""), _num(ln.get("qty")),
+                _num(ln.get("original")), f"=D{r}*E{r}", round(_num(ln.get("discountRate")), 4),
+                f"=E{r}-E{r}*G{r}", f"=D{r}*H{r}", _num(ln.get("ship")),
+                round(_num(ln.get("ratePct")) / 100, 4), f"=I{r}*K{r}", f"=I{r}-L{r}", ln.get("note", "")]
+        for ci, v in enumerate(vals, start=1):
+            c = ws.cell(row=r, column=ci, value=v)
+            c.border = BORDER
+            if ci in (5, 6, 8, 9, 10, 12, 13):
+                c.number_format = WON
+            if ci in (7, 11):
+                c.number_format = "0%"
+        r += 1
+    sr = r  # 합계 row
+    ws.cell(row=sr, column=3, value="합계").font = BOLD
+    ws.cell(row=sr, column=4, value=f"=SUM(D2:D{sr-1})")
+    for col in (6, 9, 10, 12, 13):
+        letter = ws.cell(row=sr, column=col).column_letter
+        cc = ws.cell(row=sr, column=col, value=f"=SUM({letter}2:{letter}{sr-1})")
+        cc.number_format = WON
+        cc.font = BOLD
+    for ci in range(1, 15):
+        ws.cell(row=sr, column=ci).border = BORDER
+    widths = [6, 20, 34, 6, 11, 12, 8, 11, 12, 9, 9, 11, 12, 14]
+    for ci, w in enumerate(widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
+    return sr
+
+
+def build_summary_consignment(ws, spec, sr):
+    """위탁 총결산 — layout shifted one row down, 주문채널 header, commission
+    deducted, 3-row settlement block (납품가합계/배송비/최종). Matches the sample."""
+    ws.sheet_view.showGridLines = False
+    insert_logo(ws, "A1")
+    ws.merge_cells("F1:H1")
+    ws["F1"] = "월별 정산내역서"
+    ws["F1"].font = TITLE
+    ws["F1"].alignment = Alignment(horizontal="right", vertical="center")
+
+    notices = [
+        ("D3:H3", "* 최종 정산금액 기준으로 세금계산서 역발행 예정입니다.", NOTICE_BLACK),
+        ("D4:H4", "WEHAGO 사이트를 통해 역발행 예정이오니, 금액 확인 후 '발행 승인' 처리 해주시길 바랍니다.", NOTICE_RED),
+        ("D5:H5", "발행 완료 후 업체 '매출'로 국세청 자동 전송됩니다. 감사합니다.", NOTICE_GREY),
+    ]
+    for rng, text, font in notices:
+        ws.merge_cells(rng)
+        top = rng.split(":")[0]
+        ws[top] = text
+        ws[top].font = font
+        ws[top].alignment = Alignment(horizontal="center", vertical="center")
+
+    ws.merge_cells("B8:C8")
+    ws["B8"] = spec.get("supplierName", "")
+    ws["B8"].font = Font(name="맑은 고딕", size=12, bold=True)
+    ws["B8"].alignment = LEFT
+    for r, label, value in ((7, "연도", spec.get("year")), (8, "기간", spec.get("monthLabel", ""))):
+        lc = ws.cell(row=r, column=7, value=label)
+        lc.font = BOLD10
+        lc.fill = GREY_FILL
+        lc.alignment = CENTER_NW
+        vc = ws.cell(row=r, column=8, value=value)
+        vc.font = FONT
+        vc.alignment = CENTER_NW
+    box(ws, "G7:H8")
+
+    headers = ["주문채널", "수수료율", "공급가액", "부가세", "판매합계", "판매수수료", "납품가합계"]
+    for ci, h in enumerate(headers, start=2):
+        c = ws.cell(row=10, column=ci, value=h)
+        c.font = BOLD10
+        c.fill = GREY_FILL
+        c.alignment = CENTER
+
+    ws["B11"] = "온라인"
+    ws["B11"].alignment = CENTER_NW
+    ws["B11"].font = FONT
+    ws["C11"] = round(_num(spec.get("rate", 0)), 4)
+    ws["C11"].number_format = "0%"
+    ws["C11"].alignment = CENTER_NW
+    ws["D11"] = "=F11/1.1"
+    ws["E11"] = "=D11*0.1"
+    ws["F11"] = f"=온라인!I{sr}"   # 판매합계 = 총판매가 합계
+    ws["G11"] = f"=온라인!L{sr}"   # 판매수수료 = 수수료(원) 합계
+    ws["H11"] = f"=온라인!M{sr}"   # 납품가합계 = 납품가액 합계
+    for col in ("D", "E", "F", "G", "H"):
+        ws[f"{col}11"].number_format = WON
+        ws[f"{col}11"].alignment = RIGHT
+        ws[f"{col}11"].font = FONT
+
+    ws.merge_cells("B12:E12")
+    ws["B12"] = "합계"
+    ws["B12"].font = BOLD10
+    ws["B12"].alignment = CENTER
+    for col in ("B", "C", "D", "E"):
+        ws[f"{col}12"].fill = GREY_FILL
+    ws["F12"] = "=SUM(F11)"
+    ws["G12"] = "=SUM(G11)"
+    ws["H12"] = "=F12-G12"
+    for col in ("F", "G", "H"):
+        ws[f"{col}12"].number_format = WON
+        ws[f"{col}12"].font = BOLD10
+        ws[f"{col}12"].alignment = RIGHT
+        ws[f"{col}12"].fill = GREY_FILL
+    box(ws, "B10:H12")
+
+    rows = [
+        (14, "납품가합계", "=H12"),
+        (15, "배송비", f"=온라인!J{sr}"),
+        (16, "최종 정산금액", "=SUM(H14:H15)"),
+    ]
+    for r, label, value in rows:
+        lc = ws.cell(row=r, column=7, value=label)
+        lc.fill = GREY_FILL
+        lc.alignment = CENTER_NW
+        lc.font = BOLD10 if r == 16 else FONT
+        vc = ws.cell(row=r, column=8, value=value)
+        vc.number_format = WON
+        vc.alignment = RIGHT
+        vc.font = FINAL_FONT if r == 16 else FONT
+    box(ws, "G14:H16")
+    ws.cell(row=16, column=7).border = BORDER_MED
+    ws.cell(row=16, column=8).border = BORDER_MED
+
+    for col, w in (("A", 12), ("B", 14), ("C", 11), ("D", 11), ("E", 11),
+                   ("F", 13), ("G", 18), ("H", 14)):
+        ws.column_dimensions[col].width = w
+    ws.row_dimensions[1].height = 26
+    for r in (10, 11, 12, 14, 15, 16):
+        ws.row_dimensions[r].height = 22
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
@@ -332,11 +497,15 @@ def main():
     ws_online = wb.create_sheet("온라인")
 
     lines = spec.get("lines", [])
-    if spec["type"] == "prepay_debt":
+    if spec["type"] == "consignment":
+        sr = build_online_consignment(ws_online, lines)
+        build_summary_consignment(ws_sum, spec, sr)
+    elif spec["type"] == "prepay_debt":
         sr = build_online_debt(ws_online, lines)
+        build_summary(ws_sum, spec, sr)
     else:
         sr = build_online_fee(ws_online, lines)
-    build_summary(ws_sum, spec, sr)
+        build_summary(ws_sum, spec, sr)
 
     if spec.get("cancels"):
         build_cancels(wb.create_sheet("취소_교환"), spec["cancels"])

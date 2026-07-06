@@ -1241,11 +1241,16 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
       seq++;
       const saleTotal = number(it.totalSaleAmount, number(it.unitSalePrice) * number(it.quantity));
       const commissionWon = Math.round(saleTotal * (rate / 100));
+      const unitSale = number(it.unitSalePrice);            // 현재판매가(할인가)
+      const original = number(it.originalPrice) || unitSale; // 원판매가(정가)
+      const discountRate = original > 0 ? Math.max(0, Number((1 - unitSale / original).toFixed(4))) : 0;
       lines.push({
         itemNo: `${orderNo}-${String(idx + 1).padStart(2, "0")}`,
         name: it.itemName || it.itemCode || "",
         qty: number(it.quantity) || 1,
-        consumer: number(it.unitSalePrice),
+        consumer: unitSale,
+        original,                 // 원판매가(정가) 단가
+        discountRate,             // 할인율 (fraction) — 위탁 상세 시트용
         saleTotal,
         ship: idx === 0 ? orderShip : 0,
         refundShip: 0,
@@ -1253,7 +1258,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
         commissionWon,
         supplyAmt: saleTotal - commissionWon,
         payDate: req.paidAt || "",
-        note: ""
+        note: it.note || ""
       });
     });
   }
