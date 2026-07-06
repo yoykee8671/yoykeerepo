@@ -1307,15 +1307,23 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
       const e = Math.round(number(req.paidAmount) || Math.max(0, number(req.depositAmount) - number(req.creditUsedAmount) - number(req.priorPaidAmount)));
       if (e) allExpects.push({ orderNo: String(req.orderNo || "").trim(), expect: e, included: includedByOrder.has(String(req.orderNo || "").trim()) });
     }
+    const settlementYm = `${year}-${String(month).padStart(2, "0")}`;
     for (const lw of bankBrand.filter((r) => !r.used)) {
-      const near = allExpects.filter((a) => Math.abs(a.expect - lw.amount) <= 1);
       const info = (lw.date ? `${lw.date} ` : "") + (lw.memo || "").trim();
-      if (!near.length) {
-        errors.push({ type: "bank_overpaid", message: `매칭 안 되는 출금 ${lw.amount.toLocaleString()}원 (과입금/오입금 의심) — ${info || "적요 없음"}` });
-      } else if (near.some((a) => a.included)) {
+      // 앞뒤 달 출금은 (배송 후 익월 입금 등) 주문 매칭 용도로만 쓰고, 과입금·중복
+      // 체크 대상에서는 제외한다 → 정보 경고만. 과입금/중복 판정은 정산월 내 출금만.
+      const inMonth = !lw.ym || lw.ym === settlementYm;
+      if (!inMonth) {
+        warnings.push(`정산월 밖 출금 ${lw.amount.toLocaleString()}원 (${lw.ym}) — 전월/익월 정산건 추정, 해당 월 정산에서 확인하세요. (${info})`);
+        continue;
+      }
+      const near = allExpects.filter((a) => Math.abs(a.expect - lw.amount) <= 1);
+      if (near.some((a) => a.included)) {
         errors.push({ type: "bank_duplicate", message: `중복입금 의심 ${lw.amount.toLocaleString()}원 — ${near.find((a) => a.included).orderNo} 입금액과 동일 (${info})` });
-      } else {
+      } else if (near.length) {
         warnings.push(`타 기간 주문 추정 출금 ${lw.amount.toLocaleString()}원 — ${near[0].orderNo} (${info})`);
+      } else {
+        errors.push({ type: "bank_overpaid", message: `매칭 안 되는 출금 ${lw.amount.toLocaleString()}원 (과입금/오입금 의심) — ${info || "적요 없음"}` });
       }
     }
   } else {
