@@ -873,3 +873,56 @@ select.bulk-status,
     grid-template-columns: 1fr;
   }
 }
+
+/* npb정산 */
+.npb-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.npb-subtab {
+  min-height: 32px;
+  border-radius: 999px;
+  padding: 0 14px;
+}
+
+.npb-subtab.active {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+
+.npb-upload-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.npb-upload-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.npb-upload-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+td.num,
+input.num {
+  text-align: right;
+}
+
+@media (max-width: 1080px) {
+  .npb-upload-grid {
+    grid-template-columns: 1fr;
+  }
+}

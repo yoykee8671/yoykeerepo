@@ -25,8 +25,35 @@ const state = {
   brandFilterQ: "",
   selectedRequestIds: [],
   bulkPaidAt: new Date().toISOString().slice(0, 10),
-  settlement: { year: new Date().getFullYear(), month: new Date().getMonth() + 1, brandId: "", cafe24: null, bank: null, result: null, running: false }
+  settlement: { year: new Date().getFullYear(), month: new Date().getMonth() + 1, brandId: "", cafe24: null, bank: null, result: null, running: false },
+  npb: {
+    screen: "list",
+    loaded: false,
+    loading: false,
+    config: null,
+    settlements: [],
+    current: null,
+    currentKey: "",
+    periodMonth: `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`,
+    parsePreview: null,
+    interaction: { kurlyDiscount: "없음", kurlyFees: [], event: {}, bundles: [] },
+    profitParties: [
+      { party: "", ratio: 0, excluded: false, note: "" },
+      { party: "", ratio: 0, excluded: false, note: "" },
+      { party: "", ratio: 0, excluded: false, note: "" }
+    ]
+  }
 };
+
+const NPB_BRAND = "DOTEON";
+const NPB_SCREENS = [
+  ["list", "월 목록/이력"],
+  ["upload", "업로드"],
+  ["grid", "확인/수정"],
+  ["channels", "채널 설정"],
+  ["profit", "이익분배"],
+  ["preview", "미리보기/다운로드"]
+];
 
 const app = document.querySelector("#app");
 const money = new Intl.NumberFormat("ko-KR");
@@ -444,7 +471,8 @@ function renderApp() {
     ["admins", "관리자"],
     ["audits", "이력"],
     ["archive", "아카이브"],
-    ["settlement", "정산"]
+    ["settlement", "정산"],
+    ["npb", "npb정산"]
   ];
   app.innerHTML = `
     <div class="shell">
@@ -567,6 +595,7 @@ function renderCurrentTab() {
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
   if (state.tab === "settlement") return renderSettlement();
+  if (state.tab === "npb") return renderNpb();
   return renderDashboard();
 }
 
@@ -1745,6 +1774,7 @@ function bindCurrentTab() {
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
   if (state.tab === "settlement") bindSettlement();
+  if (state.tab === "npb") bindNpb();
 }
 
 function formObject(form) {
@@ -3454,6 +3484,814 @@ function bindSettlement() {
       showToast("정산서를 다운로드했습니다.");
     } catch (error) {
       showToast(error.message || "다운로드 실패", "error");
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// npb정산 (DOTEON) — 6-screen settlement workflow.
+// ---------------------------------------------------------------------------
+function npbWon(value) {
+  return `${money.format(Math.round(Number(value || 0)))}원`;
+}
+
+function npbStatusBadge(status) {
+  const map = {
+    draft: ["pending", "작성중"],
+    open: ["pending", "진행중"],
+    computed: ["await_deposit", "계산완료"],
+    finalized: ["paid", "확정"]
+  };
+  const [cls, label] = map[status] || ["", status || "-"];
+  return `<span class="badge ${cls}">${h(label)}</span>`;
+}
+
+function npbWarnBadges(warnings) {
+  const arr = Array.isArray(warnings) ? warnings : (warnings ? [warnings] : []);
+  if (!arr.length) return `<span class="muted">-</span>`;
+  return arr.map((w) => `<span class="badge error">${h(w)}</span>`).join(" ");
+}
+
+function npbNeedSelect() {
+  return `
+    <section class="panel">
+      <div class="panel-body empty">먼저 [월 목록/이력]에서 정산을 선택하거나 생성하세요.</div>
+    </section>`;
+}
+
+function npbSeedParties(parties) {
+  const base = (parties && parties.length ? parties : []).map((p) => ({
+    party: p.party || "",
+    ratio: Number(p.ratio || 0),
+    excluded: !!p.excluded,
+    note: p.note || ""
+  }));
+  while (base.length < 3) base.push({ party: "", ratio: 0, excluded: false, note: "" });
+  return base;
+}
+
+function npbPrevSettlement() {
+  const n = state.npb;
+  const cur = n.current?.periodMonth
+    || n.settlements.find((s) => s.key === n.currentKey)?.periodMonth;
+  if (!cur) return null;
+  const prior = (n.settlements || [])
+    .filter((s) => s.periodMonth < cur)
+    .sort((a, b) => b.periodMonth.localeCompare(a.periodMonth));
+  return prior[0] || null;
+}
+
+async function npbReloadSettlements() {
+  state.npb.settlements = (await api(`/api/npb/settlements?brand=${NPB_BRAND}`)) || [];
+}
+
+async function npbLoadDetail(key) {
+  const detail = await api(`/api/npb/settlements/${encodeURIComponent(key)}`);
+  const n = state.npb;
+  n.current = detail;
+  n.currentKey = key;
+  n.profitParties = npbSeedParties(detail?.profitSplit?.parties);
+}
+
+async function npbDownloadXlsx(key) {
+  try {
+    const res = await fetch(`/api/npb/settlements/${encodeURIComponent(key)}/xlsx`, {
+      credentials: "same-origin"
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      return showToast(err.error || "다운로드 실패", "error");
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `npb_${NPB_BRAND}_${key}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showToast("정산서를 다운로드했습니다.");
+  } catch (error) {
+    showToast(error.message || "다운로드 실패", "error");
+  }
+}
+
+function renderNpb() {
+  const n = state.npb;
+  if (n.loading) {
+    return `
+      ${pageHead("npb정산", "DOTEON 채널별 매출·수수료·물류비를 집계합니다.")}
+      <section class="panel"><div class="panel-body empty">불러오는 중…</div></section>`;
+  }
+  const subnav = NPB_SCREENS
+    .map(([key, label]) =>
+      `<button data-npb-screen="${key}" class="npb-subtab ${n.screen === key ? "active" : ""}">${label}</button>`)
+    .join("");
+  let body = "";
+  if (n.screen === "upload") body = renderNpbUpload();
+  else if (n.screen === "grid") body = renderNpbGrid();
+  else if (n.screen === "channels") body = renderNpbChannels();
+  else if (n.screen === "profit") body = renderNpbProfit();
+  else if (n.screen === "preview") body = renderNpbPreview();
+  else body = renderNpbList();
+  const ctx = n.currentKey
+    ? `<span class="muted">선택: ${h(n.currentKey)}</span>`
+    : `<span class="muted">정산 미선택</span>`;
+  return `
+    ${pageHead("npb정산", "DOTEON 채널별 매출·수수료·물류비를 집계하여 월 정산과 이익분배를 계산합니다.", ctx)}
+    <div class="npb-subnav">${subnav}</div>
+    ${body}
+  `;
+}
+
+function renderNpbList() {
+  const n = state.npb;
+  const rows = (n.settlements || [])
+    .map((s) => {
+      const r = s.rollup || {};
+      return `
+        <tr>
+          <td>${npbStatusBadge(s.status)}</td>
+          <td>${h(s.periodMonth)}</td>
+          <td class="num">${money.format(Math.round(Number(r.qtyTotal || 0)))}</td>
+          <td class="num">${npbWon(r.revenueTotal)}</td>
+          <td class="num">${npbWon(r.profit)}</td>
+          <td>
+            <div class="row-actions">
+              <button data-npb-view="${h(s.key)}">보기</button>
+              <button data-npb-download="${h(s.key)}">다운로드</button>
+              <button data-npb-reissue="${h(s.key)}">재발행</button>
+            </div>
+          </td>
+        </tr>`;
+    })
+    .join("") || `<tr><td colspan="6" class="empty">생성된 정산이 없습니다.</td></tr>`;
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>월 정산 생성</h2></div>
+      <div class="panel-body">
+        <div class="field two">
+          <div><label>정산 월</label><input type="month" data-npb-period value="${h(n.periodMonth)}"></div>
+          <div style="align-self:end"><button class="primary" data-npb-create>정산 생성</button></div>
+        </div>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>정산 이력</h2><span class="muted">${(n.settlements || []).length}건</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>상태</th><th>정산월</th><th>총수량</th><th>매출계</th><th>이익</th><th>작업</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+function renderNpbUpload() {
+  const n = state.npb;
+  if (!n.currentKey) return npbNeedSelect();
+  const channels = n.config?.channels || [];
+  const uploads = n.current?.uploads || {};
+  const chZones = channels
+    .map((c) => {
+      const up = uploads[c.code];
+      return `
+        <div class="npb-upload-card">
+          <div class="npb-upload-head"><strong>${h(c.name)}</strong><span class="muted">${h(c.code)}</span></div>
+          <input type="file" accept=".csv,.xlsx,.xls" data-npb-upload-channel="${h(c.code)}">
+          <span class="muted">${up ? h(up.fileName || "업로드됨") : "미업로드"}</span>
+        </div>`;
+    })
+    .join("") || `<div class="empty">채널 설정이 없습니다. [채널 설정]에서 먼저 등록하세요.</div>`;
+  const preview = n.parsePreview ? renderNpbParsePreview(n.parsePreview) : "";
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>채널 파일 업로드</h2></div>
+      <div class="panel-body"><div class="npb-upload-grid">${chZones}</div></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>입출고 원장 (물류)</h2></div>
+      <div class="panel-body">
+        <div class="npb-upload-card">
+          <input type="file" accept=".csv,.xlsx,.xls" data-npb-upload-logistics>
+          <span class="muted">3PL 입출고/재고 원장 파일</span>
+        </div>
+      </div>
+    </section>
+    ${preview}
+  `;
+}
+
+function renderNpbParsePreview(p) {
+  const lines = p.lines || [];
+  const warns = p.warnings || [];
+  const rows = lines
+    .slice(0, 200)
+    .map((l) => `
+      <tr>
+        <td>${h(l.channel)}</td>
+        <td>${h(l.label || l.productKey)}</td>
+        <td class="num">${money.format(Number(l.qtyEa || 0))}</td>
+        <td class="num">${h(l.eaPerUnit ?? "")}</td>
+        <td>${h(l.tier ?? "")}</td>
+        <td>${npbWarnBadges(l.warnings)}</td>
+      </tr>`)
+    .join("") || `<tr><td colspan="6" class="empty">파싱된 행이 없습니다.</td></tr>`;
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>파싱 미리보기</h2><span class="muted">${lines.length}행</span></div>
+      ${warns.length
+        ? `<div class="panel-body">${warns.map((w) => `<p class="muted">⚠ ${h(w)}</p>`).join("")}</div>`
+        : ""}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>채널</th><th>품목</th><th>수량(ea)</th><th>ea/단위</th><th>tier</th><th>경고</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </section>`;
+}
+
+function renderNpbGrid() {
+  const n = state.npb;
+  if (!n.currentKey) return npbNeedSelect();
+  const lines = n.current?.lines || [];
+  const rows = lines
+    .map((l, i) => `
+      <tr>
+        <td>${h(l.channel)}</td>
+        <td>${h(l.label || l.productKey)}</td>
+        <td><input class="num" type="number" data-npb-line="${i}" data-npb-field="qtyEa" value="${h(l.qtyEa ?? 0)}"></td>
+        <td><input class="num" type="number" data-npb-line="${i}" data-npb-field="eaPerUnit" value="${h(l.eaPerUnit ?? "")}"></td>
+        <td><input type="text" data-npb-line="${i}" data-npb-field="tier" value="${h(l.tier ?? "")}"></td>
+        <td>${h(l.source || "")}</td>
+        <td>${npbWarnBadges(l.warnings)}</td>
+      </tr>`)
+    .join("") || `<tr><td colspan="7" class="empty">확인할 라인이 없습니다. 먼저 업로드하세요.</td></tr>`;
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>확인/수정 그리드</h2><span class="muted">${lines.length}행</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>채널</th><th>품목</th><th>수량(ea)</th><th>ea/단위</th><th>tier</th><th>소스</th><th>경고</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div class="panel-body toolbar">
+        <button class="primary" data-npb-confirm>확인 후 계산</button>
+        <span class="muted">라인 저장 후 집계(compute)를 실행합니다.</span>
+      </div>
+    </section>
+    ${renderNpbInteraction()}
+  `;
+}
+
+function renderNpbInteraction() {
+  const it = state.npb.interaction;
+  const kurlyRows = (it.kurlyFees || [])
+    .map((f, i) => `
+      <div class="field two">
+        <div><label>품목</label><input type="text" data-npb-kurly="${i}" data-npb-kfield="product" value="${h(f.product || "")}"></div>
+        <div><label>수수료(%)</label><input type="number" data-npb-kurly="${i}" data-npb-kfield="fee" value="${h(f.fee ?? "")}"></div>
+      </div>`)
+    .join("");
+  const bundleRows = (it.bundles || [])
+    .map((b, i) => `
+      <div class="field three">
+        <div><label>번들 SKU</label><input type="text" data-npb-bundle="${i}" data-npb-bfield="sku" value="${h(b.sku || "")}"></div>
+        <div><label>라벨</label><input type="text" data-npb-bundle="${i}" data-npb-bfield="label" value="${h(b.label || "")}"></div>
+        <div><label>구성(ea)</label><input type="number" data-npb-bundle="${i}" data-npb-bfield="qty" value="${h(b.qty ?? "")}"></div>
+      </div>`)
+    .join("") || `<p class="muted">등록된 번들 SKU가 없습니다.</p>`;
+  const discountOptions = ["없음", "할인율", "정액할인"]
+    .map((o) => `<option ${it.kurlyDiscount === o ? "selected" : ""}>${o}</option>`)
+    .join("");
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>채널 조율 (INTERACTION)</h2></div>
+      <div class="panel-body">
+        <h3>컬리 수수료 조율</h3>
+        <div class="field two">
+          <div><label>할인 종류</label><select data-npb-kurly-discount>${discountOptions}</select></div>
+          <div style="align-self:end"><button data-npb-kurly-add>품목 수수료 추가</button></div>
+        </div>
+        ${kurlyRows}
+        <hr>
+        <h3>행사 (태리마켓)</h3>
+        <div class="field three">
+          <div><label>행사명</label><input type="text" data-npb-event="name" value="${h(it.event?.name || "")}"></div>
+          <div><label>행사 할인</label><input type="text" data-npb-event="discount" value="${h(it.event?.discount || "")}"></div>
+          <div><label>비고</label><input type="text" data-npb-event="note" value="${h(it.event?.note || "")}"></div>
+        </div>
+        <hr>
+        <h3>번들 SKU (공구/쿠팡)</h3>
+        <div class="toolbar"><button data-npb-bundle-add>번들 SKU 추가</button></div>
+        ${bundleRows}
+      </div>
+    </section>`;
+}
+
+function renderNpbChannels() {
+  const n = state.npb;
+  const channels = n.config?.channels || [];
+  const rows = channels
+    .map((c, i) => `
+      <tr>
+        <td><input type="text" data-npb-ch="${i}" data-npb-cfield="code" value="${h(c.code || "")}"></td>
+        <td><input type="text" data-npb-ch="${i}" data-npb-cfield="name" value="${h(c.name || "")}"></td>
+        <td><input type="text" data-npb-ch="${i}" data-npb-cfield="calcType" value="${h(c.calcType || "")}"></td>
+        <td><input class="num" type="number" data-npb-ch="${i}" data-npb-cfield="salePrice" value="${h(c.salePrice ?? "")}"></td>
+        <td><input class="num" type="number" data-npb-ch="${i}" data-npb-cfield="feeRate" value="${h(c.feeRate ?? "")}"></td>
+        <td><input class="num" type="number" data-npb-ch="${i}" data-npb-cfield="supplyPrice" value="${h(c.supplyPrice ?? "")}"></td>
+        <td><input type="text" data-npb-ch="${i}" data-npb-cfield="archetype" value="${h(c.archetype || "")}"></td>
+        <td><button class="danger" data-npb-ch-del="${i}">삭제</button></td>
+      </tr>`)
+    .join("") || `<tr><td colspan="8" class="empty">등록된 채널이 없습니다.</td></tr>`;
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>채널 설정</h2><span class="muted">${channels.length}개</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>코드</th><th>이름</th><th>계산방식</th><th>판매가</th><th>수수료율</th><th>공급가</th><th>아키타입</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div class="panel-body toolbar">
+        <button data-npb-ch-add>채널 추가</button>
+        <button class="primary" data-npb-config-save>설정 저장</button>
+      </div>
+    </section>
+    ${renderNpbCostEditor()}
+  `;
+}
+
+function renderNpbCostEditor() {
+  const cost = state.npb.config?.costConfig || {};
+  const scalars = Object.entries(cost).filter(([, v]) => typeof v !== "object" || v === null);
+  const tableKey = Object.keys(cost).find((k) => Array.isArray(cost[k]));
+  const scalarFields = scalars
+    .map(([k, v]) => `
+      <div><label>${h(k)}</label><input type="text" data-npb-cost="${h(k)}" value="${h(v ?? "")}"></div>`)
+    .join("") || `<p class="muted">실비 단가 항목이 없습니다.</p>`;
+  let tpl = "";
+  if (tableKey) {
+    const rowsArr = cost[tableKey] || [];
+    const cols = rowsArr.length ? Object.keys(rowsArr[0]) : ["tier", "price"];
+    const head = cols.map((c) => `<th>${h(c)}</th>`).join("") + "<th></th>";
+    const body = rowsArr
+      .map((row, i) => `
+        <tr>
+          ${cols.map((c) => `<td><input type="text" data-npb-3pl="${i}" data-npb-3col="${h(c)}" value="${h(row[c] ?? "")}"></td>`).join("")}
+          <td><button class="danger" data-npb-3pl-del="${i}">삭제</button></td>
+        </tr>`)
+      .join("") || `<tr><td colspan="${cols.length + 1}" class="empty">단가표가 비어 있습니다.</td></tr>`;
+    tpl = `
+      <h3>3PL 단가표 (${h(tableKey)})</h3>
+      <div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
+      <div class="toolbar"><button data-npb-3pl-add>단가 행 추가</button></div>`;
+  }
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>실비 단가 & 3PL 단가표</h2></div>
+      <div class="panel-body">
+        <h3>실비 단가</h3>
+        <div class="field three">${scalarFields}</div>
+        ${tpl}
+      </div>
+    </section>`;
+}
+
+function renderNpbProfit() {
+  const n = state.npb;
+  if (!n.currentKey) return npbNeedSelect();
+  const profit = Number(n.current?.rollup?.profit || 0);
+  const parties = n.profitParties;
+  const activeRatio = parties
+    .filter((p) => !p.excluded)
+    .reduce((s, p) => s + Number(p.ratio || 0), 0);
+  const sumAmount = parties
+    .filter((p) => !p.excluded)
+    .reduce((s, p) => s + profit * Number(p.ratio || 0), 0);
+  const rows = parties
+    .map((p, i) => {
+      const amount = p.excluded ? 0 : profit * Number(p.ratio || 0);
+      return `
+        <tr>
+          <td><input type="text" data-npb-party="${i}" data-npb-pfield="party" value="${h(p.party || "")}"></td>
+          <td><input class="num" type="number" step="0.01" data-npb-party="${i}" data-npb-pfield="ratio" value="${h(p.ratio ?? "")}"></td>
+          <td><label class="checkbox-line"><input type="checkbox" data-npb-party="${i}" data-npb-pfield="excluded" ${p.excluded ? "checked" : ""}> 제외</label></td>
+          <td class="num">${npbWon(amount)}</td>
+          <td><input type="text" data-npb-party="${i}" data-npb-pfield="note" value="${h(p.note || "")}"></td>
+        </tr>`;
+    })
+    .join("");
+  const ratioOk = Math.abs(activeRatio - 1) < 1e-9;
+  const amountOk = Math.abs(sumAmount - profit) < 1;
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>이익분배 입력</h2><span class="muted">이익 ${npbWon(profit)}</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>파티</th><th>비율</th><th>제외</th><th>배분액</th><th>비고</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div class="panel-body">
+        <p class="${ratioOk ? "muted" : "error-text"}">활성 비율 합계: ${activeRatio.toFixed(4)} ${ratioOk ? "✓" : "(1이어야 함)"}</p>
+        <p class="${amountOk ? "muted" : "error-text"}">배분액 합계: ${npbWon(sumAmount)} ${amountOk ? "✓" : "(이익과 같아야 함)"}</p>
+        <div class="toolbar">
+          <button data-npb-profit-seed>지난달 불러오기</button>
+          <button class="primary" data-npb-profit-save ${ratioOk && amountOk ? "" : "disabled"}>저장</button>
+        </div>
+      </div>
+    </section>`;
+}
+
+function renderNpbPreview() {
+  const n = state.npb;
+  if (!n.currentKey) return npbNeedSelect();
+  const r = n.current?.rollup || {};
+  const ps = n.current?.profitSplit;
+  const profit = Number(r.profit || 0);
+  const cards = `
+    <div class="fixed-summary-grid">
+      <div class="fixed-card"><span>총수량</span><strong>${money.format(Math.round(Number(r.qtyTotal || 0)))}</strong></div>
+      <div class="fixed-card"><span>매출계</span><strong>${npbWon(r.revenueTotal)}</strong></div>
+      <div class="fixed-card"><span>이익</span><strong>${npbWon(profit)}</strong></div>
+    </div>`;
+  const splitRows = (ps?.parties || [])
+    .map((p) => `
+      <tr>
+        <td>${h(p.party)}</td>
+        <td class="num">${h(p.ratio)}</td>
+        <td class="num">${npbWon(p.amount ?? (p.excluded ? 0 : profit * Number(p.ratio || 0)))}</td>
+        <td>${p.excluded ? "제외" : h(p.note || "")}</td>
+      </tr>`)
+    .join("") || `<tr><td colspan="4" class="empty">이익분배 정보가 없습니다.</td></tr>`;
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>미리보기</h2>${npbStatusBadge(n.current?.status)}</div>
+      <div class="panel-body">${cards}</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>파티</th><th>비율</th><th>배분액</th><th>비고</th></tr></thead>
+          <tbody>${splitRows}</tbody>
+        </table>
+      </div>
+      <div class="panel-body toolbar">
+        <button class="primary" data-npb-download="${h(n.currentKey)}">엑셀 다운로드</button>
+        <button data-npb-finalize>정산 확정</button>
+      </div>
+    </section>`;
+}
+
+function bindNpb() {
+  const n = state.npb;
+  if (!n.loaded && !n.loading) {
+    n.loading = true;
+    Promise.all([
+      api(`/api/npb/config?brand=${NPB_BRAND}`),
+      api(`/api/npb/settlements?brand=${NPB_BRAND}`)
+    ])
+      .then(([config, settlements]) => {
+        n.config = config || {};
+        n.settlements = settlements || [];
+        n.loaded = true;
+        n.loading = false;
+        renderApp();
+      })
+      .catch((error) => {
+        n.loading = false;
+        showToast(error.message || "npb 데이터 로드 실패", "error");
+        renderApp();
+      });
+    return;
+  }
+  app.querySelectorAll("[data-npb-screen]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      n.screen = btn.dataset.npbScreen;
+      renderApp();
+    });
+  });
+  if (n.screen === "list") bindNpbList();
+  else if (n.screen === "upload") bindNpbUpload();
+  else if (n.screen === "grid") bindNpbGrid();
+  else if (n.screen === "channels") bindNpbChannels();
+  else if (n.screen === "profit") bindNpbProfit();
+  else if (n.screen === "preview") bindNpbPreview();
+}
+
+function bindNpbList() {
+  const n = state.npb;
+  app.querySelector("[data-npb-period]")?.addEventListener("change", (e) => {
+    n.periodMonth = e.target.value;
+  });
+  app.querySelector("[data-npb-create]")?.addEventListener("click", async () => {
+    if (!n.periodMonth) return showToast("정산 월을 선택하세요.", "error");
+    try {
+      await api("/api/npb/settlements", {
+        method: "POST",
+        body: { brand: NPB_BRAND, periodMonth: n.periodMonth }
+      });
+      await npbReloadSettlements();
+      showToast("정산을 생성했습니다.");
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "생성 실패", "error");
+    }
+  });
+  app.querySelectorAll("[data-npb-view]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await npbLoadDetail(btn.dataset.npbView);
+        n.parsePreview = null;
+        n.screen = "grid";
+        renderApp();
+      } catch (error) {
+        showToast(error.message || "불러오기 실패", "error");
+      }
+    });
+  });
+  app.querySelectorAll("[data-npb-download]").forEach((btn) => {
+    btn.addEventListener("click", () => npbDownloadXlsx(btn.dataset.npbDownload));
+  });
+  app.querySelectorAll("[data-npb-reissue]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const key = btn.dataset.npbReissue;
+      try {
+        await api(`/api/npb/settlements/${encodeURIComponent(key)}/compute`, { method: "POST" });
+        await npbReloadSettlements();
+        showToast("재계산(재발행)했습니다.");
+        renderApp();
+      } catch (error) {
+        showToast(error.message || "재발행 실패", "error");
+      }
+    });
+  });
+}
+
+function bindNpbUpload() {
+  app.querySelectorAll("[data-npb-upload-channel]").forEach((inp) => {
+    inp.addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      await npbDoUpload({ kind: "channel", channel: inp.dataset.npbUploadChannel, file });
+    });
+  });
+  app.querySelector("[data-npb-upload-logistics]")?.addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    await npbDoUpload({ kind: "logistics", file });
+  });
+}
+
+async function npbDoUpload({ kind, channel, file }) {
+  const n = state.npb;
+  try {
+    const fileBase64 = await readFileAsBase64(file);
+    const body = { kind, fileBase64, fileName: file.name };
+    if (channel) body.channel = channel;
+    const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/upload`, {
+      method: "POST",
+      body
+    });
+    n.parsePreview = { lines: res.lines || [], warnings: res.warnings || [] };
+    await npbLoadDetail(n.currentKey);
+    showToast(`업로드 완료 (${(res.lines || []).length}행)`);
+    renderApp();
+  } catch (error) {
+    showToast(error.message || "업로드 실패", "error");
+  }
+}
+
+function bindNpbGrid() {
+  const n = state.npb;
+  app.querySelectorAll("[data-npb-line]").forEach((inp) => {
+    inp.addEventListener("input", (e) => {
+      const i = Number(inp.dataset.npbLine);
+      const f = inp.dataset.npbField;
+      const line = n.current?.lines?.[i];
+      if (!line) return;
+      line[f] = f === "tier" ? e.target.value : Number(e.target.value);
+    });
+  });
+  bindNpbInteraction();
+  app.querySelector("[data-npb-confirm]")?.addEventListener("click", async () => {
+    try {
+      await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/lines`, {
+        method: "PUT",
+        body: { lines: n.current?.lines || [], interaction: n.interaction }
+      });
+      const computed = await api(
+        `/api/npb/settlements/${encodeURIComponent(n.currentKey)}/compute`,
+        { method: "POST" }
+      );
+      if (computed) n.current = { ...n.current, ...computed };
+      n.profitParties = npbSeedParties(n.current?.profitSplit?.parties);
+      await npbReloadSettlements();
+      showToast("저장 및 계산 완료");
+      n.screen = "preview";
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "계산 실패", "error");
+    }
+  });
+}
+
+function bindNpbInteraction() {
+  const it = state.npb.interaction;
+  app.querySelector("[data-npb-kurly-discount]")?.addEventListener("change", (e) => {
+    it.kurlyDiscount = e.target.value;
+  });
+  app.querySelector("[data-npb-kurly-add]")?.addEventListener("click", () => {
+    it.kurlyFees.push({ product: "", fee: "" });
+    renderApp();
+  });
+  app.querySelectorAll("[data-npb-kurly]").forEach((inp) => {
+    inp.addEventListener("input", (e) => {
+      const i = Number(inp.dataset.npbKurly);
+      it.kurlyFees[i][inp.dataset.npbKfield] = e.target.value;
+    });
+  });
+  app.querySelectorAll("[data-npb-event]").forEach((inp) => {
+    inp.addEventListener("input", (e) => {
+      it.event = it.event || {};
+      it.event[inp.dataset.npbEvent] = e.target.value;
+    });
+  });
+  app.querySelector("[data-npb-bundle-add]")?.addEventListener("click", () => {
+    it.bundles.push({ sku: "", label: "", qty: "" });
+    renderApp();
+  });
+  app.querySelectorAll("[data-npb-bundle]").forEach((inp) => {
+    inp.addEventListener("input", (e) => {
+      const i = Number(inp.dataset.npbBundle);
+      it.bundles[i][inp.dataset.npbBfield] = e.target.value;
+    });
+  });
+}
+
+function bindNpbChannels() {
+  const n = state.npb;
+  const channels = n.config?.channels || [];
+  app.querySelectorAll("[data-npb-ch]").forEach((inp) => {
+    inp.addEventListener("input", (e) => {
+      const i = Number(inp.dataset.npbCh);
+      const f = inp.dataset.npbCfield;
+      const num = ["salePrice", "feeRate", "supplyPrice"].includes(f);
+      channels[i][f] = num ? Number(e.target.value) : e.target.value;
+    });
+  });
+  app.querySelectorAll("[data-npb-ch-del]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      channels.splice(Number(btn.dataset.npbChDel), 1);
+      renderApp();
+    });
+  });
+  app.querySelector("[data-npb-ch-add]")?.addEventListener("click", () => {
+    if (!n.config) n.config = {};
+    if (!n.config.channels) n.config.channels = channels;
+    n.config.channels.push({
+      code: "",
+      name: "",
+      category: "",
+      archetype: "",
+      calcType: "",
+      salePrice: 0,
+      feeRate: 0,
+      supplyPrice: 0
+    });
+    renderApp();
+  });
+  bindNpbCostConfig();
+  app.querySelector("[data-npb-config-save]")?.addEventListener("click", async () => {
+    try {
+      await api("/api/npb/config", {
+        method: "PUT",
+        body: {
+          brand: NPB_BRAND,
+          channels: n.config?.channels || [],
+          costConfig: n.config?.costConfig || {},
+          products: n.config?.products || []
+        }
+      });
+      showToast("채널 설정을 저장했습니다.");
+    } catch (error) {
+      showToast(error.message || "저장 실패", "error");
+    }
+  });
+}
+
+function bindNpbCostConfig() {
+  const cost = state.npb.config?.costConfig;
+  if (!cost) return;
+  const coerce = (raw) => {
+    const num = Number(raw);
+    return raw !== "" && !Number.isNaN(num) && String(num) === raw.trim() ? num : raw;
+  };
+  app.querySelectorAll("[data-npb-cost]").forEach((inp) => {
+    inp.addEventListener("input", (e) => {
+      cost[inp.dataset.npbCost] = coerce(e.target.value);
+    });
+  });
+  const tableKey = Object.keys(cost).find((k) => Array.isArray(cost[k]));
+  if (!tableKey) return;
+  app.querySelectorAll("[data-npb-3pl]").forEach((inp) => {
+    inp.addEventListener("input", (e) => {
+      const i = Number(inp.dataset.npb3pl);
+      cost[tableKey][i][inp.dataset.npb3col] = coerce(e.target.value);
+    });
+  });
+  app.querySelectorAll("[data-npb-3pl-del]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      cost[tableKey].splice(Number(btn.dataset.npb3plDel), 1);
+      renderApp();
+    });
+  });
+  app.querySelector("[data-npb-3pl-add]")?.addEventListener("click", () => {
+    const arr = cost[tableKey];
+    const shape = arr[0] ? Object.keys(arr[0]) : ["tier", "price"];
+    const row = {};
+    shape.forEach((k) => {
+      row[k] = "";
+    });
+    arr.push(row);
+    renderApp();
+  });
+}
+
+function bindNpbProfit() {
+  const n = state.npb;
+  const parties = n.profitParties;
+  app.querySelectorAll("[data-npb-party]").forEach((inp) => {
+    const i = Number(inp.dataset.npbParty);
+    const f = inp.dataset.npbPfield;
+    if (f === "excluded") {
+      inp.addEventListener("change", (e) => {
+        parties[i][f] = e.target.checked;
+        renderApp();
+      });
+    } else if (f === "ratio") {
+      inp.addEventListener("input", (e) => {
+        parties[i][f] = Number(e.target.value);
+      });
+      inp.addEventListener("change", () => renderApp());
+    } else {
+      inp.addEventListener("input", (e) => {
+        parties[i][f] = e.target.value;
+      });
+    }
+  });
+  app.querySelector("[data-npb-profit-seed]")?.addEventListener("click", async () => {
+    try {
+      const prev = npbPrevSettlement();
+      if (!prev) return showToast("지난달 정산이 없습니다.", "error");
+      const detail = await api(`/api/npb/settlements/${encodeURIComponent(prev.key)}`);
+      n.profitParties = npbSeedParties(detail?.profitSplit?.parties);
+      showToast("지난달 분배를 불러왔습니다.");
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "불러오기 실패", "error");
+    }
+  });
+  app.querySelector("[data-npb-profit-save]")?.addEventListener("click", async () => {
+    try {
+      await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/profit-split`, {
+        method: "PUT",
+        body: {
+          parties: parties.map((p) => ({
+            party: p.party,
+            ratio: Number(p.ratio || 0),
+            excluded: !!p.excluded,
+            note: p.note || ""
+          }))
+        }
+      });
+      showToast("이익분배를 저장했습니다.");
+    } catch (error) {
+      showToast(error.message || "저장 실패", "error");
+    }
+  });
+}
+
+function bindNpbPreview() {
+  const n = state.npb;
+  app.querySelectorAll("[data-npb-download]").forEach((btn) => {
+    btn.addEventListener("click", () => npbDownloadXlsx(btn.dataset.npbDownload));
+  });
+  app.querySelector("[data-npb-finalize]")?.addEventListener("click", async () => {
+    try {
+      await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/finalize`, {
+        method: "POST"
+      });
+      await npbReloadSettlements();
+      await npbLoadDetail(n.currentKey);
+      showToast("정산을 확정했습니다.");
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "확정 실패", "error");
     }
   });
 }

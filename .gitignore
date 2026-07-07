@@ -10,3 +10,6 @@ data/*.csv
 !.env.example
 .omc/
 scripts/__pycache__/
+# Business/PII settlement data (uploaded channel sheets, answer keys) — never commit
+npb/
+sample/

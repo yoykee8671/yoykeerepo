@@ -1,5 +1,6 @@
 import http from "node:http";
 import { readFile, writeFile, mkdir, stat, unlink } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -16,6 +17,8 @@ const DB_PATH = path.join(DATA_DIR, "db.json");
 const PRICE_WORKBOOK_SCRIPT = path.join(__dirname, "scripts", "price_entry_excel.py");
 const SETTLEMENT_SCRIPT = path.join(__dirname, "scripts", "settlement_excel.py");
 const XLSX_PARSE_SCRIPT = path.join(__dirname, "scripts", "xlsx_to_json.py");
+const NPB_PARSE_SCRIPT = path.join(__dirname, "scripts", "npb_parse.py");
+const NPB_XLSX_SCRIPT = path.join(__dirname, "scripts", "npb_settlement_xlsx.py");
 const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.HOST || "0.0.0.0";
 const execFileAsync = promisify(execFile);
@@ -422,6 +425,155 @@ function publicAdmin(admin) {
   return safe;
 }
 
+// NPB (도톤 운영대행) namespace seed — brand DOTEON, products, channels, and
+// per-channel line templates. Stored under db.npb via readDb/writeDb (C2-blob).
+export function buildNpbNamespace() {
+  const createdAt = now();
+  const brand = {
+    id: "doteon",
+    name: "도톤",
+    costConfig: {
+      smallShip: 2650, // VAT-included, documentation-only (never recomputed)
+      largeShip: 4400,
+      pickPack: 1430,
+      threePlTable: [
+        { item: "보관료", unitPrice: null, unit: "월/평당", note: "청구제외" },
+        { item: "입고비용", unitPrice: 0, unit: "건", note: "청구제외" },
+        { item: "택배운임비", unitPrice: 2500, unit: "건", note: "로젠택배(소형)" },
+        { item: "택배운임비", unitPrice: 4000, unit: "건", note: "로젠택배(중대형)" },
+        { item: "물류비", unitPrice: 1300, unit: "건", note: "부자재/피킹/패킹" }
+      ]
+    }
+  };
+
+  const products = [
+    {
+      id: "fc", brandId: "doteon", barcode: "8809879544118",
+      name: "도톤 포레스트 워터리스 풋클리너 100ml", listPrice: 22000,
+      nameKeywords: ["풋클리너", "발세정제", "Foot Cleaner"], skuCodes: ["BT25DTFC"]
+    },
+    {
+      id: "os", brandId: "doteon", barcode: "8809879544101",
+      name: "도톤 포레스트 아웃도어 스프레이 150ml", listPrice: 22000,
+      nameKeywords: ["아웃도어", "스프레이", "해충방지", "Outdoor Spray"], skuCodes: ["BT25OS"]
+    }
+  ];
+
+  // archetype drives UI labels/adjust behavior; calcType drives the math
+  // (위탁/자사/대리점 = rate_on_sale, 매입 = margin_supply on 공급가).
+  const channels = [
+    {
+      code: "mongshu", name: "몽슈슈", category: "위탁재고", archetype: "consignment",
+      calcType: "rate_on_sale", salePrice: 13200, feeRate: 0.1, supplyPrice: null,
+      vatIncluded: true, feeAdjustable: false, filenameKeywords: ["몽슈슈"], active: true
+    },
+    {
+      code: "smartstore", name: "스마트스토어", category: "직매출", archetype: "direct",
+      calcType: "rate_on_sale", salePrice: 17600, feeRate: 0.05, supplyPrice: null,
+      vatIncluded: true, feeAdjustable: false, filenameKeywords: ["스마트스토어"], active: true
+    },
+    {
+      code: "tailit", name: "테일릿", category: "대리점", archetype: "agency",
+      calcType: "margin_supply", salePrice: 22000, feeRate: null, supplyPrice: 10560,
+      vatIncluded: true, feeAdjustable: false, filenameKeywords: ["대리점"], active: true
+    },
+    {
+      code: "emart", name: "몰리스(이마트)", category: "매입", archetype: "purchase",
+      calcType: "margin_supply", salePrice: 14000, feeRate: null, supplyPrice: 14000,
+      vatIncluded: false, basis: "납품금액", feeAdjustable: false,
+      filenameKeywords: ["emart", "몰리스"], active: true
+    },
+    {
+      code: "wooofmall", name: "우프자사몰", category: "직매출", archetype: "direct",
+      calcType: "rate_on_sale", salePrice: 17600, feeRate: 0.05, supplyPrice: null,
+      vatIncluded: true, feeAdjustable: false, filenameKeywords: ["cafe24"], active: true
+    },
+    {
+      code: "gongu", name: "자사몰-공구", category: "직매출", archetype: "direct",
+      calcType: "rate_on_sale", salePrice: null, feeRate: 0.25, supplyPrice: null,
+      vatIncluded: true, feeAdjustable: false, filenameKeywords: ["영이공구"],
+      tiers: [
+        { tier: "1개", eaPerUnit: 1, salePrice: 16500, discountRate: 0.25 },
+        { tier: "2개", eaPerUnit: 2, salePrice: 14960, discountRate: 0.32 },
+        { tier: "3개", eaPerUnit: 3, salePrice: 14080, discountRate: 0.36 }
+      ],
+      active: true
+    },
+    {
+      code: "b2b", name: "우프B2B사업자몰", category: "매입", archetype: "purchase",
+      calcType: "rate_on_sale", salePrice: 13200, feeRate: 0.05, supplyPrice: null,
+      vatIncluded: true, feeAdjustable: false, filenameKeywords: ["b2b"], active: true
+    },
+    {
+      code: "kurly", name: "컬리", category: "위탁", archetype: "consignment",
+      calcType: "rate_on_sale", salePrice: null, feeRate: 0.3, supplyPrice: null,
+      vatIncluded: true, feeAdjustable: true, filenameKeywords: ["컬리"], active: true
+    },
+    {
+      code: "coupang", name: "쿠팡", category: "매입", archetype: "purchase",
+      calcType: "margin_supply", salePrice: 22000, feeRate: 0.37, supplyPrice: 13860,
+      vatIncluded: true, feeAdjustable: false, bundle: true,
+      filenameKeywords: ["쿠팡"], active: true
+    },
+    {
+      code: "pharmasquare", name: "파마스퀘어", category: "대리점", archetype: "agency",
+      calcType: "rate_on_sale", salePrice: 22000, feeRate: 0.45, supplyPrice: null,
+      vatIncluded: true, feeAdjustable: false, filenameKeywords: ["파마스퀘어"], active: true
+    },
+    {
+      code: "tarimarket", name: "태리마켓(행사)", category: "행사", archetype: "consignment",
+      calcType: "rate_on_sale", salePrice: 15000, feeRate: 0.2, supplyPrice: null,
+      vatIncluded: true, feeAdjustable: true, filenameKeywords: ["행사", "태리마켓"], active: true
+    }
+  ];
+  channels.forEach((channel, index) => {
+    channel.brandId = "doteon";
+    channel.sortOrder = index + 1;
+  });
+
+  // Per-channel line templates that seed a monthly grid. 공구 expands per tier.
+  const channelLineConfigs = [];
+  let lineSeq = 0;
+  for (const channel of channels) {
+    if (channel.tiers) {
+      for (const tier of channel.tiers) {
+        channelLineConfigs.push({
+          channelCode: channel.code, productId: "os",
+          lineLabel: `DOTEON Outdoor Spray ${tier.tier}`,
+          listPrice: 22000, salePrice: tier.salePrice, feeRate: channel.feeRate,
+          supplyPrice: null, discountRate: tier.discountRate,
+          eaPerUnit: tier.eaPerUnit, sortOrder: ++lineSeq
+        });
+      }
+      continue;
+    }
+    for (const product of products) {
+      channelLineConfigs.push({
+        channelCode: channel.code, productId: product.id,
+        lineLabel: product.id === "fc" ? "DOTEON Foot Cleaner" : "DOTEON Outdoor Spray",
+        listPrice: 22000, salePrice: channel.salePrice, feeRate: channel.feeRate,
+        supplyPrice: channel.supplyPrice, discountRate: null,
+        eaPerUnit: 1, sortOrder: ++lineSeq
+      });
+    }
+  }
+
+  return {
+    version: 1,
+    createdAt,
+    brands: [brand],
+    products,
+    channels,
+    channelLineConfigs,
+    defaultProfitSplit: [
+      { partyName: "유씨엘주식회사", ratio: 0.4, sortOrder: 1 },
+      { partyName: "우프컴퍼니(주)", ratio: 0.3, sortOrder: 2 },
+      { partyName: "재계약중", ratio: 0.3, sortOrder: 3 }
+    ],
+    settlements: []
+  };
+}
+
 function buildInitialDb() {
   const createdAt = now();
   const brandByName = new Map();
@@ -571,7 +723,8 @@ function buildInitialDb() {
       }
     ],
     archiveHistory: [],
-    paymentLogs: []
+    paymentLogs: [],
+    npb: buildNpbNamespace()
   };
 }
 
@@ -706,6 +859,16 @@ function migrateDb(db) {
     touch(rule, "discountValue", 0);
     touch(rule, "discountDetails", "");
     touch(rule, "targetItems", []);
+  }
+
+  // NPB namespace: seed whole on first run, else merge only missing top-level
+  // keys (idempotent — never clobber existing db.npb data).
+  if (!db.npb || typeof db.npb !== "object") {
+    db.npb = buildNpbNamespace();
+    changed = true;
+  } else {
+    const npbSeed = buildNpbNamespace();
+    for (const key of Object.keys(npbSeed)) touch(db.npb, key, npbSeed[key]);
   }
   return { db, changed };
 }
@@ -1411,6 +1574,150 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// NPB (도톤 운영대행) settlement calc engine — pure functions, no I/O.
+// Golden-master reproduction gate: scripts/npb_calc_verify.mjs (2/3/4월).
+// ---------------------------------------------------------------------------
+
+// One settlement line -> money totals. rate_on_sale (위탁/자사/대리점):
+// 매출=salePrice*qty, 공제=round(매출*feeRate), 정산=매출-공제. margin_supply
+// (매입, 공급가 고정): 매출=판매가*qty, 정산=공급가*qty, 공제=매출-정산.
+// eaPerUnit affects 정가/총수량 only; salePrice is already per order/bundle.
+export function npbComputeLine(line) {
+  const qty = number(line.qty);
+  const ea = number(line.eaPerUnit, 1) || 1;
+  const listTotal = number(line.listPrice) * qty * ea;
+  if (line.calcType === "margin_supply") {
+    const saleTotal = number(line.salePrice) * qty;
+    const settleTotal = number(line.supplyPrice) * qty;
+    return { listTotal, saleTotal, feeTotal: saleTotal - settleTotal, settleTotal };
+  }
+  const saleTotal = number(line.salePrice) * qty;
+  const feeTotal = Math.round(saleTotal * number(line.feeRate));
+  return { listTotal, saleTotal, feeTotal, settleTotal: saleTotal - feeTotal };
+}
+
+// Rollup over lines (4-step 종합정산). 실판매계=Σ매출; 할인계=정가-실판매;
+// 매출계=실판매-공제; 이익=매출계-실비-이월손실. carryOver is the prior month's
+// unrecovered net loss carried forward (0 unless a previous month ran negative;
+// e.g. 3월 answer key = 매출계-실비-89860 where 89860 is |2월 이익|).
+export function npbComputeRollup(lines, logisticsCost, carryOver = 0) {
+  let qtyTotal = 0;
+  let listTotal = 0;
+  let realSaleTotal = 0;
+  let feeTotal = 0;
+  for (const line of lines) {
+    const computed = npbComputeLine(line);
+    qtyTotal += number(line.qty) * (number(line.eaPerUnit, 1) || 1);
+    listTotal += computed.listTotal;
+    realSaleTotal += computed.saleTotal;
+    feeTotal += computed.feeTotal;
+  }
+  const revenueTotal = realSaleTotal - feeTotal;
+  const cost = number(logisticsCost);
+  const carry = number(carryOver);
+  return {
+    qtyTotal,
+    listTotal,
+    discountTotal: listTotal - realSaleTotal,
+    realSaleTotal,
+    feeTotal,
+    revenueTotal,
+    logisticsCost: cost,
+    carryOver: carry,
+    profit: revenueTotal - cost - carry
+  };
+}
+
+// 실비(운임/물류) = 소형*(택배소형+피킹) + 중대형*(택배중대형+피킹). Unit costs
+// are VAT-included documentation values from costConfig.
+export function npbComputeLogistics(shipCountSmall, shipCountLarge, costConfig) {
+  const cfg = costConfig || {};
+  const pickPack = number(cfg.pickPack);
+  return number(shipCountSmall) * (number(cfg.smallShip) + pickPack)
+    + number(shipCountLarge) * (number(cfg.largeShip) + pickPack);
+}
+
+// 이익 3사 분배. Excluded party contributes ratio 0; remaining ratios are
+// renormalized so they still sum to 1 (proportional redistribution). Amount is
+// ratio*profit with NO rounding (keeps .5 shares).
+export function npbComputeProfitSplit(profit, parties) {
+  const list = parties || [];
+  const activeRatioSum = list
+    .filter((party) => !party.excluded)
+    .reduce((sum, party) => sum + number(party.ratio), 0);
+  return list.map((party) => {
+    const ratio = party.excluded || activeRatioSum <= 0
+      ? 0
+      : number(party.ratio) / activeRatioSum;
+    return {
+      party: party.party || party.partyName || "",
+      ratio,
+      amount: ratio * number(profit),
+      excluded: Boolean(party.excluded),
+      note: party.note || ""
+    };
+  });
+}
+
+// Resolve a parsed line's channel code (which may be the parser dispatch code,
+// e.g. "molly") back to the namespace channel config ("emart"). Reverse lookup
+// is computed at call time to avoid a module-load TDZ on NPB_PARSER_CHANNEL.
+function npbNamespaceChannel(code) {
+  for (const [ns, parser] of Object.entries(NPB_PARSER_CHANNEL)) {
+    if (parser === code) return ns;
+  }
+  return code;
+}
+
+function npbFindChannel(channels, code) {
+  const want = String(code || "").trim().toLowerCase();
+  if (!want) return null;
+  const list = channels || [];
+  const canonical = npbNamespaceChannel(want);
+  return (
+    list.find((c) => String(c.code).toLowerCase() === want) ||
+    list.find((c) => String(c.code).toLowerCase() === canonical) ||
+    null
+  );
+}
+
+// Merge parsed-upload row fields (channel, productKey, qtyEa/qtyOrders, tier)
+// with the channel config pricing so npbComputeLine has everything it needs.
+// Convention (matches the answer keys): qty is the TOTAL EA count and salePrice
+// is per-EA, so eaPerUnit collapses to 1. 공구 tier rows resolve their per-EA
+// price from channel.tiers by leading digit. Fields already present on the line
+// (manual grid edits) win over config defaults.
+function npbEnrichLine(line, channels) {
+  const channel = npbFindChannel(channels, line.channel);
+  const qty = line.qty != null ? number(line.qty) : number(line.qtyEa);
+  const enriched = {
+    ...line,
+    channel: channel ? channel.code : line.channel,
+    qty,
+    eaPerUnit: 1,
+    listPrice: line.listPrice != null ? number(line.listPrice) : 22000
+  };
+  if (!channel) return enriched;
+  enriched.calcType = line.calcType || channel.calcType || "rate_on_sale";
+  let tierPrice = null;
+  if (Array.isArray(channel.tiers) && line.tier) {
+    const digit = String(line.tier).match(/(\d)/);
+    const tier = digit
+      ? channel.tiers.find((t) => String(t.tier).startsWith(digit[1]))
+      : null;
+    if (tier) tierPrice = tier.salePrice;
+  }
+  enriched.salePrice = line.salePrice != null
+    ? number(line.salePrice)
+    : number(tierPrice != null ? tierPrice : channel.salePrice);
+  enriched.feeRate = line.feeRate != null ? number(line.feeRate) : number(channel.feeRate);
+  enriched.supplyPrice = line.supplyPrice != null
+    ? number(line.supplyPrice)
+    : number(channel.supplyPrice);
+  return enriched;
+}
+
 async function generateSettlementXlsx(spec) {
   const tmpBase = path.join(os.tmpdir(), `wooofpay-settlement-${crypto.randomBytes(8).toString("hex")}`);
   const inputPath = `${tmpBase}.json`;
@@ -1440,6 +1747,128 @@ function settlementSpecFromResult(brand, year, month, result) {
     lines: result.lines,
     cancels: result.cancels
   };
+}
+
+// --- NPB (도톤 운영대행) settlement API helpers ----------------------------
+
+// Namespace channel codes differ from npb_parse.py's dispatch codes for a few
+// channels; map before invoking the parser so the recipe is recognized.
+const NPB_PARSER_CHANNEL = {
+  emart: "molly",
+  wooofmall: "cafe24",
+  tarimarket: "terrymarket"
+};
+
+function npbGetBrand(db, brandCode) {
+  const code = String(brandCode || "").trim().toLowerCase();
+  return (db.npb?.brands || []).find((item) => String(item.id).toLowerCase() === code) || null;
+}
+
+function npbFindSettlement(db, key) {
+  return (db.npb?.settlements || []).find((item) => item.key === key) || null;
+}
+
+// Write the uploaded base64 to a temp file then run npb_parse.py, mirroring
+// parseBankXlsxUpload. Channel is passed explicitly (temp filename is random,
+// so filename-based detection can't work). Returns the parser JSON.
+async function runNpbParse(base64, fileName, channel) {
+  const buf = Buffer.from(base64 || "", "base64");
+  const ext = path.extname(fileName || "") || ".xlsx";
+  const tmpPath = path.join(os.tmpdir(), `wooofpay-npb-${crypto.randomBytes(8).toString("hex")}${ext}`);
+  try {
+    await writeFile(tmpPath, buf);
+    const args = [NPB_PARSE_SCRIPT, "--input", tmpPath];
+    const parserChannel = NPB_PARSER_CHANNEL[channel] || channel;
+    if (parserChannel) args.push("--channel", parserChannel);
+    const { stdout } = await execFileAsync("python3", args, {
+      cwd: __dirname,
+      maxBuffer: 20 * 1024 * 1024
+    });
+    return JSON.parse(stdout || "{}");
+  } finally {
+    await safeUnlink(tmpPath);
+  }
+}
+
+// Build the npb_settlement_xlsx.py spec.json from a stored settlement. The
+// generator is tolerant (all fields optional), so we map what we have and let
+// missing sections fall back to its defaults.
+function npbBuildXlsxSpec(db, settlement) {
+  const brand = npbGetBrand(db, settlement.brand);
+  const costConfig = brand?.costConfig || {};
+  const period = settlement.period || {};
+  const allChannels = db.npb?.channels || [];
+  const byCode = new Map();
+  for (const line of settlement.lines || []) {
+    const code = line.channelCode || line.channel || "unknown";
+    if (!byCode.has(code)) byCode.set(code, []);
+    byCode.get(code).push(line);
+  }
+  const channels = [];
+  for (const [code, lines] of byCode) {
+    const meta = allChannels.find((item) => item.code === code);
+    channels.push({
+      name: meta?.name || code,
+      headers: ["상품", "수량", "정가", "매출", "공제", "정산"],
+      rows: lines.map((line) => {
+        const computed = npbComputeLine(line);
+        return [
+          line.label || line.lineLabel || line.productKey || "",
+          number(line.qty),
+          computed.listTotal,
+          computed.saleTotal,
+          computed.feeTotal,
+          computed.settleTotal
+        ];
+      })
+    });
+  }
+  const profitSplit = (settlement.profitSplit || []).map((party) => ({
+    partyName: party.partyName || party.party || "",
+    ratio: party.ratio,
+    amount: party.amount,
+    note: party.note || "",
+    excluded: Boolean(party.excluded)
+  }));
+  return {
+    period: {
+      year: period.year,
+      month: period.month,
+      monthStart: period.monthStart || "",
+      range: period.range || "",
+      monthEnd: period.monthEnd || "",
+      start: period.start || "",
+      end: period.end || ""
+    },
+    rollup: settlement.rollup || {},
+    inventory: settlement.inventory || [],
+    inventoryTotal: settlement.inventoryTotal || null,
+    profitSplit,
+    profitSplitTotalRatio: settlement.rollup ? 1 : undefined,
+    profitSplitTotalAmount: settlement.rollup?.profit,
+    logistics: settlement.logistics || {},
+    threePLTable: costConfig.threePlTable || [],
+    channels,
+    ledger: settlement.ledger || {},
+    memo: settlement.memo || []
+  };
+}
+
+async function generateNpbXlsx(spec) {
+  const tmpBase = path.join(os.tmpdir(), `wooofpay-npb-xlsx-${crypto.randomBytes(8).toString("hex")}`);
+  const inputPath = `${tmpBase}.json`;
+  const outputPath = `${tmpBase}.xlsx`;
+  try {
+    await writeFile(inputPath, JSON.stringify(spec), "utf8");
+    await execFileAsync("python3", [NPB_XLSX_SCRIPT, "--input", inputPath, "--output", outputPath], {
+      cwd: __dirname,
+      maxBuffer: 20 * 1024 * 1024
+    });
+    return await readFile(outputPath);
+  } finally {
+    await safeUnlink(inputPath);
+    await safeUnlink(outputPath);
+  }
 }
 
 function normalizeImportedAction(row = {}) {
@@ -3194,6 +3623,250 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // --- NPB (도톤 운영대행) settlement endpoints (plan §F) -------------------
+  if (pathname === "/api/npb/config" && method === "GET") {
+    const brand = npbGetBrand(db, url.searchParams.get("brand") || "doteon");
+    if (!brand) { sendJson(res, 404, { error: "브랜드를 찾을 수 없습니다." }); return; }
+    sendJson(res, 200, {
+      brand: brand.id,
+      channels: db.npb.channels || [],
+      costConfig: brand.costConfig || {},
+      products: db.npb.products || [],
+      channelLineConfigs: db.npb.channelLineConfigs || [],
+      defaultProfitSplit: db.npb.defaultProfitSplit || []
+    });
+    return;
+  }
+
+  if (pathname === "/api/npb/config" && method === "PUT") {
+    const body = await readBody(req);
+    const brand = npbGetBrand(db, body.brand || "doteon");
+    if (!brand) { sendJson(res, 404, { error: "브랜드를 찾을 수 없습니다." }); return; }
+    if (Array.isArray(body.channels)) db.npb.channels = body.channels;
+    if (body.costConfig && typeof body.costConfig === "object") {
+      brand.costConfig = { ...brand.costConfig, ...body.costConfig };
+    }
+    const parties = body.parties || body.defaultProfitSplit;
+    if (Array.isArray(parties)) db.npb.defaultProfitSplit = parties;
+    await writeDb(db);
+    sendJson(res, 200, {
+      brand: brand.id,
+      channels: db.npb.channels,
+      costConfig: brand.costConfig,
+      defaultProfitSplit: db.npb.defaultProfitSplit
+    });
+    return;
+  }
+
+  if (pathname === "/api/npb/settlements" && method === "GET") {
+    const brandCode = String(url.searchParams.get("brand") || "").trim().toLowerCase();
+    const list = (db.npb.settlements || [])
+      .filter((item) => !brandCode || String(item.brand).toLowerCase() === brandCode)
+      .map((item) => ({
+        key: item.key,
+        brand: item.brand,
+        period: item.period,
+        status: item.status,
+        issuedAt: item.issuedAt || "",
+        rollup: item.rollup
+          ? {
+              qtyTotal: item.rollup.qtyTotal,
+              realSaleTotal: item.rollup.realSaleTotal,
+              revenueTotal: item.rollup.revenueTotal,
+              profit: item.rollup.profit
+            }
+          : null
+      }));
+    sendJson(res, 200, { settlements: list });
+    return;
+  }
+
+  if (pathname === "/api/npb/settlements" && method === "POST") {
+    const body = await readBody(req);
+    const brand = npbGetBrand(db, body.brand || "doteon");
+    if (!brand) { sendJson(res, 404, { error: "브랜드를 찾을 수 없습니다." }); return; }
+    const raw = String(body.periodMonth || "").trim();
+    const match = raw.match(/^(\d{4})[-/]?(\d{1,2})$/);
+    if (!match) { sendJson(res, 400, { error: "정산 월(YYYY-MM)을 입력하세요." }); return; }
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    if (month < 1 || month > 12) { sendJson(res, 400, { error: "정산 월이 올바르지 않습니다." }); return; }
+    const brandLabel = String(body.brand || brand.id).toUpperCase();
+    const key = `${brandLabel}_${year}${String(month).padStart(2, "0")}`;
+    if (npbFindSettlement(db, key)) {
+      sendJson(res, 409, { error: "이미 존재하는 정산 월입니다.", key });
+      return;
+    }
+    const settlement = {
+      key,
+      brand: brandLabel,
+      period: { year, month },
+      status: "draft",
+      uploads: {},
+      lines: [],
+      logistics: {},
+      inventory: [],
+      rollup: null,
+      profitSplit: [],
+      parties: (db.npb.defaultProfitSplit || []).map((party) => ({ ...party })),
+      carryOver: 0,
+      createdAt: now(),
+      updatedAt: now()
+    };
+    db.npb.settlements.push(settlement);
+    await writeDb(db);
+    sendJson(res, 201, { settlement });
+    return;
+  }
+
+  if (pathname.startsWith("/api/npb/settlements/")) {
+    const segments = pathname.split("/");
+    const key = decodeURIComponent(segments[4] || "");
+    const action = segments[5] || "";
+    const settlement = npbFindSettlement(db, key);
+    if (!settlement) { sendJson(res, 404, { error: "정산을 찾을 수 없습니다." }); return; }
+
+    if (!action && method === "GET") {
+      sendJson(res, 200, { settlement });
+      return;
+    }
+
+    if (action === "upload" && method === "POST") {
+      const body = await readBody(req);
+      const kind = body.kind === "logistics" ? "logistics" : "channel";
+      if (!body.fileBase64) { sendJson(res, 400, { error: "업로드할 파일이 없습니다." }); return; }
+      try {
+        if (kind === "channel") {
+          if (!body.channel) { sendJson(res, 400, { error: "채널을 선택하세요." }); return; }
+          const parsed = await runNpbParse(body.fileBase64, body.fileName, body.channel);
+          settlement.uploads[body.channel] = {
+            kind,
+            channel: body.channel,
+            fileName: body.fileName || "",
+            lines: parsed.lines || [],
+            warnings: parsed.warnings || [],
+            uploadedAt: now()
+          };
+          settlement.updatedAt = now();
+          await writeDb(db);
+          sendJson(res, 200, {
+            kind,
+            channel: parsed.channel || body.channel,
+            rows: parsed.lines || [],
+            warnings: parsed.warnings || []
+          });
+        } else {
+          const rows = await parseBankXlsxUpload(body.fileBase64);
+          settlement.uploads.logistics = {
+            kind,
+            fileName: body.fileName || "",
+            rows,
+            uploadedAt: now()
+          };
+          settlement.updatedAt = now();
+          await writeDb(db);
+          sendJson(res, 200, { kind, rows, warnings: [] });
+        }
+      } catch (error) {
+        sendJson(res, 400, { error: `파일 파싱 실패: ${error.message}` });
+      }
+      return;
+    }
+
+    if (action === "lines" && method === "PUT") {
+      const body = await readBody(req);
+      if (!Array.isArray(body.lines)) { sendJson(res, 400, { error: "lines 배열이 필요합니다." }); return; }
+      settlement.lines = body.lines;
+      settlement.updatedAt = now();
+      await writeDb(db);
+      sendJson(res, 200, { settlement });
+      return;
+    }
+
+    if (action === "compute" && method === "POST") {
+      const body = await readBody(req);
+      const brand = npbGetBrand(db, settlement.brand);
+      const costConfig = brand?.costConfig || {};
+      const npbChannels = (db.npb?.channels || []).filter(
+        (c) => !brand || String(c.brandId).toLowerCase() === String(brand.id).toLowerCase()
+      );
+      const lines = (settlement.lines || []).map((line) => npbEnrichLine(line, npbChannels));
+      settlement.lines = lines;
+      const small = number(body?.logistics?.smallCount, number(settlement.logistics?.smallCount));
+      const large = number(body?.logistics?.largeCount, number(settlement.logistics?.largeCount));
+      const logisticsCost = npbComputeLogistics(small, large, costConfig);
+      const carryOver = number(body?.carryOver, number(settlement.carryOver));
+      const rollup = npbComputeRollup(lines, logisticsCost, carryOver);
+      const parties = settlement.parties && settlement.parties.length
+        ? settlement.parties
+        : db.npb.defaultProfitSplit || [];
+      const profitSplit = npbComputeProfitSplit(rollup.profit, parties);
+      const pickPack = number(costConfig.pickPack);
+      settlement.logistics = {
+        smallCount: small,
+        largeCount: large,
+        smallShip: number(costConfig.smallShip),
+        largeShip: number(costConfig.largeShip),
+        pickPack,
+        smallTotal: small * (number(costConfig.smallShip) + pickPack),
+        largeTotal: large * (number(costConfig.largeShip) + pickPack),
+        grandTotal: logisticsCost
+      };
+      settlement.carryOver = carryOver;
+      settlement.rollup = rollup;
+      settlement.profitSplit = profitSplit;
+      if (Array.isArray(body.inventory)) settlement.inventory = body.inventory;
+      settlement.updatedAt = now();
+      await writeDb(db);
+      sendJson(res, 200, {
+        rollup,
+        logistics: settlement.logistics,
+        profitSplit,
+        inventory: settlement.inventory
+      });
+      return;
+    }
+
+    if (action === "profit-split" && method === "PUT") {
+      const body = await readBody(req);
+      const parties = body.parties || body.profitSplit;
+      if (!Array.isArray(parties)) { sendJson(res, 400, { error: "parties 배열이 필요합니다." }); return; }
+      settlement.parties = parties;
+      if (settlement.rollup) {
+        settlement.profitSplit = npbComputeProfitSplit(settlement.rollup.profit, parties);
+      }
+      settlement.updatedAt = now();
+      await writeDb(db);
+      sendJson(res, 200, { parties: settlement.parties, profitSplit: settlement.profitSplit });
+      return;
+    }
+
+    if (action === "finalize" && method === "POST") {
+      settlement.status = "final";
+      settlement.issuedAt = now();
+      settlement.updatedAt = now();
+      await writeDb(db);
+      sendJson(res, 200, { settlement });
+      return;
+    }
+
+    if (action === "xlsx" && method === "GET") {
+      try {
+        const spec = npbBuildXlsxSpec(db, settlement);
+        const buffer = await generateNpbXlsx(spec);
+        sendBuffer(res, 200, buffer,
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          { "content-disposition": contentDisposition(`(도톤) ${settlement.key}.xlsx`) });
+      } catch (error) {
+        sendJson(res, 500, { error: `정산서 생성 실패: ${error.message}` });
+      }
+      return;
+    }
+
+    sendJson(res, 404, { error: "API를 찾을 수 없습니다." });
+    return;
+  }
+
   sendJson(res, 404, { error: "API를 찾을 수 없습니다." });
 }
 
@@ -3257,7 +3930,14 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-await ensureDb();
-server.listen(PORT, HOST, () => {
-  console.log(`WooofPay running at http://${HOST}:${PORT}`);
-});
+// Only bootstrap the DB and bind the port when run directly (node server.js).
+// Importing this module (e.g. scripts/npb_calc_verify.mjs) must have no side
+// effects — pure functions are re-used without starting the server.
+const isMainModule = Boolean(process.argv[1]) &&
+  realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+if (isMainModule) {
+  await ensureDb();
+  server.listen(PORT, HOST, () => {
+    console.log(`WooofPay running at http://${HOST}:${PORT}`);
+  });
+}
