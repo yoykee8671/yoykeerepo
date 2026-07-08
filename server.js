@@ -1780,11 +1780,22 @@ async function runNpbParse(base64, fileName, channel) {
     const args = [NPB_PARSE_SCRIPT, "--input", tmpPath];
     const parserChannel = NPB_PARSER_CHANNEL[channel] || channel;
     if (parserChannel) args.push("--channel", parserChannel);
-    const { stdout } = await execFileAsync("python3", args, {
-      cwd: __dirname,
-      maxBuffer: 20 * 1024 * 1024
-    });
-    return JSON.parse(stdout || "{}");
+    let stdout;
+    try {
+      ({ stdout } = await execFileAsync("python3", args, {
+        cwd: __dirname,
+        maxBuffer: 20 * 1024 * 1024
+      }));
+    } catch (err) {
+      // Surface the real python error (stderr/traceback) instead of a generic message.
+      const detail = String(err.stderr || err.message || "").trim().split("\n").pop();
+      throw new Error(`파서 실행 오류: ${detail || "python3 실행 실패"}`);
+    }
+    try {
+      return JSON.parse(stdout || "{}");
+    } catch (err) {
+      throw new Error(`파서 출력 해석 실패: ${String(stdout || "").slice(0, 200)}`);
+    }
   } finally {
     await safeUnlink(tmpPath);
   }

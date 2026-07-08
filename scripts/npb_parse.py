@@ -202,6 +202,23 @@ def data_rows(ws):
     return rows
 
 
+def load_rows(path):
+    """Read the first sheet as a list of row tuples. Supports .xlsx/.xlsm via
+    openpyxl and .csv via the csv module (many channel exports are CSV). Raises
+    on unreadable input so main() can turn it into a visible warning."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".csv", ".txt"):
+        import csv
+        with open(path, newline="", encoding="utf-8-sig") as fh:
+            return [tuple(row) for row in csv.reader(fh)]
+    if ext == ".xls":
+        raise ValueError(
+            "구형 .xls 형식은 지원하지 않습니다. .xlsx 또는 .csv로 저장 후 올려주세요."
+        )
+    wb = load_workbook(path, data_only=True, read_only=True)
+    return list(wb.worksheets[0].iter_rows(values_only=True))
+
+
 # --- per-channel parsers ----------------------------------------------------
 
 def parse_cafe24(rows, channel, warnings, is_gongu=False):
@@ -502,8 +519,7 @@ def parse_terrymarket(rows, channel, warnings):
 
 # --- dispatch ---------------------------------------------------------------
 
-def parse(channel, ws, warnings, meta):
-    rows = data_rows(ws)
+def parse(channel, rows, warnings, meta):
     if channel == "gongu":
         return parse_cafe24(rows, channel, warnings, is_gongu=True)
     if channel in ("cafe24", "b2b", "tailit"):
@@ -549,9 +565,16 @@ def main():
         json.dump(result, sys.stdout, ensure_ascii=False)
         return
 
-    wb = load_workbook(args.input, data_only=True, read_only=True)
-    ws = wb.worksheets[0]
-    lines = parse(channel, ws, warnings, meta)
+    try:
+        rows = load_rows(args.input)
+    except Exception as exc:  # unreadable file -> visible warning, not a crash
+        warnings.append(
+            "파일을 읽을 수 없습니다 (%s): %s"
+            % (os.path.basename(args.input), exc)
+        )
+        rows = None
+
+    lines = parse(channel, rows, warnings, meta) if rows else []
 
     result = {
         "channel": channel,
