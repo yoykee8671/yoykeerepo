@@ -3521,7 +3521,7 @@ function npbNeedSelect() {
 
 function npbSeedParties(parties) {
   const base = (parties && parties.length ? parties : []).map((p) => ({
-    party: p.party || "",
+    party: p.party || p.partyName || "",
     ratio: Number(p.ratio || 0),
     excluded: !!p.excluded,
     note: p.note || ""
@@ -3532,25 +3532,28 @@ function npbSeedParties(parties) {
 
 function npbPrevSettlement() {
   const n = state.npb;
+  const list = Array.isArray(n.settlements) ? n.settlements : [];
   const cur = n.current?.periodMonth
-    || n.settlements.find((s) => s.key === n.currentKey)?.periodMonth;
+    || list.find((s) => s.key === n.currentKey)?.periodMonth;
   if (!cur) return null;
-  const prior = (n.settlements || [])
+  const prior = list
     .filter((s) => s.periodMonth < cur)
     .sort((a, b) => b.periodMonth.localeCompare(a.periodMonth));
   return prior[0] || null;
 }
 
 async function npbReloadSettlements() {
-  state.npb.settlements = (await api(`/api/npb/settlements?brand=${NPB_BRAND}`)) || [];
+  const resp = await api(`/api/npb/settlements?brand=${NPB_BRAND}`);
+  state.npb.settlements = (resp && resp.settlements) || [];
 }
 
 async function npbLoadDetail(key) {
-  const detail = await api(`/api/npb/settlements/${encodeURIComponent(key)}`);
+  const resp = await api(`/api/npb/settlements/${encodeURIComponent(key)}`);
+  const detail = (resp && resp.settlement) || resp || {};
   const n = state.npb;
   n.current = detail;
   n.currentKey = key;
-  n.profitParties = npbSeedParties(detail?.profitSplit?.parties);
+  n.profitParties = npbSeedParties(detail.profitSplit || detail.parties);
 }
 
 async function npbDownloadXlsx(key) {
@@ -3607,7 +3610,8 @@ function renderNpb() {
 
 function renderNpbList() {
   const n = state.npb;
-  const rows = (n.settlements || [])
+  const list = Array.isArray(n.settlements) ? n.settlements : [];
+  const rows = list
     .map((s) => {
       const r = s.rollup || {};
       return `
@@ -3638,7 +3642,7 @@ function renderNpbList() {
       </div>
     </section>
     <section class="panel">
-      <div class="panel-head"><h2>정산 이력</h2><span class="muted">${(n.settlements || []).length}건</span></div>
+      <div class="panel-head"><h2>정산 이력</h2><span class="muted">${list.length}건</span></div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>상태</th><th>정산월</th><th>총수량</th><th>매출계</th><th>이익</th><th>작업</th></tr></thead>
@@ -3957,7 +3961,7 @@ function bindNpb() {
     ])
       .then(([config, settlements]) => {
         n.config = config || {};
-        n.settlements = settlements || [];
+        n.settlements = (settlements && settlements.settlements) || [];
         n.loaded = true;
         n.loading = false;
         renderApp();
@@ -4057,9 +4061,10 @@ async function npbDoUpload({ kind, channel, file }) {
       method: "POST",
       body
     });
-    n.parsePreview = { lines: res.lines || [], warnings: res.warnings || [] };
+    const parsedRows = res.rows || res.lines || [];
+    n.parsePreview = { lines: parsedRows, warnings: res.warnings || [] };
     await npbLoadDetail(n.currentKey);
-    showToast(`업로드 완료 (${(res.lines || []).length}행)`);
+    showToast(`업로드 완료 (${parsedRows.length}행)`);
     renderApp();
   } catch (error) {
     showToast(error.message || "업로드 실패", "error");
@@ -4089,7 +4094,7 @@ function bindNpbGrid() {
         { method: "POST" }
       );
       if (computed) n.current = { ...n.current, ...computed };
-      n.profitParties = npbSeedParties(n.current?.profitSplit?.parties);
+      n.profitParties = npbSeedParties(n.current?.profitSplit || n.current?.parties);
       await npbReloadSettlements();
       showToast("저장 및 계산 완료");
       n.screen = "preview";
