@@ -3746,6 +3746,17 @@ async function routeApi(req, res, url) {
       const body = await readBody(req);
       const kind = body.kind === "logistics" ? "logistics" : "channel";
       if (!body.fileBase64) { sendJson(res, 400, { error: "업로드할 파일이 없습니다." }); return; }
+      // Old binary .xls (OLE2 magic D0CF11E0) can't be read by openpyxl and is
+      // often password-encrypted by Excel; give an actionable message instead of
+      // a cryptic parse failure. Excel: 파일 > 다른 이름으로 저장 > .xlsx.
+      const head = Buffer.from(String(body.fileBase64).slice(0, 16), "base64");
+      const isOleXls = head.length >= 4 && head.readUInt32BE(0) === 0xd0cf11e0;
+      if (isOleXls || /\.xls$/i.test(body.fileName || "")) {
+        sendJson(res, 400, {
+          error: "구형 .xls 파일은 읽을 수 없습니다. Excel에서 '다른 이름으로 저장 → .xlsx'로 변환한 뒤 다시 올려주세요."
+        });
+        return;
+      }
       try {
         if (kind === "channel") {
           if (!body.channel) { sendJson(res, 400, { error: "채널을 선택하세요." }); return; }
