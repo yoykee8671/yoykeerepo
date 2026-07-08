@@ -3751,9 +3751,17 @@ async function routeApi(req, res, url) {
       // a cryptic parse failure. Excel: 파일 > 다른 이름으로 저장 > .xlsx.
       const head = Buffer.from(String(body.fileBase64).slice(0, 16), "base64");
       const isOleXls = head.length >= 4 && head.readUInt32BE(0) === 0xd0cf11e0;
-      if (isOleXls || /\.xls$/i.test(body.fileName || "")) {
+      if (isOleXls) {
         sendJson(res, 400, {
-          error: "구형 .xls 파일은 읽을 수 없습니다. Excel에서 '다른 이름으로 저장 → .xlsx'로 변환한 뒤 다시 올려주세요."
+          error:
+            "이 파일은 구형 .xls(바이너리) 형식입니다. 확장자만 .xlsx로 바꾸면 안 되고, " +
+            "Excel에서 파일을 연 뒤 '파일 → 다른 이름으로 저장 → Excel 통합 문서(.xlsx)'로 실제 변환해서 올려주세요."
+        });
+        return;
+      }
+      if (/\.xls$/i.test(body.fileName || "")) {
+        sendJson(res, 400, {
+          error: "구형 .xls 파일은 읽을 수 없습니다. Excel에서 '다른 이름으로 저장 → .xlsx'로 변환한 뒤 올려주세요."
         });
         return;
       }
