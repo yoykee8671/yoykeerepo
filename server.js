@@ -3782,20 +3782,29 @@ async function routeApi(req, res, url) {
         if (kind === "channel") {
           if (!body.channel) { sendJson(res, 400, { error: "채널을 선택하세요." }); return; }
           const parsed = await runNpbParse(body.fileBase64, body.fileName, body.channel);
+          const parsedLines = (parsed.lines || []).map((line) => ({
+            ...line,
+            channel: body.channel
+          }));
           settlement.uploads[body.channel] = {
             kind,
             channel: body.channel,
             fileName: body.fileName || "",
-            lines: parsed.lines || [],
+            lines: parsedLines,
             warnings: parsed.warnings || [],
             uploadedAt: now()
           };
+          // Accumulate parsed lines into the editable grid: drop any prior lines
+          // for this channel (idempotent re-upload) and append the fresh ones.
+          settlement.lines = (settlement.lines || [])
+            .filter((line) => line.channel !== body.channel)
+            .concat(parsedLines);
           settlement.updatedAt = now();
           await writeDb(db);
           sendJson(res, 200, {
             kind,
             channel: parsed.channel || body.channel,
-            rows: parsed.lines || [],
+            rows: parsedLines,
             warnings: parsed.warnings || []
           });
         } else {
