@@ -3746,16 +3746,29 @@ async function routeApi(req, res, url) {
       const body = await readBody(req);
       const kind = body.kind === "logistics" ? "logistics" : "channel";
       if (!body.fileBase64) { sendJson(res, 400, { error: "업로드할 파일이 없습니다." }); return; }
-      // Old binary .xls (OLE2 magic D0CF11E0) can't be read by openpyxl and is
-      // often password-encrypted by Excel; give an actionable message instead of
-      // a cryptic parse failure. Excel: 파일 > 다른 이름으로 저장 > .xlsx.
-      const head = Buffer.from(String(body.fileBase64).slice(0, 16), "base64");
-      const isOleXls = head.length >= 4 && head.readUInt32BE(0) === 0xd0cf11e0;
-      if (isOleXls) {
+      // Files can't be read by openpyxl in two cases; give actionable messages
+      // instead of a cryptic parse failure:
+      //  1) OLE2 (magic D0CF11E0) WITH an EncryptedPackage stream = a
+      //     password-encrypted .xlsx (the WMS export protects it). Needs the
+      //     password removed, not a format conversion.
+      //  2) OLE2 without that stream = an old binary .xls.
+      const fileBuf = Buffer.from(String(body.fileBase64 || ""), "base64");
+      const isOle = fileBuf.length >= 4 && fileBuf.readUInt32BE(0) === 0xd0cf11e0;
+      if (isOle) {
+        const encMarker = Buffer.from("EncryptedPackage", "utf16le");
+        if (fileBuf.includes(encMarker)) {
+          sendJson(res, 400, {
+            error:
+              "이 파일은 비밀번호로 암호화되어 있습니다. Excel에서 파일을 연 뒤 " +
+              "'검토 → 통합 문서 보호 → 암호 제거'(또는 '다른 이름으로 저장 → 도구/옵션에서 암호 삭제')로 " +
+              "암호를 없앤 .xlsx로 저장해 올려주세요."
+          });
+          return;
+        }
         sendJson(res, 400, {
           error:
             "이 파일은 구형 .xls(바이너리) 형식입니다. 확장자만 .xlsx로 바꾸면 안 되고, " +
-            "Excel에서 파일을 연 뒤 '파일 → 다른 이름으로 저장 → Excel 통합 문서(.xlsx)'로 실제 변환해서 올려주세요."
+            "Excel에서 '파일 → 다른 이름으로 저장 → Excel 통합 문서(.xlsx)'로 실제 변환해서 올려주세요."
         });
         return;
       }
