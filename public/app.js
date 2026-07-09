@@ -36,6 +36,7 @@ const state = {
     currentKey: "",
     periodMonth: `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`,
     parsePreview: null,
+    logisticsCounts: { small: 0, large: 0 },
     interaction: { kurlyDiscount: "없음", kurlyFees: [], event: {}, bundles: [] },
     profitParties: [
       { party: "", ratio: 0, excluded: false, note: "" },
@@ -3743,9 +3744,15 @@ function renderNpbGrid() {
           <tbody>${rows}</tbody>
         </table>
       </div>
+      <div class="panel-body">
+        <div class="field two">
+          <div><label>소형 출고건수(실비)</label><input class="num" type="number" data-npb-ship="small" value="${h(n.logisticsCounts?.small ?? 0)}"></div>
+          <div><label>중대형 출고건수(실비)</label><input class="num" type="number" data-npb-ship="large" value="${h(n.logisticsCounts?.large ?? 0)}"></div>
+        </div>
+      </div>
       <div class="panel-body toolbar">
         <button class="primary" data-npb-confirm>확인 후 계산</button>
-        <span class="muted">라인 저장 후 집계(compute)를 실행합니다.</span>
+        <span class="muted">라인·출고건수 저장 후 집계(compute)를 실행합니다.</span>
       </div>
     </section>
     ${renderNpbInteraction()}
@@ -4082,6 +4089,11 @@ function bindNpbGrid() {
       line[f] = f === "tier" ? e.target.value : Number(e.target.value);
     });
   });
+  app.querySelectorAll("[data-npb-ship]").forEach((inp) => {
+    inp.addEventListener("input", (e) => {
+      n.logisticsCounts[inp.dataset.npbShip] = Number(e.target.value) || 0;
+    });
+  });
   bindNpbInteraction();
   app.querySelector("[data-npb-confirm]")?.addEventListener("click", async () => {
     try {
@@ -4091,7 +4103,15 @@ function bindNpbGrid() {
       });
       const computed = await api(
         `/api/npb/settlements/${encodeURIComponent(n.currentKey)}/compute`,
-        { method: "POST" }
+        {
+          method: "POST",
+          body: {
+            logistics: {
+              smallCount: n.logisticsCounts?.small || 0,
+              largeCount: n.logisticsCounts?.large || 0
+            }
+          }
+        }
       );
       if (computed) n.current = { ...n.current, ...computed };
       n.profitParties = npbSeedParties(n.current?.profitSplit || n.current?.parties);
