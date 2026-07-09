@@ -37,7 +37,8 @@ const state = {
     periodMonth: `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`,
     parsePreview: null,
     logisticsCounts: { small: 0, large: 0 },
-    interaction: { kurlyDiscount: "없음", kurlyFees: [], event: {}, bundles: [] },
+    worksheet: null,
+    inventory: null,
     profitParties: [
       { party: "", ratio: 0, excluded: false, note: "" },
       { party: "", ratio: 0, excluded: false, note: "" },
@@ -49,12 +50,41 @@ const state = {
 const NPB_BRAND = "DOTEON";
 const NPB_SCREENS = [
   ["list", "월 목록/이력"],
+  ["worksheet", "정산 워크시트"],
   ["upload", "업로드"],
-  ["grid", "확인/수정"],
   ["channels", "채널 설정"],
-  ["profit", "이익분배"],
   ["preview", "미리보기/다운로드"]
 ];
+
+// Client-side line math — MUST mirror server.js npbComputeLine (rate_on_sale):
+// 매출=salePrice*qty, 수수료=round(매출*feeRate), 정산=매출-수수료,
+// 정가=listPrice*qty*eaPerUnit. eaPerUnit stays 1 (qty is already total EA).
+function npbRowMath(row) {
+  const qty = Number(row.qty || 0);
+  const ea = Number(row.eaPerUnit || 1) || 1;
+  const revenue = Number(row.salePrice || 0) * qty;
+  const fee = Math.round(revenue * Number(row.feeRate || 0));
+  return {
+    revenue,
+    fee,
+    settle: revenue - fee,
+    list: Number(row.listPrice || 22000) * qty * ea
+  };
+}
+
+// The answer-key channel order for the worksheet blocks.
+const NPB_WS_ORDER = [
+  "mongshu", "smartstore", "tailit", "emart", "wooofmall", "gongu",
+  "b2b", "kurly", "coupang", "tarimarket", "pharmasquare"
+];
+
+// Map a parser productKey (foot/spray) to a config productId (fc/os).
+function npbProductId(key) {
+  const k = String(key || "").toLowerCase();
+  if (k === "fc" || k === "foot") return "fc";
+  if (k === "os" || k === "spray") return "os";
+  return k;
+}
 
 const app = document.querySelector("#app");
 const money = new Intl.NumberFormat("ko-KR");
@@ -3555,6 +3585,127 @@ async function npbLoadDetail(key) {
   n.current = detail;
   n.currentKey = key;
   n.profitParties = npbSeedParties(detail.profitSplit || detail.parties);
+  n.logisticsCounts = {
+    small: Number(detail.logistics?.smallCount || 0),
+    large: Number(detail.logistics?.largeCount || 0)
+  };
+  n.worksheet = npbBuildWorksheet(n.config, detail.lines || []);
+  n.inventory = npbBuildInventory(n.config, detail.inventory || []);
+}
+
+// Build the editable worksheet: one block per channel, seeded from
+// channelLineConfigs (so blocks are visible pre-upload), overlaid with any
+// qty/price/fee already stored on settlement.lines (parsed or hand-edited).
+function npbBuildWorksheet(config, lines) {
+  const cfg = config || {};
+  const channels = cfg.channels || [];
+  const lineConfigs = cfg.channelLineConfigs || [];
+  const byChannel = new Map(channels.map((c) => [c.code, c]));
+  // Index stored lines by channel|productId|tier for overlay lookup.
+  const stored = new Map();
+  for (const l of lines || []) {
+    const pid = npbProductId(l.productKey || l.productId);
+    const tier = l.tier || "";
+    stored.set(`${l.channel}|${pid}|${tier}`, l);
+  }
+  const order = NPB_WS_ORDER.slice();
+  channels.forEach((c) => { if (!order.includes(c.code)) order.push(c.code); });
+  const blocks = [];
+  for (const code of order) {
+    const channel = byChannel.get(code);
+    if (!channel || channel.active === false) continue;
+    const seeds = lineConfigs.filter((lc) => lc.channelCode === code);
+    if (!seeds.length) continue;
+    const rows = seeds.map((seed) => {
+      const tierLabel = channel.tiers && seed.lineLabel
+        ? (seed.lineLabel.match(/(\d개)$/) || [])[1] || ""
+        : "";
+      const key = `${code}|${seed.productId}|${tierLabel}`;
+      const stLine = stored.get(key)
+        || stored.get(`${code}|${seed.productId}|`);
+      return {
+        productKey: seed.productId,
+        label: seed.lineLabel,
+        listPrice: 22000,
+        salePrice: Number(stLine?.salePrice ?? seed.salePrice ?? 0),
+        feeRate: Number(stLine?.feeRate ?? seed.feeRate ?? 0),
+        qty: Number(stLine?.qty ?? stLine?.qtyEa ?? 0),
+        eaPerUnit: 1,
+        tier: tierLabel
+      };
+    });
+    blocks.push({
+      code,
+      name: channel.name,
+      category: channel.category || "",
+      priceLabel: channel.priceLabel || "기준가",
+      rows
+    });
+  }
+  return blocks;
+}
+
+// Seed the 재고현황 table from config products, overlaying any stored rows.
+function npbBuildInventory(config, stored) {
+  const products = config?.products || [];
+  const byKey = new Map(
+    (stored || []).map((r) => [npbProductId(r.productKey || r.productId || r.key), r])
+  );
+  return products.map((p) => {
+    const r = byKey.get(p.id) || {};
+    return {
+      productKey: p.id,
+      name: p.name,
+      opening: Number(r.opening || 0),
+      inbound: Number(r.inbound || 0),
+      outbound: Number(r.outbound || 0),
+      sold: Number(r.sold || 0),
+      nonSale: Number(r.nonSale || 0),
+      closing: Number(r.closing || 0)
+    };
+  });
+}
+
+// Roll the worksheet blocks up client-side (mirrors npbComputeRollup) so the
+// summary card and 이익 update instantly as the user edits.
+function npbWorksheetRollup() {
+  const n = state.npb;
+  const blocks = n.worksheet || [];
+  let qtyTotal = 0;
+  let listTotal = 0;
+  let realSaleTotal = 0;
+  let feeTotal = 0;
+  for (const block of blocks) {
+    for (const row of block.rows) {
+      const m = npbRowMath(row);
+      qtyTotal += Number(row.qty || 0) * (Number(row.eaPerUnit || 1) || 1);
+      listTotal += m.list;
+      realSaleTotal += m.revenue;
+      feeTotal += m.fee;
+    }
+  }
+  const revenueTotal = realSaleTotal - feeTotal;
+  const cost = npbLogisticsCost();
+  return {
+    qtyTotal,
+    listTotal,
+    discountTotal: listTotal - realSaleTotal,
+    realSaleTotal,
+    feeTotal,
+    revenueTotal,
+    logisticsCost: cost,
+    profit: revenueTotal - cost
+  };
+}
+
+function npbLogisticsCost() {
+  const n = state.npb;
+  const cc = n.config?.costConfig || {};
+  const pick = Number(cc.pickPack || 0);
+  const small = Number(n.logisticsCounts?.small || 0);
+  const large = Number(n.logisticsCounts?.large || 0);
+  return small * (Number(cc.smallShip || 0) + pick)
+    + large * (Number(cc.largeShip || 0) + pick);
 }
 
 async function npbDownloadXlsx(key) {
@@ -3594,9 +3745,8 @@ function renderNpb() {
     .join("");
   let body = "";
   if (n.screen === "upload") body = renderNpbUpload();
-  else if (n.screen === "grid") body = renderNpbGrid();
+  else if (n.screen === "worksheet") body = renderNpbWorksheet();
   else if (n.screen === "channels") body = renderNpbChannels();
-  else if (n.screen === "profit") body = renderNpbProfit();
   else if (n.screen === "preview") body = renderNpbPreview();
   else body = renderNpbList();
   const ctx = n.currentKey
@@ -3719,87 +3869,210 @@ function renderNpbParsePreview(p) {
     </section>`;
 }
 
-function renderNpbGrid() {
+function renderNpbWorksheet() {
   const n = state.npb;
   if (!n.currentKey) return npbNeedSelect();
-  const lines = n.current?.lines || [];
-  const rows = lines
-    .map((l, i) => `
-      <tr>
-        <td>${h(l.channel)}</td>
-        <td>${h(l.label || l.productKey)}</td>
-        <td><input class="num" type="number" data-npb-line="${i}" data-npb-field="qtyEa" value="${h(l.qtyEa ?? 0)}"></td>
-        <td><input class="num" type="number" data-npb-line="${i}" data-npb-field="eaPerUnit" value="${h(l.eaPerUnit ?? "")}"></td>
-        <td><input type="text" data-npb-line="${i}" data-npb-field="tier" value="${h(l.tier ?? "")}"></td>
-        <td>${h(l.source || "")}</td>
-        <td>${npbWarnBadges(l.warnings)}</td>
-      </tr>`)
-    .join("") || `<tr><td colspan="7" class="empty">확인할 라인이 없습니다. 먼저 업로드하세요.</td></tr>`;
+  if (!n.worksheet) n.worksheet = npbBuildWorksheet(n.config, n.current?.lines || []);
+  if (!n.inventory) n.inventory = npbBuildInventory(n.config, n.current?.inventory || []);
+  return `
+    ${renderNpbRollupCard()}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>채널별 워크시트</h2>
+        <span class="muted">채널별 판매데이터 정리 · 정가 22,000원 기준</span>
+      </div>
+      <div class="panel-body npb-ws">
+        ${n.worksheet.map((b, bi) => renderNpbWsBlock(b, bi)).join("")}
+      </div>
+    </section>
+    ${renderNpbCostSection()}
+    ${renderNpbProfitSection()}
+    ${renderNpbInventorySection()}
+    <section class="panel">
+      <div class="panel-body toolbar">
+        <button class="primary" data-npb-ws-save>저장 (계산)</button>
+        <button data-npb-download="${h(n.currentKey)}">엑셀 다운로드</button>
+        <span class="muted">라인·출고건수 저장 후 집계(compute)를 실행합니다.</span>
+      </div>
+    </section>
+  `;
+}
+
+function renderNpbRollupCard() {
+  const r = npbWorksheetRollup();
+  const cell = (label, value) =>
+    `<div class="fixed-card"><span>${label}</span><strong>${value}</strong></div>`;
   return `
     <section class="panel">
-      <div class="panel-head"><h2>확인/수정 그리드</h2><span class="muted">${lines.length}행</span></div>
+      <div class="panel-head"><h2>종합정산 (실시간)</h2></div>
+      <div class="panel-body">
+        <div class="npb-rollup-grid">
+          ${cell("실판매수량", money.format(Math.round(r.qtyTotal)))}
+          ${cell("판매정가계", npbWon(r.listTotal))}
+          ${cell("할인계", npbWon(r.discountTotal))}
+          ${cell("실판매계", npbWon(r.realSaleTotal))}
+          ${cell("공제수수료", npbWon(r.feeTotal))}
+          ${cell("매출계", npbWon(r.revenueTotal))}
+          ${cell("실비", npbWon(r.logisticsCost))}
+          ${cell("이익", npbWon(r.profit))}
+        </div>
+      </div>
+    </section>`;
+}
+
+function renderNpbWsBlock(block, bi) {
+  let subQty = 0;
+  let subRevenue = 0;
+  let subFee = 0;
+  let subSettle = 0;
+  let subList = 0;
+  const rows = block.rows
+    .map((row, ri) => {
+      const m = npbRowMath(row);
+      subQty += Number(row.qty || 0);
+      subRevenue += m.revenue;
+      subFee += m.fee;
+      subSettle += m.settle;
+      subList += m.list;
+      const feePct = (Number(row.feeRate || 0) * 100).toFixed(2).replace(/\.?0+$/, "");
+      return `
+        <tr>
+          <td>${h(row.label)}</td>
+          <td class="num">${money.format(row.listPrice)}</td>
+          <td><input class="num" type="number" data-npb-ws="${bi}" data-npb-wr="${ri}"
+            data-npb-wf="salePrice" value="${h(row.salePrice)}"></td>
+          <td><input class="num npb-pct" type="number" step="0.01" data-npb-ws="${bi}"
+            data-npb-wr="${ri}" data-npb-wf="feeRate" value="${h(feePct)}"></td>
+          <td><input class="num" type="number" data-npb-ws="${bi}" data-npb-wr="${ri}"
+            data-npb-wf="qty" value="${h(row.qty)}"></td>
+          <td class="num">${money.format(m.revenue)}</td>
+          <td class="num">${money.format(m.fee)}</td>
+          <td class="num">${money.format(m.settle)}</td>
+        </tr>`;
+    })
+    .join("");
+  const tag = block.category
+    ? `<span class="badge">${h(block.category)}</span>`
+    : "";
+  return `
+    <div class="npb-ws-block">
+      <div class="npb-ws-title"><strong>${h(block.name)}</strong> ${tag}</div>
+      <div class="table-wrap">
+        <table class="npb-ws-table">
+          <thead>
+            <tr>
+              <th>제품</th><th>정가</th><th>기준가</th><th>수수료율(%)</th>
+              <th>판매수량</th><th>매출</th><th>수수료</th><th>정산</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+          <tfoot>
+            <tr>
+              <th>합계</th>
+              <td class="num">-</td><td class="num">-</td><td class="num">-</td>
+              <td class="num">${money.format(subQty)}</td>
+              <td class="num">${money.format(subRevenue)}</td>
+              <td class="num">${money.format(subFee)}</td>
+              <td class="num">${money.format(subSettle)}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>`;
+}
+
+function renderNpbCostSection() {
+  const n = state.npb;
+  const cc = n.config?.costConfig || {};
+  const small = Number(n.logisticsCounts?.small || 0);
+  const large = Number(n.logisticsCounts?.large || 0);
+  const pick = Number(cc.pickPack || 0);
+  const smallUnit = Number(cc.smallShip || 0) + pick;
+  const largeUnit = Number(cc.largeShip || 0) + pick;
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>실비 (운임/물류)</h2>
+        <span class="muted">단가 VAT포함 · 피킹/패킹 ${money.format(pick)}원</span></div>
+      <div class="panel-body">
+        <div class="field two">
+          <div>
+            <label>소형 출고건수 (단가 ${money.format(smallUnit)}원)</label>
+            <input class="num" type="number" data-npb-ship="small" value="${h(small)}">
+          </div>
+          <div>
+            <label>중대형 출고건수 (단가 ${money.format(largeUnit)}원)</label>
+            <input class="num" type="number" data-npb-ship="large" value="${h(large)}">
+          </div>
+        </div>
+        <p class="muted">실비 = 소형 ${money.format(small)} × ${money.format(smallUnit)}
+          + 중대형 ${money.format(large)} × ${money.format(largeUnit)}
+          = <strong>${npbWon(npbLogisticsCost())}</strong></p>
+      </div>
+    </section>`;
+}
+
+function renderNpbProfitSection() {
+  const n = state.npb;
+  const profit = npbWorksheetRollup().profit;
+  const parties = n.profitParties;
+  const activeRatio = parties
+    .filter((p) => !p.excluded)
+    .reduce((s, p) => s + Number(p.ratio || 0), 0);
+  const rows = parties
+    .map((p, i) => {
+      const ratio = p.excluded || activeRatio <= 0
+        ? 0
+        : Number(p.ratio || 0) / activeRatio;
+      const amount = ratio * profit;
+      return `
+        <tr>
+          <td><input type="text" data-npb-party="${i}" data-npb-pfield="party" value="${h(p.party || "")}"></td>
+          <td><input class="num" type="number" step="0.01" data-npb-party="${i}" data-npb-pfield="ratio" value="${h(p.ratio ?? "")}"></td>
+          <td><label class="checkbox-line"><input type="checkbox" data-npb-party="${i}" data-npb-pfield="excluded" ${p.excluded ? "checked" : ""}> 제외</label></td>
+          <td class="num">${npbWon(amount)}</td>
+          <td><input type="text" data-npb-party="${i}" data-npb-pfield="note" value="${h(p.note || "")}"></td>
+        </tr>`;
+    })
+    .join("");
+  const ratioOk = Math.abs(activeRatio - 1) < 1e-9;
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>이익분배</h2><span class="muted">이익 ${npbWon(profit)}</span></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>채널</th><th>품목</th><th>수량(ea)</th><th>ea/단위</th><th>tier</th><th>소스</th><th>경고</th></tr></thead>
+          <thead><tr><th>파티</th><th>비율</th><th>제외</th><th>배분액</th><th>비고</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
       <div class="panel-body">
-        <div class="field two">
-          <div><label>소형 출고건수(실비)</label><input class="num" type="number" data-npb-ship="small" value="${h(n.logisticsCounts?.small ?? 0)}"></div>
-          <div><label>중대형 출고건수(실비)</label><input class="num" type="number" data-npb-ship="large" value="${h(n.logisticsCounts?.large ?? 0)}"></div>
-        </div>
+        <p class="${ratioOk ? "muted" : "error-text"}">활성 비율 합계: ${activeRatio.toFixed(4)} ${ratioOk ? "✓" : "(1이어야 함)"}</p>
+        <div class="toolbar"><button data-npb-profit-seed>지난달 불러오기</button></div>
       </div>
-      <div class="panel-body toolbar">
-        <button class="primary" data-npb-confirm>확인 후 계산</button>
-        <span class="muted">라인·출고건수 저장 후 집계(compute)를 실행합니다.</span>
-      </div>
-    </section>
-    ${renderNpbInteraction()}
-  `;
+    </section>`;
 }
 
-function renderNpbInteraction() {
-  const it = state.npb.interaction;
-  const kurlyRows = (it.kurlyFees || [])
-    .map((f, i) => `
-      <div class="field two">
-        <div><label>품목</label><input type="text" data-npb-kurly="${i}" data-npb-kfield="product" value="${h(f.product || "")}"></div>
-        <div><label>수수료(%)</label><input type="number" data-npb-kurly="${i}" data-npb-kfield="fee" value="${h(f.fee ?? "")}"></div>
-      </div>`)
-    .join("");
-  const bundleRows = (it.bundles || [])
-    .map((b, i) => `
-      <div class="field three">
-        <div><label>번들 SKU</label><input type="text" data-npb-bundle="${i}" data-npb-bfield="sku" value="${h(b.sku || "")}"></div>
-        <div><label>라벨</label><input type="text" data-npb-bundle="${i}" data-npb-bfield="label" value="${h(b.label || "")}"></div>
-        <div><label>구성(ea)</label><input type="number" data-npb-bundle="${i}" data-npb-bfield="qty" value="${h(b.qty ?? "")}"></div>
-      </div>`)
-    .join("") || `<p class="muted">등록된 번들 SKU가 없습니다.</p>`;
-  const discountOptions = ["없음", "할인율", "정액할인"]
-    .map((o) => `<option ${it.kurlyDiscount === o ? "selected" : ""}>${o}</option>`)
-    .join("");
+function renderNpbInventorySection() {
+  const n = state.npb;
+  const inv = n.inventory || [];
+  const cols = [
+    ["opening", "기초"], ["inbound", "입고"], ["outbound", "출고"],
+    ["sold", "판매"], ["nonSale", "비매출"], ["closing", "기말"]
+  ];
+  const rows = inv
+    .map((r, i) => `
+      <tr>
+        <td>${h(r.name)}</td>
+        ${cols.map(([f]) => `<td><input class="num" type="number" data-npb-inv="${i}" data-npb-ifield="${f}" value="${h(r[f] ?? 0)}"></td>`).join("")}
+      </tr>`)
+    .join("") || `<tr><td colspan="7" class="empty">제품이 없습니다.</td></tr>`;
   return `
     <section class="panel">
-      <div class="panel-head"><h2>채널 조율 (INTERACTION)</h2></div>
-      <div class="panel-body">
-        <h3>컬리 수수료 조율</h3>
-        <div class="field two">
-          <div><label>할인 종류</label><select data-npb-kurly-discount>${discountOptions}</select></div>
-          <div style="align-self:end"><button data-npb-kurly-add>품목 수수료 추가</button></div>
-        </div>
-        ${kurlyRows}
-        <hr>
-        <h3>행사 (태리마켓)</h3>
-        <div class="field three">
-          <div><label>행사명</label><input type="text" data-npb-event="name" value="${h(it.event?.name || "")}"></div>
-          <div><label>행사 할인</label><input type="text" data-npb-event="discount" value="${h(it.event?.discount || "")}"></div>
-          <div><label>비고</label><input type="text" data-npb-event="note" value="${h(it.event?.note || "")}"></div>
-        </div>
-        <hr>
-        <h3>번들 SKU (공구/쿠팡)</h3>
-        <div class="toolbar"><button data-npb-bundle-add>번들 SKU 추가</button></div>
-        ${bundleRows}
+      <div class="panel-head"><h2>재고현황</h2><span class="muted">자사물류센터 입출고 기준</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>품목</th>${cols.map(([, l]) => `<th>${l}</th>`).join("")}</tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
       </div>
     </section>`;
 }
@@ -3874,51 +4147,6 @@ function renderNpbCostEditor() {
     </section>`;
 }
 
-function renderNpbProfit() {
-  const n = state.npb;
-  if (!n.currentKey) return npbNeedSelect();
-  const profit = Number(n.current?.rollup?.profit || 0);
-  const parties = n.profitParties;
-  const activeRatio = parties
-    .filter((p) => !p.excluded)
-    .reduce((s, p) => s + Number(p.ratio || 0), 0);
-  const sumAmount = parties
-    .filter((p) => !p.excluded)
-    .reduce((s, p) => s + profit * Number(p.ratio || 0), 0);
-  const rows = parties
-    .map((p, i) => {
-      const amount = p.excluded ? 0 : profit * Number(p.ratio || 0);
-      return `
-        <tr>
-          <td><input type="text" data-npb-party="${i}" data-npb-pfield="party" value="${h(p.party || "")}"></td>
-          <td><input class="num" type="number" step="0.01" data-npb-party="${i}" data-npb-pfield="ratio" value="${h(p.ratio ?? "")}"></td>
-          <td><label class="checkbox-line"><input type="checkbox" data-npb-party="${i}" data-npb-pfield="excluded" ${p.excluded ? "checked" : ""}> 제외</label></td>
-          <td class="num">${npbWon(amount)}</td>
-          <td><input type="text" data-npb-party="${i}" data-npb-pfield="note" value="${h(p.note || "")}"></td>
-        </tr>`;
-    })
-    .join("");
-  const ratioOk = Math.abs(activeRatio - 1) < 1e-9;
-  const amountOk = Math.abs(sumAmount - profit) < 1;
-  return `
-    <section class="panel">
-      <div class="panel-head"><h2>이익분배 입력</h2><span class="muted">이익 ${npbWon(profit)}</span></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>파티</th><th>비율</th><th>제외</th><th>배분액</th><th>비고</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-      <div class="panel-body">
-        <p class="${ratioOk ? "muted" : "error-text"}">활성 비율 합계: ${activeRatio.toFixed(4)} ${ratioOk ? "✓" : "(1이어야 함)"}</p>
-        <p class="${amountOk ? "muted" : "error-text"}">배분액 합계: ${npbWon(sumAmount)} ${amountOk ? "✓" : "(이익과 같아야 함)"}</p>
-        <div class="toolbar">
-          <button data-npb-profit-seed>지난달 불러오기</button>
-          <button class="primary" data-npb-profit-save ${ratioOk && amountOk ? "" : "disabled"}>저장</button>
-        </div>
-      </div>
-    </section>`;
-}
 
 function renderNpbPreview() {
   const n = state.npb;
@@ -3988,9 +4216,8 @@ function bindNpb() {
   });
   if (n.screen === "list") bindNpbList();
   else if (n.screen === "upload") bindNpbUpload();
-  else if (n.screen === "grid") bindNpbGrid();
+  else if (n.screen === "worksheet") bindNpbWorksheet();
   else if (n.screen === "channels") bindNpbChannels();
-  else if (n.screen === "profit") bindNpbProfit();
   else if (n.screen === "preview") bindNpbPreview();
 }
 
@@ -4018,7 +4245,7 @@ function bindNpbList() {
       try {
         await npbLoadDetail(btn.dataset.npbView);
         n.parsePreview = null;
-        n.screen = "grid";
+        n.screen = "worksheet";
         renderApp();
       } catch (error) {
         showToast(error.message || "불러오기 실패", "error");
@@ -4078,83 +4305,175 @@ async function npbDoUpload({ kind, channel, file }) {
   }
 }
 
-function bindNpbGrid() {
+// Flatten the worksheet blocks into settlement line objects for PUT /lines.
+function npbWorksheetLines() {
   const n = state.npb;
-  app.querySelectorAll("[data-npb-line]").forEach((inp) => {
+  const lines = [];
+  for (const block of n.worksheet || []) {
+    for (const row of block.rows) {
+      lines.push({
+        channel: block.code,
+        productKey: row.productKey,
+        label: row.label,
+        listPrice: 22000,
+        salePrice: Number(row.salePrice || 0),
+        feeRate: Number(row.feeRate || 0),
+        qty: Number(row.qty || 0),
+        eaPerUnit: 1,
+        tier: row.tier || ""
+      });
+    }
+  }
+  return lines;
+}
+
+function bindNpbWorksheet() {
+  const n = state.npb;
+  // Worksheet cell edits: salePrice/qty as numbers, feeRate entered as a percent.
+  app.querySelectorAll("[data-npb-ws]").forEach((inp) => {
     inp.addEventListener("input", (e) => {
-      const i = Number(inp.dataset.npbLine);
-      const f = inp.dataset.npbField;
-      const line = n.current?.lines?.[i];
-      if (!line) return;
-      line[f] = f === "tier" ? e.target.value : Number(e.target.value);
+      const bi = Number(inp.dataset.npbWs);
+      const ri = Number(inp.dataset.npbWr);
+      const f = inp.dataset.npbWf;
+      const row = n.worksheet?.[bi]?.rows?.[ri];
+      if (!row) return;
+      const raw = Number(e.target.value);
+      row[f] = f === "feeRate" ? (Number.isFinite(raw) ? raw / 100 : 0) : raw;
+      renderNpbWorksheetLive();
     });
   });
   app.querySelectorAll("[data-npb-ship]").forEach((inp) => {
     inp.addEventListener("input", (e) => {
       n.logisticsCounts[inp.dataset.npbShip] = Number(e.target.value) || 0;
+      renderNpbWorksheetLive();
     });
   });
-  bindNpbInteraction();
-  app.querySelector("[data-npb-confirm]")?.addEventListener("click", async () => {
-    try {
-      await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/lines`, {
-        method: "PUT",
-        body: { lines: n.current?.lines || [], interaction: n.interaction }
-      });
-      const computed = await api(
-        `/api/npb/settlements/${encodeURIComponent(n.currentKey)}/compute`,
-        {
-          method: "POST",
-          body: {
-            logistics: {
-              smallCount: n.logisticsCounts?.small || 0,
-              largeCount: n.logisticsCounts?.large || 0
-            }
-          }
-        }
-      );
-      if (computed) n.current = { ...n.current, ...computed };
-      n.profitParties = npbSeedParties(n.current?.profitSplit || n.current?.parties);
-      await npbReloadSettlements();
-      showToast("저장 및 계산 완료");
-      n.screen = "preview";
-      renderApp();
-    } catch (error) {
-      showToast(error.message || "계산 실패", "error");
-    }
+  app.querySelectorAll("[data-npb-inv]").forEach((inp) => {
+    inp.addEventListener("input", (e) => {
+      const i = Number(inp.dataset.npbInv);
+      const row = n.inventory?.[i];
+      if (row) row[inp.dataset.npbIfield] = Number(e.target.value) || 0;
+    });
+  });
+  bindNpbProfitInline();
+  app.querySelector("[data-npb-ws-save]")?.addEventListener("click", npbSaveWorksheet);
+  app.querySelectorAll("[data-npb-download]").forEach((btn) => {
+    btn.addEventListener("click", () => npbDownloadXlsx(btn.dataset.npbDownload));
   });
 }
 
-function bindNpbInteraction() {
-  const it = state.npb.interaction;
-  app.querySelector("[data-npb-kurly-discount]")?.addEventListener("change", (e) => {
-    it.kurlyDiscount = e.target.value;
+// Re-render only the worksheet screen in place for instant feedback (avoids a
+// full renderApp so focus/caret stay in the edited input).
+function renderNpbWorksheetLive() {
+  const container = app.querySelector(".npb-rollup-grid");
+  if (!container) return;
+  const r = npbWorksheetRollup();
+  const cells = [
+    money.format(Math.round(r.qtyTotal)), npbWon(r.listTotal),
+    npbWon(r.discountTotal), npbWon(r.realSaleTotal), npbWon(r.feeTotal),
+    npbWon(r.revenueTotal), npbWon(r.logisticsCost), npbWon(r.profit)
+  ];
+  container.querySelectorAll(".fixed-card strong").forEach((el, i) => {
+    if (cells[i] != null) el.textContent = cells[i];
   });
-  app.querySelector("[data-npb-kurly-add]")?.addEventListener("click", () => {
-    it.kurlyFees.push({ product: "", fee: "" });
+  // Update each block's row totals and the channel 합계 row.
+  app.querySelectorAll(".npb-ws-block").forEach((blockEl, bi) => {
+    const block = state.npb.worksheet?.[bi];
+    if (!block) return;
+    let sq = 0, sr = 0, sf = 0, ss = 0;
+    blockEl.querySelectorAll("tbody tr").forEach((tr, ri) => {
+      const row = block.rows[ri];
+      if (!row) return;
+      const m = npbRowMath(row);
+      sq += Number(row.qty || 0); sr += m.revenue; sf += m.fee; ss += m.settle;
+      const tds = tr.querySelectorAll("td");
+      if (tds[5]) tds[5].textContent = money.format(m.revenue);
+      if (tds[6]) tds[6].textContent = money.format(m.fee);
+      if (tds[7]) tds[7].textContent = money.format(m.settle);
+    });
+    const foot = blockEl.querySelectorAll("tfoot td");
+    if (foot[3]) foot[3].textContent = money.format(sq);
+    if (foot[4]) foot[4].textContent = money.format(sr);
+    if (foot[5]) foot[5].textContent = money.format(sf);
+    if (foot[6]) foot[6].textContent = money.format(ss);
+  });
+}
+
+async function npbSaveWorksheet() {
+  const n = state.npb;
+  try {
+    await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/lines`, {
+      method: "PUT",
+      body: { lines: npbWorksheetLines() }
+    });
+    const computed = await api(
+      `/api/npb/settlements/${encodeURIComponent(n.currentKey)}/compute`,
+      {
+        method: "POST",
+        body: {
+          logistics: {
+            smallCount: n.logisticsCounts?.small || 0,
+            largeCount: n.logisticsCounts?.large || 0
+          },
+          inventory: n.inventory || []
+        }
+      }
+    );
+    // Persist the edited profit-split alongside the compute pass.
+    await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/profit-split`, {
+      method: "PUT",
+      body: {
+        parties: n.profitParties.map((p) => ({
+          party: p.party,
+          ratio: Number(p.ratio || 0),
+          excluded: !!p.excluded,
+          note: p.note || ""
+        }))
+      }
+    });
+    if (computed) n.current = { ...n.current, ...computed };
+    await npbReloadSettlements();
+    showToast(`저장 및 계산 완료 · 이익 ${npbWon(computed?.rollup?.profit)}`);
     renderApp();
+  } catch (error) {
+    showToast(error.message || "계산 실패", "error");
+  }
+}
+
+function bindNpbProfitInline() {
+  const n = state.npb;
+  const parties = n.profitParties;
+  app.querySelectorAll("[data-npb-party]").forEach((inp) => {
+    const i = Number(inp.dataset.npbParty);
+    const f = inp.dataset.npbPfield;
+    if (f === "excluded") {
+      inp.addEventListener("change", (e) => {
+        parties[i][f] = e.target.checked;
+        renderApp();
+      });
+    } else if (f === "ratio") {
+      inp.addEventListener("input", (e) => {
+        parties[i][f] = Number(e.target.value);
+      });
+      inp.addEventListener("change", () => renderApp());
+    } else {
+      inp.addEventListener("input", (e) => {
+        parties[i][f] = e.target.value;
+      });
+    }
   });
-  app.querySelectorAll("[data-npb-kurly]").forEach((inp) => {
-    inp.addEventListener("input", (e) => {
-      const i = Number(inp.dataset.npbKurly);
-      it.kurlyFees[i][inp.dataset.npbKfield] = e.target.value;
-    });
-  });
-  app.querySelectorAll("[data-npb-event]").forEach((inp) => {
-    inp.addEventListener("input", (e) => {
-      it.event = it.event || {};
-      it.event[inp.dataset.npbEvent] = e.target.value;
-    });
-  });
-  app.querySelector("[data-npb-bundle-add]")?.addEventListener("click", () => {
-    it.bundles.push({ sku: "", label: "", qty: "" });
-    renderApp();
-  });
-  app.querySelectorAll("[data-npb-bundle]").forEach((inp) => {
-    inp.addEventListener("input", (e) => {
-      const i = Number(inp.dataset.npbBundle);
-      it.bundles[i][inp.dataset.npbBfield] = e.target.value;
-    });
+  app.querySelector("[data-npb-profit-seed]")?.addEventListener("click", async () => {
+    try {
+      const prev = npbPrevSettlement();
+      if (!prev) return showToast("지난달 정산이 없습니다.", "error");
+      const detail = await api(`/api/npb/settlements/${encodeURIComponent(prev.key)}`);
+      const d = detail?.settlement || detail;
+      n.profitParties = npbSeedParties(d?.profitSplit || d?.parties);
+      showToast("지난달 분배를 불러왔습니다.");
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "불러오기 실패", "error");
+    }
   });
 }
 
@@ -4247,59 +4566,6 @@ function bindNpbCostConfig() {
   });
 }
 
-function bindNpbProfit() {
-  const n = state.npb;
-  const parties = n.profitParties;
-  app.querySelectorAll("[data-npb-party]").forEach((inp) => {
-    const i = Number(inp.dataset.npbParty);
-    const f = inp.dataset.npbPfield;
-    if (f === "excluded") {
-      inp.addEventListener("change", (e) => {
-        parties[i][f] = e.target.checked;
-        renderApp();
-      });
-    } else if (f === "ratio") {
-      inp.addEventListener("input", (e) => {
-        parties[i][f] = Number(e.target.value);
-      });
-      inp.addEventListener("change", () => renderApp());
-    } else {
-      inp.addEventListener("input", (e) => {
-        parties[i][f] = e.target.value;
-      });
-    }
-  });
-  app.querySelector("[data-npb-profit-seed]")?.addEventListener("click", async () => {
-    try {
-      const prev = npbPrevSettlement();
-      if (!prev) return showToast("지난달 정산이 없습니다.", "error");
-      const detail = await api(`/api/npb/settlements/${encodeURIComponent(prev.key)}`);
-      n.profitParties = npbSeedParties(detail?.profitSplit?.parties);
-      showToast("지난달 분배를 불러왔습니다.");
-      renderApp();
-    } catch (error) {
-      showToast(error.message || "불러오기 실패", "error");
-    }
-  });
-  app.querySelector("[data-npb-profit-save]")?.addEventListener("click", async () => {
-    try {
-      await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/profit-split`, {
-        method: "PUT",
-        body: {
-          parties: parties.map((p) => ({
-            party: p.party,
-            ratio: Number(p.ratio || 0),
-            excluded: !!p.excluded,
-            note: p.note || ""
-          }))
-        }
-      });
-      showToast("이익분배를 저장했습니다.");
-    } catch (error) {
-      showToast(error.message || "저장 실패", "error");
-    }
-  });
-}
 
 function bindNpbPreview() {
   const n = state.npb;
