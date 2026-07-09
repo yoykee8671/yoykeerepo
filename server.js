@@ -464,29 +464,31 @@ export function buildNpbNamespace() {
   const channels = [
     {
       code: "mongshu", name: "몽슈슈", category: "위탁재고", archetype: "consignment",
-      calcType: "rate_on_sale", salePrice: 13200, feeRate: 0.1, supplyPrice: null,
-      vatIncluded: true, feeAdjustable: false, filenameKeywords: ["몽슈슈"], active: true
+      calcType: "rate_on_sale", salePrice: 22000, feeRate: 0.4, supplyPrice: 13200,
+      priceLabel: "정가", vatIncluded: true, feeAdjustable: false,
+      filenameKeywords: ["몽슈슈"], active: true
     },
     {
       code: "smartstore", name: "스마트스토어", category: "직매출", archetype: "direct",
-      calcType: "rate_on_sale", salePrice: 17600, feeRate: 0.05, supplyPrice: null,
-      vatIncluded: true, feeAdjustable: false, filenameKeywords: ["스마트스토어"], active: true
+      calcType: "rate_on_sale", salePrice: 19800, feeRate: 0.05, supplyPrice: null,
+      priceLabel: "프로모션가", vatIncluded: true, feeAdjustable: false, filenameKeywords: ["스마트스토어"], active: true
     },
     {
       code: "tailit", name: "테일릿", category: "대리점", archetype: "agency",
-      calcType: "margin_supply", salePrice: 22000, feeRate: null, supplyPrice: 10560,
-      vatIncluded: true, feeAdjustable: false, filenameKeywords: ["대리점"], active: true
+      calcType: "rate_on_sale", salePrice: 22000, feeRate: 0.52, supplyPrice: 10560,
+      priceLabel: "정가", vatIncluded: true, feeAdjustable: false,
+      filenameKeywords: ["대리점"], active: true
     },
     {
-      code: "emart", name: "몰리스(이마트)", category: "매입", archetype: "purchase",
-      calcType: "margin_supply", salePrice: 14000, feeRate: null, supplyPrice: 14000,
-      vatIncluded: false, basis: "납품금액", feeAdjustable: false,
+      code: "emart", name: "몰리스(이마트)", category: "위탁재고", archetype: "consignment",
+      calcType: "rate_on_sale", salePrice: 22000, feeRate: 0.3, supplyPrice: 15400,
+      priceLabel: "정가", vatIncluded: true, feeAdjustable: false,
       filenameKeywords: ["emart", "몰리스"], active: true
     },
     {
       code: "wooofmall", name: "우프자사몰", category: "직매출", archetype: "direct",
-      calcType: "rate_on_sale", salePrice: 17600, feeRate: 0.05, supplyPrice: null,
-      vatIncluded: true, feeAdjustable: false, filenameKeywords: ["cafe24"], active: true
+      calcType: "rate_on_sale", salePrice: 19800, feeRate: 0.05, supplyPrice: null,
+      priceLabel: "프로모션가", vatIncluded: true, feeAdjustable: false, filenameKeywords: ["cafe24"], active: true
     },
     {
       code: "gongu", name: "자사몰-공구", category: "직매출", archetype: "direct",
@@ -506,13 +508,14 @@ export function buildNpbNamespace() {
     },
     {
       code: "kurly", name: "컬리", category: "위탁", archetype: "consignment",
-      calcType: "rate_on_sale", salePrice: null, feeRate: 0.3, supplyPrice: null,
-      vatIncluded: true, feeAdjustable: true, filenameKeywords: ["컬리"], active: true
+      calcType: "rate_on_sale", salePrice: 22000, feeRate: 0.3, supplyPrice: null,
+      priceLabel: "할인가", vatIncluded: true, feeAdjustable: true,
+      filenameKeywords: ["컬리"], active: true
     },
     {
       code: "coupang", name: "쿠팡", category: "매입", archetype: "purchase",
-      calcType: "margin_supply", salePrice: 22000, feeRate: 0.37, supplyPrice: 13860,
-      vatIncluded: true, feeAdjustable: false, bundle: true,
+      calcType: "rate_on_sale", salePrice: 22000, feeRate: 0.37, supplyPrice: 13860,
+      priceLabel: "판매가", vatIncluded: true, feeAdjustable: false, bundle: true,
       filenameKeywords: ["쿠팡"], active: true
     },
     {
