@@ -891,7 +891,14 @@ function renderRequestForm() {
   const extraShippingEnabled = Number(item.extraShippingFee || 0) > 0 || Boolean(item.extraShippingNote);
   const commissionDisplay = item.commissionRate ?? selectedBrand?.commissionRate ?? "";
   const promotion = findActivePromotionRule(selectedBrand?.id, item.expectedDepositDate);
-  const autoBaseShippingFee = calculateBrandShippingFee(selectedBrand, Number(item.productSalesAmount || item.depositAmount || 0));
+  const lineSupplyTotal = lineItems.reduce((sum, li) => sum + Number(li.totalSupplyPrice || 0), 0);
+  const autoBaseShippingFee = calculateBrandShippingFee(
+    selectedBrand,
+    shippingThresholdBaseAmount(selectedBrand, {
+      salesAmount: Number(item.productSalesAmount || item.depositAmount || 0),
+      supplyAmount: lineSupplyTotal || Number(item.supplyAmount || 0)
+    })
+  );
   const defaultBaseShippingFee = item.baseShippingFee ?? autoBaseShippingFee;
   const baseShippingManual =
     item.baseShippingFee != null && Number(item.baseShippingFee) !== Number(autoBaseShippingFee || 0);
@@ -1355,13 +1362,7 @@ function renderRequestLineItems(items, promotionOptions = []) {
               <td><button type="button" class="danger" data-remove-line-item="${item.id}">삭제</button></td>
               <td><input value="${h(item.itemCode || "")}" data-line-code="${item.id}" aria-label="품목코드" placeholder="코드"></td>
               <td><input value="${h(item.itemName || "")}" data-line-name="${item.id}" aria-label="품목명" placeholder="품목명"></td>
-              <td>
-                <div class="qty-editor">
-                  <button type="button" data-line-step="${item.id}" data-step="-1" aria-label="수량 감소">-</button>
-                  <input type="number" min="1" value="${h(item.quantity)}" data-line-qty="${item.id}" aria-label="수량">
-                  <button type="button" data-line-step="${item.id}" data-step="1" aria-label="수량 증가">+</button>
-                </div>
-              </td>
+              <td><input type="number" min="1" value="${h(item.quantity)}" data-line-qty="${item.id}" class="qty-input" aria-label="수량"></td>
               <td><input type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.unitSupplyPrice))}" data-line-supply-price="${item.id}" aria-label="공급가" placeholder="선택"></td>
               <td><input type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.originalPrice))}" data-line-original="${item.id}" aria-label="원판매가" placeholder="선택"></td>
               <td><input type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.discountPrice))}" data-line-discount="${item.id}" aria-label="할인가" placeholder="선택"></td>
@@ -1483,8 +1484,15 @@ function renderBrandForm() {
       </div>
       <div class="field two">
         <div><label>기준 미만 배송비</label><input name="shippingThresholdFee" type="number" min="0" value="${h(b.shippingThresholdFee || "")}" placeholder="예: 3000"></div>
-        <div><label>적용 미리보기</label><input value="${h(describeShippingRule(b))}" disabled></div>
+        <div>
+          <label>배송비 기준금액</label>
+          <select name="shippingThresholdBase">
+            <option value="sales" ${(b.shippingThresholdBase || "sales") !== "supply" ? "selected" : ""}>제품매출 기준 (고객 기준·일반)</option>
+            <option value="supply" ${b.shippingThresholdBase === "supply" ? "selected" : ""}>공급가 기준 (입금액 기준·예: 펫페이스)</option>
+          </select>
+        </div>
       </div>
+      <div class="field"><label>적용 미리보기</label><input value="${h(describeShippingRule(b))}" disabled></div>
       <div class="field"><label>배송비 운영 메모</label><input value="지역 추가배송비는 입금요청 입력에서 필요할 때만 별도 기입합니다." disabled></div>
       <div class="field two">
         <div>
@@ -2099,18 +2107,6 @@ function bindRequests() {
         updateRequestCalculation(requestForm);
       });
     });
-    lineItemsTable.querySelectorAll("[data-line-step]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const step = Number(button.dataset.step || 0);
-        const updated = getLineItems().map((item) =>
-          item.id === button.dataset.lineStep
-            ? { ...item, quantity: Math.max(1, Number(item.quantity || 1) + step) }
-            : item
-        );
-        setLineItems(updated);
-        updateRequestCalculation(requestForm);
-      });
-    });
     // In-place field edit: update the data model + this row's computed cells
     // WITHOUT rebuilding the table, so the focused input is never destroyed
     // (fixes the "types one char then loses focus" bug).
@@ -2586,9 +2582,13 @@ function updateRequestCalculation(form) {
   const settlementType = form.querySelector("[name='settlementType']")?.value || "prepay_fee";
   const derivedProductSalesAmount = lineItems.reduce((sum, item) => sum + Number(item.totalSaleAmount || 0), 0);
   const productSalesAmount = derivedProductSalesAmount > 0 ? derivedProductSalesAmount : value("productSalesAmount");
+  const supplyAmount = lineItems.length
+    ? lineItems.reduce((sum, item) => sum + Number(item.totalSupplyPrice || 0), 0)
+    : value("supplyAmount");
   const baseShippingInputEl = form.querySelector("[name='baseShippingFee']");
   const baseManual = baseShippingInputEl?.dataset.manual === "1";
-  const baseShippingFee = baseManual ? value("baseShippingFee") : calculateBrandShippingFee(brand, productSalesAmount);
+  const shippingBase = shippingThresholdBaseAmount(brand, { salesAmount: productSalesAmount, supplyAmount });
+  const baseShippingFee = baseManual ? value("baseShippingFee") : calculateBrandShippingFee(brand, shippingBase);
   const extraShippingFee = value("extraShippingFee");
   const shippingFee = baseShippingFee + extraShippingFee;
   const promotionContext = buildPromotionPreview(brand, lineItems, form.querySelector("[name='expectedDepositDate']")?.value);
@@ -2604,9 +2604,6 @@ function updateRequestCalculation(form) {
         return 0;
       })();
   const adjustedProductSales = Math.max(0, productSalesAmount - discountAmount);
-  const supplyAmount = lineItems.length
-    ? lineItems.reduce((sum, item) => sum + Number(item.totalSupplyPrice || 0), 0)
-    : value("supplyAmount");
   const commissionAmount = Number.isFinite(promotionContext?.commissionAmount)
     ? Number(promotionContext.commissionAmount)
     : Math.round(adjustedProductSales * (commissionRate / 100));
@@ -2796,15 +2793,21 @@ function summarizeAppliedPromotions(item) {
   return item.promotionRuleName || "";
 }
 
-function calculateBrandShippingFee(brand, productSalesAmount = 0) {
+function calculateBrandShippingFee(brand, baseAmount = 0) {
   if (!brand) return 0;
   if (brand.shippingPolicyType === "flat") return Number(brand.shippingFlatFee || 0);
   if (brand.shippingPolicyType === "threshold") {
-    return Number(productSalesAmount || 0) < Number(brand.shippingThresholdAmount || 0)
+    return Number(baseAmount || 0) < Number(brand.shippingThresholdAmount || 0)
       ? Number(brand.shippingThresholdFee || 0)
       : 0;
   }
   return 0;
+}
+
+// 배송비 N-미만 기준을 어느 금액으로 잴지: 기본은 제품매출(고객 기준),
+// 브랜드 설정이 supply면 공급가 합계(할인 반영 후 실입금 기준, 예: 펫페이스).
+function shippingThresholdBaseAmount(brand, { salesAmount = 0, supplyAmount = 0 } = {}) {
+  return brand?.shippingThresholdBase === "supply" ? Number(supplyAmount || 0) : Number(salesAmount || 0);
 }
 
 function findActivePromotionRule(brandId = "", effectiveDate = "") {
@@ -2903,7 +2906,8 @@ function previewDiscountAmount(rule, sales) {
 function describeShippingRule(brand = {}) {
   if (brand.shippingPolicyType === "flat") return brand.shippingFlatFee ? `무조건 ${money.format(Number(brand.shippingFlatFee))}원` : "무조건 0원";
   if (brand.shippingPolicyType === "threshold") {
-    return `${money.format(Number(brand.shippingThresholdAmount || 0))}원 미만 ${money.format(Number(brand.shippingThresholdFee || 0))}원`;
+    const base = brand.shippingThresholdBase === "supply" ? "공급가" : "제품매출";
+    return `${base} ${money.format(Number(brand.shippingThresholdAmount || 0))}원 미만 ${money.format(Number(brand.shippingThresholdFee || 0))}원`;
   }
   return "무료배송";
 }

@@ -446,24 +446,6 @@ td.wrap {
   margin: 8px 0 12px;
 }
 
-.qty-editor {
-  display: grid;
-  grid-template-columns: 32px 76px 32px;
-  gap: 6px;
-  align-items: center;
-  min-width: 152px;
-}
-
-.qty-editor button {
-  padding: 0;
-  min-height: 34px;
-}
-
-.qty-editor input {
-  min-height: 34px;
-  text-align: center;
-}
-
 .badge {
   display: inline-flex;
   align-items: center;
@@ -663,16 +645,42 @@ select.bulk-status,
   background: #fff;
 }
 
-/* Keep the action column visible during horizontal scroll (pin it left). */
-.line-items-table th:first-child,
-.line-items-table td:first-child {
+/* Pin 작업 / 코드 / 품목명 to the left so the item name stays readable
+   while the low-priority price/date columns scroll horizontally. */
+.line-items-table th:nth-child(1),
+.line-items-table td:nth-child(1),
+.line-items-table th:nth-child(2),
+.line-items-table td:nth-child(2),
+.line-items-table th:nth-child(3),
+.line-items-table td:nth-child(3) {
   position: sticky;
-  left: 0;
   z-index: 2;
+}
+.line-items-table td:nth-child(1),
+.line-items-table td:nth-child(2),
+.line-items-table td:nth-child(3) {
   background: #fff;
 }
-.line-items-table thead th:first-child {
+.line-items-table th:nth-child(1),
+.line-items-table th:nth-child(2),
+.line-items-table th:nth-child(3) {
+  background: #f3f5f8;
   z-index: 3;
+}
+.line-items-table th:nth-child(1),
+.line-items-table td:nth-child(1) {
+  left: 0;
+  width: 46px;
+}
+.line-items-table th:nth-child(2),
+.line-items-table td:nth-child(2) {
+  left: 46px;
+  width: 72px;
+}
+.line-items-table th:nth-child(3),
+.line-items-table td:nth-child(3) {
+  left: 118px;
+  box-shadow: 2px 0 4px rgba(15, 23, 42, 0.08);
 }
 .requests-table th:nth-child(1),
 .requests-table td:nth-child(1) {
@@ -699,15 +707,24 @@ select.bulk-status,
   padding: 4px 6px;
   white-space: nowrap;
 }
-.line-items-table input[type="number"] {
-  width: 78px;
-}
 .line-items-table input[type="date"] {
   width: 130px;
 }
-.line-items-table td:first-child input,
+/* 코드: compact. 품목명: wide & always visible. 수량: plain number. */
 .line-items-table td:nth-child(2) input {
-  min-width: 90px;
+  width: 60px;
+  min-width: 60px;
+}
+.line-items-table td:nth-child(3) input {
+  width: 190px;
+  min-width: 190px;
+}
+.line-items-table .qty-input {
+  width: 60px;
+  text-align: center;
+}
+.line-items-table input[type="number"]:not(.qty-input) {
+  width: 78px;
 }
 
 .bulk-paste {
@@ -828,7 +845,7 @@ select.bulk-status,
 }
 
 .popup-shell .panel {
-  max-width: 900px;
+  max-width: 1240px;
   margin: 0 auto;
 }
 

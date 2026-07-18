@@ -232,10 +232,11 @@ function normalizeItemKey(itemCode, itemName) {
   return `${String(itemCode || "").trim().toLowerCase()}::${String(itemName || "").trim().toLowerCase()}`;
 }
 
-function shippingRuleText(policyType, flatFee, thresholdAmount, thresholdFee) {
+function shippingRuleText(policyType, flatFee, thresholdAmount, thresholdFee, thresholdBase = "sales") {
   if (policyType === "flat") return flatFee > 0 ? `무조건 ${flatFee.toLocaleString("ko-KR")}원` : "무조건 0원";
   if (policyType === "threshold") {
-    return `${thresholdAmount.toLocaleString("ko-KR")}원 미만 ${thresholdFee.toLocaleString("ko-KR")}원`;
+    const base = thresholdBase === "supply" ? "공급가" : "제품매출";
+    return `${base} ${thresholdAmount.toLocaleString("ko-KR")}원 미만 ${thresholdFee.toLocaleString("ko-KR")}원`;
   }
   return "무료배송";
 }
@@ -245,13 +246,24 @@ function normalizeShippingPolicy(input = {}, current = {}) {
   const shippingFlatFee = number(input.shippingFlatFee, number(current.shippingFlatFee));
   const shippingThresholdAmount = number(input.shippingThresholdAmount, number(current.shippingThresholdAmount));
   const shippingThresholdFee = number(input.shippingThresholdFee, number(current.shippingThresholdFee));
+  // 배송비 N-미만 기준을 어느 금액으로 잴지: "sales" = 제품매출(고객 기준, 기본),
+  // "supply" = 공급가 합계(할인 반영 후 실입금 기준, 펫페이스 등 특이 브랜드).
+  const shippingThresholdBase = ["sales", "supply"].includes(input.shippingThresholdBase)
+    ? input.shippingThresholdBase
+    : (current.shippingThresholdBase === "supply" ? "supply" : "sales");
   return {
     shippingPolicyType: policyType,
     shippingFlatFee,
     shippingThresholdAmount,
     shippingThresholdFee,
-    shippingRule: shippingRuleText(policyType, shippingFlatFee, shippingThresholdAmount, shippingThresholdFee)
+    shippingThresholdBase,
+    shippingRule: shippingRuleText(policyType, shippingFlatFee, shippingThresholdAmount, shippingThresholdFee, shippingThresholdBase)
   };
+}
+
+// 배송비 임계 기준금액 선택: 기본은 제품매출, 브랜드 설정이 supply면 공급가 합계.
+function shippingThresholdBaseAmount(brand = {}, { salesAmount = 0, supplyAmount = 0 } = {}) {
+  return brand.shippingThresholdBase === "supply" ? number(supplyAmount) : number(salesAmount);
 }
 
 function calculateBaseShippingFee(brand = {}, productSalesAmount = 0) {
@@ -600,6 +612,7 @@ function buildInitialDb() {
       shippingFlatFee: 0,
       shippingThresholdAmount: 0,
       shippingThresholdFee: 0,
+      shippingThresholdBase: "sales",
       shippingRule: "무료배송",
       promotionSummary: "",
       isActive: !isPriceSheet,
@@ -801,6 +814,7 @@ function migrateDb(db) {
     touch(brand, "shippingFlatFee", 0);
     touch(brand, "shippingThresholdAmount", 0);
     touch(brand, "shippingThresholdFee", 0);
+    touch(brand, "shippingThresholdBase", "sales");
     touch(brand, "shippingRule", "");
     if (!shippingPolicyTypes.has(brand.shippingPolicyType)) {
       brand.shippingPolicyType = "free";
@@ -1400,7 +1414,11 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
           message: `정가 기준 금액 불일치 ${orderNo}: 정가 ${expected.toLocaleString()} vs 입금요청 ${wooofSales.toLocaleString()}`
         });
       } else {
-        const expectedShip = calculateBaseShippingFee(brand, expected);
+        const shipBase = shippingThresholdBaseAmount(brand, {
+          salesAmount: expected,
+          supplyAmount: number(req.supplyAmount)
+        });
+        const expectedShip = calculateBaseShippingFee(brand, shipBase);
         const reqShip = number(req.shippingFee);
         if (Math.abs(expectedShip - reqShip) > 1) {
           errors.push({
@@ -2259,12 +2277,19 @@ function calculateSettlement(input, brand = {}) {
       ? brand.settlementType
       : "prepay_fee";
   const productSalesAmount = number(input.productSalesAmount, number(input.depositAmount));
-  const baseShippingFee = number(input.baseShippingFee, calculateBaseShippingFee(brand, productSalesAmount));
+  const derivedProductSalesAmount = lineItems.reduce((sum, item) => sum + number(item.totalSaleAmount), 0);
+  const effectiveProductSalesAmount = derivedProductSalesAmount > 0 ? derivedProductSalesAmount : productSalesAmount;
+  const derivedSupplyAmount = lineItems.reduce((sum, item) => sum + number(item.totalSupplyPrice), 0);
+  const supplyAmount = lineItems.length ? derivedSupplyAmount : number(input.supplyAmount);
+  // 배송비 기준금액: 브랜드 설정에 따라 제품매출 또는 공급가 합계로 임계 판정.
+  const shippingBase = shippingThresholdBaseAmount(brand, {
+    salesAmount: effectiveProductSalesAmount,
+    supplyAmount
+  });
+  const baseShippingFee = number(input.baseShippingFee, calculateBaseShippingFee(brand, shippingBase));
   const extraShippingFee = number(input.extraShippingFee);
   const shippingFee = baseShippingFee + extraShippingFee;
   const promotionContext = input._promotionContext || null;
-  const derivedProductSalesAmount = lineItems.reduce((sum, item) => sum + number(item.totalSaleAmount), 0);
-  const effectiveProductSalesAmount = derivedProductSalesAmount > 0 ? derivedProductSalesAmount : productSalesAmount;
   // When line items are present, the promotion context already aggregated the
   // per-line discount (each line may carry its own rule); use it directly.
   // Otherwise fall back to the order-level discount from the brand-wide rule.
@@ -2273,8 +2298,6 @@ function calculateSettlement(input, brand = {}) {
     : computeDiscountAmount(promotionContext, effectiveProductSalesAmount);
   const adjustedProductSales = Math.max(0, effectiveProductSalesAmount - discountAmount);
   const commissionRate = promotionContext ? number(promotionContext.commissionRate) : number(input.commissionRate, number(brand.commissionRate));
-  const derivedSupplyAmount = lineItems.reduce((sum, item) => sum + number(item.totalSupplyPrice), 0);
-  const supplyAmount = lineItems.length ? derivedSupplyAmount : number(input.supplyAmount);
   const commissionAmount = Number.isFinite(promotionContext?.commissionAmount)
     ? number(promotionContext.commissionAmount)
     : Math.round(adjustedProductSales * (commissionRate / 100));
@@ -3113,6 +3136,7 @@ async function routeApi(req, res, url) {
       "shippingFlatFee",
       "shippingThresholdAmount",
       "shippingThresholdFee",
+      "shippingThresholdBase",
       "isActive",
       "starred",
       "businessName",
