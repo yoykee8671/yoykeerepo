@@ -888,6 +888,9 @@ function renderRequestForm() {
   const resolvedBusinessName = item.businessName || selectedBrand?.businessName || "";
   const resolvedBusinessNumber = item.businessNumber || selectedBrand?.businessNumber || "";
   const resolvedDepositorName = item.depositorName || selectedBrand?.depositorName || "";
+  const resolvedBankName = selectedBrand?.bankName || "";
+  const resolvedBankAccount = selectedBrand?.bankAccount || "";
+  const resolvedAccountInfo = [resolvedBankName, resolvedBankAccount].filter(Boolean).join(" ") || "-";
   const extraShippingEnabled = Number(item.extraShippingFee || 0) > 0 || Boolean(item.extraShippingNote);
   const commissionDisplay = item.commissionRate ?? selectedBrand?.commissionRate ?? "";
   const promotion = findActivePromotionRule(selectedBrand?.id, item.expectedDepositDate);
@@ -931,12 +934,17 @@ function renderRequestForm() {
           <div class="fixed-card"><span>정산유형</span><strong data-fixed-settlement-type>${h(settlementLabel(settlementType))}</strong></div>
           <div class="fixed-card"><span>기본 수수료율</span><strong data-fixed-commission-rate>${commissionDisplay !== "" ? `${h(commissionDisplay)}%` : "-"}</strong></div>
           <div class="fixed-card"><span>기본 배송비</span><strong data-fixed-base-shipping>${money.format(Number(defaultBaseShippingFee || 0))}원</strong></div>
+        </div>
+        <div class="fixed-summary-grid" style="grid-template-columns:repeat(2,minmax(0,1fr))">
           <div class="fixed-card"><span>출고 기준</span><strong data-fixed-cutoff>${h(cutoffLabel(selectedBrand || { cutoffNote: resolvedCutoffNote, cutoffType: item.cutoffType, cutoffHour: item.cutoffHour })) || "-"}</strong></div>
           <div class="fixed-card"><span>원본 시트</span><strong data-fixed-source-sheet>${h(resolvedSourceSheet || "-")}</strong></div>
+        </div>
+        <div class="fixed-summary-grid">
           <div class="fixed-card"><span>계좌예금주명</span><strong data-fixed-depositor>${h(resolvedDepositorName || "-")}</strong></div>
+          <div class="fixed-card"><span>계좌정보(은행/번호)</span><strong data-fixed-account>${h(resolvedAccountInfo)}</strong></div>
+          <div class="fixed-card"><span>사업자</span><strong data-fixed-business>${h(resolvedBusinessName || "-")}${resolvedBusinessNumber ? ` (${h(resolvedBusinessNumber)})` : ""}</strong></div>
         </div>
         <div class="fixed-summary-notes">
-        <div><span>사업자</span><strong data-fixed-business>${h(resolvedBusinessName || "-")}${resolvedBusinessNumber ? ` (${h(resolvedBusinessNumber)})` : ""}</strong></div>
         <div><span>필수 메모</span><strong data-fixed-required-memo>${h(resolvedRequiredMemo || "-")}</strong></div>
         <div><span>정산 메모</span><strong data-fixed-cutoff-note>${h(resolvedCutoffNote || "-")}</strong></div>
         ${settlementNote ? `<div><span>계산 안내</span><strong data-special-settlement-note>${h(settlementNote)}</strong></div>` : `<div style="display:none"><span>계산 안내</span><strong data-special-settlement-note></strong></div>`}
@@ -960,7 +968,7 @@ function renderRequestForm() {
         </div>
       </div>
       <div class="field">
-        <label class="checkbox-line"><input name="useExtraShippingFee" type="checkbox" ${extraShippingEnabled ? "checked" : ""}> 지역/예외 추가배송비 직접 입력</label>
+        <label class="checkbox-line" style="justify-self:start"><input name="useExtraShippingFee" type="checkbox" ${extraShippingEnabled ? "checked" : ""}> 지역/예외 추가배송비 직접 입력</label>
       </div>
       <div class="field two" data-extra-shipping-fields style="${extraShippingEnabled ? "" : "display:none"}">
         <div><label>지역 추가배송비</label><input name="extraShippingFee" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(defaultExtraShippingFee))}"></div>
@@ -976,10 +984,13 @@ function renderRequestForm() {
       </div>
       <div class="field" data-hide-direct="1"><label>적용 프로모션</label><input name="promotionRuleName" readonly value="${h(item.promotionRuleName || promotion?.name || "")}" placeholder="없음"></div>
       <div class="field" data-hide-direct="1">
-        <label>품목별 공급가</label>
+        <label>품목별 항목 추가</label>
         <input name="lineItemsJson" type="hidden" value='${h(JSON.stringify(lineItems))}'>
         <div class="field two">
-          <div><input name="lineItemSearch" list="request-price-options" placeholder="품목코드 또는 품목명 검색"></div>
+          <div class="autocomplete" style="position:relative">
+            <input name="lineItemSearch" autocomplete="off" placeholder="품목코드 또는 품목명 검색 (입력 즉시 목록에서 선택)">
+            <div class="autocomplete-menu" data-line-item-menu hidden></div>
+          </div>
           <div><input name="lineItemQty" type="number" min="1" value="1" placeholder="수량"></div>
         </div>
         <datalist id="request-price-options"></datalist>
@@ -990,7 +1001,7 @@ function renderRequestForm() {
         <div data-line-items-table>${renderRequestLineItems(lineItems)}</div>
         <div class="toolbar" style="margin-top:8px">
           <button type="button" class="primary" data-add-manual-line-item>+ 행 추가</button>
-          <span class="muted">최대 30개 행 · 모든 값은 선택 입력, 현재판매가는 원판매가−할인가 자동(수정 가능)</span>
+          <span class="muted">최대 30개 행 · 모든 값은 선택 입력, 현재판매가는 원판매가−할인금액 자동(수정 가능)</span>
         </div>
       </div>
       <div class="field two">
@@ -1020,8 +1031,10 @@ function renderRequestForm() {
         <label>주문 메모</label>
         <textarea name="notes" placeholder="해당 입금건에 대한 메모 (예: 통화 내용, 특이사항 등)">${h(item.notes || "")}</textarea>
       </div>
-      <section class="fixed-summary">
-        <div class="fixed-summary-title">외상 처리 <span class="muted" style="font-weight:400">(품절·가격변경·오입금 등 정산 조정용)</span></div>
+      <details class="fixed-summary collapsible-summary" ${
+        Number(item.overpaidAmount || 0) > 0 || Number(item.creditUsedAmount || 0) > 0 || item.overpaidNote || item.creditUsedNote ? "open" : ""
+      }>
+        <summary class="fixed-summary-title">외상 처리 <span class="muted" style="font-weight:400">(품절·가격변경·오입금 등 정산 조정용)</span></summary>
         <div data-brand-credit-hint class="muted" style="margin-bottom:8px">${
           selectedBrand
             ? `${h(selectedBrand.name)} 외상 잔액: ${renderCreditBalance(selectedBrand.creditBalance)}`
@@ -1051,9 +1064,11 @@ function renderRequestForm() {
           </div>
         </div>
         <div class="muted">실제 송금액 ≒ 업체 실 입금액 − 외상 차감. 차감 금액은 직접 입력하세요.</div>
-      </section>
-      <section class="fixed-summary">
-        <div class="fixed-summary-title">환불·취소 처리 <span class="muted" style="font-weight:400">(품절·반품·부분취소)</span></div>
+      </details>
+      <details class="fixed-summary collapsible-summary" ${
+        Number(item.cancelledAmount || 0) > 0 || item.cancelledNote ? "open" : ""
+      }>
+        <summary class="fixed-summary-title">환불·취소 처리 <span class="muted" style="font-weight:400">(품절·반품·부분취소)</span></summary>
         <div class="muted" style="margin-bottom:8px">
           채권: 입력 시 채권차감액에 자동 누적(수수료 중복 방지). 선매입: 외상 처리 섹션 활용. 위탁: 별도 환불 행 생성 필요.
         </div>
@@ -1076,7 +1091,7 @@ function renderRequestForm() {
           </div>
         </div>
         <div class="field"><label>환불/취소 메모</label><input name="cancelledNote" value="${h(item.cancelledNote || "")}" placeholder="예: 사료 1포 품절 4,000원"></div>
-      </section>
+      </details>
       <div class="field"><label>상태</label><select name="status">${["pending", "await_deposit", "consignment_unpaid", "paid", "hold", "error"].map((s) => `<option value="${s}" ${(item.status || (settlementType === "consignment" ? "consignment_unpaid" : "pending")) === s ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}</select></div>
       <div class="field" data-hide-direct="1">
         <label>계산 수수료 <span class="muted" style="font-weight:400" data-commission-display-hint>${selectedBrand?.hasReceivable ? "(채권 기준 — 프로모션 무시)" : "(실제 차감액)"}</span></label>
@@ -1175,7 +1190,7 @@ function renderPrices() {
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>브랜드</th><th>코드</th><th>품목명</th><th>옵션</th><th>공급가</th><th>원판매가</th><th>할인가</th><th>현재 판매가</th><th>적용 시작</th><th>적용 종료</th><th>작업</th></tr></thead>
+            <thead><tr><th>브랜드</th><th>코드</th><th>품목명</th><th>옵션</th><th>공급가</th><th>원판매가</th><th>할인금액</th><th>현재 판매가</th><th>적용 시작</th><th>적용 종료</th><th>작업</th></tr></thead>
             <tbody>
               ${rows.map((item) => `
                 <tr>
@@ -1198,7 +1213,7 @@ function renderPrices() {
           <h3 style="margin-top:0">개정 이력</h3>
           <div class="table-wrap" style="max-height:280px">
             <table>
-              <thead><tr><th>브랜드</th><th>코드</th><th>품목명</th><th>공급가</th><th>원판매가</th><th>할인가</th><th>현재 판매가</th><th>적용 시작</th><th>적용 종료</th><th>작업</th></tr></thead>
+              <thead><tr><th>브랜드</th><th>코드</th><th>품목명</th><th>공급가</th><th>원판매가</th><th>할인금액</th><th>현재 판매가</th><th>적용 시작</th><th>적용 종료</th><th>작업</th></tr></thead>
               <tbody>
                 ${revisions.map((item) => `
                   <tr>
@@ -1274,7 +1289,7 @@ function renderPriceEntryForm() {
       <div class="field"><label>적용 종료일 (비우면 상시)</label><input name="effectiveTo" type="date" value="${h(item.effectiveTo || "")}"></div>
       <div class="field three">
         <div><label>원판매가</label><input name="originalPrice" type="number" min="0" value="${h((item.originalPrice ?? item.consumerPrice) || "")}"></div>
-        <div><label>할인가</label><input name="discountPrice" type="number" min="0" value="${h(item.discountPrice || "")}"></div>
+        <div><label>할인금액</label><input name="discountPrice" type="number" min="0" value="${h(item.discountPrice || "")}"></div>
         <div><label>현재 판매가</label><input name="salePrice" type="number" min="0" value="${h(item.salePrice || "")}"></div>
       </div>
       <div class="field"><label>바코드</label><input name="barcode" value="${h(item.barcode)}"></div>
@@ -1343,6 +1358,32 @@ function renderPriceAliasForm() {
   `;
 }
 
+function renderRequestLineItemsSummary(items) {
+  const real = items.filter(
+    (item) => String(item.itemCode || "").trim() || String(item.itemName || "").trim()
+  );
+  if (!real.length) return "";
+  const sum = (fn) => real.reduce((acc, item) => acc + fn(item), 0);
+  const qty = (item) => Math.max(0, Number(item.quantity || 0));
+  const totalCount = real.length;
+  const totalQty = sum(qty);
+  const totalSupply = sum((item) => qty(item) * Number(item.unitSupplyPrice || 0));
+  const totalOriginal = sum((item) => qty(item) * Number(item.originalPrice || 0));
+  const totalDiscount = sum((item) => qty(item) * Number(item.discountPrice || 0));
+  const totalSale = sum((item) => Number(item.totalSaleAmount || qty(item) * Number(item.unitSalePrice || 0)));
+  const cell = (label, value) => `<span><b>${label}</b> ${value}</span>`;
+  return `
+    <div class="line-items-summary">
+      ${cell("총 건수", `${money.format(totalCount)}건`)}
+      ${cell("총 수량", `${money.format(totalQty)}개`)}
+      ${cell("총 공급가", `${money.format(totalSupply)}원`)}
+      ${cell("총 원판매가", `${money.format(totalOriginal)}원`)}
+      ${cell("총 할인금액", `${money.format(totalDiscount)}원`)}
+      ${cell("현재판매가 총합계", `${money.format(totalSale)}원`)}
+    </div>
+  `;
+}
+
 function renderRequestLineItems(items, promotionOptions = []) {
   if (!items.length) return `<div class="empty">추가된 품목이 없습니다.</div>`;
   const promotionCell = (item) => {
@@ -1355,17 +1396,17 @@ function renderRequestLineItems(items, promotionOptions = []) {
   return `
     <div class="table-wrap line-items-wrap" style="max-height:300px">
       <table class="line-items-table">
-        <thead><tr><th>작업</th><th>코드</th><th>품목명</th><th>수량</th><th>공급가</th><th>원판매가</th><th>할인가</th><th>현재판매가</th><th>적용시작</th><th>적용종료</th><th>판매합계</th><th>프로모션</th></tr></thead>
+        <thead><tr><th>작업</th><th>코드</th><th>품목명</th><th>수량</th><th>공급가</th><th>원판매가</th><th>할인금액</th><th>현재판매가</th><th>적용시작</th><th>적용종료</th><th>판매합계</th><th>프로모션</th></tr></thead>
         <tbody>
           ${items.map((item) => `
-            <tr>
+            <tr data-line-row="${item.id}">
               <td><button type="button" class="danger" data-remove-line-item="${item.id}">삭제</button></td>
               <td><input value="${h(item.itemCode || "")}" data-line-code="${item.id}" aria-label="품목코드" placeholder="코드"></td>
               <td><input value="${h(item.itemName || "")}" data-line-name="${item.id}" aria-label="품목명" placeholder="품목명"></td>
               <td><input type="number" min="1" value="${h(item.quantity)}" data-line-qty="${item.id}" class="qty-input" aria-label="수량"></td>
               <td><input type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.unitSupplyPrice))}" data-line-supply-price="${item.id}" aria-label="공급가" placeholder="선택"></td>
               <td><input type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.originalPrice))}" data-line-original="${item.id}" aria-label="원판매가" placeholder="선택"></td>
-              <td><input type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.discountPrice))}" data-line-discount="${item.id}" aria-label="할인가" placeholder="선택"></td>
+              <td><input type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.discountPrice))}" data-line-discount="${item.id}" aria-label="할인금액" placeholder="선택"></td>
               <td><input type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.unitSalePrice))}" data-line-sale-price="${item.id}" aria-label="현재판매가" placeholder="자동"></td>
               <td><input type="date" value="${h(item.effectiveFrom || "")}" data-line-from="${item.id}" aria-label="적용시작"></td>
               <td><input type="date" value="${h(item.effectiveTo || "")}" data-line-to="${item.id}" aria-label="적용종료"></td>
@@ -1375,6 +1416,7 @@ function renderRequestLineItems(items, promotionOptions = []) {
         </tbody>
       </table>
     </div>
+    ${renderRequestLineItemsSummary(items)}
   `;
 }
 
@@ -2118,7 +2160,7 @@ function bindRequests() {
         const unitSupplyPrice = Math.max(0, Number(merged.unitSupplyPrice || 0));
         const originalPrice = Math.max(0, Number(merged.originalPrice || 0));
         const discountPrice = Math.max(0, Number(merged.discountPrice || 0));
-        // 현재판매가: auto = 원판매가 - 할인가, unless the user typed it directly.
+        // 현재판매가: auto = 원판매가 - 할인금액, unless the user typed it directly.
         let salePriceManual = merged.salePriceManual === true;
         if (opts.saleTyped) salePriceManual = true;
         let unitSalePrice = Math.max(0, Number(merged.unitSalePrice || 0));
@@ -2210,7 +2252,7 @@ function bindRequests() {
       existing.effectiveTo = priceItem.effectiveTo || existing.effectiveTo || "";
       return items;
     }
-    items.push({
+    const newLine = {
       id: cryptoRandomId(),
       priceEntryId: priceItem.id,
       itemCode: priceItem.itemCode,
@@ -2227,7 +2269,13 @@ function bindRequests() {
       totalSaleAmount: Number(priceItem.salePrice || 0) * quantity,
       effectiveFrom: priceItem.effectiveFrom,
       effectiveTo: priceItem.effectiveTo || ""
-    });
+    };
+    // 보여지는 빈 행(코드·품목명 없음)이 있으면 그 자리를 채워 잔여 빈 행이 남지 않게 함.
+    const blankIndex = items.findIndex(
+      (item) => !String(item.itemCode || "").trim() && !String(item.itemName || "").trim()
+    );
+    if (blankIndex >= 0) items[blankIndex] = { ...newLine, id: items[blankIndex].id };
+    else items.push(newLine);
     return items;
   };
   const addManualLineItem = () => {
@@ -2420,6 +2468,16 @@ function bindRequests() {
     });
     updateRequestCalculation(requestForm);
   });
+  const addPriceItemLine = (priceItem) => {
+    const quantity = Math.max(1, Number(lineItemQty.value || 1));
+    setLineItems(mergeLineItem(getLineItems(), priceItem, quantity));
+    lineItemSearch.value = "";
+    lineItemQty.value = "1";
+    if (bulkResult) bulkResult.textContent = "";
+    setUnmatchedItems([]);
+    updateRequestCalculation(requestForm);
+    lineItemSearch.focus();
+  };
   const addSelectedLineItem = () => {
     const brand = getSelectedBrand();
     const priceItem = findPriceCatalogByInput(lineItemSearch.value, brand?.id || "", getEffectiveDate());
@@ -2427,29 +2485,95 @@ function bindRequests() {
       alert("현재 브랜드에 해당하는 품목을 찾지 못했습니다.");
       return;
     }
-    const quantity = Math.max(1, Number(lineItemQty.value || 1));
-    const items = mergeLineItem(getLineItems(), priceItem, quantity);
-    setLineItems(items);
-    lineItemSearch.value = "";
-    lineItemQty.value = "1";
-    if (bulkResult) if (bulkResult) bulkResult.textContent = "";
-    setUnmatchedItems([]);
-    updateRequestCalculation(requestForm);
-    lineItemSearch.focus();
+    addPriceItemLine(priceItem);
   };
+  // Custom autocomplete — replaces the native <datalist> which does not refilter
+  // mid-Korean-IME-composition (user had to type a trailing space to commit).
+  const lineItemMenu = requestForm.querySelector("[data-line-item-menu]");
+  let acMatches = [];
+  let acActive = -1;
+  const buildMatches = (rawQuery) => {
+    const query = normalizeSearchText(rawQuery);
+    if (!query) return [];
+    const brand = getSelectedBrand();
+    return state.priceCatalog
+      .filter((item) => !brand || item.brandId === brand.id)
+      .filter((item) => normalizeSearchText(`${item.itemCode || ""} ${item.itemName || ""}`).includes(query))
+      .slice(0, 20);
+  };
+  const renderMenu = () => {
+    if (!lineItemMenu) return;
+    if (!acMatches.length) {
+      lineItemMenu.hidden = true;
+      lineItemMenu.innerHTML = "";
+      return;
+    }
+    lineItemMenu.innerHTML = acMatches
+      .map((item, i) => `<div class="autocomplete-item${i === acActive ? " active" : ""}" data-ac-index="${i}">${h(formatPriceOption(item))}</div>`)
+      .join("");
+    lineItemMenu.hidden = false;
+  };
+  const closeMenu = () => {
+    acMatches = [];
+    acActive = -1;
+    if (lineItemMenu) {
+      lineItemMenu.hidden = true;
+      lineItemMenu.innerHTML = "";
+    }
+  };
+  const refreshMenu = () => {
+    acMatches = buildMatches(lineItemSearch.value);
+    acActive = acMatches.length ? 0 : -1;
+    renderMenu();
+  };
+  lineItemSearch.addEventListener("input", refreshMenu);
+  lineItemSearch.addEventListener("compositionend", refreshMenu);
+  lineItemSearch.addEventListener("focus", refreshMenu);
+  lineItemSearch.addEventListener("blur", () => setTimeout(closeMenu, 150));
+  lineItemMenu?.addEventListener("mousedown", (event) => {
+    const target = event.target.closest("[data-ac-index]");
+    if (!target) return;
+    event.preventDefault();
+    const picked = acMatches[Number(target.dataset.acIndex)];
+    if (picked) {
+      closeMenu();
+      addPriceItemLine(picked);
+    }
+  });
+  lineItemSearch.addEventListener("keydown", (event) => {
+    if (event.isComposing) return;
+    if (event.key === "ArrowDown" && acMatches.length) {
+      event.preventDefault();
+      acActive = (acActive + 1) % acMatches.length;
+      renderMenu();
+    } else if (event.key === "ArrowUp" && acMatches.length) {
+      event.preventDefault();
+      acActive = (acActive - 1 + acMatches.length) % acMatches.length;
+      renderMenu();
+    } else if (event.key === "Escape") {
+      closeMenu();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      if (acMatches.length && acActive >= 0) {
+        const picked = acMatches[acActive];
+        closeMenu();
+        addPriceItemLine(picked);
+      } else {
+        addSelectedLineItem();
+      }
+    }
+  });
   requestForm.querySelector("[data-add-line-item]").addEventListener("click", () => {
     addSelectedLineItem();
   });
   requestForm.querySelector("[data-add-manual-line-item]")?.addEventListener("click", () => {
     addManualLineItem();
   });
-  [lineItemSearch, lineItemQty].forEach((input) => {
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        addSelectedLineItem();
-      }
-    });
+  lineItemQty.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addSelectedLineItem();
+    }
   });
   requestForm
     .querySelectorAll("[name='productSalesAmount'], [name='extraShippingFee'], [name='commissionRate'], [name='supplyAmount'], [name='expectedDepositDate'], [name='overpaidAmount'], [name='creditUsedAmount'], [name='cancelledAmount'], [name='priorPaidAmount']")
@@ -2737,6 +2861,10 @@ function updateRequestCalculation(form) {
   if (fixedCutoff) fixedCutoff.textContent = cutoffLabel(brand) || "-";
   if (fixedSourceSheet) fixedSourceSheet.textContent = form.querySelector("[name='sourceSheet']")?.value || "-";
   if (fixedDepositor) fixedDepositor.textContent = form.querySelector("[name='depositorName']")?.value || "-";
+  const fixedAccount = form.querySelector("[data-fixed-account]");
+  if (fixedAccount) {
+    fixedAccount.textContent = [brand?.bankName, brand?.bankAccount].filter(Boolean).join(" ") || "-";
+  }
   if (fixedBusiness) {
     const name = form.querySelector("[name='businessName']")?.value || "";
     const numberText = form.querySelector("[name='businessNumber']")?.value || "";

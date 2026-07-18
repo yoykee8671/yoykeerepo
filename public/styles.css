@@ -618,6 +618,31 @@ select.bulk-status,
   background: #fff;
 }
 
+/* Collapsible 외상/환불 sections — closed by default unless they carry values. */
+details.collapsible-summary > summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+details.collapsible-summary > summary::-webkit-details-marker {
+  display: none;
+}
+details.collapsible-summary > summary::before {
+  content: "▸";
+  color: var(--muted, #6b7280);
+  font-size: 12px;
+  transition: transform 0.15s ease;
+}
+details.collapsible-summary[open] > summary::before {
+  transform: rotate(90deg);
+}
+details.collapsible-summary[open] > summary {
+  margin-bottom: 4px;
+}
+
 .fixed-card span,
 .fixed-summary-notes span {
   font-size: 12px;
@@ -725,6 +750,53 @@ select.bulk-status,
 }
 .line-items-table input[type="number"]:not(.qty-input) {
   width: 78px;
+}
+
+.autocomplete-menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  max-height: 260px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+}
+.autocomplete-menu[hidden] {
+  display: none;
+}
+.autocomplete-item {
+  padding: 8px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.autocomplete-item:hover,
+.autocomplete-item.active {
+  background: #eef2ff;
+}
+
+.line-items-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  font-size: 13px;
+  color: #3d4a5f;
+}
+.line-items-summary b {
+  font-weight: 700;
+  color: var(--muted, #6b7280);
+  margin-right: 4px;
 }
 
 .bulk-paste {
