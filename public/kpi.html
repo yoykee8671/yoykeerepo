@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>우프컴퍼니 공헌이익 KPI</title>
+<style>
+:root{
+  color-scheme: light;
+  --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --baseline:#c3c2b7; --border:rgba(11,11,11,0.10);
+  --blue:#2a78d6; --green:#008300; --red:#e34948;
+  --good:#0ca30c; --goodtext:#006300; --warn:#fab219; --critical:#d03b3b;
+  --input-bg:#fffbe6; --input-border:#e6d98a;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    color-scheme: dark;
+    --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+    --grid:#2c2c2a; --baseline:#383835; --border:rgba(255,255,255,0.10);
+    --blue:#3987e5; --green:#008300; --red:#e66767;
+    --good:#0ca30c; --goodtext:#0ca30c; --warn:#fab219; --critical:#d03b3b;
+    --input-bg:#2b2917; --input-border:#5a5220;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);
+  font-family:system-ui,-apple-system,"Segoe UI","Apple SD Gothic Neo","Noto Sans KR",sans-serif;
+  font-size:15px;line-height:1.5}
+.wrap{max-width:1180px;margin:0 auto;padding:16px 16px 80px}
+header.top{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:8px 0 14px}
+header.top h1{font-size:20px;margin:0;font-weight:700}
+header.top .sub{color:var(--ink2);font-size:13px}
+.tabs{display:flex;gap:6px;margin:6px 0 18px;flex-wrap:wrap}
+.tabs button{border:1px solid var(--border);background:var(--surface);color:var(--ink2);
+  padding:9px 18px;border-radius:10px;font-size:15px;cursor:pointer;font-weight:600}
+.tabs button.active{background:var(--blue);border-color:var(--blue);color:#fff}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:16px}
+.card h2{font-size:16px;margin:0 0 4px;display:flex;align-items:center;gap:8px}
+.card h2 .dot{width:10px;height:10px;border-radius:3px;display:inline-block}
+.card .desc{color:var(--ink2);font-size:13px;margin:0 0 12px}
+.monthbar{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.monthbar .nav{border:1px solid var(--border);background:var(--surface);color:var(--ink);
+  width:38px;height:38px;border-radius:10px;font-size:16px;cursor:pointer}
+.monthbar select{font-size:17px;font-weight:700;padding:8px 12px;border-radius:10px;
+  border:1px solid var(--border);background:var(--surface);color:var(--ink)}
+.tablescroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table.grid{border-collapse:collapse;width:100%;min-width:1090px;font-variant-numeric:tabular-nums}
+table.grid th{font-size:12px;color:var(--muted);font-weight:600;text-align:right;
+  padding:6px 4px;border-bottom:1px solid var(--grid);white-space:nowrap}
+table.grid th:first-child{text-align:left}
+table.grid td{padding:4px 3px;border-bottom:1px solid var(--grid);text-align:right;white-space:nowrap;font-size:13px}
+table.grid td:first-child{text-align:left}
+table.grid tr:last-child td{border-bottom:none}
+table.grid input[type=text]{width:84px;padding:7px 6px;border-radius:8px;text-align:right;
+  border:1px solid var(--input-border);background:var(--input-bg);color:var(--ink);font-size:13px;
+  font-variant-numeric:tabular-nums}
+table.grid input.chname{width:120px;text-align:left;background:var(--surface);border:1px solid var(--border)}
+td.calc{font-weight:700}
+td.calc.settle{color:var(--blue)}
+td.calc.cm1{color:var(--goodtext)}
+td.calc.cm2{color:var(--ink)}
+tr.totalrow td{font-weight:700;border-top:2px solid var(--baseline);background:transparent;padding:8px}
+.rowdel{border:none;background:none;color:var(--muted);cursor:pointer;font-size:15px;padding:4px 6px}
+.rowdel:hover{color:var(--critical)}
+.addrow{margin-top:8px;border:1px dashed var(--baseline);background:none;color:var(--ink2);
+  padding:8px 14px;border-radius:10px;cursor:pointer;font-size:14px}
+.neg{color:var(--critical)}
+/* stat tiles */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:14px}
+.tile{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 14px}
+.tile .lbl{font-size:12px;color:var(--muted);margin-bottom:2px;display:flex;align-items:center;gap:6px}
+.tile .lbl .dot{width:8px;height:8px;border-radius:2px;display:inline-block}
+.tile .val{font-size:22px;font-weight:700}
+.tile .unit{font-size:12px;color:var(--muted);font-weight:400;margin-left:2px}
+/* judgement */
+.judge{display:flex;flex-wrap:wrap;gap:16px}
+.judge .col{flex:1 1 340px;min-width:300px}
+table.plain{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+table.plain td{padding:7px 4px;border-bottom:1px solid var(--grid)}
+table.plain td:last-child{text-align:right;font-weight:600}
+table.plain tr.em td{font-weight:700;border-top:2px solid var(--baseline);border-bottom:none;font-size:16px}
+table.plain td .note{display:block;font-size:12px;color:var(--muted);font-weight:400}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:999px;font-weight:700;font-size:15px}
+.badge.ok{background:rgba(12,163,12,.12);color:var(--goodtext)}
+.badge.no{background:rgba(208,59,59,.12);color:var(--critical)}
+.badge.wait{background:rgba(137,135,129,.15);color:var(--ink2)}
+.hint{font-size:13px;color:var(--ink2);background:var(--page);border:1px solid var(--border);
+  border-radius:10px;padding:10px 12px;margin-top:10px}
+/* settings */
+.setgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+.setgrid label{display:block;font-size:13px;color:var(--ink2);margin:10px 0 4px}
+.setgrid input[type=text],.setgrid select{width:100%;padding:9px 10px;border-radius:9px;font-size:15px;
+  border:1px solid var(--input-border);background:var(--input-bg);color:var(--ink);
+  font-variant-numeric:tabular-nums}
+.setgrid select{background:var(--surface);border-color:var(--border)}
+.btnrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.btn{border:1px solid var(--border);background:var(--surface);color:var(--ink);
+  padding:9px 16px;border-radius:10px;cursor:pointer;font-size:14px;font-weight:600}
+.btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+.btn.danger{color:var(--critical)}
+/* chart */
+.chartbox{position:relative}
+.chartbox svg{display:block;width:100%;height:auto}
+.legend{display:flex;gap:16px;font-size:13px;color:var(--ink2);margin:4px 2px 8px;flex-wrap:wrap}
+.legend .item{display:flex;align-items:center;gap:6px}
+.legend .sw{width:12px;height:12px;border-radius:3px}
+.legend .ln{width:18px;height:0;border-top:2px dashed var(--muted)}
+.tooltip{position:absolute;pointer-events:none;background:var(--surface);border:1px solid var(--border);
+  border-radius:8px;padding:8px 10px;font-size:13px;box-shadow:0 4px 14px rgba(0,0,0,.15);
+  display:none;z-index:10;white-space:nowrap;font-variant-numeric:tabular-nums}
+/* glossary */
+.gloss{font-size:13px;color:var(--ink2)}
+.gloss b{color:var(--ink)}
+.flowline{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13px;font-weight:600;margin:8px 0}
+.flowline span{background:var(--page);border:1px solid var(--border);border-radius:8px;padding:5px 10px}
+.flowline .arrow{border:none;background:none;color:var(--muted);padding:0 2px}
+@media (max-width:640px){
+  body{font-size:14px}
+  .tile .val{font-size:18px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>우프컴퍼니 공헌이익 KPI</h1>
+    <span class="sub">순매출 → 정산매출 → 공헌이익(CM1) → 공헌이익(CM2) &middot; 2026</span>
+  </header>
+
+  <div class="tabs">
+    <button id="tabBtn-input" class="active" onclick="showTab('input')">① 월별 입력</button>
+    <button id="tabBtn-year" onclick="showTab('year')">② 연간 현황</button>
+    <button id="tabBtn-settings" onclick="showTab('settings')">③ 설정</button>
+  </div>
+
+  <!-- ══════════ TAB 1 : 월별 입력 ══════════ -->
+  <section id="tab-input">
+    <div class="monthbar">
+      <button class="nav" onclick="moveMonth(-1)">◀</button>
+      <select id="monthSel" onchange="switchMonth(this.value)"></select>
+      <button class="nav" onclick="moveMonth(1)">▶</button>
+      <span class="sub" style="color:var(--muted);font-size:13px">노란 칸에 숫자만 입력하면 나머지는 자동 계산됩니다.</span>
+    </div>
+
+    <div class="card">
+      <h2><span class="dot" style="background:var(--blue)"></span>우프 <span style="font-weight:400;font-size:13px;color:var(--muted)">입점브랜드(선매입·위탁·채권·매입) + 필바이츠 · 도톤 · 공감캣</span></h2>
+      <p class="desc">순매출 = 소비자가 실제 결제한 금액(할인 반영) &middot; 수수료 = 플랫폼/위탁/PG 수수료 → 정산매출(실입금)이 자동 계산됩니다.</p>
+      <div class="tablescroll"><table class="grid" id="tbl-wooof"></table></div>
+      <button class="addrow" onclick="addRow('wooof')">＋ 채널 추가</button>
+    </div>
+
+    <div class="card">
+      <h2><span class="dot" style="background:var(--green)"></span>베럴즈 (PB) <span style="font-weight:400;font-size:13px;color:var(--muted)">자사몰 + 외부채널, 공구 포함</span></h2>
+      <p class="desc">공구는 별도 사업부가 아니라 베럴즈 안의 한 행입니다. 공구 수수료(예: 20%)는 수수료 칸에, 늘어난 물류·생산비는 각 변동비 칸에 넣으세요.</p>
+      <div class="tablescroll"><table class="grid" id="tbl-barrels"></table></div>
+      <button class="addrow" onclick="addRow('barrels')">＋ 채널 추가</button>
+    </div>
+
+    <div class="card">
+      <h2>이번 달 결과</h2>
+      <div class="tiles" id="monthTiles"></div>
+      <div class="judge">
+        <div class="col">
+          <h2 style="font-size:14px">① 방어선 (이 금액을 넘어야 보너스 검토)</h2>
+          <table class="plain" id="gateTable"></table>
+        </div>
+        <div class="col">
+          <h2 style="font-size:14px">② 보너스 계산</h2>
+          <table class="plain" id="bonusTable"></table>
+          <div style="margin-top:12px" id="judgeBadge"></div>
+          <div class="hint" id="judgeHint"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>픽키도기 (회생 적립 전용)</h2>
+      <p class="desc">월 고정 운영금 200만원은 보너스 재원이 아니라 회생 변제 적립 재원입니다. 외부채널 매출이 월 2,000만원을 넘으면, 매출의 10% 중 200만원을 뺀 초과분만 보너스 풀에 들어갑니다.</p>
+      <table class="plain" style="max-width:520px">
+        <tr><td>이번 달 픽키도기 외부채널 매출</td>
+            <td><input type="text" id="pickySales" inputmode="numeric" style="width:140px;padding:7px 8px;border-radius:8px;text-align:right;border:1px solid var(--input-border);background:var(--input-bg);color:var(--ink)"></td></tr>
+        <tr><td>매출의 10%</td><td id="picky10">0</td></tr>
+        <tr class="em"><td>초과 보너스 (10% − 200만, 0 미만이면 0)</td><td id="pickyOver">0</td></tr>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>용어 한 줄 설명</h2>
+      <div class="flowline">
+        <span>순매출<br><small style="font-weight:400;color:var(--muted)">소비자 결제액</small></span>
+        <span class="arrow">→</span>
+        <span>정산매출<br><small style="font-weight:400;color:var(--muted)">실제 입금액</small></span>
+        <span class="arrow">→</span>
+        <span>CM1<br><small style="font-weight:400;color:var(--muted)">채널/영업 성과</small></span>
+        <span class="arrow">→</span>
+        <span>CM2<br><small style="font-weight:400;color:var(--muted)">마케팅 성과</small></span>
+      </div>
+      <p class="gloss">
+        <b>정산매출</b> = 순매출 − 수수료(플랫폼/위탁/PG) &nbsp;|&nbsp;
+        <b>CM1</b> = 정산매출 − 변동비(상품원가·물류비·프로모션비·반품비·기타) &nbsp;|&nbsp;
+        <b>CM2</b> = CM1 − 광고비.<br>
+        인건비·임차료·관리비 같은 고정비는 여기서 빼지 않고, 아래 "방어선"에서 한꺼번에 비교합니다.
+        공헌이익은 <b>"매출에서 그 매출을 만들기 위해 직접 들어간 비용을 뺀, 회사에 실제로 남는 돈"</b>입니다.
+      </p>
+    </div>
+  </section>
+
+  <!-- ══════════ TAB 2 : 연간 현황 ══════════ -->
+  <section id="tab-year" style="display:none">
+    <div class="tiles" id="yearTiles"></div>
+    <div class="card">
+      <h2>월별 공헌이익(CM2) vs 방어선</h2>
+      <p class="desc">막대가 점선(방어선)을 넘는 달만 보너스 검토 대상입니다.</p>
+      <div class="legend">
+        <span class="item"><span class="sw" style="background:var(--blue)"></span>월 CM2 (플러스)</span>
+        <span class="item"><span class="sw" style="background:var(--red)"></span>월 CM2 (마이너스)</span>
+        <span class="item"><span class="ln"></span>방어선</span>
+      </div>
+      <div class="chartbox">
+        <svg id="chart" viewBox="0 0 960 320" role="img" aria-label="월별 CM2와 방어선 차트"></svg>
+        <div class="tooltip" id="chartTip"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>연간 표</h2>
+      <div class="tablescroll"><table class="grid" id="yearTable" style="min-width:900px"></table></div>
+    </div>
+  </section>
+
+  <!-- ══════════ TAB 3 : 설정 ══════════ -->
+  <section id="tab-settings" style="display:none">
+    <div class="setgrid">
+      <div class="card">
+        <h2>구성원 기본급</h2>
+        <p class="desc">개인 보너스 상한(cap) 계산에 쓰입니다. 이 데이터는 서버로 전송되지 않고 이 브라우저에만 저장됩니다.</p>
+        <div id="memberInputs"></div>
+        <label>개인 보너스 상한 배수 (2026 베타: 기본급의 100% = 1)</label>
+        <input type="text" id="set-capMult" inputmode="decimal">
+        <label>초과분 중 직원 몫 비율 (회사 50 : 직원 50 = 0.5)</label>
+        <input type="text" id="set-staffShare" inputmode="decimal">
+      </div>
+
+      <div class="card">
+        <h2>월 비용 기준 (방어선의 재료)</h2>
+        <p class="desc">고정비+운영비를 감당할 기준 금액입니다. 2026 예산비용 파일 기준값이 미리 들어 있습니다.</p>
+        <label>비용 기준 모드</label>
+        <select id="set-costMode">
+          <option value="budget">예산월별 (월마다 다름)</option>
+          <option value="stable">안정월 고정 (11,502,480)</option>
+          <option value="avg">연평균 고정 (12,578,454)</option>
+          <option value="custom">직접 입력</option>
+        </select>
+        <label>직접 입력 금액 (모드가 "직접 입력"일 때)</label>
+        <input type="text" id="set-customCost" inputmode="numeric">
+        <label style="margin-top:14px">월별 예산 비용 (예산월별 모드에서 사용)</label>
+        <div class="tablescroll"><table class="plain" id="budgetTable" style="min-width:280px"></table></div>
+      </div>
+
+      <div class="card">
+        <h2>회생 적립 &middot; 픽키도기</h2>
+        <label>회생 변제 월 적립 목표 <span style="color:var(--muted)">(2026년분 월 300,048 + 2027년분 월 1,738,690)</span></label>
+        <input type="text" id="set-rehabMonthly" inputmode="numeric">
+        <label>픽키도기 월 고정 운영금 (회생 적립에 충당)</label>
+        <input type="text" id="set-pickyFixed" inputmode="numeric">
+        <label>보너스 판정 기준</label>
+        <select id="set-gateBasis">
+          <option value="cm2">CM2 기준 (광고비까지 뺀 뒤 판정 — 보수적, 권장)</option>
+          <option value="cm1">CM1 기준</option>
+        </select>
+      </div>
+
+      <div class="card">
+        <h2>데이터 관리</h2>
+        <p class="desc">데이터는 이 브라우저(localStorage)에만 저장됩니다. 다른 컴퓨터에서 쓰려면 JSON으로 내보내서 옮기세요.</p>
+        <div class="btnrow">
+          <button class="btn primary" onclick="exportJson()">JSON 내보내기 (백업)</button>
+          <button class="btn" onclick="document.getElementById('importFile').click()">JSON 가져오기</button>
+          <input type="file" id="importFile" accept=".json" style="display:none" onchange="importJson(this)">
+          <button class="btn danger" onclick="resetAll()">전체 초기화</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+"use strict";
+/* ───────────────── 상수 · 기본값 ───────────────── */
+var STORE_KEY = "wooof_kpi_2026_v1";
+var MONTHS = [1,2,3,4,5,6,7,8,9,10,11,12];
+/* 2026_예산비용.xlsx 기준 월별 총예산비용 (사용자 자료) */
+var DEFAULT_BUDGET = {1:14079274,2:12927804,3:17598798,4:13435730,5:12382480,
+                      6:11502480,7:11502480,8:11502480,9:11502480,10:11502480,11:11502480,12:11502480};
+var STABLE_COST = 11502480;   /* 안정월(6~12월) 월비용 */
+var AVG_COST    = 12578454;   /* 연평균 월비용 */
+/* 회생 변제 월 안분: 2026년분 300,048 + 2027년분 1,738,690 (사용자 자료) */
+var DEFAULT_REHAB = 2038737;
+
+var FIELDS = [
+  {key:"net",  label:"순매출"},
+  {key:"fee",  label:"수수료"},
+  {key:"cogs", label:"상품원가"},
+  {key:"logi", label:"물류비"},
+  {key:"promo",label:"프로모션비"},
+  {key:"ret",  label:"반품비"},
+  {key:"etc",  label:"기타변동비"},
+  {key:"ad",   label:"광고비"}
+];
+
+function defaultRows(unit){
+  if(unit==="wooof") return [
+    mkRow("입점브랜드 위탁"), mkRow("입점브랜드 선매입"),
+    mkRow("필바이츠"), mkRow("도톤"), mkRow("공감캣")
+  ];
+  return [
+    mkRow("자사몰 (PG)"), mkRow("온라인 위탁 (쿠팡·스토어 등)"),
+    mkRow("오프라인 위탁 (백화점 등)"), mkRow("공구")
+  ];
+}
+function mkRow(name){
+  var r={name:name};
+  FIELDS.forEach(function(f){r[f.key]=0});
+  return r;
+}
+function defaultState(){
+  var months={};
+  MONTHS.forEach(function(m){
+    months[m]={rows:{wooof:defaultRows("wooof"),barrels:defaultRows("barrels")},picky:0};
+  });
+  return {
+    settings:{
+      members:[{name:"이교영",salary:0},{name:"김예빈",salary:0},{name:"유재량",salary:0}],
+      capMult:1, staffShare:0.5,
+      costMode:"budget", customCost:STABLE_COST,
+      monthlyBudget:Object.assign({},DEFAULT_BUDGET),
+      rehabMonthly:DEFAULT_REHAB, pickyFixed:2000000,
+      gateBasis:"cm2"
+    },
+    months:months
+  };
+}
+
+/* ───────────────── 상태 로드/저장 ───────────────── */
+var state = load();
+var curMonth = (new Date()).getFullYear()===2026 ? (new Date()).getMonth()+1 : 1;
+
+function load(){
+  try{
+    var raw=localStorage.getItem(STORE_KEY);
+    if(!raw) return defaultState();
+    var s=JSON.parse(raw);
+    var d=defaultState();
+    s.settings=Object.assign(d.settings,s.settings||{});
+    s.settings.monthlyBudget=Object.assign({},DEFAULT_BUDGET,s.settings.monthlyBudget||{});
+    if(!s.months) s.months=d.months;
+    MONTHS.forEach(function(m){ if(!s.months[m]) s.months[m]=d.months[m]; });
+    return s;
+  }catch(e){ return defaultState(); }
+}
+var saveTimer=null;
+function save(){
+  clearTimeout(saveTimer);
+  saveTimer=setTimeout(function(){
+    try{ localStorage.setItem(STORE_KEY,JSON.stringify(state)); }catch(e){}
+  },250);
+}
+
+/* ───────────────── 숫자 유틸 ───────────────── */
+function num(v){
+  if(typeof v==="number") return isFinite(v)?v:0;
+  var n=parseFloat(String(v).replace(/[^0-9.\-]/g,""));
+  return isFinite(n)?n:0;
+}
+function fmt(n){
+  n=Math.round(n);
+  return n.toLocaleString("ko-KR");
+}
+function fmtCell(n){
+  var s=fmt(n);
+  return n<0 ? '<span class="neg">'+s+'</span>' : s;
+}
+
+/* ───────────────── 계산 ───────────────── */
+function calcRow(r){
+  var settle=num(r.net)-num(r.fee);
+  var cm1=settle-num(r.cogs)-num(r.logi)-num(r.promo)-num(r.ret)-num(r.etc);
+  var cm2=cm1-num(r.ad);
+  return {settle:settle,cm1:cm1,cm2:cm2};
+}
+function calcUnit(rows){
+  var t={net:0,fee:0,settle:0,cogs:0,logi:0,promo:0,ret:0,etc:0,ad:0,cm1:0,cm2:0};
+  rows.forEach(function(r){
+    var c=calcRow(r);
+    FIELDS.forEach(function(f){t[f.key]+=num(r[f.key])});
+    t.settle+=c.settle; t.cm1+=c.cm1; t.cm2+=c.cm2;
+  });
+  return t;
+}
+function monthCost(m){
+  var s=state.settings;
+  if(s.costMode==="stable") return STABLE_COST;
+  if(s.costMode==="avg")    return AVG_COST;
+  if(s.costMode==="custom") return num(s.customCost);
+  return num(s.monthlyBudget[m]);
+}
+function calcMonth(m){
+  var md=state.months[m], s=state.settings;
+  var w=calcUnit(md.rows.wooof), b=calcUnit(md.rows.barrels);
+  var totalCM1=w.cm1+b.cm1, totalCM2=w.cm2+b.cm2;
+  var cost=monthCost(m);
+  var rehabGap=Math.max(0,num(s.rehabMonthly)-num(s.pickyFixed));
+  var line=cost+rehabGap;                    /* 방어선 */
+  var basis=(s.gateBasis==="cm1")?totalCM1:totalCM2;
+  var surplus=basis-line;
+  var pass=surplus>0;
+  var picky10=num(md.picky)*0.1;
+  var pickyOver=Math.max(0,picky10-num(s.pickyFixed));
+  var staffPool=pass ? Math.max(0,surplus)*num(s.staffShare)+pickyOver*0.5 : 0;
+  var perRaw=staffPool/3;
+  var pays=s.members.map(function(mem){
+    var cap=num(mem.salary)*num(s.capMult);
+    return {name:mem.name,salary:num(mem.salary),cap:cap,raw:perRaw,pay:Math.min(cap,perRaw)};
+  });
+  var hasInput = w.net!==0||b.net!==0||w.settle!==0||b.settle!==0||totalCM1!==0;
+  return {w:w,b:b,totalCM1:totalCM1,totalCM2:totalCM2,cost:cost,rehabGap:rehabGap,line:line,
+          basis:basis,surplus:surplus,pass:pass,picky10:picky10,pickyOver:pickyOver,
+          staffPool:staffPool,perRaw:perRaw,pays:pays,hasInput:hasInput};
+}
+
+/* ───────────────── 탭 · 월 이동 ───────────────── */
+function showTab(id){
+  ["input","year","settings"].forEach(function(t){
+    document.getElementById("tab-"+t).style.display = (t===id)?"":"none";
+    document.getElementById("tabBtn-"+t).classList.toggle("active",t===id);
+  });
+  if(id==="year") renderYear();
+  if(id==="settings") renderSettings();
+}
+function switchMonth(m){ curMonth=parseInt(m,10); renderInput(); }
+function moveMonth(d){
+  var m=curMonth+d; if(m<1)m=1; if(m>12)m=12;
+  curMonth=m; document.getElementById("monthSel").value=m; renderInput();
+}
+
+/* ───────────────── 입력 탭 렌더 ───────────────── */
+function renderMonthSel(){
+  var sel=document.getElementById("monthSel");
+  sel.innerHTML=MONTHS.map(function(m){return '<option value="'+m+'">2026년 '+m+'월</option>'}).join("");
+  sel.value=curMonth;
+}
+function renderInput(){
+  buildUnitTable("wooof");
+  buildUnitTable("barrels");
+  var p=document.getElementById("pickySales");
+  p.value=state.months[curMonth].picky?fmt(state.months[curMonth].picky):"";
+  recalc();
+}
+function buildUnitTable(unit){
+  var tbl=document.getElementById("tbl-"+unit);
+  var rows=state.months[curMonth].rows[unit];
+  var html='<tr><th>채널</th><th>순매출</th><th>수수료</th><th>정산매출</th>'+
+           '<th>상품원가</th><th>물류비</th><th>프로모션비</th><th>반품비</th><th>기타변동비</th>'+
+           '<th>CM1</th><th>광고비</th><th>CM2</th><th></th></tr>';
+  rows.forEach(function(r,i){
+    html+='<tr>'+
+      '<td><input class="chname" type="text" value="'+esc(r.name)+'" data-unit="'+unit+'" data-i="'+i+'" data-f="name"></td>'+
+      cellInput(unit,i,"net",r)+cellInput(unit,i,"fee",r)+
+      '<td class="calc settle" id="c-'+unit+'-'+i+'-settle"></td>'+
+      cellInput(unit,i,"cogs",r)+cellInput(unit,i,"logi",r)+cellInput(unit,i,"promo",r)+
+      cellInput(unit,i,"ret",r)+cellInput(unit,i,"etc",r)+
+      '<td class="calc cm1" id="c-'+unit+'-'+i+'-cm1"></td>'+
+      cellInput(unit,i,"ad",r)+
+      '<td class="calc cm2" id="c-'+unit+'-'+i+'-cm2"></td>'+
+      '<td><button class="rowdel" title="행 삭제" onclick="delRow(\''+unit+'\','+i+')">✕</button></td></tr>';
+  });
+  html+='<tr class="totalrow"><td>합계</td>'+
+    '<td id="t-'+unit+'-net"></td><td id="t-'+unit+'-fee"></td><td id="t-'+unit+'-settle"></td>'+
+    '<td id="t-'+unit+'-cogs"></td><td id="t-'+unit+'-logi"></td><td id="t-'+unit+'-promo"></td>'+
+    '<td id="t-'+unit+'-ret"></td><td id="t-'+unit+'-etc"></td>'+
+    '<td class="calc cm1" id="t-'+unit+'-cm1"></td><td id="t-'+unit+'-ad"></td>'+
+    '<td class="calc cm2" id="t-'+unit+'-cm2"></td><td></td></tr>';
+  tbl.innerHTML=html;
+  tbl.querySelectorAll("input").forEach(function(inp){
+    inp.addEventListener("input",onCellInput);
+    if(inp.dataset.f!=="name"){
+      inp.addEventListener("focus",function(){this.select()});
+      inp.addEventListener("blur",function(){
+        var v=num(this.value); this.value=v?fmt(v):"";
+      });
+    }
+  });
+}
+function cellInput(unit,i,f,r){
+  var v=num(r[f]);
+  return '<td><input type="text" inputmode="numeric" value="'+(v?fmt(v):"")+'" '+
+         'data-unit="'+unit+'" data-i="'+i+'" data-f="'+f+'"></td>';
+}
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;")}
+function onCellInput(e){
+  var d=e.target.dataset;
+  var row=state.months[curMonth].rows[d.unit][d.i];
+  if(d.f==="name") row.name=e.target.value;
+  else row[d.f]=num(e.target.value);
+  save(); recalc();
+}
+function addRow(unit){
+  state.months[curMonth].rows[unit].push(mkRow("새 채널"));
+  save(); buildUnitTable(unit); recalc();
+}
+function delRow(unit,i){
+  var rows=state.months[curMonth].rows[unit];
+  var r=rows[i], c=calcRow(r);
+  var hasData=FIELDS.some(function(f){return num(r[f.key])!==0});
+  if(hasData && !confirm('"'+r.name+'" 행에 입력된 숫자가 있습니다. 삭제할까요?')) return;
+  rows.splice(i,1);
+  save(); buildUnitTable(unit); recalc();
+}
+
+document.getElementById("pickySales").addEventListener("input",function(){
+  state.months[curMonth].picky=num(this.value); save(); recalc();
+});
+document.getElementById("pickySales").addEventListener("blur",function(){
+  var v=num(this.value); this.value=v?fmt(v):"";
+});
+
+/* ───────────────── 계산 결과 반영 ───────────────── */
+function recalc(){
+  var m=curMonth, md=state.months[m];
+  ["wooof","barrels"].forEach(function(unit){
+    var rows=md.rows[unit];
+    rows.forEach(function(r,i){
+      var c=calcRow(r);
+      setHtml("c-"+unit+"-"+i+"-settle",fmtCell(c.settle));
+      setHtml("c-"+unit+"-"+i+"-cm1",fmtCell(c.cm1));
+      setHtml("c-"+unit+"-"+i+"-cm2",fmtCell(c.cm2));
+    });
+    var t=calcUnit(rows);
+    ["net","fee","settle","cogs","logi","promo","ret","etc","cm1","ad","cm2"].forEach(function(k){
+      setHtml("t-"+unit+"-"+k,fmtCell(t[k]));
+    });
+  });
+  var r=calcMonth(m);
+  /* 타일 */
+  document.getElementById("monthTiles").innerHTML=
+    tile("우프 CM1",r.w.cm1,"var(--blue)")+
+    tile("베럴즈 CM1",r.b.cm1,"var(--green)")+
+    tile("총 CM1",r.totalCM1)+
+    tile("총 CM2 (광고비 차감)",r.totalCM2)+
+    tile("방어선",r.line)+
+    tile("초과분",r.surplus);
+  /* 방어선 표 */
+  document.getElementById("gateTable").innerHTML=
+    '<tr><td>월 비용 기준 ('+costModeLabel()+')</td><td>'+fmt(r.cost)+'</td></tr>'+
+    '<tr><td>회생 월 적립 목표</td><td>'+fmt(num(state.settings.rehabMonthly))+'</td></tr>'+
+    '<tr><td>픽키도기 운영금으로 충당<span class="note">회생 적립 전용 월 '+fmt(num(state.settings.pickyFixed))+'원</span></td><td>−'+fmt(Math.min(num(state.settings.rehabMonthly),num(state.settings.pickyFixed)))+'</td></tr>'+
+    '<tr class="em"><td>방어선 합계</td><td>'+fmt(r.line)+'</td></tr>'+
+    '<tr><td>판정 기준 '+(state.settings.gateBasis==="cm1"?"(총 CM1)":"(총 CM2)")+'</td><td>'+fmtCell(r.basis)+'</td></tr>'+
+    '<tr class="em"><td>초과분</td><td>'+fmtCell(r.surplus)+'</td></tr>';
+  /* 보너스 표 */
+  var bh='<tr><td>초과분 × 직원 몫 '+(num(state.settings.staffShare)*100)+'%</td><td>'+fmt(r.pass?Math.max(0,r.surplus)*num(state.settings.staffShare):0)+'</td></tr>'+
+    '<tr><td>픽키도기 초과 보너스 × 50%</td><td>'+fmt(r.pass?r.pickyOver*0.5:0)+'</td></tr>'+
+    '<tr class="em"><td>직원 보너스 풀</td><td>'+fmt(r.staffPool)+'</td></tr>';
+  r.pays.forEach(function(p){
+    bh+='<tr><td>'+esc(p.name)+' <span class="note">1/3 = '+fmt(p.raw)+' / 상한 '+fmt(p.cap)+'</span></td><td>'+fmt(p.pay)+'</td></tr>';
+  });
+  document.getElementById("bonusTable").innerHTML=bh;
+  /* 판정 배지 */
+  var badge;
+  if(!r.hasInput) badge='<span class="badge wait">아직 입력 없음</span>';
+  else if(r.pass) badge='<span class="badge ok">✓ 방어선 통과 — 보너스 지급 검토 가능</span>';
+  else badge='<span class="badge no">✕ 방어선 미달 — 이번 달 보너스 보류</span>';
+  document.getElementById("judgeBadge").innerHTML=badge;
+  var hint;
+  var salarySum=state.settings.members.reduce(function(a,mm){return a+num(mm.salary)},0);
+  if(salarySum===0) hint="⚠ 설정 탭에서 3인의 기본급을 입력해야 개인 상한(cap)이 적용된 실제 지급액이 계산됩니다.";
+  else if(r.pass) hint="초과분의 "+(num(state.settings.staffShare)*100)+"%가 직원 몫이며, 나머지는 회사 유보(다음 달 버퍼·회생 적립)에 남습니다.";
+  else hint="방어선 = 월 비용 + 회생 적립 부족분. 이 선을 넘지 못한 달은 전액 회사 운영에 사용됩니다.";
+  document.getElementById("judgeHint").textContent=hint;
+  /* 픽키도기 */
+  setHtml("picky10",fmt(r.picky10));
+  setHtml("pickyOver",fmt(r.pickyOver));
+}
+function tile(label,val,dotColor,unit){
+  if(unit===undefined) unit="원";
+  var dot=dotColor?'<span class="dot" style="background:'+dotColor+'"></span>':"";
+  return '<div class="tile"><div class="lbl">'+dot+label+'</div>'+
+         '<div class="val">'+fmtCell(val)+(unit?'<span class="unit">'+unit+'</span>':"")+'</div></div>';
+}
+function costModeLabel(){
+  var m=state.settings.costMode;
+  return m==="budget"?"예산월별":m==="stable"?"안정월":m==="avg"?"연평균":"직접입력";
+}
+function setHtml(id,html){
+  var el=document.getElementById(id);
+  if(el) el.innerHTML=html;
+}
+
+/* ───────────────── 연간 탭 ───────────────── */
+function renderYear(){
+  var results=MONTHS.map(function(m){return calcMonth(m)});
+  var ytdCM1=0,ytdCM2=0,ytdPay=0,passCnt=0,inputCnt=0;
+  results.forEach(function(r){
+    if(!r.hasInput) return;
+    inputCnt++; ytdCM1+=r.totalCM1; ytdCM2+=r.totalCM2;
+    if(r.pass){passCnt++; ytdPay+=r.pays.reduce(function(a,p){return a+p.pay},0);}
+  });
+  document.getElementById("yearTiles").innerHTML=
+    tile("입력된 달",inputCnt,null,"개월")+
+    tile("누적 CM1",ytdCM1)+
+    tile("누적 CM2",ytdCM2)+
+    tile("통과한 달",passCnt,null,"개월")+
+    tile("누적 보너스 지급액",ytdPay);
+  /* 표 */
+  var h='<tr><th>월</th><th>우프 CM1</th><th>베럴즈 CM1</th><th>총 CM1</th><th>총 CM2</th>'+
+        '<th>방어선</th><th>초과분</th><th>1인 지급액</th><th>판정</th></tr>';
+  results.forEach(function(r,idx){
+    var m=idx+1;
+    var per=r.pays.length?r.pays[0].pay:0;
+    var stat=!r.hasInput?'<span style="color:var(--muted)">—</span>'
+      :r.pass?'<span style="color:var(--goodtext);font-weight:700">통과</span>'
+      :'<span style="color:var(--critical);font-weight:700">미달</span>';
+    h+='<tr><td>'+m+'월</td><td>'+(r.hasInput?fmtCell(r.w.cm1):"—")+'</td>'+
+       '<td>'+(r.hasInput?fmtCell(r.b.cm1):"—")+'</td>'+
+       '<td>'+(r.hasInput?fmtCell(r.totalCM1):"—")+'</td>'+
+       '<td>'+(r.hasInput?fmtCell(r.totalCM2):"—")+'</td>'+
+       '<td>'+fmt(r.line)+'</td>'+
+       '<td>'+(r.hasInput?fmtCell(r.surplus):"—")+'</td>'+
+       '<td>'+(r.hasInput&&r.pass?fmt(per):"—")+'</td>'+
+       '<td>'+stat+'</td></tr>';
+  });
+  document.getElementById("yearTable").innerHTML=h;
+  drawChart(results);
+}
+
+/* SVG 막대 차트: 월 CM2 vs 방어선 */
+function drawChart(results){
+  var svg=document.getElementById("chart");
+  var W=960,H=320,padL=70,padR=16,padT=16,padB=34;
+  var plotW=W-padL-padR,plotH=H-padT-padB;
+  var vals=[];
+  results.forEach(function(r){
+    vals.push(r.line);
+    if(r.hasInput) vals.push(r.totalCM2);
+  });
+  var maxV=Math.max.apply(null,vals.concat([1]));
+  var minV=Math.min.apply(null,vals.concat([0]));
+  maxV*=1.12; if(minV<0) minV*=1.12;
+  var range=maxV-minV;
+  function y(v){return padT+plotH*(1-(v-minV)/range)}
+  var y0=y(0);
+  var s='';
+  /* 눈금: 0과 max 중간값들 */
+  var ticks=niceTicks(minV,maxV,5);
+  ticks.forEach(function(t){
+    var yy=y(t);
+    s+='<line x1="'+padL+'" y1="'+yy+'" x2="'+(W-padR)+'" y2="'+yy+'" stroke="var(--grid)" stroke-width="1"/>';
+    s+='<text x="'+(padL-8)+'" y="'+(yy+4)+'" text-anchor="end" font-size="11" fill="var(--muted)">'+shortNum(t)+'</text>';
+  });
+  /* 기준선(0) */
+  s+='<line x1="'+padL+'" y1="'+y0+'" x2="'+(W-padR)+'" y2="'+y0+'" stroke="var(--baseline)" stroke-width="1.5"/>';
+  var slot=plotW/12, barW=Math.min(40,slot*0.55);
+  /* 막대 */
+  results.forEach(function(r,i){
+    var cx=padL+slot*i+slot/2;
+    var xx=cx-barW/2;
+    if(r.hasInput){
+      var v=r.totalCM2;
+      var yy=y(Math.max(0,v)), hh=Math.abs(y(v)-y0);
+      if(hh<1)hh=1;
+      var col=v>=0?"var(--blue)":"var(--red)";
+      var rx=4;
+      s+='<path d="'+roundedBar(xx,v>=0?yy:y0,barW,hh,rx,v>=0)+'" fill="'+col+'" data-i="'+i+'" class="bar"/>';
+    }
+    s+='<text x="'+cx+'" y="'+(H-12)+'" text-anchor="middle" font-size="12" fill="var(--muted)">'+(i+1)+'월</text>';
+  });
+  /* 방어선 (점선, 월별) */
+  var lp='';
+  results.forEach(function(r,i){
+    var x1=padL+slot*i+3, x2=padL+slot*(i+1)-3, yy=y(r.line);
+    lp+='<line x1="'+x1+'" y1="'+yy+'" x2="'+x2+'" y2="'+yy+'" stroke="var(--muted)" stroke-width="2" stroke-dasharray="5 4"/>';
+  });
+  s+=lp;
+  svg.innerHTML=s;
+  /* 툴팁 */
+  var tip=document.getElementById("chartTip");
+  svg.querySelectorAll(".bar").forEach(function(el){
+    el.addEventListener("mousemove",function(ev){
+      var i=parseInt(el.dataset.i,10), r=results[i];
+      tip.style.display="block";
+      tip.innerHTML='<b>'+(i+1)+'월</b><br>CM2: '+fmt(r.totalCM2)+'원<br>방어선: '+fmt(r.line)+'원<br>초과분: '+fmt(r.surplus)+'원';
+      var box=svg.parentElement.getBoundingClientRect();
+      var tx=ev.clientX-box.left+14, ty=ev.clientY-box.top-10;
+      if(tx+tip.offsetWidth>box.width) tx-=tip.offsetWidth+24;
+      tip.style.left=tx+"px"; tip.style.top=ty+"px";
+    });
+    el.addEventListener("mouseleave",function(){tip.style.display="none"});
+  });
+}
+function roundedBar(x,y,w,h,r,up){
+  r=Math.min(r,h,w/2);
+  if(up) return "M"+x+" "+(y+h)+" L"+x+" "+(y+r)+" Q"+x+" "+y+" "+(x+r)+" "+y+
+    " L"+(x+w-r)+" "+y+" Q"+(x+w)+" "+y+" "+(x+w)+" "+(y+r)+" L"+(x+w)+" "+(y+h)+" Z";
+  return "M"+x+" "+y+" L"+x+" "+(y+h-r)+" Q"+x+" "+(y+h)+" "+(x+r)+" "+(y+h)+
+    " L"+(x+w-r)+" "+(y+h)+" Q"+(x+w)+" "+(y+h)+" "+(x+w)+" "+(y+h-r)+" L"+(x+w)+" "+y+" Z";
+}
+function niceTicks(min,max,n){
+  var span=max-min, step=Math.pow(10,Math.floor(Math.log10(span/n)));
+  var err=span/n/step;
+  if(err>=5)step*=5; else if(err>=2)step*=2;
+  var out=[],v=Math.ceil(min/step)*step;
+  for(;v<=max;v+=step) out.push(v);
+  return out;
+}
+function shortNum(n){
+  if(Math.abs(n)>=100000000) return (n/100000000).toFixed(1).replace(/\.0$/,"")+"억";
+  if(Math.abs(n)>=10000) return Math.round(n/10000).toLocaleString("ko-KR")+"만";
+  return fmt(n);
+}
+
+/* ───────────────── 설정 탭 ───────────────── */
+function renderSettings(){
+  var s=state.settings;
+  var mh='';
+  s.members.forEach(function(m,i){
+    mh+='<div style="display:flex;gap:8px;margin-bottom:8px">'+
+      '<input type="text" value="'+esc(m.name)+'" data-mi="'+i+'" data-mf="name" style="flex:1;padding:9px 10px;border-radius:9px;border:1px solid var(--border);background:var(--surface);color:var(--ink)">'+
+      '<input type="text" inputmode="numeric" value="'+(m.salary?fmt(m.salary):"")+'" placeholder="월 기본급" data-mi="'+i+'" data-mf="salary" style="flex:1;padding:9px 10px;border-radius:9px;text-align:right;border:1px solid var(--input-border);background:var(--input-bg);color:var(--ink)">'+
+      '</div>';
+  });
+  document.getElementById("memberInputs").innerHTML=mh;
+  document.querySelectorAll("#memberInputs input").forEach(function(inp){
+    inp.addEventListener("input",function(){
+      var m=s.members[this.dataset.mi];
+      if(this.dataset.mf==="name") m.name=this.value;
+      else m.salary=num(this.value);
+      save();
+    });
+    if(inp.dataset.mf==="salary") inp.addEventListener("blur",function(){
+      var v=num(this.value); this.value=v?fmt(v):"";
+    });
+  });
+  bindSet("set-capMult","capMult",true);
+  bindSet("set-staffShare","staffShare",true);
+  bindSet("set-customCost","customCost");
+  bindSet("set-rehabMonthly","rehabMonthly");
+  bindSet("set-pickyFixed","pickyFixed");
+  var cm=document.getElementById("set-costMode");
+  cm.value=s.costMode;
+  cm.onchange=function(){s.costMode=this.value;save()};
+  var gb=document.getElementById("set-gateBasis");
+  gb.value=s.gateBasis;
+  gb.onchange=function(){s.gateBasis=this.value;save()};
+  /* 월별 예산 표 */
+  var bh='';
+  MONTHS.forEach(function(m){
+    bh+='<tr><td>'+m+'월</td><td><input type="text" inputmode="numeric" value="'+fmt(num(s.monthlyBudget[m]))+'" data-bm="'+m+'" style="width:130px;padding:6px 8px;border-radius:8px;text-align:right;border:1px solid var(--input-border);background:var(--input-bg);color:var(--ink)"></td></tr>';
+  });
+  document.getElementById("budgetTable").innerHTML=bh;
+  document.querySelectorAll("#budgetTable input").forEach(function(inp){
+    inp.addEventListener("input",function(){s.monthlyBudget[this.dataset.bm]=num(this.value);save()});
+    inp.addEventListener("blur",function(){this.value=fmt(num(this.value))});
+  });
+}
+function bindSet(id,key,isFloat){
+  var s=state.settings, el=document.getElementById(id);
+  el.value=isFloat?String(num(s[key])):(num(s[key])?fmt(num(s[key])):"");
+  el.oninput=function(){s[key]=num(this.value);save()};
+  if(!isFloat) el.onblur=function(){var v=num(this.value);this.value=v?fmt(v):""};
+}
+
+/* ───────────────── 데이터 관리 ───────────────── */
+function exportJson(){
+  var blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
+  var a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="wooof_kpi_2026_백업_"+new Date().toISOString().slice(0,10)+".json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+function importJson(input){
+  var f=input.files[0]; if(!f) return;
+  var reader=new FileReader();
+  reader.onload=function(){
+    try{
+      var s=JSON.parse(reader.result);
+      if(!s.months||!s.settings) throw new Error("bad");
+      state=s; save();
+      renderMonthSel(); renderInput(); renderSettings();
+      alert("가져오기 완료");
+    }catch(e){ alert("올바른 백업 파일이 아닙니다."); }
+  };
+  reader.readAsText(f);
+  input.value="";
+}
+function resetAll(){
+  if(!confirm("모든 입력값과 설정을 지우고 처음 상태로 되돌립니다. 계속할까요?")) return;
+  state=defaultState();
+  localStorage.removeItem(STORE_KEY);
+  save();
+  renderMonthSel(); renderInput(); renderSettings();
+}
+
+/* ───────────────── 시작 ───────────────── */
+renderMonthSel();
+renderInput();
+renderSettings();
+</script>
+</body>
+</html>
