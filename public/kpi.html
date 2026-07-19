@@ -120,6 +120,17 @@ td.warncell{color:var(--critical)!important}
 .onboard{background:rgba(42,120,214,.07);border:1px solid var(--blue)}
 .onboard ol{margin:6px 0 0;padding-left:20px}
 .onboard li{margin:4px 0}
+/* 입력 가이드 */
+details.guide{border:1px solid var(--border);border-radius:12px;background:var(--surface);margin-bottom:16px}
+details.guide summary{cursor:pointer;font-weight:700;font-size:15px;padding:14px 16px;list-style:none}
+details.guide summary::before{content:"▸ ";color:var(--blue)}
+details.guide[open] summary::before{content:"▾ "}
+details.guide .gbody{padding:0 16px 14px;font-size:14px}
+.gitem{border-top:1px solid var(--grid);padding:10px 0}
+.gitem b{display:block;margin-bottom:2px}
+.gitem .src{color:var(--blue);font-weight:600}
+.gitem .map{color:var(--ink2);line-height:1.7}
+.gitem .map code{background:var(--page);border:1px solid var(--border);border-radius:5px;padding:1px 6px;font-family:inherit;font-size:13px}
 /* print summary */
 @media print{
   body.printing *{visibility:hidden}
@@ -169,6 +180,39 @@ td.warncell{color:var(--critical)!important}
       <button class="btn" onclick="copyPrevStructure()" title="지난달의 채널 이름 구성을 이번 달로 복사합니다">지난달 채널 구성 복사</button>
       <span class="sub" style="color:var(--muted);font-size:13px">노란 칸에 숫자만 입력하면 자동 계산·자동 저장됩니다.</span>
     </div>
+
+    <details class="guide">
+      <summary>📖 무엇을 보고 채우나요? — 채널별 자료 안내 (클릭해서 열기)</summary>
+      <div class="gbody">
+        <p style="color:var(--ink2);margin:6px 0 4px">매달 정산서가 오면 아래 표대로 옮겨 적으면 됩니다. <b>정산서에 실입금액만 있는 채널은 순매출 칸에 실입금액을 넣고 수수료는 비워두세요</b> — 그래도 CM 계산은 정확합니다.</p>
+        <div class="gitem"><b>입점브랜드 위탁 / 선매입 (우프)</b>
+          <span class="src">자료: 위탁·선매입 월별 정산 시트 (WooofPay 정산 기준)</span>
+          <div class="map"><code>순매출</code> 해당 월 판매금액 합계 · <code>수수료</code> 플랫폼/PG 수수료 합 · <code>상품원가</code> 브랜드에 지급한 정산액(매입가) · <code>물류비</code> 해당 판매분 택배비</div></div>
+        <div class="gitem"><b>필바이츠 (우프)</b>
+          <span class="src">자료: 픽키파크 "필바이츠 판매정산서" (매월 수신)</span>
+          <div class="map"><code>순매출</code> GMV(소비자 최종결제액) · <code>수수료</code> 공제계(픽키파크 공제 금액) · <code>물류비</code> 운임/물류 실비 항목</div></div>
+        <div class="gitem"><b>도톤 (우프)</b>
+          <span class="src">자료: 도톤 판매정산서 (종합정산 시트)</span>
+          <div class="map"><code>순매출</code> gross sales(총 판매금액) · <code>수수료</code> 정산 수수료·공제액 · <code>기타변동비</code> profit split 등 나눠주는 몫</div></div>
+        <div class="gitem"><b>공감캣 (우프)</b>
+          <span class="src">자료: 공감캣 판매가·예상이윤 산출표 + 판매 건수</span>
+          <div class="map"><code>순매출</code> 판매건수 × 건당 판매가(약 698,000원) · <code>수수료</code> 채널 수수료 · <code>상품원가</code> 건당 제조원가 × 건수</div></div>
+        <div class="gitem"><b>자사몰 PG (베럴즈)</b>
+          <span class="src">자료: 카페24/PG사 월 정산 내역</span>
+          <div class="map"><code>순매출</code> 고객 결제금액(쿠폰·적립금 차감 후) · <code>수수료</code> PG 수수료(약 3%) · <code>상품원가</code> 판매분 생산원가 · <code>물류비</code> 택배·출고·포장</div></div>
+        <div class="gitem"><b>온라인 위탁 — 쿠팡·스마트스토어 등 (베럴즈)</b>
+          <span class="src">자료: 각 플랫폼 월 정산 내역 (정산금액 화면)</span>
+          <div class="map"><code>순매출</code> 결제금액 · <code>수수료</code> 플랫폼 판매수수료(보통 15% 안팎) · <code>프로모션비</code> 쿠폰·사은품 원가</div></div>
+        <div class="gitem"><b>오프라인 위탁 — 백화점·편집숍 등 (베럴즈)</b>
+          <span class="src">자료: 매장 월 정산서</span>
+          <div class="map"><code>순매출</code> 매장 판매액 · <code>수수료</code> 위탁 수수료(보통 35% 안팎) · <code>프로모션비</code> 매장 프로모션 분담금·POP 제작비</div></div>
+        <div class="gitem"><b>공구 (베럴즈)</b>
+          <span class="src">자료: 공구 판매내역 명세서 (예: 라떼 공구)</span>
+          <div class="map"><code>순매출</code> 공구 판매액 · <code>수수료</code> 인플루언서 수수료(예: 20%) · <code>물류비</code> 공구로 늘어난 택배·퀵 비용 · <code>상품원가</code> 해당 물량 생산원가</div></div>
+        <div class="gitem"><b>넣지 말아야 할 것</b>
+          <div class="map">급여·임대료·관리비·세무 수수료·부가세·법인세 — 이런 고정비/세금은 이미 "방어선의 월 비용"에 들어 있어서 여기 넣으면 <b>두 번 빼는 오류</b>가 됩니다. 홈택스 세금계산서 금액도 쓰지 마세요(수수료매출 발행 구조 때문에 실매출과 다릅니다).</div></div>
+      </div>
+    </details>
 
     <div class="card">
       <h2><span class="dot" style="background:var(--blue)"></span>우프 <span style="font-weight:400;font-size:13px;color:var(--muted)">입점브랜드(선매입·위탁·채권·매입) + 필바이츠 · 도톤 · 공감캣</span></h2>
