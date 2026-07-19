@@ -109,6 +109,23 @@ table.plain td .note{display:block;font-size:12px;color:var(--muted);font-weight
 .tooltip{position:absolute;pointer-events:none;background:var(--surface);border:1px solid var(--border);
   border-radius:8px;padding:8px 10px;font-size:13px;box-shadow:0 4px 14px rgba(0,0,0,.15);
   display:none;z-index:10;white-space:nowrap;font-variant-numeric:tabular-nums}
+/* warnings & checklist */
+td.warncell{color:var(--critical)!important}
+.warnbox{font-size:13px;color:var(--critical);margin-top:8px;line-height:1.7}
+.ratebox{font-size:12px;color:var(--muted);margin-top:6px}
+.checkitem{display:flex;align-items:flex-start;gap:10px;padding:9px 4px;border-bottom:1px solid var(--grid);cursor:pointer;font-size:14px}
+.checkitem:last-child{border-bottom:none}
+.checkitem input{width:18px;height:18px;margin-top:2px;flex:none;accent-color:var(--blue)}
+.checkitem.done{color:var(--muted);text-decoration:line-through}
+.onboard{background:rgba(42,120,214,.07);border:1px solid var(--blue)}
+.onboard ol{margin:6px 0 0;padding-left:20px}
+.onboard li{margin:4px 0}
+/* print summary */
+@media print{
+  body.printing *{visibility:hidden}
+  body.printing #summaryCard,body.printing #summaryCard *{visibility:visible}
+  body.printing #summaryCard{position:absolute;top:0;left:0;width:100%;border:none}
+}
 /* glossary */
 .gloss{font-size:13px;color:var(--ink2)}
 .gloss b{color:var(--ink)}
@@ -136,17 +153,29 @@ table.plain td .note{display:block;font-size:12px;color:var(--muted);font-weight
 
   <!-- ══════════ TAB 1 : 월별 입력 ══════════ -->
   <section id="tab-input">
+    <div class="card onboard" id="onboardCard" style="display:none">
+      <h2>👋 처음 오셨나요? 딱 3단계입니다</h2>
+      <ol>
+        <li><b>③ 설정</b> 탭에서 3인의 <b>월 기본급</b>을 입력하세요. (보너스 상한 계산에 필요)</li>
+        <li><b>① 월별 입력</b>에서 이번 달 채널별 숫자를 노란 칸에 넣으세요. 정산서에 <b>실입금액만</b> 있으면 순매출 칸에 그 금액을 넣고 수수료는 비워두면 됩니다.</li>
+        <li>아래 <b>이번 달 결과</b>에서 판정과 보너스를 확인하고, 지급 전에 <b>월 마감 체크리스트</b>를 확인하세요.</li>
+      </ol>
+      <div class="btnrow"><button class="btn primary" onclick="dismissOnboard()">알겠어요, 닫기</button></div>
+    </div>
     <div class="monthbar">
       <button class="nav" onclick="moveMonth(-1)">◀</button>
       <select id="monthSel" onchange="switchMonth(this.value)"></select>
       <button class="nav" onclick="moveMonth(1)">▶</button>
-      <span class="sub" style="color:var(--muted);font-size:13px">노란 칸에 숫자만 입력하면 나머지는 자동 계산됩니다.</span>
+      <button class="btn" onclick="copyPrevStructure()" title="지난달의 채널 이름 구성을 이번 달로 복사합니다">지난달 채널 구성 복사</button>
+      <span class="sub" style="color:var(--muted);font-size:13px">노란 칸에 숫자만 입력하면 자동 계산·자동 저장됩니다.</span>
     </div>
 
     <div class="card">
       <h2><span class="dot" style="background:var(--blue)"></span>우프 <span style="font-weight:400;font-size:13px;color:var(--muted)">입점브랜드(선매입·위탁·채권·매입) + 필바이츠 · 도톤 · 공감캣</span></h2>
       <p class="desc">순매출 = 소비자가 실제 결제한 금액(할인 반영) &middot; 수수료 = 플랫폼/위탁/PG 수수료 → 정산매출(실입금)이 자동 계산됩니다.</p>
       <div class="tablescroll"><table class="grid" id="tbl-wooof"></table></div>
+      <div class="ratebox" id="rate-wooof"></div>
+      <div class="warnbox" id="warn-wooof"></div>
       <button class="addrow" onclick="addRow('wooof')">＋ 채널 추가</button>
     </div>
 
@@ -154,6 +183,8 @@ table.plain td .note{display:block;font-size:12px;color:var(--muted);font-weight
       <h2><span class="dot" style="background:var(--green)"></span>베럴즈 (PB) <span style="font-weight:400;font-size:13px;color:var(--muted)">자사몰 + 외부채널, 공구 포함</span></h2>
       <p class="desc">공구는 별도 사업부가 아니라 베럴즈 안의 한 행입니다. 공구 수수료(예: 20%)는 수수료 칸에, 늘어난 물류·생산비는 각 변동비 칸에 넣으세요.</p>
       <div class="tablescroll"><table class="grid" id="tbl-barrels"></table></div>
+      <div class="ratebox" id="rate-barrels"></div>
+      <div class="warnbox" id="warn-barrels"></div>
       <button class="addrow" onclick="addRow('barrels')">＋ 채널 추가</button>
     </div>
 
@@ -170,8 +201,24 @@ table.plain td .note{display:block;font-size:12px;color:var(--muted);font-weight
           <table class="plain" id="bonusTable"></table>
           <div style="margin-top:12px" id="judgeBadge"></div>
           <div class="hint" id="judgeHint"></div>
+          <div class="btnrow"><button class="btn" onclick="showSummary()">직원 공유용 요약 보기 / 인쇄</button></div>
         </div>
       </div>
+    </div>
+
+    <div class="card" id="summaryCard" style="display:none">
+      <h2>📋 이번 달 성과 요약 (직원 공유용)</h2>
+      <div id="summaryBody"></div>
+      <div class="btnrow noprint">
+        <button class="btn primary" onclick="printSummary()">인쇄 / PDF 저장</button>
+        <button class="btn" onclick="document.getElementById('summaryCard').style.display='none'">닫기</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>✅ 월 마감 체크리스트 <span id="checkCount" style="font-weight:400;font-size:13px;color:var(--muted)"></span></h2>
+      <p class="desc">보너스를 확정하기 전에 아래를 확인하세요. 빠뜨리면 이익이 실제보다 커 보여서(=과다 지급) 나중에 회사가 힘들어집니다.</p>
+      <div id="checkList"></div>
     </div>
 
     <div class="card">
@@ -272,7 +319,8 @@ table.plain td .note{display:block;font-size:12px;color:var(--muted);font-weight
 
       <div class="card">
         <h2>데이터 관리</h2>
-        <p class="desc">데이터는 이 브라우저(localStorage)에만 저장됩니다. 다른 컴퓨터에서 쓰려면 JSON으로 내보내서 옮기세요.</p>
+        <p class="desc">데이터는 이 브라우저(localStorage)에만 저장됩니다. 다른 컴퓨터에서 쓰려면 JSON으로 내보내서 옮기세요. <b>한 달에 한 번은 꼭 백업하세요</b> — 브라우저 데이터를 지우면 입력값이 사라집니다.</p>
+        <p class="desc" id="lastBackupInfo"></p>
         <div class="btnrow">
           <button class="btn primary" onclick="exportJson()">JSON 내보내기 (백업)</button>
           <button class="btn" onclick="document.getElementById('importFile').click()">JSON 가져오기</button>
@@ -296,6 +344,15 @@ var STABLE_COST = 11502480;   /* 안정월(6~12월) 월비용 */
 var AVG_COST    = 12578454;   /* 연평균 월비용 */
 /* 회생 변제 월 안분: 2026년분 300,048 + 2027년분 1,738,690 (사용자 자료) */
 var DEFAULT_REHAB = 2038737;
+
+var CHECK_ITEMS = [
+  {k:"gongu",  t:"공구·인플루언서 판매가 있었다면, 그 수수료를 해당 행의 수수료 칸에 넣었나요? (예: 라떼 공구 20%)"},
+  {k:"logi",   t:"물류비(택배·퀵·출고·포장)를 빠짐없이 넣었나요? 공구가 있던 달은 주문이 늘어 물류비도 같이 늡니다."},
+  {k:"prod",   t:"이번 달 판매를 위해 미리 쓴 생산비(원단·가공·부자재)를 상품원가에 반영했나요?"},
+  {k:"refund", t:"반품·환불·교환 배송비를 반영했나요?"},
+  {k:"lag",    t:"이번 달에 팔았지만 입금은 다음 달인 정산(시차)이 있는지 확인했나요? 있으면 메모해 두고 다음 달에 이어서 보세요."},
+  {k:"tax",    t:"부가세·법인세는 여기 넣지 않았죠? (이미 방어선의 월 비용에 들어 있어 두 번 빼면 안 됩니다)"}
+];
 
 var FIELDS = [
   {key:"net",  label:"순매출"},
@@ -326,9 +383,10 @@ function mkRow(name){
 function defaultState(){
   var months={};
   MONTHS.forEach(function(m){
-    months[m]={rows:{wooof:defaultRows("wooof"),barrels:defaultRows("barrels")},picky:0};
+    months[m]={rows:{wooof:defaultRows("wooof"),barrels:defaultRows("barrels")},picky:0,checks:{}};
   });
   return {
+    meta:{onboardDismissed:false,lastBackup:""},
     settings:{
       members:[{name:"이교영",salary:0},{name:"김예빈",salary:0},{name:"유재량",salary:0}],
       capMult:1, staffShare:0.5,
@@ -354,17 +412,24 @@ function load(){
     s.settings=Object.assign(d.settings,s.settings||{});
     s.settings.monthlyBudget=Object.assign({},DEFAULT_BUDGET,s.settings.monthlyBudget||{});
     if(!s.months) s.months=d.months;
-    MONTHS.forEach(function(m){ if(!s.months[m]) s.months[m]=d.months[m]; });
+    MONTHS.forEach(function(m){
+      if(!s.months[m]) s.months[m]=d.months[m];
+      if(!s.months[m].checks) s.months[m].checks={};
+    });
+    s.meta=Object.assign(d.meta,s.meta||{});
     return s;
   }catch(e){ return defaultState(); }
 }
 var saveTimer=null;
 function save(){
   clearTimeout(saveTimer);
-  saveTimer=setTimeout(function(){
-    try{ localStorage.setItem(STORE_KEY,JSON.stringify(state)); }catch(e){}
-  },250);
+  saveTimer=setTimeout(saveNow,250);
 }
+function saveNow(){
+  clearTimeout(saveTimer);
+  try{ localStorage.setItem(STORE_KEY,JSON.stringify(state)); }catch(e){}
+}
+window.addEventListener("beforeunload",saveNow);
 
 /* ───────────────── 숫자 유틸 ───────────────── */
 function num(v){
@@ -454,7 +519,45 @@ function renderInput(){
   buildUnitTable("barrels");
   var p=document.getElementById("pickySales");
   p.value=state.months[curMonth].picky?fmt(state.months[curMonth].picky):"";
+  renderChecks();
+  document.getElementById("summaryCard").style.display="none";
   recalc();
+}
+function renderChecks(){
+  var checks=state.months[curMonth].checks;
+  var h='';
+  CHECK_ITEMS.forEach(function(c){
+    var on=!!checks[c.k];
+    h+='<label class="checkitem'+(on?' done':'')+'"><input type="checkbox" data-ck="'+c.k+'"'+(on?' checked':'')+'> <span>'+c.t+'</span></label>';
+  });
+  document.getElementById("checkList").innerHTML=h;
+  document.querySelectorAll("#checkList input").forEach(function(inp){
+    inp.addEventListener("change",function(){
+      state.months[curMonth].checks[this.dataset.ck]=this.checked;
+      save(); renderChecks(); recalc();
+    });
+  });
+  var done=checksDone(curMonth);
+  document.getElementById("checkCount").textContent="("+done+"/"+CHECK_ITEMS.length+" 확인됨)";
+}
+function checksDone(m){
+  var checks=state.months[m].checks||{};
+  return CHECK_ITEMS.filter(function(c){return checks[c.k]}).length;
+}
+function copyPrevStructure(){
+  if(curMonth===1){ alert("1월은 이전 달이 없습니다."); return; }
+  var prev=state.months[curMonth-1], cur=state.months[curMonth];
+  var hasData=["wooof","barrels"].some(function(u){
+    return cur.rows[u].some(function(r){return FIELDS.some(function(f){return num(r[f.key])!==0})});
+  });
+  if(hasData && !confirm("이번 달에 이미 입력된 숫자가 있습니다. 지난달 채널 구성을 가져오면 이번 달 숫자가 모두 지워집니다. 계속할까요?")) return;
+  cur.rows.wooof=prev.rows.wooof.map(function(r){return mkRow(r.name)});
+  cur.rows.barrels=prev.rows.barrels.map(function(r){return mkRow(r.name)});
+  save(); renderInput();
+}
+function dismissOnboard(){
+  state.meta.onboardDismissed=true; saveNow();
+  document.getElementById("onboardCard").style.display="none";
 }
 function buildUnitTable(unit){
   var tbl=document.getElementById("tbl-"+unit);
@@ -529,16 +632,33 @@ function recalc(){
   var m=curMonth, md=state.months[m];
   ["wooof","barrels"].forEach(function(unit){
     var rows=md.rows[unit];
+    var warns=[];
     rows.forEach(function(r,i){
       var c=calcRow(r);
       setHtml("c-"+unit+"-"+i+"-settle",fmtCell(c.settle));
       setHtml("c-"+unit+"-"+i+"-cm1",fmtCell(c.cm1));
       setHtml("c-"+unit+"-"+i+"-cm2",fmtCell(c.cm2));
+      var hasAny=FIELDS.some(function(f){return num(r[f.key])!==0});
+      var cm1cell=document.getElementById("c-"+unit+"-"+i+"-cm1");
+      if(cm1cell) cm1cell.classList.toggle("warncell",hasAny&&c.cm1<0);
+      if(num(r.fee)>num(r.net)&&num(r.net)>0)
+        warns.push('"'+r.name+'": 수수료가 순매출보다 큽니다. 숫자를 다시 확인하세요.');
+      if(num(r.net)>0&&num(r.fee)/num(r.net)>0.6)
+        warns.push('"'+r.name+'": 수수료율이 '+Math.round(num(r.fee)/num(r.net)*100)+'%입니다. 보통 15~35% 범위인데 맞는지 확인하세요.');
+      if(hasAny&&c.cm1<0)
+        warns.push('"'+r.name+'": 이 채널은 팔수록 손해(CM1 마이너스)입니다. 원가·수수료 입력이 맞다면 판매가/비용 구조를 점검해야 합니다.');
     });
     var t=calcUnit(rows);
     ["net","fee","settle","cogs","logi","promo","ret","etc","cm1","ad","cm2"].forEach(function(k){
       setHtml("t-"+unit+"-"+k,fmtCell(t[k]));
     });
+    /* 평균 요율 표시 */
+    var rateBits=[];
+    if(t.net>0) rateBits.push("평균 수수료율 "+ (t.fee/t.net*100).toFixed(1)+"%");
+    if(t.settle>0&&t.cogs>0) rateBits.push("원가율(정산매출 대비) "+(t.cogs/t.settle*100).toFixed(1)+"%");
+    if(t.net>0) rateBits.push("CM1율(순매출 대비) "+(t.cm1/t.net*100).toFixed(1)+"%");
+    setHtml("rate-"+unit,rateBits.join(" · "));
+    setHtml("warn-"+unit,warns.map(function(w){return "⚠ "+w}).join("<br>"));
   });
   var r=calcMonth(m);
   /* 타일 */
@@ -576,6 +696,9 @@ function recalc(){
   if(salarySum===0) hint="⚠ 설정 탭에서 3인의 기본급을 입력해야 개인 상한(cap)이 적용된 실제 지급액이 계산됩니다.";
   else if(r.pass) hint="초과분의 "+(num(state.settings.staffShare)*100)+"%가 직원 몫이며, 나머지는 회사 유보(다음 달 버퍼·회생 적립)에 남습니다.";
   else hint="방어선 = 월 비용 + 회생 적립 부족분. 이 선을 넘지 못한 달은 전액 회사 운영에 사용됩니다.";
+  var done=checksDone(m);
+  if(r.pass&&r.hasInput&&done<CHECK_ITEMS.length)
+    hint+=" ⚠ 지급 확정 전에 아래 월 마감 체크리스트("+done+"/"+CHECK_ITEMS.length+")를 마저 확인하세요.";
   document.getElementById("judgeHint").textContent=hint;
   /* 픽키도기 */
   setHtml("picky10",fmt(r.picky10));
@@ -761,6 +884,7 @@ function renderSettings(){
     inp.addEventListener("input",function(){s.monthlyBudget[this.dataset.bm]=num(this.value);save()});
     inp.addEventListener("blur",function(){this.value=fmt(num(this.value))});
   });
+  updateBackupInfo();
 }
 function bindSet(id,key,isFloat){
   var s=state.settings, el=document.getElementById(id);
@@ -769,8 +893,49 @@ function bindSet(id,key,isFloat){
   if(!isFloat) el.onblur=function(){var v=num(this.value);this.value=v?fmt(v):""};
 }
 
+/* ───────────────── 직원 공유용 요약 ───────────────── */
+function showSummary(){
+  var r=calcMonth(curMonth);
+  var s=state.settings;
+  var passTxt=r.pass?'<span style="color:var(--goodtext)">통과 — 보너스 지급</span>'
+                    :'<span style="color:var(--critical)">미달 — 이번 달 보류</span>';
+  var h='<table class="plain" style="max-width:640px">'+
+    '<tr><td>대상 월</td><td>2026년 '+curMonth+'월</td></tr>'+
+    '<tr><td>우프 공헌이익(CM1)</td><td>'+fmt(r.w.cm1)+'원</td></tr>'+
+    '<tr><td>베럴즈 공헌이익(CM1)</td><td>'+fmt(r.b.cm1)+'원</td></tr>'+
+    '<tr><td>총 공헌이익(CM2, 광고비 차감)</td><td>'+fmt(r.totalCM2)+'원</td></tr>'+
+    '<tr><td>방어선 (월 비용 + 회생 적립)</td><td>'+fmt(r.line)+'원</td></tr>'+
+    '<tr class="em"><td>판정</td><td>'+passTxt+'</td></tr>';
+  if(r.pass){
+    h+='<tr><td>초과분</td><td>'+fmt(r.surplus)+'원</td></tr>'+
+       '<tr><td>직원 보너스 풀 (초과분의 '+(num(s.staffShare)*100)+'%'+(r.pickyOver>0?' + 픽키도기 초과':'')+')</td><td>'+fmt(r.staffPool)+'원</td></tr>';
+    r.pays.forEach(function(p){
+      h+='<tr><td>'+esc(p.name)+' 지급액</td><td>'+fmt(p.pay)+'원</td></tr>';
+    });
+  }
+  h+='<tr><td>회생 변제 적립 (픽키도기 운영금)</td><td>'+fmt(num(s.pickyFixed))+'원</td></tr>'+
+     '</table>'+
+     '<p class="gloss" style="margin-top:10px">공헌이익 = 매출에서 그 매출을 만들기 위해 직접 들어간 비용(원가·수수료·물류비 등)을 뺀, 회사에 실제로 남는 돈. '+
+     '이 돈으로 급여·임대료·회생 변제를 감당하고, 방어선을 넘은 만큼만 회사 50 : 직원 50으로 나눕니다.</p>';
+  document.getElementById("summaryBody").innerHTML=h;
+  var card=document.getElementById("summaryCard");
+  card.style.display="";
+  card.scrollIntoView({behavior:"smooth"});
+}
+function printSummary(){
+  document.body.classList.add("printing");
+  window.print();
+  setTimeout(function(){document.body.classList.remove("printing")},500);
+}
+
 /* ───────────────── 데이터 관리 ───────────────── */
+function updateBackupInfo(){
+  var el=document.getElementById("lastBackupInfo");
+  if(el) el.textContent="마지막 백업: "+(state.meta.lastBackup||"아직 없음");
+}
 function exportJson(){
+  state.meta.lastBackup=new Date().toISOString().slice(0,10);
+  save(); updateBackupInfo();
   var blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
   var a=document.createElement("a");
   a.href=URL.createObjectURL(blob);
@@ -805,6 +970,8 @@ function resetAll(){
 renderMonthSel();
 renderInput();
 renderSettings();
+updateBackupInfo();
+if(!state.meta.onboardDismissed) document.getElementById("onboardCard").style.display="";
 </script>
 </body>
 </html>
