@@ -23,3 +23,19 @@ services:
         sync: false
       - key: GOOGLE_APPS_SCRIPT_WEBHOOK_URL
         sync: false
+      # Public origin used to build the clobe OAuth redirect URI behind
+      # Cloudflare. Without it the host is inferred from forwarded headers.
+      - key: PUBLIC_BASE_URL
+        value: https://pay.wooof.co.kr
+      # Encrypts the stored clobe refresh token at rest. Must match the value
+      # the token was sealed with — changing it forces a reconnect.
+      - key: CLOBE_TOKEN_SECRET
+        sync: false
+      # Cafe24 Admin API. The secret authenticates the token endpoint over
+      # HTTP Basic, so it must never live in the repo or the database.
+      - key: CAFE24_MALL_ID
+        sync: false
+      - key: CAFE24_CLIENT_ID
+        sync: false
+      - key: CAFE24_CLIENT_SECRET
+        sync: false

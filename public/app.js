@@ -25,7 +25,19 @@ const state = {
   brandFilterQ: "",
   selectedRequestIds: [],
   bulkPaidAt: new Date().toISOString().slice(0, 10),
-  settlement: { year: new Date().getFullYear(), month: new Date().getMonth() + 1, brandId: "", cafe24: null, bank: null, result: null, running: false },
+  settlement: { year: new Date().getFullYear(), month: new Date().getMonth() + 1, brandId: "", cafe24: null, bank: null, useClobe: true, result: null, running: false },
+  clobe: {
+    status: null,
+    loading: false,
+    running: false,
+    companies: null,
+    accounts: null,
+    result: null,
+    error: "",
+    confirming: "",
+    startDate: new Date(Date.now() - 13 * 86400000).toISOString().slice(0, 10),
+    endDate: new Date().toISOString().slice(0, 10)
+  },
   npb: {
     screen: "list",
     loaded: false,
@@ -380,6 +392,18 @@ async function init() {
     state.editingBrand = state.brands.find((item) => item.id === popupBrandId) || null;
     state.editingPromotionRule = null;
   }
+  // Landing back from the clobe OAuth redirect. Strip the query so a reload
+  // doesn't replay the toast.
+  const clobeResult = new URLSearchParams(location.search).get("clobe");
+  if (clobeResult) {
+    state.tab = "reconcile";
+    const reason = new URLSearchParams(location.search).get("reason") || "";
+    history.replaceState(null, "", location.pathname);
+    renderApp();
+    if (clobeResult === "connected") showToast("클로브ai가 연결되었습니다.");
+    else showToast(reason ? `클로브 연결 실패: ${reason}` : "클로브 연결에 실패했습니다.", "error");
+    return;
+  }
   renderApp();
 }
 
@@ -503,8 +527,9 @@ function renderApp() {
     ["audits", "이력"],
     ["archive", "아카이브"],
     ["settlement", "정산"],
+    ["reconcile", "클로브ai"],
     ["npb", "npb정산"]
-  ];
+  ].filter(([key]) => key !== "reconcile" || canUseClobe());
   app.innerHTML = `
     <div class="shell">
       <aside class="sidebar">
@@ -626,6 +651,7 @@ function renderCurrentTab() {
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
   if (state.tab === "settlement") return renderSettlement();
+  if (state.tab === "reconcile") return renderReconcile();
   if (state.tab === "npb") return renderNpb();
   return renderDashboard();
 }
@@ -1373,7 +1399,7 @@ function renderRequestLineItemsSummary(items) {
   const totalSale = sum((item) => Number(item.totalSaleAmount || qty(item) * Number(item.unitSalePrice || 0)));
   const cell = (label, value) => `<span><b>${label}</b> ${value}</span>`;
   return `
-    <div class="line-items-summary">
+    <div class="line-items-summary" data-line-items-summary>
       ${cell("총 건수", `${money.format(totalCount)}건`)}
       ${cell("총 수량", `${money.format(totalQty)}개`)}
       ${cell("총 공급가", `${money.format(totalSupply)}원`)}
@@ -1416,7 +1442,7 @@ function renderRequestLineItems(items, promotionOptions = []) {
         </tbody>
       </table>
     </div>
-    ${renderRequestLineItemsSummary(items)}
+    <div data-line-items-summary-slot>${renderRequestLineItemsSummary(items)}</div>
   `;
 }
 
@@ -1489,6 +1515,61 @@ function renderBrandRow(brand) {
   `;
 }
 
+// 계약 규칙은 버전으로 쌓인다. 시작일을 비우고 저장하면 지금 적용 중인 버전을
+// 고친 것으로 보고, 날짜를 넣으면 그 날짜부터 유효한 새 버전이 생긴다. 정산은
+// 주문의 배송완료일 시점에 유효했던 버전으로 계산하므로, 지난달 정산이 이번 달
+// 새 계약으로 다시 계산되는 일이 없다.
+function renderBrandRuleSection(brand) {
+  if (!brand?.id) {
+    return `<div class="field"><label>계약 규칙 변경</label>
+      <span class="muted">브랜드를 저장한 뒤에 규칙 변경 이력을 관리할 수 있습니다.</span></div>`;
+  }
+  const history = [...(brand.ruleHistory || [])].sort((a, b) => String(b.validFrom).localeCompare(String(a.validFrom)));
+  const today = new Date().toISOString().slice(0, 10);
+  const activeId = history.filter((r) => String(r.validFrom) <= today).sort((a, b) => String(a.validFrom).localeCompare(String(b.validFrom))).pop()?.id;
+  const rows = history
+    .map((rule) => {
+      const isActive = rule.id === activeId;
+      const isFuture = String(rule.validFrom) > today;
+      const badge = isActive
+        ? `<span class="badge clobe-high">적용중</span>`
+        : isFuture
+          ? `<span class="badge clobe-medium">예정</span>`
+          : `<span class="badge">과거</span>`;
+      return `<tr>
+        <td>${badge}</td>
+        <td>${h(rule.validFrom)}${rule.validFrom === "2000-01-01" ? `<br><span class="muted">최초</span>` : ""}</td>
+        <td class="num">${h(Number(rule.commissionRate || 0))}%</td>
+        <td>${h(rule.shippingRule || "")}</td>
+        <td>${h(rule.note || "")}</td>
+        <td>
+          <button type="button" data-edit-brand-rule="${rule.id}">이 버전 수정</button>
+          ${history.length > 1 ? `<button type="button" class="danger" data-remove-brand-rule="${rule.id}">삭제</button>` : ""}
+        </td>
+      </tr>`;
+    })
+    .join("");
+  return `
+    <div class="field">
+      <label>계약 규칙 변경 (적용 시작일)</label>
+      <input name="ruleValidFrom" type="date" value="">
+      <span class="muted">
+        위 수수료율·배송비를 <b>언제부터</b> 적용할지 지정합니다. 비워두면 지금 적용 중인 규칙을 수정합니다.
+        정산은 주문의 <b>배송완료일</b> 기준으로 그 시점 규칙을 적용하므로, 지난 달 정산은 옛 규칙 그대로 계산됩니다.
+      </span>
+    </div>
+    <div class="field"><label>변경 사유 (선택)</label>
+      <input name="ruleNote" placeholder="예: 2026년 재계약 — 수수료 25%, 배송비 4,000원"></div>
+    <div class="field">
+      <label>규칙 이력</label>
+      <div class="table-wrap" style="max-height:220px">
+        <table><thead><tr><th>상태</th><th>적용 시작</th><th>수수료</th><th>배송비</th><th>사유</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table>
+      </div>
+    </div>
+  `;
+}
+
 function renderBrandForm() {
   const b = state.editingBrand || {};
   return `
@@ -1503,6 +1584,17 @@ function renderBrandForm() {
         <select name="settlementType">
           ${["prepay_debt", "prepay_fee", "prepay_supply", "consignment", "direct_purchase"].map((s) => `<option value="${s}" ${(b.settlementType || "prepay_fee") === s ? "selected" : ""}>${settlementLabel(s)}</option>`).join("")}
         </select>
+      </div>
+      <div class="field">
+        <label>정산 월 기준일</label>
+        <select name="settlementDateBasis">
+          <option value="order" ${(b.settlementDateBasis || (b.settlementType === "consignment" ? "delivered" : "order")) === "order" ? "selected" : ""}>주문일 기준 (주문번호 앞 8자리) · 배송완료 건만</option>
+          <option value="delivered" ${(b.settlementDateBasis || (b.settlementType === "consignment" ? "delivered" : "order")) === "delivered" ? "selected" : ""}>배송완료일 기준 (주문일 무관)</option>
+        </select>
+        <span class="muted">
+          어느 날짜로 정산월을 가를지 정합니다. 계약 규칙(수수료·배송비)도 같은 날짜로 적용됩니다.
+          주문일 기준에서도 <b>배송완료된 건만</b> 정산에 들어갑니다 — 카페24에 배송완료가 안 찍힌 주문은 다음 달로 넘어갑니다.
+        </span>
       </div>
       <div class="field two">
         <div><label>계약 수수료율(%)</label><input name="commissionRate" type="number" min="0" max="100" step="0.1" value="${h(b.commissionRate ?? "")}"></div>
@@ -1536,6 +1628,7 @@ function renderBrandForm() {
       </div>
       <div class="field"><label>적용 미리보기</label><input value="${h(describeShippingRule(b))}" disabled></div>
       <div class="field"><label>배송비 운영 메모</label><input value="지역 추가배송비는 입금요청 입력에서 필요할 때만 별도 기입합니다." disabled></div>
+      ${renderBrandRuleSection(b)}
       <div class="field two">
         <div>
           <label>출고 기준</label>
@@ -1855,6 +1948,7 @@ function bindCurrentTab() {
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
   if (state.tab === "settlement") bindSettlement();
+  if (state.tab === "reconcile") bindReconcile();
   if (state.tab === "npb") bindNpb();
 }
 
@@ -2180,6 +2274,11 @@ function bindRequests() {
         };
       });
       lineItemsInput.value = JSON.stringify(items);
+      // Refresh the totals row in place. The table itself is never re-rendered
+      // here — that would blow away focus and the IME buffer mid-typing — so
+      // the summary has to be updated separately or it silently goes stale.
+      const summarySlot = lineItemsTable.querySelector("[data-line-items-summary-slot]");
+      if (summarySlot) summarySlot.innerHTML = renderRequestLineItemsSummary(items);
       const item = items.find((x) => x.id === id);
       if (item) {
         const saleCell = lineItemsTable.querySelector(`[data-line-saletotal='${id}']`);
@@ -3342,6 +3441,47 @@ function bindBrands() {
     state.editingBrand = null;
     await refreshAndRender();
   });
+  // 과거 버전을 고쳐야 하는 경우가 실제로 있다 — 계약이 바뀐 뒤에야 이력 기능을
+  // 쓰기 시작하면, 지금 저장된 값은 새 계약이고 옛 계약은 어디에도 없다.
+  // 행의 값을 폼에 실어주고 시작일을 그 버전 날짜로 맞춰두면, 저장 시 같은
+  // 날짜의 버전을 덮어쓴다.
+  app.querySelectorAll("[data-edit-brand-rule]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const rule = (state.editingBrand?.ruleHistory || []).find((item) => item.id === button.dataset.editBrandRule);
+      if (!rule) return;
+      const form = app.querySelector("[data-brand-form]");
+      if (!form) return;
+      const set = (name, value) => {
+        const input = form.querySelector(`[name='${name}']`);
+        if (input) input.value = value ?? "";
+      };
+      set("commissionRate", rule.commissionRate);
+      set("shippingPolicyType", rule.shippingPolicyType || "free");
+      set("shippingFlatFee", rule.shippingFlatFee || "");
+      set("shippingThresholdAmount", rule.shippingThresholdAmount || "");
+      set("shippingThresholdFee", rule.shippingThresholdFee || "");
+      set("shippingThresholdBase", rule.shippingThresholdBase || "sales");
+      set("ruleValidFrom", rule.validFrom);
+      set("ruleNote", rule.note || "");
+      showToast(`${rule.validFrom} 버전을 폼에 불러왔습니다. 수정 후 저장하세요.`);
+    });
+  });
+  app.querySelectorAll("[data-remove-brand-rule]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const brandId = state.editingBrand?.id;
+      if (!brandId) return;
+      if (!confirm("이 계약 규칙 버전을 삭제할까요? 해당 기간의 과거 정산 결과가 달라집니다.")) return;
+      try {
+        const result = await api(`/api/brands/${brandId}/rules/${button.dataset.removeBrandRule}`, { method: "DELETE" });
+        state.editingBrand = result.brand;
+        await loadAll();
+        showToast("규칙 버전을 삭제했습니다.");
+        renderApp();
+      } catch (error) {
+        showToast(error.message || "규칙 삭제 실패", "error");
+      }
+    });
+  });
   app.querySelector("[data-brand-form] [name='hasReceivable']")?.addEventListener("change", (event) => {
     const wrap = app.querySelector("[data-brand-receivable-fields]");
     const enabled = event.target.value === "true";
@@ -3496,6 +3636,8 @@ function priceAliasStatusLabel(item) {
 
 function renderSettlement() {
   const s = state.settlement;
+  // Operators cannot reach clobe, so they always settle from an uploaded file.
+  if (!canUseClobe()) s.useClobe = false;
   const ym = `${s.year}-${String(s.month).padStart(2, "0")}`;
   const brands = [...state.brands].sort((a, b) => a.name.localeCompare(b.name, "ko"));
   const brandOptions = brands
@@ -3513,8 +3655,16 @@ function renderSettlement() {
         <div class="field two">
           <div><label>카페24 주문내역 (CSV)</label><input type="file" accept=".csv" data-settlement-cafe24>
             <span class="muted">${s.cafe24 ? h(s.cafe24.name) : "월 전체 공급사 포함 파일"}</span></div>
-          <div><label>은행 거래내역 (XLSX, 선택)</label><input type="file" accept=".xlsx" data-settlement-bank>
-            <span class="muted">${s.bank ? h(s.bank.name) : "출금 대조용 (선택)"}</span></div>
+          <div><label>은행 거래내역</label>
+            ${canUseClobe()
+              ? `<label class="check-row"><input type="checkbox" data-settlement-useclobe ${s.useClobe ? "checked" : ""}>
+                  클로브ai에서 자동 조회 (파일 업로드 없이)</label>`
+              : ""}
+            ${s.useClobe
+              ? `<span class="muted">정산월 전후 범위를 자동 조회합니다. 계좌 범위는 클로브ai 탭에서 설정합니다.</span>`
+              : `<input type="file" accept=".xlsx" data-settlement-bank>
+                 <span class="muted">${s.bank ? h(s.bank.name) : "출금 대조용 (선택)"}</span>`}
+          </div>
         </div>
         <div class="toolbar">
           <button class="primary" data-settlement-run ${s.running ? "disabled" : ""}>${s.running ? "정산 중…" : "정산 시작"}</button>
@@ -3524,6 +3674,18 @@ function renderSettlement() {
     </section>
     ${renderSettlementResult(s.result)}
   `;
+}
+
+// Makes the bank data's provenance visible on the result, so an unexpected
+// 은행 출금합 can be traced to the source before anyone edits a spreadsheet.
+function bankSourceLabel(bankSource) {
+  if (!bankSource) return "";
+  if (bankSource.source === "clobe") {
+    const range = bankSource.range ? ` ${bankSource.range.startDate}~${bankSource.range.endDate}` : "";
+    return `은행내역: 클로브ai${range} · ${bankSource.rowCount}건`;
+  }
+  if (bankSource.source === "upload") return `은행내역: 업로드 파일 · ${bankSource.rowCount}건`;
+  return "은행내역 없음 — 출금 대조를 건너뜁니다";
 }
 
 function renderSettlementResult(result) {
@@ -3556,7 +3718,10 @@ function renderSettlementResult(result) {
     : "";
   return `
     <section class="panel">
-      <div class="panel-head"><h2>정산 결과</h2></div>
+      <div class="panel-head">
+        <h2>정산 결과</h2>
+        <span class="muted">${bankSourceLabel(result.bankSource)}</span>
+      </div>
       <div class="panel-body">
         <div class="fixed-summary-grid">
           <div class="fixed-card"><span>포함 주문</span><strong>${sum.orderCount || 0}건</strong></div>
@@ -3573,7 +3738,10 @@ function renderSettlementResult(result) {
       ${cancelBlock}
       <div class="panel-body toolbar">
         <button class="primary" data-settlement-export ${errs.length ? "disabled" : ""}>정산서 엑셀 다운로드</button>
-        ${errs.length ? `<span class="muted">오류 해결 후 다운로드할 수 있습니다.</span>` : ""}
+        ${errs.length
+          ? `<button data-settlement-export-force>오류 무시하고 출력 (${errs.length}건)</button>
+             <span class="muted">엑셀에서 직접 고치는 편이 빠른 업체용입니다. 오류 건은 정산서에 그대로 실립니다.</span>`
+          : ""}
       </div>
     </section>`;
 }
@@ -3597,6 +3765,11 @@ function bindSettlement() {
     s.bank = file ? { name: file.name, base64: await readFileAsBase64(file) } : null;
     renderApp();
   });
+  app.querySelector("[data-settlement-useclobe]")?.addEventListener("change", (e) => {
+    s.useClobe = e.target.checked;
+    if (s.useClobe) s.bank = null;
+    renderApp();
+  });
   app.querySelector("[data-settlement-run]")?.addEventListener("click", async () => {
     if (!s.brandId) return showToast("브랜드를 선택하세요.", "error");
     if (!s.cafe24) return showToast("카페24 CSV를 업로드하세요.", "error");
@@ -3604,7 +3777,12 @@ function bindSettlement() {
     try {
       s.result = await api("/api/settlement/run", {
         method: "POST",
-        body: { brandId: s.brandId, year: s.year, month: s.month, cafe24Csv: s.cafe24.base64, bankXlsx: s.bank?.base64 || "" }
+        body: {
+          brandId: s.brandId, year: s.year, month: s.month,
+          cafe24Csv: s.cafe24.base64,
+          useClobe: s.useClobe,
+          bankXlsx: s.useClobe ? "" : s.bank?.base64 || ""
+        }
       });
     } catch (error) {
       showToast(error.message || "정산 실행 실패", "error");
@@ -3624,13 +3802,21 @@ function bindSettlement() {
       showToast(error.message || "매핑 저장 실패", "error");
     }
   });
-  app.querySelector("[data-settlement-export]")?.addEventListener("click", async () => {
+  // force=true 는 서버의 오류 게이트를 건너뛴다. 오류 건을 고쳐서 다시 돌리는
+  // 것보다 엑셀에서 직접 손보는 편이 빠른 업체가 있어 필요한 출구다.
+  const exportSettlement = async (force = false) => {
     try {
       const res = await fetch("/api/settlement/export", {
         method: "POST",
         headers: { "content-type": "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify({ brandId: s.brandId, year: s.year, month: s.month, cafe24Csv: s.cafe24.base64, bankXlsx: s.bank?.base64 || "" })
+        body: JSON.stringify({
+          brandId: s.brandId, year: s.year, month: s.month,
+          cafe24Csv: s.cafe24.base64,
+          useClobe: s.useClobe,
+          bankXlsx: s.useClobe ? "" : s.bank?.base64 || "",
+          ...(force ? { force: true } : {})
+        })
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -3641,13 +3827,20 @@ function bindSettlement() {
       const a = document.createElement("a");
       a.href = url;
       const brand = state.brands.find((b) => b.id === s.brandId);
-      a.download = `(우프) ${brand?.name || brand?.cafe24Supplier}_${s.year}${String(s.month).padStart(2, "0")}.xlsx`;
+      const suffix = force ? "_오류포함" : "";
+      a.download = `(우프) ${brand?.name || brand?.cafe24Supplier}_${s.year}${String(s.month).padStart(2, "0")}${suffix}.xlsx`;
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
-      showToast("정산서를 다운로드했습니다.");
+      showToast(force ? "오류를 포함한 정산서를 다운로드했습니다. 엑셀에서 확인 후 사용하세요." : "정산서를 다운로드했습니다.");
     } catch (error) {
       showToast(error.message || "다운로드 실패", "error");
     }
+  };
+  app.querySelector("[data-settlement-export]")?.addEventListener("click", () => exportSettlement(false));
+  app.querySelector("[data-settlement-export-force]")?.addEventListener("click", () => {
+    const count = (s.result?.errors || []).length;
+    if (!confirm(`오류 ${count}건을 무시하고 정산서를 출력할까요?\n오류 건이 그대로 실리므로 엑셀에서 반드시 확인하세요.`)) return;
+    exportSettlement(true);
   });
 }
 
@@ -3861,6 +4054,291 @@ async function npbDownloadXlsx(key) {
     showToast("정산서를 다운로드했습니다.");
   } catch (error) {
     showToast(error.message || "다운로드 실패", "error");
+  }
+}
+
+// --- 입금대사 (클로브ai 연동) ---------------------------------------------
+
+const CONFIDENCE_LABEL = { high: "확실", medium: "확인 권장", low: "직접 확인" };
+
+// Banking data — owner/manager only. The server enforces this on every
+// /api/clobe/* route; hiding the tab keeps operators from hitting a dead end.
+function canUseClobe() {
+  return state.admin?.role === "owner" || state.admin?.role === "manager";
+}
+
+function renderReconcile() {
+  const c = state.clobe;
+  const head = pageHead(
+    "클로브ai",
+    "클로브ai의 은행 입금내역과 미입금 요청을 대조합니다. 제안된 매칭을 확인 후 입금완료 처리하세요."
+  );
+  if (!canUseClobe()) {
+    return `${head}<section class="panel"><div class="panel-body"><p class="muted">이 메뉴는 오너 또는 매니저만 사용할 수 있습니다.</p></div></section>`;
+  }
+  if (c.loading || !c.status) {
+    return `${head}<section class="panel"><div class="panel-body"><p class="muted">클로브 연동 상태를 불러오는 중…</p></div></section>`;
+  }
+  if (!c.status.connected) return `${head}${renderReconcileConnect()}`;
+  return `
+    ${head}
+    ${renderReconcileSettings()}
+    ${c.error ? `<section class="panel"><div class="panel-body"><p style="color:var(--red)">${h(c.error)}</p></div></section>` : ""}
+    ${renderReconcileResult(c.result)}
+  `;
+}
+
+function renderReconcileConnect() {
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>클로브ai 연결</h2></div>
+      <div class="panel-body">
+        <p class="muted">
+          연결하면 클로브에 등록된 회사 계좌의 입금내역을 읽어와 미입금 요청과 자동 대조합니다.
+          WooofPay는 <strong>읽기 전용</strong> 도구만 호출하며, 장부·전표를 수정하지 않습니다.
+        </p>
+        <div class="toolbar"><button class="primary" data-clobe-connect>클로브ai 연결하기</button></div>
+      </div>
+    </section>
+  `;
+}
+
+function renderReconcileSettings() {
+  const c = state.clobe;
+  const status = c.status;
+  const accountRows = (c.accounts || [])
+    .map((account) => {
+      const checked = status.accountIds.includes(Number(account.bankAccountId)) ? "checked" : "";
+      const alias = account.aliasName ? ` · ${h(account.aliasName)}` : "";
+      return `<label class="check-row"><input type="checkbox" data-clobe-account value="${account.bankAccountId}" ${checked}>
+        ${h(account.displayAccountNumber)} · ${h(account.accountName)}${alias}</label>`;
+    })
+    .join("");
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <h2>연동 상태</h2>
+        <span class="muted">${h(status.companyName || "회사 미선택")}${status.connectedBy ? ` · ${h(status.connectedBy)} 연결` : ""}</span>
+      </div>
+      <div class="panel-body">
+        ${status.encryptedAtRest ? "" : `<p class="muted" style="color:var(--red)">CLOBE_TOKEN_SECRET 미설정 — 토큰이 암호화되지 않은 채 저장됩니다.</p>`}
+        <div class="field two">
+          <div><label>대사 대상 회사</label>
+            <input type="text" readonly value="${h(status.companyName || "주식회사 우프컴퍼니")}">
+            <span class="muted">우프컴퍼니 법인으로 고정됩니다.</span></div>
+          <div><label>입금예정일 허용 오차 (일)</label>
+            <input type="number" min="0" max="60" data-clobe-window value="${Number(status.windowDays)}"></div>
+        </div>
+        ${accountRows ? `<div class="field"><label>대사에 포함할 계좌 (미선택 시 전체)</label><div class="check-grid">${accountRows}</div></div>` : ""}
+        <div class="field two">
+          <div><label>조회 시작일</label><input type="date" data-clobe-start value="${h(state.clobe.startDate)}"></div>
+          <div><label>조회 종료일</label><input type="date" data-clobe-end value="${h(state.clobe.endDate)}"></div>
+        </div>
+        <div class="toolbar">
+          <button class="primary" data-clobe-run ${state.clobe.running ? "disabled" : ""}>${state.clobe.running ? "대조 중…" : "입금내역 대조"}</button>
+          <button class="ghost" data-clobe-disconnect>연결 해제</button>
+          <span class="muted">${status.lastSyncAt ? `마지막 대조 ${h(status.lastSyncAt.slice(0, 16).replace("T", " "))}` : "아직 대조하지 않았습니다."}</span>
+        </div>
+        <p class="muted">클로브 은행데이터는 실시간이 아니라 마지막 수집 시점 기준입니다. 최신화는 app.clobe.ai 에서 직접 실행하세요.</p>
+      </div>
+    </section>
+  `;
+}
+
+function renderReconcileResult(result) {
+  if (!result) return "";
+  const summary = result.summary || {};
+  const matchRows = (result.matches || [])
+    .map((match, index) => {
+      const orders = match.requests
+        .map((request) => `${h(request.brandName || "-")} · ${h(request.orderNo)} · ${money.format(Number(request.expectedAmount || 0))}원`)
+        .join("<br>");
+      const busy = state.clobe.confirming === String(index);
+      return `
+        <tr>
+          <td><span class="badge clobe-${match.confidence}">${CONFIDENCE_LABEL[match.confidence] || match.confidence}</span></td>
+          <td>${h((match.transaction.transactionAt || "").slice(0, 16).replace("T", " "))}<br>
+            <span class="muted">${h(match.transaction.transactionName || "")}</span></td>
+          <td class="num"><strong>${money.format(match.amount)}원</strong><br>
+            <span class="muted">${
+              match.kind === "memo" ? `메모 지정${match.requests.length > 1 ? ` ${match.requests.length}건` : ""}`
+              : match.kind === "many_to_one" ? `${match.requests.length}건 합산`
+              : "1:1"
+            }</span></td>
+          <td>${orders}</td>
+          <td><span class="muted">${match.reasons.map((reason) => h(reason)).join(" · ")}</span></td>
+          <td><button class="primary" data-clobe-confirm="${index}" ${busy ? "disabled" : ""}>${busy ? "처리 중…" : "입금완료"}</button></td>
+        </tr>`;
+    })
+    .join("");
+
+  const unmatchedDeposits = (result.unmatchedDeposits || [])
+    .map((tx) => `<tr>
+      <td>${h((tx.transactionAt || "").slice(0, 16).replace("T", " "))}</td>
+      <td>${h(tx.transactionName || "")}</td>
+      <td class="num">${money.format(Math.round(Number(tx.inAmount || 0)))}원</td>
+      <td><span class="muted">${h(tx.category || "")}</span></td>
+    </tr>`)
+    .join("");
+
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <h2>대조 결과</h2>
+        <span class="muted">입금 ${summary.depositCount || 0}건 · 미입금 요청 ${summary.requestCount || 0}건 ·
+          매칭 ${summary.matchedCount || 0}건(요청 ${summary.matchedRequestCount || 0}건) · 확실 ${summary.highConfidenceCount || 0}건</span>
+      </div>
+      <div class="panel-body">
+        ${matchRows
+          ? `<div class="table-wrap"><table><thead><tr>
+              <th>신뢰도</th><th>입금</th><th>금액</th><th>대응 요청</th><th>근거</th><th></th>
+            </tr></thead><tbody>${matchRows}</tbody></table></div>`
+          : `<p class="muted">매칭된 입금이 없습니다. 기간이나 계좌 설정을 확인하세요.</p>`}
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>미매칭 입금 ${(result.unmatchedDeposits || []).length}건</h2>
+        <span class="muted">요청과 짝이 없는 입금 — 수동 확인이 필요합니다.</span>
+      </div>
+      <div class="panel-body">
+        ${unmatchedDeposits
+          ? `<div class="table-wrap"><table><thead><tr><th>일시</th><th>입금자</th><th>금액</th><th>분류</th></tr></thead>
+             <tbody>${unmatchedDeposits}</tbody></table></div>`
+          : `<p class="muted">미매칭 입금이 없습니다.</p>`}
+      </div>
+    </section>
+  `;
+}
+
+function bindReconcile() {
+  const c = state.clobe;
+  if (!c.status && !c.loading) {
+    c.loading = true;
+    loadClobeStatus().finally(() => {
+      c.loading = false;
+      renderApp();
+    });
+    return;
+  }
+
+  app.querySelector("[data-clobe-connect]")?.addEventListener("click", async () => {
+    try {
+      const { authorizeUrl } = await api("/api/clobe/connect", { method: "POST" });
+      // Full-page navigation, not a popup: the OAuth callback needs to land
+      // back on this origin with the session cookie attached.
+      window.location.href = authorizeUrl;
+    } catch (error) {
+      showToast(error.message || "클로브 연결 준비 실패", "error");
+    }
+  });
+
+  app.querySelector("[data-clobe-disconnect]")?.addEventListener("click", async () => {
+    if (!confirm("클로브 연결을 해제할까요? 저장된 토큰이 삭제됩니다.")) return;
+    await api("/api/clobe/disconnect", { method: "POST" });
+    state.clobe.status = null;
+    state.clobe.result = null;
+    state.clobe.companies = null;
+    state.clobe.accounts = null;
+    renderApp();
+  });
+
+  app.querySelector("[data-clobe-window]")?.addEventListener("change", async (event) => {
+    await saveClobeSettings({ windowDays: Number(event.target.value) });
+  });
+
+  app.querySelectorAll("[data-clobe-account]").forEach((box) => {
+    box.addEventListener("change", async () => {
+      const accountIds = Array.from(app.querySelectorAll("[data-clobe-account]"))
+        .filter((item) => item.checked)
+        .map((item) => Number(item.value));
+      await saveClobeSettings({ accountIds });
+    });
+  });
+
+  app.querySelector("[data-clobe-start]")?.addEventListener("change", (event) => {
+    state.clobe.startDate = event.target.value;
+  });
+  app.querySelector("[data-clobe-end]")?.addEventListener("change", (event) => {
+    state.clobe.endDate = event.target.value;
+  });
+
+  app.querySelector("[data-clobe-run]")?.addEventListener("click", async () => {
+    if (!state.clobe.status?.companyId) return showToast("대사 대상 회사를 먼저 선택하세요.", "error");
+    state.clobe.running = true;
+    state.clobe.error = "";
+    renderApp();
+    try {
+      state.clobe.result = await api("/api/clobe/reconcile", {
+        method: "POST",
+        body: { startDate: state.clobe.startDate, endDate: state.clobe.endDate }
+      });
+      await loadClobeStatus();
+      const matched = state.clobe.result.summary?.matchedCount || 0;
+      showToast(matched ? `${matched}건의 입금을 매칭했습니다.` : "매칭된 입금이 없습니다.");
+    } catch (error) {
+      state.clobe.error = error.message || "대조에 실패했습니다.";
+      showToast(state.clobe.error, "error");
+    } finally {
+      state.clobe.running = false;
+      renderApp();
+    }
+  });
+
+  app.querySelectorAll("[data-clobe-confirm]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const index = button.dataset.clobeConfirm;
+      const match = state.clobe.result?.matches?.[Number(index)];
+      if (!match) return;
+      const orders = match.requests.map((request) => request.orderNo).join(", ");
+      if (!confirm(`${money.format(match.amount)}원 입금을 다음 요청에 입금완료 처리할까요?\n${orders}`)) return;
+      state.clobe.confirming = String(index);
+      renderApp();
+      try {
+        // paidAmount is intentionally omitted so each request keeps its own
+        // amount — mark-paid falls back to the request's depositAmount, which
+        // is what an N:1 lump deposit needs.
+        await api("/api/requests/mark-paid", {
+          method: "POST",
+          body: {
+            requestIds: match.requests.map((request) => request.id),
+            paidAt: match.transaction.transactionAt || state.clobe.endDate
+          }
+        });
+        state.clobe.result.matches.splice(Number(index), 1);
+        await loadAll();
+        showToast(`${match.requests.length}건 입금완료 처리했습니다.`);
+      } catch (error) {
+        showToast(error.message || "입금완료 처리 실패", "error");
+      } finally {
+        state.clobe.confirming = "";
+        renderApp();
+      }
+    });
+  });
+}
+
+async function loadClobeStatus() {
+  const status = await api("/api/clobe/status");
+  state.clobe.status = status;
+  if (!status.connected) return;
+  try {
+    if (!state.clobe.companies) {
+      state.clobe.companies = (await api("/api/clobe/companies")).companies || [];
+    }
+    if (status.companyId && !state.clobe.accounts) {
+      state.clobe.accounts = (await api("/api/clobe/accounts")).accounts || [];
+    }
+  } catch (error) {
+    state.clobe.error = error.message || "클로브 데이터를 불러오지 못했습니다.";
+  }
+}
+
+async function saveClobeSettings(patch) {
+  try {
+    state.clobe.status = await api("/api/clobe/settings", { method: "POST", body: patch });
+  } catch (error) {
+    showToast(error.message || "설정 저장 실패", "error");
   }
 }
 

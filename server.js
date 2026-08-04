@@ -9,6 +9,9 @@ import { promisify } from "node:util";
 import os from "node:os";
 import { gzipSync } from "node:zlib";
 import pg from "pg";
+import * as clobe from "./lib/clobe-mcp.mjs";
+import { reconcile } from "./lib/clobe-reconcile.mjs";
+import * as cafe24 from "./lib/cafe24-api.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -259,6 +262,100 @@ function normalizeShippingPolicy(input = {}, current = {}) {
     shippingThresholdBase,
     shippingRule: shippingRuleText(policyType, shippingFlatFee, shippingThresholdAmount, shippingThresholdFee, shippingThresholdBase)
   };
+}
+
+// --- 브랜드 규칙 유효기간 (계약 변경 이력) --------------------------------
+//
+// 계약이 바뀌면(예: 릴리스키친 2026-08-01부터 수수료 20%→25%, 무료배송→4,000원)
+// 브랜드 필드를 덮어쓰는 것으로 끝내면 과거 정산이 새 규칙으로 계산돼 전부 오류가
+// 난다. 그래서 규칙은 버전으로 쌓고, 정산할 때 그 주문이 배송완료된 시점에
+// 유효했던 버전을 골라 쓴다.
+//
+// brand 최상위 필드는 "오늘 유효한 버전"의 사본으로 유지된다 — 신규 입금요청과
+// 기존 화면들이 그대로 동작하고, 미래 날짜로 예약해둔 변경이 당겨 적용되지 않는다.
+const BRAND_RULE_FIELDS = [
+  "commissionRate",
+  "shippingPolicyType",
+  "shippingFlatFee",
+  "shippingThresholdAmount",
+  "shippingThresholdFee",
+  "shippingThresholdBase",
+  "shippingRule"
+];
+
+// 이력이 없던 시절의 데이터를 덮기 위한 최초 버전의 시작일.
+const BRAND_RULE_EPOCH = "2000-01-01";
+
+function pickBrandRuleFields(source = {}) {
+  const rule = {};
+  for (const key of BRAND_RULE_FIELDS) rule[key] = source[key];
+  return rule;
+}
+
+// 기준일 정규화. dateOnly 는 정확히 yyyy-MM-dd 만 받아들이는데 now() 는 ISO
+// 타임스탬프를 주므로, 여기서 날짜 부분만 떼어낸다. 이걸 빠뜨리면 기준일이
+// 빈 문자열이 되어 어떤 버전도 매칭되지 않고 늘 최초 버전으로 떨어진다.
+function asOfDate(value) {
+  const text = String(value || "").trim();
+  const direct = dateOnly(text);
+  if (direct) return direct;
+  const head = text.slice(0, 10);
+  return dateOnly(head) || dateOnly(new Date().toISOString().slice(0, 10));
+}
+
+function buildBrandRule(source, validFrom, note = "") {
+  return {
+    id: id("brule"),
+    validFrom: validFrom ? asOfDate(validFrom) : BRAND_RULE_EPOCH,
+    ...pickBrandRuleFields(source),
+    note: String(note || ""),
+    createdAt: now()
+  };
+}
+
+// 정렬된 이력에서 asOf 시점에 유효한 버전을 고른다. asOf 가 최초 버전보다도
+// 이르면 최초 버전을 쓴다 — 그 이전 계약은 기록이 없으므로 가장 오래된 것이
+// 최선의 근사다.
+function brandRuleAt(brand, asOf) {
+  const history = Array.isArray(brand?.ruleHistory) ? brand.ruleHistory : [];
+  if (!history.length) return null;
+  const sorted = [...history].sort((a, b) => String(a.validFrom).localeCompare(String(b.validFrom)));
+  const target = asOfDate(asOf);
+  let chosen = null;
+  for (const rule of sorted) {
+    if (String(rule.validFrom) <= target) chosen = rule;
+  }
+  return chosen || sorted[0];
+}
+
+// asOf 시점 규칙이 반영된 브랜드 사본. 배송비 헬퍼들이 평범한 객체를 받으므로
+// 그대로 넘겨 쓸 수 있다.
+function effectiveBrand(brand, asOf) {
+  const rule = brandRuleAt(brand, asOf);
+  return rule ? { ...brand, ...pickBrandRuleFields(rule) } : brand;
+}
+
+// 최상위 규칙 필드를 "오늘 유효한 버전"으로 맞춘다.
+function syncBrandCurrentRules(brand) {
+  const rule = brandRuleAt(brand, now());
+  if (!rule) return false;
+  let changed = false;
+  for (const key of BRAND_RULE_FIELDS) {
+    if (brand[key] !== rule[key]) {
+      brand[key] = rule[key];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+// 정산월을 가르는 날짜 기준. 명시적으로 고르지 않은 브랜드는 기존 동작을
+// 그대로 유지한다 — 위탁은 배송완료일, 나머지는 주문일.
+const settlementDateBases = new Set(["order", "delivered"]);
+
+function brandSettlementDateBasis(brand = {}) {
+  if (settlementDateBases.has(brand.settlementDateBasis)) return brand.settlementDateBasis;
+  return brand.settlementType === "consignment" ? "delivered" : "order";
 }
 
 // 배송비 임계 기준금액 선택: 기본은 제품매출, 브랜드 설정이 supply면 공급가 합계.
@@ -630,9 +727,11 @@ function buildInitialDb() {
       requiredMemo: "",
       googleSheetUrl: "",
       shareToken: crypto.randomBytes(12).toString("hex"),
+      ruleHistory: [],
       createdAt,
       updatedAt: createdAt
     };
+    brand.ruleHistory = [buildBrandRule(brand, BRAND_RULE_EPOCH, "최초 등록 규칙")];
     brands.push(brand);
     brandByName.set(normalizeName(rawName), brand);
   }
@@ -740,7 +839,8 @@ function buildInitialDb() {
     ],
     archiveHistory: [],
     paymentLogs: [],
-    npb: buildNpbNamespace()
+    npb: buildNpbNamespace(),
+    clobe: buildClobeNamespace()
   };
 }
 
@@ -815,7 +915,14 @@ function migrateDb(db) {
     touch(brand, "shippingThresholdAmount", 0);
     touch(brand, "shippingThresholdFee", 0);
     touch(brand, "shippingThresholdBase", "sales");
+    touch(brand, "settlementDateBasis", brand.settlementType === "consignment" ? "delivered" : "order");
     touch(brand, "shippingRule", "");
+    // 규칙 이력이 없는 기존 브랜드는 현재 규칙을 최초 버전으로 이관한다.
+    // 시작일을 EPOCH 로 두어 과거 정산이 지금과 동일하게 계산되도록 한다.
+    if (!Array.isArray(brand.ruleHistory) || !brand.ruleHistory.length) {
+      brand.ruleHistory = [buildBrandRule(brand, BRAND_RULE_EPOCH, "최초 등록 규칙 (자동 이관)")];
+      changed = true;
+    }
     if (!shippingPolicyTypes.has(brand.shippingPolicyType)) {
       brand.shippingPolicyType = "free";
       changed = true;
@@ -887,7 +994,56 @@ function migrateDb(db) {
     const npbSeed = buildNpbNamespace();
     for (const key of Object.keys(npbSeed)) touch(db.npb, key, npbSeed[key]);
   }
+
+  // Clobe (클로브ai) connection state. Tokens live here rather than in env
+  // because they are issued per-user at runtime and rotate on refresh.
+  if (!db.clobe || typeof db.clobe !== "object") {
+    db.clobe = buildClobeNamespace();
+    changed = true;
+  } else {
+    const clobeSeed = buildClobeNamespace();
+    for (const key of Object.keys(clobeSeed)) touch(db.clobe, key, clobeSeed[key]);
+  }
+
+  // Cafe24 Admin API connection state, same shape and lifecycle as db.clobe.
+  if (!db.cafe24 || typeof db.cafe24 !== "object") {
+    db.cafe24 = buildCafe24Namespace();
+    changed = true;
+  } else {
+    const cafe24Seed = buildCafe24Namespace();
+    for (const key of Object.keys(cafe24Seed)) touch(db.cafe24, key, cafe24Seed[key]);
+  }
   return { db, changed };
+}
+
+function buildCafe24Namespace() {
+  return {
+    accessToken: "",
+    refreshToken: "",
+    expiresAt: "",
+    refreshTokenExpiresAt: "",
+    mallId: "",
+    connectedBy: "",
+    connectedAt: "",
+    lastSyncAt: ""
+  };
+}
+
+function buildClobeNamespace() {
+  return {
+    clientId: "",
+    redirectUri: "",
+    accessToken: "",
+    refreshToken: "",
+    expiresAt: "",
+    companyId: "",
+    companyName: "",
+    accountIds: [],
+    windowDays: 7,
+    connectedBy: "",
+    connectedAt: "",
+    lastSyncAt: ""
+  };
 }
 
 let cachedDb = null;
@@ -1162,6 +1318,31 @@ function cafe24RowMatchesBrand(row, brand) {
   return target === code || target === name;
 }
 
+// cafe24 날짜 컬럼은 내보내기마다 형식이 다르다: "2026-06-15", "2026.7.7 12:19"
+// (점 구분·월/일 0 미패딩), "2026/07/15", "20260615 13:20:00".
+//
+// 구분자를 지우고 앞 8자리를 취하는 방식은 0 미패딩 형식에서 조용히 망가진다 —
+// "2026.7.7 12:19" 이 "2026-77-12" 가 되어 어떤 실제 날짜보다도 커지고, 계약
+// 규칙이 미래 버전으로 잘못 잡힌다. 그래서 구분자가 있으면 자리별로 파싱한다.
+function cafe24DateOnly(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  const parts = text.match(/^(\d{4})[-./](\d{1,2})[-./](\d{1,2})/);
+  if (parts) {
+    const [, y, m, d] = parts;
+    const month = Number(m);
+    const day = Number(d);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return "";
+    return `${y}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+  const digits = text.replace(/[^0-9]/g, "");
+  if (digits.length < 8) return "";
+  const month = Number(digits.slice(4, 6));
+  const day = Number(digits.slice(6, 8));
+  if (month < 1 || month > 12 || day < 1 || day > 31) return "";
+  return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`;
+}
+
 function cafe24RowIsCancelled(row) {
   return Boolean(
     String(row["환불완료일"] || "").trim() ||
@@ -1274,8 +1455,35 @@ function buildCanonPriceMatcher(db, brand) {
 function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   const monthPrefix = `${year}${String(month).padStart(2, "0")}`;
   const settlementType = brand.settlementType || "prepay_fee";
-  const rate = number(brand.commissionRate);
   const suppliers = distinctCafe24Suppliers(cafe24Rows);
+
+  // 정산서 머리말에 찍히는 대표 요율. 건별 요율이 갈릴 수 있으므로 정산월
+  // 말일 기준 규칙을 대표값으로 쓰고, 실제로 섞였다면 아래에서 경고를 낸다.
+  const periodEnd = new Date(Date.UTC(Number(year), Number(month), 0)).toISOString().slice(0, 10);
+  const rate = number(effectiveBrand(brand, periodEnd).commissionRate);
+
+  // 계약 규칙은 "이 정산이 그 건을 어느 달로 묶는지"와 같은 날짜로 고른다.
+  // 선매입은 주문일로 정산월을 가르므로 주문일, 위탁은 배송완료월로 가르므로
+  // 배송완료일이다. 기준이 어긋나면 7/31 주문·8/3 배송완료 건이 7월 정산에
+  // 들어가면서 8월 요율로 계산되는 모순이 생긴다.
+  // settlementType 은 정산 흐름 자체를 가르는 구조적 값이라 건별로 흔들면
+  // 안 되므로 브랜드 현재값을 그대로 쓴다.
+  const appliedRules = new Map(); // validFrom -> 적용 건수
+  const ruleFor = (asOf) => {
+    const target = asOf || `${year}-${String(month).padStart(2, "0")}-01`;
+    const rule = brandRuleAt(brand, target);
+    if (rule) appliedRules.set(rule.validFrom, (appliedRules.get(rule.validFrom) || 0) + 1);
+    return rule ? { ...brand, ...pickBrandRuleFields(rule) } : brand;
+  };
+  // 주문 단위 규칙: 한 주문 안의 품목은 같은 규칙으로 계산되어야 하므로
+  // 주문당 날짜 하나로 정한다.
+  const ruleForOrder = (orderNo, rowsOfOrder) => {
+    if (brandSettlementDateBasis(brand) === "delivered") {
+      const dates = rowsOfOrder.map((r) => cafe24DateOnly(r["배송완료일"])).filter(Boolean).sort();
+      return ruleFor(dates.length ? dates[dates.length - 1] : "");
+    }
+    return ruleFor(cafe24DateOnly(String(orderNo || "").slice(0, 8)));
+  };
 
   if (!String(brand.cafe24Supplier || "").trim()) {
     return { needsMapping: true, suppliers, settlementType };
@@ -1284,10 +1492,14 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   // data2: cafe24 rows for this brand
   const brandRows = cafe24Rows.filter((r) => cafe24RowMatchesBrand(r, brand));
 
-  // 위탁(consignment)은 [배송완료일]이 정산월인 건을 포함(주문일 무관).
-  // 그 외(채권/수수료)는 [주문일](주문번호 앞 8자리)이 정산월 + 배송완료 건.
+  // 어느 날짜로 정산월을 가를지는 브랜드 설정(settlementDateBasis)을 따른다.
+  //   delivered : [배송완료일]이 정산월인 건 (주문일 무관) — 위탁 기본값
+  //   order     : [주문일](주문번호 앞 8자리)이 정산월 + 배송완료된 건 — 그 외 기본값
+  // 계약이 브랜드마다 다르므로 정산유형에 묶지 않고 브랜드별로 고르게 둔다.
+  const dateBasis = brandSettlementDateBasis(brand);
   const isConsignment = settlementType === "consignment";
-  const ymOf = (raw) => String(raw || "").replace(/[^0-9]/g, "").slice(0, 6);
+  const byDelivered = dateBasis === "delivered";
+  const ymOf = (raw) => String(cafe24DateOnly(raw) || "").replace(/[^0-9]/g, "").slice(0, 6);
   const cancels = [];
   const includedByOrder = new Map(); // orderNo -> [정산 포함 cafe24 rows]
   const allRowsByOrder = new Map(); // orderNo -> [all non-cancelled rows] (부분배송 대조용)
@@ -1308,10 +1520,10 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
       });
       continue;
     }
-    const included = isConsignment
-      ? (delivered && ymOf(deliveredDate) === monthPrefix)      // 위탁: 배송완료월 기준
-      : (orderDate.startsWith(monthPrefix) && delivered);       // 그 외: 주문일 기준 + 배송완료
-    const inScope = isConsignment ? included : orderDate.startsWith(monthPrefix);
+    const included = byDelivered
+      ? (delivered && ymOf(deliveredDate) === monthPrefix)      // 배송완료월 기준
+      : (orderDate.startsWith(monthPrefix) && delivered);       // 주문일 기준 + 배송완료
+    const inScope = byDelivered ? included : orderDate.startsWith(monthPrefix);
     if (inScope) {
       if (!allRowsByOrder.has(orderNo)) allRowsByOrder.set(orderNo, []);
       allRowsByOrder.get(orderNo).push(r);
@@ -1350,6 +1562,8 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   if (isConsignment) {
     for (const [orderNo, rowsOfOrder] of includedByOrder) {
       const orderShip = cafe24OrderShipping(rowsOfOrder);
+      const orderBrand = ruleForOrder(orderNo, rowsOfOrder);
+      const orderRate = number(orderBrand.commissionRate);
       rowsOfOrder.forEach((r, idx) => {
         seq++;
         const qty = Math.max(1, number(r["수량"], 1));
@@ -1358,7 +1572,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
         const discountRate = original > 0 && qty > 0 ? Math.max(0, Number((lineDisc / (qty * original)).toFixed(4))) : 0;
         const unitSale = Math.round(original * (1 - discountRate));
         const saleTotal = Math.max(0, original * qty - lineDisc);
-        const commissionWon = Math.round(saleTotal * (rate / 100));
+        const commissionWon = Math.round(saleTotal * (orderRate / 100));
         lines.push({
           itemNo: r["품목별 주문번호"] || `${orderNo}-${String(idx + 1).padStart(2, "0")}`,
           name: r["주문상품명(기본)"] || "",
@@ -1369,7 +1583,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
           saleTotal,
           ship: idx === 0 ? orderShip : 0,
           refundShip: 0,
-          ratePct: rate,
+          ratePct: orderRate,
           commissionWon,
           supplyAmt: saleTotal - commissionWon,
           payDate: "",
@@ -1391,6 +1605,8 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
         errors.push({ orderNo, type: "unpaid", message: `입금완료되지 않은 주문입니다: ${orderNo}` });
       }
     }
+    const orderBrand = ruleForOrder(orderNo, rowsOfOrder);
+    const orderRate = number(orderBrand.commissionRate);
     const wooofSales = number(req.productSalesAmount);
     if (priceBasis === "catalog" && canon.hasCatalog) {
       // 정가 기준: 카페24 품목을 단가표 정가로 환산해 기대금액 계산.
@@ -1414,11 +1630,11 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
           message: `정가 기준 금액 불일치 ${orderNo}: 정가 ${expected.toLocaleString()} vs 입금요청 ${wooofSales.toLocaleString()}`
         });
       } else {
-        const shipBase = shippingThresholdBaseAmount(brand, {
+        const shipBase = shippingThresholdBaseAmount(orderBrand, {
           salesAmount: expected,
           supplyAmount: number(req.supplyAmount)
         });
-        const expectedShip = calculateBaseShippingFee(brand, shipBase);
+        const expectedShip = calculateBaseShippingFee(orderBrand, shipBase);
         const reqShip = number(req.shippingFee);
         if (Math.abs(expectedShip - reqShip) > 1) {
           errors.push({
@@ -1467,7 +1683,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
     detail.forEach((it, idx) => {
       seq++;
       const saleTotal = number(it.totalSaleAmount, number(it.unitSalePrice) * number(it.quantity));
-      const commissionWon = Math.round(saleTotal * (rate / 100));
+      const commissionWon = Math.round(saleTotal * (orderRate / 100));
       const unitSale = number(it.unitSalePrice);            // 현재판매가(할인가)
       const original = number(it.originalPrice) || unitSale; // 원판매가(정가)
       const discountRate = original > 0 ? Math.max(0, Number((1 - unitSale / original).toFixed(4))) : 0;
@@ -1481,13 +1697,28 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
         saleTotal,
         ship: idx === 0 ? orderShip : 0,
         refundShip: 0,
-        ratePct: rate,
+        ratePct: orderRate,
         commissionWon,
         supplyAmt: saleTotal - commissionWon,
         payDate: req.paidAt || "",
         note: it.note || ""
       });
     });
+  }
+
+  // 한 정산 안에서 계약 규칙이 갈렸으면 반드시 드러낸다 — 조용히 섞이면
+  // 합계만 보고는 어느 요율이 적용됐는지 알 수 없다.
+  if (appliedRules.size > 1) {
+    const detail = [...appliedRules.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([validFrom, count]) => {
+        const rule = (brand.ruleHistory || []).find((item) => item.validFrom === validFrom);
+        const rateText = rule ? `수수료 ${number(rule.commissionRate)}%` : "";
+        const shipText = rule?.shippingRule ? ` · ${rule.shippingRule}` : "";
+        return `${validFrom}~ (${rateText}${shipText}) ${count}건`;
+      })
+      .join(" / ");
+    warnings.push(`이 정산에 계약 규칙 ${appliedRules.size}개 버전이 적용됐습니다 — ${detail}`);
   }
 
   const salesTotal = lines.reduce((s, l) => s + l.saleTotal, 0);
@@ -2577,6 +2808,220 @@ function contentDisposition(filename) {
   return `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`;
 }
 
+// --- Clobe (클로브ai) MCP integration -------------------------------------
+
+// In-flight authorization attempts. Deliberately not persisted: a PKCE verifier
+// is single-use and short-lived, and a server restart mid-login should just
+// make the user click connect again rather than leave a usable secret on disk.
+const clobePendingAuth = new Map();
+const CLOBE_AUTH_TTL_MS = 10 * 60 * 1000;
+
+// WooofPay only ever settles 주식회사 우프컴퍼니. The clobe account can also see
+// 베럴즈/엘브이더블유/픽키파크, so the company is pinned by business number —
+// stable across renames, and it keeps another company's banking out of reach.
+const CLOBE_COMPANY_BIZ_NO = "3148700725";
+
+function clobePickCompany(companies) {
+  return (companies || []).find((item) => String(item.businessRegNo || "") === CLOBE_COMPANY_BIZ_NO) || null;
+}
+
+function clobeRedirectUri(req) {
+  const configured = String(process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
+  if (configured) return `${configured}/api/clobe/callback`;
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const host = req.headers["x-forwarded-host"] || req.headers.host || `localhost:${PORT}`;
+  const proto = forwardedProto || (/^localhost|^127\.0\.0\.1/.test(String(host)) ? "http" : "https");
+  return `${proto}://${host}/api/clobe/callback`;
+}
+
+function clobeIsConnected(db) {
+  return Boolean(db.clobe?.refreshToken && db.clobe?.clientId);
+}
+
+// Returns a usable access token, refreshing and persisting when the stored one
+// is at or near expiry. clobe has no client_credentials grant, so if the
+// refresh token itself is rejected the only fix is a human re-login.
+async function clobeAccessToken(db) {
+  const state = db.clobe;
+  if (!clobeIsConnected(db)) throw new Error("클로브가 연결되지 않았습니다. 먼저 연결하세요.");
+  const expiresAt = state.expiresAt ? new Date(state.expiresAt).getTime() : 0;
+  if (state.accessToken && expiresAt - Date.now() > 60000) {
+    return clobe.openSecret(state.accessToken);
+  }
+  let tokens;
+  try {
+    tokens = await clobe.refreshTokens({
+      clientId: state.clientId,
+      refreshToken: clobe.openSecret(state.refreshToken)
+    });
+  } catch (error) {
+    const failure = new Error(`클로브 재인증이 필요합니다: ${error.message}`);
+    failure.needsReauth = true;
+    throw failure;
+  }
+  state.accessToken = clobe.sealSecret(tokens.accessToken);
+  if (tokens.refreshToken) state.refreshToken = clobe.sealSecret(tokens.refreshToken);
+  state.expiresAt = tokens.expiresAt;
+  await writeDb(db);
+  return tokens.accessToken;
+}
+
+async function clobeCall(db, tool, input) {
+  const accessToken = await clobeAccessToken(db);
+  return clobe.callTool(accessToken, tool, input);
+}
+
+// Pulls every bank transaction in the range, following the keyset cursor.
+// Capped so a wide date range can't spin forever. Omit direction for both ways.
+async function clobeFetchTransactions(db, { startDate, endDate, direction = null }) {
+  if (!clobeIsConnected(db)) throw new Error("클로브가 연결되지 않았습니다. 먼저 연결하세요.");
+  const companyId = db.clobe.companyId;
+  if (!companyId) throw new Error("대사 대상 회사를 먼저 선택하세요.");
+  const collected = [];
+  let cursor = null;
+  for (let page = 0; page < 20; page += 1) {
+    const payload = await clobeCall(db, "get_labeled_transactions", {
+      companyId,
+      startDate,
+      endDate,
+      size: 100,
+      ...(direction ? { direction } : {}),
+      ...(cursor ? { cursor } : {})
+    });
+    collected.push(...(payload.content || []));
+    if (!payload.hasNext || !payload.nextCursor) break;
+    cursor = payload.nextCursor;
+  }
+  return collected;
+}
+
+// Adapts clobe transactions to the Korean-keyed row shape the settlement
+// engine already expects from an uploaded bank XLSX, so computeSettlementResult
+// works identically whether the data came from a file or from clobe.
+// Mirrors the columns read by bankBrandMovements/bankRowMatchesBrand.
+function clobeRowsToBankRows(transactions, accountIds = []) {
+  const allowed = accountIds.length ? new Set(accountIds.map(Number)) : null;
+  return transactions
+    .filter((tx) => !allowed || allowed.has(Number(tx.accountId)))
+    .map((tx) => {
+      const at = String(tx.transactionAt || "");
+      return {
+        "거래 연도": Number(at.slice(0, 4)) || 0,
+        "거래 월": Number(at.slice(5, 7)) || 0,
+        "거래일시": at.replace("T", " "),
+        "출금": Number(tx.outAmount || 0),
+        "입금": Number(tx.inAmount || 0),
+        "적요": tx.transactionDescription || "",
+        "거래자명": tx.transactionName || "",
+        "거래처 라벨": tx.businessEntityName || tx.customLabel || tx.category || ""
+      };
+    });
+}
+
+// Settlement pulls a wider range than the settlement month itself: brands that
+// pay after delivery routinely cross the month boundary, and the engine
+// deliberately searches the whole dataset rather than just the target month.
+function clobeSettlementRange(year, month) {
+  const start = new Date(Date.UTC(Number(year), Number(month) - 1, 1));
+  start.setUTCMonth(start.getUTCMonth() - 1);
+  const end = new Date(Date.UTC(Number(year), Number(month) + 1, 0));
+  const today = new Date();
+  return {
+    startDate: start.toISOString().slice(0, 10),
+    endDate: (end > today ? today : end).toISOString().slice(0, 10)
+  };
+}
+
+// Shared by /api/settlement/run and /api/settlement/export so the exported
+// workbook is computed from exactly the same bank data as the preview.
+async function settlementBankRows(db, body, actor) {
+  if (body.useClobe) {
+    if (!canManageAdmins(actor)) {
+      const error = new Error("클로브 은행내역 조회는 오너 또는 매니저만 사용할 수 있습니다.");
+      error.status = 403;
+      throw error;
+    }
+    const range = clobeSettlementRange(body.year, body.month);
+    const transactions = await clobeFetchTransactions(db, range);
+    return { rows: clobeRowsToBankRows(transactions, db.clobe?.accountIds || []), source: "clobe", range };
+  }
+  if (body.bankXlsx) {
+    return { rows: await parseBankXlsxUpload(body.bankXlsx), source: "upload", range: null };
+  }
+  return { rows: [], source: "none", range: null };
+}
+
+function clobePublicState(db) {
+  const state = db.clobe || {};
+  return {
+    connected: clobeIsConnected(db),
+    companyId: state.companyId || "",
+    companyName: state.companyName || "",
+    accountIds: state.accountIds || [],
+    windowDays: Number(state.windowDays || 7),
+    connectedBy: state.connectedBy || "",
+    connectedAt: state.connectedAt || "",
+    lastSyncAt: state.lastSyncAt || "",
+    encryptedAtRest: clobe.tokenEncryptionEnabled()
+  };
+}
+
+// --- Cafe24 Admin API integration ---------------------------------------
+
+const cafe24PendingAuth = new Map();
+
+function cafe24RedirectUri(req) {
+  const configured = String(process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
+  if (configured) return `${configured}/api/cafe24/callback`;
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const host = req.headers["x-forwarded-host"] || req.headers.host || `localhost:${PORT}`;
+  const proto = forwardedProto || (/^localhost|^127\.0\.0\.1/.test(String(host)) ? "http" : "https");
+  return `${proto}://${host}/api/cafe24/callback`;
+}
+
+function cafe24IsConnected(db) {
+  return Boolean(db.cafe24?.refreshToken);
+}
+
+// Cafe24's refresh token lives 2 weeks. Once it lapses there is no automated
+// recovery — say so plainly instead of retrying.
+async function cafe24AccessToken(db) {
+  const state = db.cafe24;
+  if (!cafe24IsConnected(db)) throw new Error("카페24가 연결되지 않았습니다. 먼저 연결하세요.");
+  const expiresAt = state.expiresAt ? new Date(state.expiresAt).getTime() : 0;
+  if (state.accessToken && expiresAt - Date.now() > 60000) {
+    return clobe.openSecret(state.accessToken);
+  }
+  let tokens;
+  try {
+    tokens = await cafe24.refreshTokens({ refreshToken: clobe.openSecret(state.refreshToken) });
+  } catch (error) {
+    const failure = new Error(`카페24 재연결이 필요합니다 (갱신 토큰 만료 가능): ${error.message}`);
+    failure.needsReauth = true;
+    throw failure;
+  }
+  state.accessToken = clobe.sealSecret(tokens.accessToken);
+  if (tokens.refreshToken) state.refreshToken = clobe.sealSecret(tokens.refreshToken);
+  state.expiresAt = tokens.expiresAt;
+  state.refreshTokenExpiresAt = tokens.refreshTokenExpiresAt || state.refreshTokenExpiresAt;
+  await writeDb(db);
+  return tokens.accessToken;
+}
+
+function cafe24PublicState(db) {
+  const state = db.cafe24 || {};
+  const config = cafe24.cafe24Config();
+  return {
+    configured: cafe24.cafe24Configured(),
+    connected: cafe24IsConnected(db),
+    mallId: state.mallId || config.mallId || "",
+    connectedBy: state.connectedBy || "",
+    connectedAt: state.connectedAt || "",
+    lastSyncAt: state.lastSyncAt || "",
+    refreshTokenExpiresAt: state.refreshTokenExpiresAt || ""
+  };
+}
+
 async function routeApi(req, res, url) {
   const pathname = url.pathname;
   const method = req.method || "GET";
@@ -3137,6 +3582,7 @@ async function routeApi(req, res, url) {
       "shippingThresholdAmount",
       "shippingThresholdFee",
       "shippingThresholdBase",
+      "settlementDateBasis",
       "isActive",
       "starred",
       "businessName",
@@ -3162,9 +3608,63 @@ async function routeApi(req, res, url) {
     brand.receivableTotal = number(brand.receivableTotal);
     brand.hasReceivable = brand.hasReceivable === true || brand.hasReceivable === "true";
     if (!settlementTypes.has(brand.settlementType)) brand.settlementType = "prepay_fee";
+    if (!settlementDateBases.has(brand.settlementDateBasis)) {
+      brand.settlementDateBasis = brandSettlementDateBasis(brand);
+    }
     Object.assign(brand, normalizeShippingPolicy(brand, before));
+
+    // 계약 규칙 변경: ruleValidFrom 이 오면 덮어쓰지 않고 그 날짜의 버전을
+    // 새로 쌓는다. 같은 날짜가 이미 있으면 그 버전을 고쳐 쓴다(오타 정정).
+    // 그러고 나서 최상위 필드를 "오늘 유효한 버전"으로 되돌린다 — 미래로
+    // 예약한 변경이 지금 만드는 입금요청에 당겨 적용되면 안 되기 때문.
+    const ruleValidFrom = dateOnly(body.ruleValidFrom);
+    if (ruleValidFrom) {
+      if (!Array.isArray(brand.ruleHistory)) brand.ruleHistory = [];
+      const existing = brand.ruleHistory.find((item) => item.validFrom === ruleValidFrom);
+      if (existing) {
+        Object.assign(existing, pickBrandRuleFields(brand), { note: String(body.ruleNote ?? existing.note ?? "") });
+      } else {
+        brand.ruleHistory.push(buildBrandRule(brand, ruleValidFrom, body.ruleNote || ""));
+      }
+      brand.ruleHistory.sort((a, b) => String(a.validFrom).localeCompare(String(b.validFrom)));
+      syncBrandCurrentRules(brand);
+    } else if (Array.isArray(brand.ruleHistory) && brand.ruleHistory.length) {
+      // 시작일 없이 규칙을 고치면 "지금 유효한 버전"을 그 자리에서 수정한 것으로 본다.
+      const current = brandRuleAt(brand, now());
+      if (current) Object.assign(current, pickBrandRuleFields(brand));
+    }
+
     brand.updatedAt = now();
     addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 브랜드 수정`, before, brand);
+    await writeDb(db);
+    sendJson(res, 200, { brand: hydrateBrand(db, brand) });
+    return;
+  }
+
+  // 잘못 등록한 계약 규칙 버전 삭제. 마지막 한 개는 남긴다 — 규칙이 하나도
+  // 없으면 과거 정산의 기준이 사라진다.
+  const brandRuleMatch = pathname.match(/^\/api\/brands\/([^/]+)\/rules\/([^/]+)$/);
+  if (brandRuleMatch && method === "DELETE") {
+    const brand = db.brands.find((item) => item.id === brandRuleMatch[1]);
+    if (!brand) {
+      sendJson(res, 404, { error: "브랜드를 찾을 수 없습니다." });
+      return;
+    }
+    const history = Array.isArray(brand.ruleHistory) ? brand.ruleHistory : [];
+    if (history.length <= 1) {
+      sendJson(res, 400, { error: "규칙 버전은 최소 1개가 있어야 합니다." });
+      return;
+    }
+    const index = history.findIndex((item) => item.id === brandRuleMatch[2]);
+    if (index === -1) {
+      sendJson(res, 404, { error: "규칙 버전을 찾을 수 없습니다." });
+      return;
+    }
+    const before = { ...brand };
+    const [removed] = history.splice(index, 1);
+    syncBrandCurrentRules(brand);
+    brand.updatedAt = now();
+    addAudit(db, actor, "delete", "brand_rule", brand.id, `${brand.name} 계약규칙 ${removed.validFrom} 삭제`, removed, null);
     await writeDb(db);
     sendJson(res, 200, { brand: hydrateBrand(db, brand) });
     return;
@@ -3611,19 +4111,22 @@ async function routeApi(req, res, url) {
     if (!brand) { sendJson(res, 400, { error: "브랜드를 선택하세요." }); return; }
     if (!body.year || !body.month) { sendJson(res, 400, { error: "정산 연/월을 선택하세요." }); return; }
     let cafe24Rows = [];
-    let bankRows = [];
+    let bank = { rows: [], source: "none", range: null };
     try {
       if (body.cafe24Csv) cafe24Rows = parseCafe24Csv(body.cafe24Csv);
-      if (body.bankXlsx) bankRows = await parseBankXlsxUpload(body.bankXlsx);
+      bank = await settlementBankRows(db, body, actor);
     } catch (error) {
-      sendJson(res, 400, { error: `파일 파싱 실패: ${error.message}` });
+      sendJson(res, error.status || (error.needsReauth ? 401 : 400), {
+        error: body.useClobe ? `클로브 은행내역 조회 실패: ${error.message}` : `파일 파싱 실패: ${error.message}`
+      });
       return;
     }
     if (!cafe24Rows.length) { sendJson(res, 400, { error: "카페24 주문내역(CSV)을 업로드하세요." }); return; }
-    const result = computeSettlementResult(db, brand, body.year, body.month, cafe24Rows, bankRows);
+    const result = computeSettlementResult(db, brand, body.year, body.month, cafe24Rows, bank.rows);
     sendJson(res, 200, {
       brand: { id: brand.id, name: brand.name, settlementType: brand.settlementType, cafe24Supplier: brand.cafe24Supplier || "" },
       ...result,
+      bankSource: { source: bank.source, rowCount: bank.rows.length, range: bank.range },
       lines: result.needsMapping ? [] : result.lines
     });
     return;
@@ -3634,15 +4137,17 @@ async function routeApi(req, res, url) {
     const brand = db.brands.find((item) => item.id === body.brandId);
     if (!brand) { sendJson(res, 400, { error: "브랜드를 선택하세요." }); return; }
     let cafe24Rows = [];
-    let bankRows = [];
+    let bank = { rows: [], source: "none", range: null };
     try {
       if (body.cafe24Csv) cafe24Rows = parseCafe24Csv(body.cafe24Csv);
-      if (body.bankXlsx) bankRows = await parseBankXlsxUpload(body.bankXlsx);
+      bank = await settlementBankRows(db, body, actor);
     } catch (error) {
-      sendJson(res, 400, { error: `파일 파싱 실패: ${error.message}` });
+      sendJson(res, error.status || (error.needsReauth ? 401 : 400), {
+        error: body.useClobe ? `클로브 은행내역 조회 실패: ${error.message}` : `파일 파싱 실패: ${error.message}`
+      });
       return;
     }
-    const result = computeSettlementResult(db, brand, body.year, body.month, cafe24Rows, bankRows);
+    const result = computeSettlementResult(db, brand, body.year, body.month, cafe24Rows, bank.rows);
     if (result.needsMapping) { sendJson(res, 409, { error: "먼저 카페24 공급사 매핑을 저장하세요." }); return; }
     if (result.errors.length && !body.force) {
       sendJson(res, 409, { error: "정산 오류가 있어 출력할 수 없습니다.", errors: result.errors });
@@ -3657,6 +4162,308 @@ async function routeApi(req, res, url) {
         { "content-disposition": contentDisposition(`(우프) ${spec.supplierName}_${ym}.xlsx`) });
     } catch (error) {
       sendJson(res, 500, { error: `정산서 생성 실패: ${error.message}` });
+    }
+    return;
+  }
+
+  // --- Cafe24 Admin API endpoints -----------------------------------------
+  // Order data and a delegated credential — owner/manager only, same as clobe.
+  if (pathname.startsWith("/api/cafe24/")) {
+    if (!canManageAdmins(actor)) {
+      sendJson(res, 403, { error: "카페24 연동은 오너 또는 매니저만 사용할 수 있습니다." });
+      return;
+    }
+    if (!db.cafe24 || typeof db.cafe24 !== "object") db.cafe24 = buildCafe24Namespace();
+  }
+
+  if (pathname === "/api/cafe24/status" && method === "GET") {
+    sendJson(res, 200, cafe24PublicState(db));
+    return;
+  }
+
+  if (pathname === "/api/cafe24/connect" && method === "POST") {
+    if (!cafe24.cafe24Configured()) {
+      sendJson(res, 400, { error: "CAFE24_MALL_ID / CAFE24_CLIENT_ID / CAFE24_CLIENT_SECRET 환경변수를 먼저 설정하세요." });
+      return;
+    }
+    try {
+      const redirectUri = cafe24RedirectUri(req);
+      const state = cafe24.createState();
+      cafe24PendingAuth.set(state, { redirectUri, actorId: actor.id, createdAt: Date.now() });
+      for (const [key, value] of cafe24PendingAuth) {
+        if (Date.now() - value.createdAt > CLOBE_AUTH_TTL_MS) cafe24PendingAuth.delete(key);
+      }
+      sendJson(res, 200, { authorizeUrl: cafe24.buildAuthorizeUrl({ redirectUri, state }) });
+    } catch (error) {
+      sendJson(res, 502, { error: `카페24 연결 준비 실패: ${error.message}` });
+    }
+    return;
+  }
+
+  if (pathname === "/api/cafe24/callback" && method === "GET") {
+    const code = url.searchParams.get("code") || "";
+    const state = url.searchParams.get("state") || "";
+    const pending = cafe24PendingAuth.get(state);
+    cafe24PendingAuth.delete(state);
+    const fail = (reason) => {
+      res.writeHead(302, { location: `/?cafe24=error&reason=${encodeURIComponent(reason)}` });
+      res.end();
+    };
+    if (url.searchParams.get("error")) return void fail(url.searchParams.get("error"));
+    if (!code || !pending) return void fail("인증 요청이 만료되었습니다. 다시 시도하세요.");
+    // Cafe24 authorization codes expire after one minute.
+    if (Date.now() - pending.createdAt > CLOBE_AUTH_TTL_MS) return void fail("인증 요청이 만료되었습니다.");
+    if (pending.actorId !== actor.id) return void fail("인증을 시작한 계정과 다릅니다.");
+    try {
+      const tokens = await cafe24.exchangeCode({ code, redirectUri: pending.redirectUri });
+      db.cafe24.accessToken = clobe.sealSecret(tokens.accessToken);
+      db.cafe24.refreshToken = clobe.sealSecret(tokens.refreshToken);
+      db.cafe24.expiresAt = tokens.expiresAt;
+      db.cafe24.refreshTokenExpiresAt = tokens.refreshTokenExpiresAt || "";
+      db.cafe24.mallId = tokens.mallId || "";
+      db.cafe24.connectedBy = actor.name || actor.email || "";
+      db.cafe24.connectedAt = now();
+      addAudit(db, actor, "update", "cafe24", "connection", `카페24 연동 연결 (${db.cafe24.mallId})`, null, cafe24PublicState(db));
+      await writeDb(db);
+      res.writeHead(302, { location: "/?cafe24=connected" });
+      res.end();
+    } catch (error) {
+      fail(error.message);
+    }
+    return;
+  }
+
+  if (pathname === "/api/cafe24/disconnect" && method === "POST") {
+    addAudit(db, actor, "delete", "cafe24", "connection", "카페24 연동 해제", cafe24PublicState(db), null);
+    db.cafe24 = buildCafe24Namespace();
+    await writeDb(db);
+    sendJson(res, 200, cafe24PublicState(db));
+    return;
+  }
+
+  // Returns one raw order exactly as Cafe24 sends it. The settlement engine
+  // consumes Korean-keyed spreadsheet columns, so the API→column adapter has
+  // to be written against real field names rather than guessed from docs.
+  if (pathname === "/api/cafe24/sample" && method === "GET") {
+    try {
+      const accessToken = await cafe24AccessToken(db);
+      const startDate = url.searchParams.get("startDate") || "";
+      const endDate = url.searchParams.get("endDate") || "";
+      const payload = await cafe24.apiGet(accessToken, "/api/v2/admin/orders", {
+        start_date: startDate,
+        end_date: endDate,
+        date_type: url.searchParams.get("dateType") || "order_date",
+        supplier_id: url.searchParams.get("supplierId") || "",
+        embed: "items",
+        limit: Number(url.searchParams.get("limit") || 2)
+      });
+      db.cafe24.lastSyncAt = now();
+      await writeDb(db);
+      sendJson(res, 200, payload);
+    } catch (error) {
+      sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
+    }
+    return;
+  }
+
+  // --- Clobe (클로브ai) 입금대사 endpoints ---------------------------------
+  // Banking data and a long-lived delegated credential — owner/manager only.
+  if (pathname.startsWith("/api/clobe/")) {
+    if (!canManageAdmins(actor)) {
+      sendJson(res, 403, { error: "클로브 연동은 오너 또는 매니저만 사용할 수 있습니다." });
+      return;
+    }
+    if (!db.clobe || typeof db.clobe !== "object") db.clobe = buildClobeNamespace();
+  }
+
+  if (pathname === "/api/clobe/status" && method === "GET") {
+    sendJson(res, 200, clobePublicState(db));
+    return;
+  }
+
+  if (pathname === "/api/clobe/connect" && method === "POST") {
+    try {
+      const redirectUri = clobeRedirectUri(req);
+      // The client_id is bound to its redirect URI at registration, so a moved
+      // deployment needs a fresh registration rather than a reused one.
+      if (!db.clobe.clientId || db.clobe.redirectUri !== redirectUri) {
+        const registration = await clobe.registerClient(redirectUri);
+        db.clobe.clientId = registration.clientId;
+        db.clobe.redirectUri = redirectUri;
+        await writeDb(db);
+      }
+      const { verifier, challenge } = clobe.createPkcePair();
+      const state = crypto.randomBytes(24).toString("hex");
+      clobePendingAuth.set(state, { verifier, redirectUri, actorId: actor.id, createdAt: Date.now() });
+      for (const [key, value] of clobePendingAuth) {
+        if (Date.now() - value.createdAt > CLOBE_AUTH_TTL_MS) clobePendingAuth.delete(key);
+      }
+      const authorizeUrl = await clobe.buildAuthorizeUrl({
+        clientId: db.clobe.clientId,
+        redirectUri,
+        challenge,
+        state
+      });
+      sendJson(res, 200, { authorizeUrl });
+    } catch (error) {
+      sendJson(res, 502, { error: `클로브 연결 준비 실패: ${error.message}` });
+    }
+    return;
+  }
+
+  if (pathname === "/api/clobe/callback" && method === "GET") {
+    const code = url.searchParams.get("code") || "";
+    const state = url.searchParams.get("state") || "";
+    const pending = clobePendingAuth.get(state);
+    clobePendingAuth.delete(state);
+    const fail = (reason) => {
+      res.writeHead(302, { location: `/?clobe=error&reason=${encodeURIComponent(reason)}` });
+      res.end();
+    };
+    if (url.searchParams.get("error")) return void fail(url.searchParams.get("error"));
+    if (!code || !pending) return void fail("인증 요청이 만료되었습니다. 다시 시도하세요.");
+    if (Date.now() - pending.createdAt > CLOBE_AUTH_TTL_MS) return void fail("인증 요청이 만료되었습니다.");
+    if (pending.actorId !== actor.id) return void fail("인증을 시작한 계정과 다릅니다.");
+    try {
+      const tokens = await clobe.exchangeCode({
+        clientId: db.clobe.clientId,
+        redirectUri: pending.redirectUri,
+        code,
+        verifier: pending.verifier
+      });
+      db.clobe.accessToken = clobe.sealSecret(tokens.accessToken);
+      db.clobe.refreshToken = clobe.sealSecret(tokens.refreshToken);
+      db.clobe.expiresAt = tokens.expiresAt;
+      db.clobe.connectedBy = actor.name || actor.email || "";
+      db.clobe.connectedAt = now();
+
+      // 우프컴퍼니 is the only company WooofPay settles, so bind it right away
+      // rather than making the operator pick from the other three.
+      const context = await clobe.callTool(tokens.accessToken, "get_my_context", {});
+      const company = clobePickCompany(context.companies);
+      if (!company) {
+        return void fail("이 클로브 계정에서 주식회사 우프컴퍼니를 찾지 못했습니다.");
+      }
+      db.clobe.companyId = company.companyId;
+      db.clobe.companyName = company.companyName;
+      addAudit(db, actor, "update", "clobe", "connection", `클로브 연동 연결 (${company.companyName})`, null, { companyId: company.companyId });
+      await writeDb(db);
+      res.writeHead(302, { location: "/?clobe=connected" });
+      res.end();
+    } catch (error) {
+      fail(error.message);
+    }
+    return;
+  }
+
+  if (pathname === "/api/clobe/disconnect" && method === "POST") {
+    addAudit(db, actor, "delete", "clobe", "connection", "클로브 연동 해제", clobePublicState(db), null);
+    db.clobe = buildClobeNamespace();
+    await writeDb(db);
+    sendJson(res, 200, clobePublicState(db));
+    return;
+  }
+
+  // Re-binds 우프컴퍼니 if a connection predates the pinning, and reports the
+  // company back. Other companies on the clobe account are never exposed.
+  if (pathname === "/api/clobe/companies" && method === "GET") {
+    try {
+      const context = await clobeCall(db, "get_my_context", {});
+      const company = clobePickCompany(context.companies);
+      if (!company) {
+        sendJson(res, 404, { error: "이 클로브 계정에서 주식회사 우프컴퍼니를 찾지 못했습니다." });
+        return;
+      }
+      if (db.clobe.companyId !== company.companyId) {
+        db.clobe.companyId = company.companyId;
+        db.clobe.companyName = company.companyName;
+        await writeDb(db);
+      }
+      sendJson(res, 200, { companies: [company] });
+    } catch (error) {
+      sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
+    }
+    return;
+  }
+
+  if (pathname === "/api/clobe/accounts" && method === "GET") {
+    try {
+      const [accounts, scraping] = await Promise.all([
+        clobeCall(db, "get_bank_accounts", { companyId: db.clobe.companyId }),
+        clobeCall(db, "get_scraping_status", { companyId: db.clobe.companyId }).catch(() => null)
+      ]);
+      sendJson(res, 200, { accounts: accounts.accounts || [], scraping });
+    } catch (error) {
+      sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
+    }
+    return;
+  }
+
+  if (pathname === "/api/clobe/settings" && method === "POST") {
+    const body = await readBody(req);
+    // companyId is deliberately not settable — it is pinned to 우프컴퍼니.
+    if (body.accountIds !== undefined) {
+      db.clobe.accountIds = (Array.isArray(body.accountIds) ? body.accountIds : []).map(Number).filter(Boolean);
+    }
+    if (body.windowDays !== undefined) {
+      db.clobe.windowDays = Math.min(60, Math.max(0, Number(body.windowDays) || 0));
+    }
+    await writeDb(db);
+    sendJson(res, 200, clobePublicState(db));
+    return;
+  }
+
+  if (pathname === "/api/clobe/reconcile" && method === "POST") {
+    const body = await readBody(req);
+    const startDate = String(body.startDate || "").trim();
+    const endDate = String(body.endDate || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+      sendJson(res, 400, { error: "조회 시작일과 종료일을 yyyy-MM-dd 형식으로 지정하세요." });
+      return;
+    }
+    try {
+      const transactions = await clobeFetchTransactions(db, { startDate, endDate, direction: "IN" });
+      const unpaid = db.requests
+        .filter((item) => item.status !== "paid" && item.status !== "deleted")
+        .map((item) => ({
+          id: item.id,
+          orderNo: item.orderNo,
+          brandId: item.brandId,
+          brandName: item.brandName,
+          customerName: item.customerName,
+          depositorName: item.depositorName,
+          status: item.status,
+          expectedAmount: finalDepositAmount(item),
+          expectedDepositDate: item.expectedDepositDate,
+          createdAt: item.createdAt
+        }));
+      const result = reconcile({
+        requests: unpaid,
+        transactions,
+        options: { windowDays: Number(db.clobe.windowDays || 7), accountIds: db.clobe.accountIds }
+      });
+      db.clobe.lastSyncAt = now();
+      await writeDb(db);
+      sendJson(res, 200, { ...result, range: { startDate, endDate } });
+    } catch (error) {
+      sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
+    }
+    return;
+  }
+
+  if (pathname === "/api/clobe/tax-invoices" && method === "GET") {
+    try {
+      const payload = await clobeCall(db, "get_tax_invoices", {
+        companyId: db.clobe.companyId,
+        startDate: url.searchParams.get("startDate") || "",
+        endDate: url.searchParams.get("endDate") || "",
+        ...(url.searchParams.get("type") ? { type: url.searchParams.get("type") } : {}),
+        ...(url.searchParams.get("q") ? { searchParam: url.searchParams.get("q") } : {}),
+        size: 100
+      });
+      sendJson(res, 200, payload);
+    } catch (error) {
+      sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
     }
     return;
   }
