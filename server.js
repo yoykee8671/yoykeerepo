@@ -2615,6 +2615,15 @@ function contentDisposition(filename) {
 const clobePendingAuth = new Map();
 const CLOBE_AUTH_TTL_MS = 10 * 60 * 1000;
 
+// WooofPay only ever settles 주식회사 우프컴퍼니. The clobe account can also see
+// 베럴즈/엘브이더블유/픽키파크, so the company is pinned by business number —
+// stable across renames, and it keeps another company's banking out of reach.
+const CLOBE_COMPANY_BIZ_NO = "3148700725";
+
+function clobePickCompany(companies) {
+  return (companies || []).find((item) => String(item.businessRegNo || "") === CLOBE_COMPANY_BIZ_NO) || null;
+}
+
 function clobeRedirectUri(req) {
   const configured = String(process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
   if (configured) return `${configured}/api/clobe/callback`;
@@ -3916,15 +3925,16 @@ async function routeApi(req, res, url) {
       db.clobe.connectedBy = actor.name || actor.email || "";
       db.clobe.connectedAt = now();
 
-      // Auto-select when the account has exactly one company; otherwise the
-      // operator picks in the UI.
+      // 우프컴퍼니 is the only company WooofPay settles, so bind it right away
+      // rather than making the operator pick from the other three.
       const context = await clobe.callTool(tokens.accessToken, "get_my_context", {});
-      const companies = context.companies || [];
-      if (companies.length === 1) {
-        db.clobe.companyId = companies[0].companyId;
-        db.clobe.companyName = companies[0].companyName;
+      const company = clobePickCompany(context.companies);
+      if (!company) {
+        return void fail("이 클로브 계정에서 주식회사 우프컴퍼니를 찾지 못했습니다.");
       }
-      addAudit(db, actor, "update", "clobe", "connection", "클로브 연동 연결", null, { companies: companies.length });
+      db.clobe.companyId = company.companyId;
+      db.clobe.companyName = company.companyName;
+      addAudit(db, actor, "update", "clobe", "connection", `클로브 연동 연결 (${company.companyName})`, null, { companyId: company.companyId });
       await writeDb(db);
       res.writeHead(302, { location: "/?clobe=connected" });
       res.end();
@@ -3942,10 +3952,22 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // Re-binds 우프컴퍼니 if a connection predates the pinning, and reports the
+  // company back. Other companies on the clobe account are never exposed.
   if (pathname === "/api/clobe/companies" && method === "GET") {
     try {
       const context = await clobeCall(db, "get_my_context", {});
-      sendJson(res, 200, { companies: context.companies || [] });
+      const company = clobePickCompany(context.companies);
+      if (!company) {
+        sendJson(res, 404, { error: "이 클로브 계정에서 주식회사 우프컴퍼니를 찾지 못했습니다." });
+        return;
+      }
+      if (db.clobe.companyId !== company.companyId) {
+        db.clobe.companyId = company.companyId;
+        db.clobe.companyName = company.companyName;
+        await writeDb(db);
+      }
+      sendJson(res, 200, { companies: [company] });
     } catch (error) {
       sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
     }
@@ -3967,11 +3989,7 @@ async function routeApi(req, res, url) {
 
   if (pathname === "/api/clobe/settings" && method === "POST") {
     const body = await readBody(req);
-    if (body.companyId !== undefined) {
-      db.clobe.companyId = String(body.companyId || "");
-      db.clobe.companyName = String(body.companyName || "");
-      db.clobe.accountIds = [];
-    }
+    // companyId is deliberately not settable — it is pinned to 우프컴퍼니.
     if (body.accountIds !== undefined) {
       db.clobe.accountIds = (Array.isArray(body.accountIds) ? body.accountIds : []).map(Number).filter(Boolean);
     }

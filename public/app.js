@@ -527,9 +527,9 @@ function renderApp() {
     ["audits", "이력"],
     ["archive", "아카이브"],
     ["settlement", "정산"],
-    ["reconcile", "입금대사"],
+    ["reconcile", "클로브ai"],
     ["npb", "npb정산"]
-  ];
+  ].filter(([key]) => key !== "reconcile" || canUseClobe());
   app.innerHTML = `
     <div class="shell">
       <aside class="sidebar">
@@ -1399,7 +1399,7 @@ function renderRequestLineItemsSummary(items) {
   const totalSale = sum((item) => Number(item.totalSaleAmount || qty(item) * Number(item.unitSalePrice || 0)));
   const cell = (label, value) => `<span><b>${label}</b> ${value}</span>`;
   return `
-    <div class="line-items-summary">
+    <div class="line-items-summary" data-line-items-summary>
       ${cell("총 건수", `${money.format(totalCount)}건`)}
       ${cell("총 수량", `${money.format(totalQty)}개`)}
       ${cell("총 공급가", `${money.format(totalSupply)}원`)}
@@ -1442,7 +1442,7 @@ function renderRequestLineItems(items, promotionOptions = []) {
         </tbody>
       </table>
     </div>
-    ${renderRequestLineItemsSummary(items)}
+    <div data-line-items-summary-slot>${renderRequestLineItemsSummary(items)}</div>
   `;
 }
 
@@ -2207,6 +2207,11 @@ function bindRequests() {
         };
       });
       lineItemsInput.value = JSON.stringify(items);
+      // Refresh the totals row in place. The table itself is never re-rendered
+      // here — that would blow away focus and the IME buffer mid-typing — so
+      // the summary has to be updated separately or it silently goes stale.
+      const summarySlot = lineItemsTable.querySelector("[data-line-items-summary-slot]");
+      if (summarySlot) summarySlot.innerHTML = renderRequestLineItemsSummary(items);
       const item = items.find((x) => x.id === id);
       if (item) {
         const saleCell = lineItemsTable.querySelector(`[data-line-saletotal='${id}']`);
@@ -3523,6 +3528,8 @@ function priceAliasStatusLabel(item) {
 
 function renderSettlement() {
   const s = state.settlement;
+  // Operators cannot reach clobe, so they always settle from an uploaded file.
+  if (!canUseClobe()) s.useClobe = false;
   const ym = `${s.year}-${String(s.month).padStart(2, "0")}`;
   const brands = [...state.brands].sort((a, b) => a.name.localeCompare(b.name, "ko"));
   const brandOptions = brands
@@ -3541,8 +3548,10 @@ function renderSettlement() {
           <div><label>카페24 주문내역 (CSV)</label><input type="file" accept=".csv" data-settlement-cafe24>
             <span class="muted">${s.cafe24 ? h(s.cafe24.name) : "월 전체 공급사 포함 파일"}</span></div>
           <div><label>은행 거래내역</label>
-            <label class="check-row"><input type="checkbox" data-settlement-useclobe ${s.useClobe ? "checked" : ""}>
-              클로브ai에서 자동 조회 (파일 업로드 없이)</label>
+            ${canUseClobe()
+              ? `<label class="check-row"><input type="checkbox" data-settlement-useclobe ${s.useClobe ? "checked" : ""}>
+                  클로브ai에서 자동 조회 (파일 업로드 없이)</label>`
+              : ""}
             ${s.useClobe
               ? `<span class="muted">정산월 전후 범위를 자동 조회합니다. 계좌 범위는 입금대사 탭에서 설정합니다.</span>`
               : `<input type="file" accept=".xlsx" data-settlement-bank>
@@ -3931,12 +3940,21 @@ async function npbDownloadXlsx(key) {
 
 const CONFIDENCE_LABEL = { high: "확실", medium: "확인 권장", low: "직접 확인" };
 
+// Banking data — owner/manager only. The server enforces this on every
+// /api/clobe/* route; hiding the tab keeps operators from hitting a dead end.
+function canUseClobe() {
+  return state.admin?.role === "owner" || state.admin?.role === "manager";
+}
+
 function renderReconcile() {
   const c = state.clobe;
   const head = pageHead(
-    "입금대사",
+    "클로브ai",
     "클로브ai의 은행 입금내역과 미입금 요청을 대조합니다. 제안된 매칭을 확인 후 입금완료 처리하세요."
   );
+  if (!canUseClobe()) {
+    return `${head}<section class="panel"><div class="panel-body"><p class="muted">이 메뉴는 오너 또는 매니저만 사용할 수 있습니다.</p></div></section>`;
+  }
   if (c.loading || !c.status) {
     return `${head}<section class="panel"><div class="panel-body"><p class="muted">클로브 연동 상태를 불러오는 중…</p></div></section>`;
   }
@@ -3967,9 +3985,6 @@ function renderReconcileConnect() {
 function renderReconcileSettings() {
   const c = state.clobe;
   const status = c.status;
-  const companyOptions = (c.companies || [])
-    .map((item) => `<option value="${h(item.companyId)}" data-name="${h(item.companyName)}" ${status.companyId === item.companyId ? "selected" : ""}>${h(item.companyName)}</option>`)
-    .join("");
   const accountRows = (c.accounts || [])
     .map((account) => {
       const checked = status.accountIds.includes(Number(account.bankAccountId)) ? "checked" : "";
@@ -3988,7 +4003,8 @@ function renderReconcileSettings() {
         ${status.encryptedAtRest ? "" : `<p class="muted" style="color:var(--red)">CLOBE_TOKEN_SECRET 미설정 — 토큰이 암호화되지 않은 채 저장됩니다.</p>`}
         <div class="field two">
           <div><label>대사 대상 회사</label>
-            <select data-clobe-company><option value="">회사 선택</option>${companyOptions}</select></div>
+            <input type="text" readonly value="${h(status.companyName || "주식회사 우프컴퍼니")}">
+            <span class="muted">우프컴퍼니 법인으로 고정됩니다.</span></div>
           <div><label>입금예정일 허용 오차 (일)</label>
             <input type="number" min="0" max="60" data-clobe-window value="${Number(status.windowDays)}"></div>
         </div>
@@ -4099,14 +4115,6 @@ function bindReconcile() {
     state.clobe.result = null;
     state.clobe.companies = null;
     state.clobe.accounts = null;
-    renderApp();
-  });
-
-  app.querySelector("[data-clobe-company]")?.addEventListener("change", async (event) => {
-    const option = event.target.selectedOptions[0];
-    await saveClobeSettings({ companyId: event.target.value, companyName: option?.dataset.name || "" });
-    state.clobe.accounts = null;
-    await loadClobeStatus();
     renderApp();
   });
 
