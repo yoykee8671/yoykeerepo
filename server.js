@@ -2456,6 +2456,23 @@ function priceEntryWithBrand(db, entry) {
   };
 }
 
+// 목록을 한 번에 변환할 때 쓴다.
+//
+// 항목마다 priceEntryWithBrand 를 부르면 그 안에서 단가표 전체를 다시 훑고
+// 정렬한다 — 463개면 463번이고, 그 사이 이벤트 루프가 멈춰 동시에 처리 중인
+// 다른 응답까지 전부 대기한다. "최신" 판정과 브랜드 조회를 한 번만 만들어 쓴다.
+// 그룹 키에 brandId 가 들어 있어 전체 기준 최신 집합은 브랜드별 결과와 같다.
+function priceEntriesWithBrand(db, entries) {
+  const brandById = new Map((db.brands || []).map((brand) => [brand.id, brand]));
+  const latestIds = new Set(getLatestPriceCatalog(db).map((item) => item.id));
+  return entries.map((entry) => ({
+    ...entry,
+    ...normalizePriceFields(entry),
+    brandName: brandById.get(entry.brandId)?.name || "",
+    latest: latestIds.has(entry.id)
+  }));
+}
+
 function applyImportedPriceWorkbook(db, actor, brand, rows) {
   const nextDb = structuredClone(db);
   const result = { created: 0, updated: 0, revised: 0, deleted: 0, skipped: 0 };
@@ -3284,12 +3301,12 @@ async function routeApi(req, res, url) {
   }
 
   if (pathname === "/api/price-entries" && method === "GET") {
+    const sortedEntries = (db.priceEntries || [])
+      .slice()
+      .sort((a, b) => (b.effectiveFrom || "").localeCompare(a.effectiveFrom || "") || b.updatedAt.localeCompare(a.updatedAt));
     sendJson(res, 200, {
-      priceEntries: (db.priceEntries || [])
-        .slice()
-        .sort((a, b) => (b.effectiveFrom || "").localeCompare(a.effectiveFrom || "") || b.updatedAt.localeCompare(a.updatedAt))
-        .map((entry) => priceEntryWithBrand(db, entry)),
-      catalog: getLatestPriceCatalog(db).map((entry) => priceEntryWithBrand(db, entry))
+      priceEntries: priceEntriesWithBrand(db, sortedEntries),
+      catalog: priceEntriesWithBrand(db, getLatestPriceCatalog(db))
     });
     return;
   }
