@@ -25,7 +25,7 @@ const state = {
   brandFilterQ: "",
   selectedRequestIds: [],
   bulkPaidAt: new Date().toISOString().slice(0, 10),
-  settlement: { year: new Date().getFullYear(), month: new Date().getMonth() + 1, brandId: "", cafe24: null, bank: null, useClobe: true, result: null, running: false, comparing: false, compare: null },
+  settlement: { year: new Date().getFullYear(), month: new Date().getMonth() + 1, brandId: "", cafe24: null, bank: null, useClobe: true, useCafe24: true, result: null, running: false, comparing: false, compare: null },
   clobe: {
     status: null,
     loading: false,
@@ -3659,8 +3659,16 @@ function renderSettlement() {
           <div><label>공급사(브랜드)</label><select data-settlement-brand><option value="">브랜드 선택</option>${brandOptions}</select></div>
         </div>
         <div class="field two">
-          <div><label>카페24 주문내역 (CSV)</label><input type="file" accept=".csv" data-settlement-cafe24>
-            <span class="muted">${s.cafe24 ? h(s.cafe24.name) : "월 전체 공급사 포함 파일"}</span></div>
+          <div><label>카페24 주문내역</label>
+            ${canUseClobe()
+              ? `<label class="check-row"><input type="checkbox" data-settlement-usecafe24 ${s.useCafe24 ? "checked" : ""}>
+                  카페24에서 자동 조회 (파일 업로드 없이)</label>`
+              : ""}
+            ${s.useCafe24
+              ? `<span class="muted">정산월을 브랜드 기준일(주문일/배송완료일)로 조회합니다.</span>`
+              : `<input type="file" accept=".csv" data-settlement-cafe24>
+                 <span class="muted">${s.cafe24 ? h(s.cafe24.name) : "월 전체 공급사 포함 파일"}</span>`}
+          </div>
           <div><label>은행 거래내역</label>
             ${canUseClobe()
               ? `<label class="check-row"><input type="checkbox" data-settlement-useclobe ${s.useClobe ? "checked" : ""}>
@@ -3674,7 +3682,7 @@ function renderSettlement() {
         </div>
         <div class="toolbar">
           <button class="primary" data-settlement-run ${s.running ? "disabled" : ""}>${s.running ? "정산 중…" : "정산 시작"}</button>
-          ${canUseClobe() && s.cafe24
+          ${canUseClobe() && s.cafe24 && !s.useCafe24
             ? `<button data-settlement-compare ${s.comparing ? "disabled" : ""}>${s.comparing ? "대조 중…" : "카페24 API와 대조"}</button>`
             : ""}
           <span class="muted">입금요청 데이터는 시스템에서 자동 조회됩니다.</span>
@@ -3721,6 +3729,18 @@ function renderCafe24Compare(compare) {
   `;
 }
 
+// 주문 데이터의 출처를 결과에 남긴다. 자동조회로 바꾼 뒤 숫자가 달라 보이면
+// 어느 소스로 계산된 건지부터 확인할 수 있어야 한다.
+function orderSourceLabel(orderSource) {
+  if (!orderSource) return "";
+  if (orderSource.source === "cafe24") {
+    const r = orderSource.range;
+    const basis = r?.dateType === "shipend_date" ? "배송완료일" : "주문일";
+    return `주문내역: 카페24 API ${r ? `${r.startDate}~${r.endDate}` : ""} (${basis} 기준) · 주문 ${money.format(orderSource.orderCount || 0)}건 / ${money.format(orderSource.rowCount || 0)}행`;
+  }
+  return `주문내역: 업로드 CSV · ${money.format(orderSource.rowCount || 0)}행`;
+}
+
 function bankSourceLabel(bankSource) {
   if (!bankSource) return "";
   if (bankSource.source === "clobe") {
@@ -3763,7 +3783,7 @@ function renderSettlementResult(result) {
     <section class="panel">
       <div class="panel-head">
         <h2>정산 결과</h2>
-        <span class="muted">${bankSourceLabel(result.bankSource)}</span>
+        <span class="muted">${orderSourceLabel(result.orderSource)}${result.orderSource ? " · " : ""}${bankSourceLabel(result.bankSource)}</span>
       </div>
       <div class="panel-body">
         <div class="fixed-summary-grid">
@@ -3808,6 +3828,12 @@ function bindSettlement() {
     s.bank = file ? { name: file.name, base64: await readFileAsBase64(file) } : null;
     renderApp();
   });
+  app.querySelector("[data-settlement-usecafe24]")?.addEventListener("change", (e) => {
+    s.useCafe24 = e.target.checked;
+    if (s.useCafe24) s.cafe24 = null;
+    s.compare = null;
+    renderApp();
+  });
   app.querySelector("[data-settlement-useclobe]")?.addEventListener("change", (e) => {
     s.useClobe = e.target.checked;
     if (s.useClobe) s.bank = null;
@@ -3845,14 +3871,15 @@ function bindSettlement() {
 
   app.querySelector("[data-settlement-run]")?.addEventListener("click", async () => {
     if (!s.brandId) return showToast("브랜드를 선택하세요.", "error");
-    if (!s.cafe24) return showToast("카페24 CSV를 업로드하세요.", "error");
+    if (!s.useCafe24 && !s.cafe24) return showToast("카페24 CSV를 업로드하거나 자동 조회를 켜세요.", "error");
     s.running = true; renderApp();
     try {
       s.result = await api("/api/settlement/run", {
         method: "POST",
         body: {
           brandId: s.brandId, year: s.year, month: s.month,
-          cafe24Csv: s.cafe24.base64,
+          useCafe24: s.useCafe24,
+          cafe24Csv: s.useCafe24 ? "" : s.cafe24?.base64 || "",
           useClobe: s.useClobe,
           bankXlsx: s.useClobe ? "" : s.bank?.base64 || ""
         }
@@ -3885,7 +3912,8 @@ function bindSettlement() {
         credentials: "same-origin",
         body: JSON.stringify({
           brandId: s.brandId, year: s.year, month: s.month,
-          cafe24Csv: s.cafe24.base64,
+          useCafe24: s.useCafe24,
+          cafe24Csv: s.useCafe24 ? "" : s.cafe24?.base64 || "",
           useClobe: s.useClobe,
           bankXlsx: s.useClobe ? "" : s.bank?.base64 || "",
           ...(force ? { force: true } : {})
