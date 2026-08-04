@@ -13,6 +13,7 @@ import * as clobe from "./lib/clobe-mcp.mjs";
 import { reconcile } from "./lib/clobe-reconcile.mjs";
 import * as cafe24 from "./lib/cafe24-api.mjs";
 import { cafe24OrdersToRows, compareRows } from "./lib/cafe24-rows.mjs";
+import { buildRequestDrafts, findShippedAwaiting } from "./lib/cafe24-collect.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -1458,6 +1459,49 @@ function bankBrandMovements(bankRows, brand) {
 // Canonical(정가) price matcher for catalog-basis brands (예: 고공캣). Matches a
 // cafe24 product name against the brand's price catalog + aliases; the longest
 // matched text wins so "캣모나이트 리필 (3개입)" beats "캣모나이트".
+// 카페24 품목 행을 정산서 라인으로 펼친다.
+//
+// 합계는 입금요청 금액(실제로 지급한 금액)에 맞춰야 하므로 품목별 비중대로
+// 나눠 담고 잔돈은 가장 큰 라인에 얹는다. 그래야 총액과 품목 단위가 둘 다
+// 지켜진다 — 카페24 원금액을 그대로 쓰면 할인·쿠폰 처리 차이만큼 총액이 어긋난다.
+function explodeOrderRows(rowsOfOrder, billedTotal) {
+  const base = rowsOfOrder.map((row) => {
+    const quantity = Math.max(1, number(row["수량"], 1));
+    const unit = cafe24UnitPrice(row);
+    return {
+      orderItemCode: String(row["품목별 주문번호"] || "").trim(),
+      itemName: row["주문상품명(기본)"] || "",
+      quantity,
+      originalPrice: unit,
+      gross: Math.max(0, unit * quantity - number(row["상품별 추가할인금액"]))
+    };
+  });
+  if (!base.length) return [];
+  const grossTotal = base.reduce((sum, item) => sum + item.gross, 0);
+  const target = number(billedTotal);
+
+  let allocated = 0;
+  const scaled = base.map((item, index) => {
+    const share = grossTotal > 0 && target > 0
+      ? Math.round((item.gross / grossTotal) * target)
+      : (index === 0 ? target : 0);
+    allocated += share;
+    return { ...item, totalSaleAmount: share };
+  });
+  if (target > 0 && allocated !== target) {
+    const biggest = scaled.reduce((a, b) => (b.totalSaleAmount > a.totalSaleAmount ? b : a));
+    biggest.totalSaleAmount += target - allocated;
+  }
+  return scaled.map((item) => ({
+    orderItemCode: item.orderItemCode,
+    itemName: item.itemName,
+    quantity: item.quantity,
+    originalPrice: item.originalPrice,
+    unitSalePrice: Math.round(item.totalSaleAmount / item.quantity),
+    totalSaleAmount: item.totalSaleAmount
+  }));
+}
+
 function buildCanonPriceMatcher(db, brand) {
   const strip = (s) => String(s || "").toLowerCase().replace(/\s+/g, "");
   const entries = getLatestPriceCatalog(db, brand.id).map((entry) => ({
@@ -1708,16 +1752,11 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
         warnings.push(`부분배송 주문 ${orderNo}: 일부 품목만 배송완료 상태입니다 — 정산 포함 범위를 확인하세요.`);
       }
     }
-    // Build detail lines from wooofpay lineItems (billing truth). One order's
-    // shipping is charged once (attached to the first line).
+    // 정산서는 품목별 주문번호 단위로 한 줄씩 나와야 한다. 입금요청에 품목
+    // 내역이 없는 건(총액만 입력한 경우)은 예전처럼 카페24 품목으로 펼친다 —
+    // 한 줄로 접으면 서로 다른 상품이 수량만 합쳐진 채 사라진다.
     const items = sanitizeLineItems(req.lineItems);
-    const detail = items.length ? items : [{
-      itemName: rowsOfOrder[0]?.["주문상품명(기본)"] || "",
-      quantity: number(req.quantity) || 1,
-      unitSalePrice: wooofSales,
-      totalSaleAmount: wooofSales,
-      totalSupplyPrice: number(req.supplyAmount)
-    }];
+    const detail = items.length ? items : explodeOrderRows(rowsOfOrder, wooofSales);
     const orderShip = number(req.shippingFee);
     detail.forEach((it, idx) => {
       seq++;
@@ -1727,7 +1766,9 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
       const original = number(it.originalPrice) || unitSale; // 원판매가(정가)
       const discountRate = original > 0 ? Math.max(0, Number((1 - unitSale / original).toFixed(4))) : 0;
       lines.push({
-        itemNo: `${orderNo}-${String(idx + 1).padStart(2, "0")}`,
+        // 진짜 품목별 주문번호를 쓴다. 순번으로 지어내면 -02/-03 품목이 전부
+        // -01 로 찍혀 원본 주문과 대조가 안 된다.
+        itemNo: it.orderItemCode || `${orderNo}-${String(idx + 1).padStart(2, "0")}`,
         name: it.itemName || it.itemCode || "",
         qty: number(it.quantity) || 1,
         consumer: unitSale,
@@ -3042,6 +3083,79 @@ function clobePublicState(db) {
   };
 }
 
+// 초안을 브랜드 규칙으로 계산한다. 화면에서 만드는 입금요청과 같은 경로를
+// 쓰므로, 자동 수집분과 수기 입력분의 금액 산출이 갈리지 않는다.
+function priceDraft(db, draft) {
+  const brand = db.brands.find((item) => item.id === draft.brandId) || {};
+  const promotionContext = buildPromotionContext(db, brand, sanitizeLineItems(draft.lineItems), "");
+  const calc = calculateSettlement({ lineItems: draft.lineItems, _promotionContext: promotionContext }, brand);
+  return {
+    depositAmount: calc.depositAmount,
+    productSalesAmount: calc.productSalesAmount,
+    baseShippingFee: calc.baseShippingFee,
+    commissionRate: calc.commissionRate,
+    commissionAmount: calc.commissionAmount,
+    settlementType: calc.settlementType,
+    // 카페24가 청구한 배송비와 브랜드 규칙이 다르면 확인 단계에서 보여준다.
+    shippingMismatch: Math.abs(number(calc.baseShippingFee) - number(draft.cafe24ShippingFee)) > 1
+  };
+}
+
+function buildRequestFromDraft(db, brand, draft) {
+  const promotionContext = buildPromotionContext(db, brand, sanitizeLineItems(draft.lineItems), "");
+  const calc = calculateSettlement({ lineItems: draft.lineItems, _promotionContext: promotionContext }, brand);
+  return {
+    id: id("req"),
+    brandId: brand.id,
+    brandName: brand.name,
+    orderNo: String(draft.orderNo || "").trim(),
+    customerName: String(draft.customerName || "").trim(),
+    depositAmount: calc.depositAmount,
+    productSalesAmount: calc.productSalesAmount,
+    baseShippingFee: calc.baseShippingFee,
+    extraShippingFee: 0,
+    extraShippingNote: "",
+    shippingFee: calc.shippingFee,
+    promotionRuleId: calc.promotionRuleId,
+    promotionRuleName: calc.promotionRuleName,
+    appliedPromotionRules: calc.appliedPromotionRules,
+    commissionRate: calc.commissionRate,
+    commissionAmount: calc.commissionAmount,
+    supplyAmount: calc.supplyAmount,
+    receivableDeduction: calc.receivableDeduction,
+    settlementType: calc.settlementType,
+    lineItems: calc.lineItems,
+    expectedDepositDate: "",
+    cutoffNote: brand.cutoffNote || "",
+    sourceSheet: "카페24 자동수집",
+    sourceRow: 0,
+    requiredMemo: brand.requiredMemo || "",
+    businessName: brand.businessName || "",
+    businessNumber: brand.businessNumber || "",
+    depositorName: brand.depositorName || "",
+    // 출고후입금 브랜드는 송장이 찍히기 전까지 입금대기로 둔다.
+    status: brand.payAfterShipping === true ? "await_deposit" : "pending",
+    paidAmount: "",
+    paidAt: "",
+    notes: "",
+    quantity: (draft.lineItems || []).reduce((sum, line) => sum + number(line.quantity), 0),
+    priorPaidAmount: 0,
+    priorPaidNote: "",
+    cancelledAmount: 0,
+    cancelledReason: "",
+    cancelledNote: "",
+    overpaidAmount: 0,
+    overpaidReason: "",
+    overpaidNote: "",
+    creditUsedAmount: 0,
+    creditUsedNote: "",
+    source: "cafe24_auto",
+    cafe24ShippingFee: number(draft.cafe24ShippingFee),
+    createdAt: now(),
+    updatedAt: now()
+  };
+}
+
 // --- Cafe24 Admin API integration ---------------------------------------
 
 const cafe24PendingAuth = new Map();
@@ -4256,6 +4370,127 @@ async function routeApi(req, res, url) {
     } catch (error) {
       sendJson(res, 500, { error: `정산서 생성 실패: ${error.message}` });
     }
+    return;
+  }
+
+  // --- 반자동 파이프라인 ---------------------------------------------------
+  // 각 단계는 버튼 하나에 대응하고, 수집·확인은 미리보기만 하고 아무것도 쓰지
+  // 않는다. 실제 생성/전환은 사람이 확인한 뒤 apply 로만 일어난다.
+  if (pathname.startsWith("/api/pipeline/")) {
+    if (!canManageAdmins(actor)) {
+      sendJson(res, 403, { error: "파이프라인은 오너 또는 매니저만 사용할 수 있습니다." });
+      return;
+    }
+  }
+
+  // ① 수집 (미리보기) — 결제된 카페24 주문에서 만들어질 입금요청을 보여준다.
+  if (pathname === "/api/pipeline/collect" && method === "POST") {
+    const body = await readBody(req);
+    try {
+      const endDate = dateOnly(body.endDate) || now().slice(0, 10);
+      const startDate = dateOnly(body.startDate) ||
+        new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+      const accessToken = await cafe24AccessToken(db);
+      const orders = await cafe24.fetchOrders(accessToken, { startDate, endDate, dateType: "order_date" });
+      const result = buildRequestDrafts({
+        orders,
+        brands: db.brands,
+        existingRequests: db.requests
+      });
+      // 미리보기 단계에서 금액까지 계산해 보여준다. 확인 단계가 곧 검산이다.
+      const priced = result.drafts.map((draft) => ({
+        ...draft,
+        ...priceDraft(db, draft)
+      }));
+      db.cafe24.lastSyncAt = now();
+      await writeDb(db);
+      sendJson(res, 200, {
+        range: { startDate, endDate },
+        orderCount: orders.length,
+        drafts: priced,
+        skipped: result.skipped,
+        unmappedSuppliers: result.unmappedSuppliers
+      });
+    } catch (error) {
+      sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
+    }
+    return;
+  }
+
+  // ① 수집 (적용) — 확인한 초안만 실제 입금요청으로 만든다.
+  if (pathname === "/api/pipeline/collect/apply" && method === "POST") {
+    const body = await readBody(req);
+    const drafts = Array.isArray(body.drafts) ? body.drafts : [];
+    if (!drafts.length) {
+      sendJson(res, 400, { error: "생성할 요청을 선택하세요." });
+      return;
+    }
+    const created = [];
+    const skipped = [];
+    for (const draft of drafts) {
+      const brand = db.brands.find((item) => item.id === draft.brandId);
+      const orderNo = String(draft.orderNo || "").trim();
+      if (!brand || !orderNo) continue;
+      // 미리보기와 적용 사이에 누군가 만들었을 수 있다.
+      const exists = db.requests.some(
+        (item) => item.status !== "deleted" && String(item.orderNo || "").trim() === orderNo && item.brandId === brand.id
+      );
+      if (exists) {
+        skipped.push(orderNo);
+        continue;
+      }
+      const request = buildRequestFromDraft(db, brand, draft);
+      db.requests.unshift(request);
+      addAudit(db, actor, "create", "request", request.id,
+        `${request.orderNo} 입금요청 자동수집 (${brand.name})`, null, request);
+      created.push(request);
+    }
+    if (created.length) await writeDb(db);
+    sendJson(res, 200, { created, createdCount: created.length, skipped });
+    return;
+  }
+
+  // ⑤ 출고 감지 — 출고후입금 브랜드의 입금대기 건 중 송장이 찍힌 것을 찾는다.
+  if (pathname === "/api/pipeline/shipped" && method === "POST") {
+    const body = await readBody(req);
+    try {
+      const endDate = dateOnly(body.endDate) || now().slice(0, 10);
+      const startDate = dateOnly(body.startDate) ||
+        new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+      const accessToken = await cafe24AccessToken(db);
+      const orders = await cafe24.fetchOrders(accessToken, { startDate, endDate, dateType: "order_date" });
+      const found = findShippedAwaiting({ orders, requests: db.requests, brands: db.brands });
+      sendJson(res, 200, {
+        range: { startDate, endDate },
+        items: found.map(({ request, brand, trackingNo }) => ({
+          requestId: request.id,
+          orderNo: request.orderNo,
+          brandName: brand?.name || request.brandName,
+          amount: finalDepositAmount(request),
+          trackingNo
+        }))
+      });
+    } catch (error) {
+      sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
+    }
+    return;
+  }
+
+  // ⑤ 출고 감지 (적용) — 입금대기 → 입금요청.
+  if (pathname === "/api/pipeline/shipped/apply" && method === "POST") {
+    const body = await readBody(req);
+    const ids = Array.isArray(body.requestIds) ? body.requestIds : [];
+    const updated = [];
+    for (const request of db.requests.filter((item) => ids.includes(item.id) && item.status === "await_deposit")) {
+      const before = { ...request };
+      request.status = "pending";
+      request.updatedAt = now();
+      addAudit(db, actor, "update", "request", request.id,
+        `${request.orderNo} 출고 확인 — 입금대기에서 입금요청으로`, before, request);
+      updated.push(request);
+    }
+    if (updated.length) await writeDb(db);
+    sendJson(res, 200, { updated, updatedCount: updated.length });
     return;
   }
 
