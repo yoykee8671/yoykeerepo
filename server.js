@@ -9,6 +9,8 @@ import { promisify } from "node:util";
 import os from "node:os";
 import { gzipSync } from "node:zlib";
 import pg from "pg";
+import * as clobe from "./lib/clobe-mcp.mjs";
+import { reconcile } from "./lib/clobe-reconcile.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -740,7 +742,8 @@ function buildInitialDb() {
     ],
     archiveHistory: [],
     paymentLogs: [],
-    npb: buildNpbNamespace()
+    npb: buildNpbNamespace(),
+    clobe: buildClobeNamespace()
   };
 }
 
@@ -887,7 +890,34 @@ function migrateDb(db) {
     const npbSeed = buildNpbNamespace();
     for (const key of Object.keys(npbSeed)) touch(db.npb, key, npbSeed[key]);
   }
+
+  // Clobe (클로브ai) connection state. Tokens live here rather than in env
+  // because they are issued per-user at runtime and rotate on refresh.
+  if (!db.clobe || typeof db.clobe !== "object") {
+    db.clobe = buildClobeNamespace();
+    changed = true;
+  } else {
+    const clobeSeed = buildClobeNamespace();
+    for (const key of Object.keys(clobeSeed)) touch(db.clobe, key, clobeSeed[key]);
+  }
   return { db, changed };
+}
+
+function buildClobeNamespace() {
+  return {
+    clientId: "",
+    redirectUri: "",
+    accessToken: "",
+    refreshToken: "",
+    expiresAt: "",
+    companyId: "",
+    companyName: "",
+    accountIds: [],
+    windowDays: 7,
+    connectedBy: "",
+    connectedAt: "",
+    lastSyncAt: ""
+  };
 }
 
 let cachedDb = null;
@@ -2577,6 +2607,99 @@ function contentDisposition(filename) {
   return `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`;
 }
 
+// --- Clobe (클로브ai) MCP integration -------------------------------------
+
+// In-flight authorization attempts. Deliberately not persisted: a PKCE verifier
+// is single-use and short-lived, and a server restart mid-login should just
+// make the user click connect again rather than leave a usable secret on disk.
+const clobePendingAuth = new Map();
+const CLOBE_AUTH_TTL_MS = 10 * 60 * 1000;
+
+function clobeRedirectUri(req) {
+  const configured = String(process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
+  if (configured) return `${configured}/api/clobe/callback`;
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const host = req.headers["x-forwarded-host"] || req.headers.host || `localhost:${PORT}`;
+  const proto = forwardedProto || (/^localhost|^127\.0\.0\.1/.test(String(host)) ? "http" : "https");
+  return `${proto}://${host}/api/clobe/callback`;
+}
+
+function clobeIsConnected(db) {
+  return Boolean(db.clobe?.refreshToken && db.clobe?.clientId);
+}
+
+// Returns a usable access token, refreshing and persisting when the stored one
+// is at or near expiry. clobe has no client_credentials grant, so if the
+// refresh token itself is rejected the only fix is a human re-login.
+async function clobeAccessToken(db) {
+  const state = db.clobe;
+  if (!clobeIsConnected(db)) throw new Error("클로브가 연결되지 않았습니다. 먼저 연결하세요.");
+  const expiresAt = state.expiresAt ? new Date(state.expiresAt).getTime() : 0;
+  if (state.accessToken && expiresAt - Date.now() > 60000) {
+    return clobe.openSecret(state.accessToken);
+  }
+  let tokens;
+  try {
+    tokens = await clobe.refreshTokens({
+      clientId: state.clientId,
+      refreshToken: clobe.openSecret(state.refreshToken)
+    });
+  } catch (error) {
+    const failure = new Error(`클로브 재인증이 필요합니다: ${error.message}`);
+    failure.needsReauth = true;
+    throw failure;
+  }
+  state.accessToken = clobe.sealSecret(tokens.accessToken);
+  if (tokens.refreshToken) state.refreshToken = clobe.sealSecret(tokens.refreshToken);
+  state.expiresAt = tokens.expiresAt;
+  await writeDb(db);
+  return tokens.accessToken;
+}
+
+async function clobeCall(db, tool, input) {
+  const accessToken = await clobeAccessToken(db);
+  return clobe.callTool(accessToken, tool, input);
+}
+
+// Pulls every incoming bank transaction in the range, following the keyset
+// cursor. Capped so a wide date range can't spin forever.
+async function clobeFetchDeposits(db, { startDate, endDate }) {
+  if (!clobeIsConnected(db)) throw new Error("클로브가 연결되지 않았습니다. 먼저 연결하세요.");
+  const companyId = db.clobe.companyId;
+  if (!companyId) throw new Error("대사 대상 회사를 먼저 선택하세요.");
+  const collected = [];
+  let cursor = null;
+  for (let page = 0; page < 20; page += 1) {
+    const payload = await clobeCall(db, "get_labeled_transactions", {
+      companyId,
+      direction: "IN",
+      startDate,
+      endDate,
+      size: 100,
+      ...(cursor ? { cursor } : {})
+    });
+    collected.push(...(payload.content || []));
+    if (!payload.hasNext || !payload.nextCursor) break;
+    cursor = payload.nextCursor;
+  }
+  return collected;
+}
+
+function clobePublicState(db) {
+  const state = db.clobe || {};
+  return {
+    connected: clobeIsConnected(db),
+    companyId: state.companyId || "",
+    companyName: state.companyName || "",
+    accountIds: state.accountIds || [],
+    windowDays: Number(state.windowDays || 7),
+    connectedBy: state.connectedBy || "",
+    connectedAt: state.connectedAt || "",
+    lastSyncAt: state.lastSyncAt || "",
+    encryptedAtRest: clobe.tokenEncryptionEnabled()
+  };
+}
+
 async function routeApi(req, res, url) {
   const pathname = url.pathname;
   const method = req.method || "GET";
@@ -3657,6 +3780,199 @@ async function routeApi(req, res, url) {
         { "content-disposition": contentDisposition(`(우프) ${spec.supplierName}_${ym}.xlsx`) });
     } catch (error) {
       sendJson(res, 500, { error: `정산서 생성 실패: ${error.message}` });
+    }
+    return;
+  }
+
+  // --- Clobe (클로브ai) 입금대사 endpoints ---------------------------------
+  // Banking data and a long-lived delegated credential — owner/manager only.
+  if (pathname.startsWith("/api/clobe/")) {
+    if (!canManageAdmins(actor)) {
+      sendJson(res, 403, { error: "클로브 연동은 오너 또는 매니저만 사용할 수 있습니다." });
+      return;
+    }
+    if (!db.clobe || typeof db.clobe !== "object") db.clobe = buildClobeNamespace();
+  }
+
+  if (pathname === "/api/clobe/status" && method === "GET") {
+    sendJson(res, 200, clobePublicState(db));
+    return;
+  }
+
+  if (pathname === "/api/clobe/connect" && method === "POST") {
+    try {
+      const redirectUri = clobeRedirectUri(req);
+      // The client_id is bound to its redirect URI at registration, so a moved
+      // deployment needs a fresh registration rather than a reused one.
+      if (!db.clobe.clientId || db.clobe.redirectUri !== redirectUri) {
+        const registration = await clobe.registerClient(redirectUri);
+        db.clobe.clientId = registration.clientId;
+        db.clobe.redirectUri = redirectUri;
+        await writeDb(db);
+      }
+      const { verifier, challenge } = clobe.createPkcePair();
+      const state = crypto.randomBytes(24).toString("hex");
+      clobePendingAuth.set(state, { verifier, redirectUri, actorId: actor.id, createdAt: Date.now() });
+      for (const [key, value] of clobePendingAuth) {
+        if (Date.now() - value.createdAt > CLOBE_AUTH_TTL_MS) clobePendingAuth.delete(key);
+      }
+      const authorizeUrl = await clobe.buildAuthorizeUrl({
+        clientId: db.clobe.clientId,
+        redirectUri,
+        challenge,
+        state
+      });
+      sendJson(res, 200, { authorizeUrl });
+    } catch (error) {
+      sendJson(res, 502, { error: `클로브 연결 준비 실패: ${error.message}` });
+    }
+    return;
+  }
+
+  if (pathname === "/api/clobe/callback" && method === "GET") {
+    const code = url.searchParams.get("code") || "";
+    const state = url.searchParams.get("state") || "";
+    const pending = clobePendingAuth.get(state);
+    clobePendingAuth.delete(state);
+    const fail = (reason) => {
+      res.writeHead(302, { location: `/?clobe=error&reason=${encodeURIComponent(reason)}` });
+      res.end();
+    };
+    if (url.searchParams.get("error")) return void fail(url.searchParams.get("error"));
+    if (!code || !pending) return void fail("인증 요청이 만료되었습니다. 다시 시도하세요.");
+    if (Date.now() - pending.createdAt > CLOBE_AUTH_TTL_MS) return void fail("인증 요청이 만료되었습니다.");
+    if (pending.actorId !== actor.id) return void fail("인증을 시작한 계정과 다릅니다.");
+    try {
+      const tokens = await clobe.exchangeCode({
+        clientId: db.clobe.clientId,
+        redirectUri: pending.redirectUri,
+        code,
+        verifier: pending.verifier
+      });
+      db.clobe.accessToken = clobe.sealSecret(tokens.accessToken);
+      db.clobe.refreshToken = clobe.sealSecret(tokens.refreshToken);
+      db.clobe.expiresAt = tokens.expiresAt;
+      db.clobe.connectedBy = actor.name || actor.email || "";
+      db.clobe.connectedAt = now();
+
+      // Auto-select when the account has exactly one company; otherwise the
+      // operator picks in the UI.
+      const context = await clobe.callTool(tokens.accessToken, "get_my_context", {});
+      const companies = context.companies || [];
+      if (companies.length === 1) {
+        db.clobe.companyId = companies[0].companyId;
+        db.clobe.companyName = companies[0].companyName;
+      }
+      addAudit(db, actor, "update", "clobe", "connection", "클로브 연동 연결", null, { companies: companies.length });
+      await writeDb(db);
+      res.writeHead(302, { location: "/?clobe=connected" });
+      res.end();
+    } catch (error) {
+      fail(error.message);
+    }
+    return;
+  }
+
+  if (pathname === "/api/clobe/disconnect" && method === "POST") {
+    addAudit(db, actor, "delete", "clobe", "connection", "클로브 연동 해제", clobePublicState(db), null);
+    db.clobe = buildClobeNamespace();
+    await writeDb(db);
+    sendJson(res, 200, clobePublicState(db));
+    return;
+  }
+
+  if (pathname === "/api/clobe/companies" && method === "GET") {
+    try {
+      const context = await clobeCall(db, "get_my_context", {});
+      sendJson(res, 200, { companies: context.companies || [] });
+    } catch (error) {
+      sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
+    }
+    return;
+  }
+
+  if (pathname === "/api/clobe/accounts" && method === "GET") {
+    try {
+      const [accounts, scraping] = await Promise.all([
+        clobeCall(db, "get_bank_accounts", { companyId: db.clobe.companyId }),
+        clobeCall(db, "get_scraping_status", { companyId: db.clobe.companyId }).catch(() => null)
+      ]);
+      sendJson(res, 200, { accounts: accounts.accounts || [], scraping });
+    } catch (error) {
+      sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
+    }
+    return;
+  }
+
+  if (pathname === "/api/clobe/settings" && method === "POST") {
+    const body = await readBody(req);
+    if (body.companyId !== undefined) {
+      db.clobe.companyId = String(body.companyId || "");
+      db.clobe.companyName = String(body.companyName || "");
+      db.clobe.accountIds = [];
+    }
+    if (body.accountIds !== undefined) {
+      db.clobe.accountIds = (Array.isArray(body.accountIds) ? body.accountIds : []).map(Number).filter(Boolean);
+    }
+    if (body.windowDays !== undefined) {
+      db.clobe.windowDays = Math.min(60, Math.max(0, Number(body.windowDays) || 0));
+    }
+    await writeDb(db);
+    sendJson(res, 200, clobePublicState(db));
+    return;
+  }
+
+  if (pathname === "/api/clobe/reconcile" && method === "POST") {
+    const body = await readBody(req);
+    const startDate = String(body.startDate || "").trim();
+    const endDate = String(body.endDate || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+      sendJson(res, 400, { error: "조회 시작일과 종료일을 yyyy-MM-dd 형식으로 지정하세요." });
+      return;
+    }
+    try {
+      const transactions = await clobeFetchDeposits(db, { startDate, endDate });
+      const unpaid = db.requests
+        .filter((item) => item.status !== "paid" && item.status !== "deleted")
+        .map((item) => ({
+          id: item.id,
+          orderNo: item.orderNo,
+          brandId: item.brandId,
+          brandName: item.brandName,
+          customerName: item.customerName,
+          depositorName: item.depositorName,
+          status: item.status,
+          expectedAmount: finalDepositAmount(item),
+          expectedDepositDate: item.expectedDepositDate,
+          createdAt: item.createdAt
+        }));
+      const result = reconcile({
+        requests: unpaid,
+        transactions,
+        options: { windowDays: Number(db.clobe.windowDays || 7), accountIds: db.clobe.accountIds }
+      });
+      db.clobe.lastSyncAt = now();
+      await writeDb(db);
+      sendJson(res, 200, { ...result, range: { startDate, endDate } });
+    } catch (error) {
+      sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
+    }
+    return;
+  }
+
+  if (pathname === "/api/clobe/tax-invoices" && method === "GET") {
+    try {
+      const payload = await clobeCall(db, "get_tax_invoices", {
+        companyId: db.clobe.companyId,
+        startDate: url.searchParams.get("startDate") || "",
+        endDate: url.searchParams.get("endDate") || "",
+        ...(url.searchParams.get("type") ? { type: url.searchParams.get("type") } : {}),
+        ...(url.searchParams.get("q") ? { searchParam: url.searchParams.get("q") } : {}),
+        size: 100
+      });
+      sendJson(res, 200, payload);
+    } catch (error) {
+      sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
     }
     return;
   }

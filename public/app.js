@@ -26,6 +26,18 @@ const state = {
   selectedRequestIds: [],
   bulkPaidAt: new Date().toISOString().slice(0, 10),
   settlement: { year: new Date().getFullYear(), month: new Date().getMonth() + 1, brandId: "", cafe24: null, bank: null, result: null, running: false },
+  clobe: {
+    status: null,
+    loading: false,
+    running: false,
+    companies: null,
+    accounts: null,
+    result: null,
+    error: "",
+    confirming: "",
+    startDate: new Date(Date.now() - 13 * 86400000).toISOString().slice(0, 10),
+    endDate: new Date().toISOString().slice(0, 10)
+  },
   npb: {
     screen: "list",
     loaded: false,
@@ -380,6 +392,18 @@ async function init() {
     state.editingBrand = state.brands.find((item) => item.id === popupBrandId) || null;
     state.editingPromotionRule = null;
   }
+  // Landing back from the clobe OAuth redirect. Strip the query so a reload
+  // doesn't replay the toast.
+  const clobeResult = new URLSearchParams(location.search).get("clobe");
+  if (clobeResult) {
+    state.tab = "reconcile";
+    const reason = new URLSearchParams(location.search).get("reason") || "";
+    history.replaceState(null, "", location.pathname);
+    renderApp();
+    if (clobeResult === "connected") showToast("클로브ai가 연결되었습니다.");
+    else showToast(reason ? `클로브 연결 실패: ${reason}` : "클로브 연결에 실패했습니다.", "error");
+    return;
+  }
   renderApp();
 }
 
@@ -503,6 +527,7 @@ function renderApp() {
     ["audits", "이력"],
     ["archive", "아카이브"],
     ["settlement", "정산"],
+    ["reconcile", "입금대사"],
     ["npb", "npb정산"]
   ];
   app.innerHTML = `
@@ -626,6 +651,7 @@ function renderCurrentTab() {
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
   if (state.tab === "settlement") return renderSettlement();
+  if (state.tab === "reconcile") return renderReconcile();
   if (state.tab === "npb") return renderNpb();
   return renderDashboard();
 }
@@ -1855,6 +1881,7 @@ function bindCurrentTab() {
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
   if (state.tab === "settlement") bindSettlement();
+  if (state.tab === "reconcile") bindReconcile();
   if (state.tab === "npb") bindNpb();
 }
 
@@ -3861,6 +3888,288 @@ async function npbDownloadXlsx(key) {
     showToast("정산서를 다운로드했습니다.");
   } catch (error) {
     showToast(error.message || "다운로드 실패", "error");
+  }
+}
+
+// --- 입금대사 (클로브ai 연동) ---------------------------------------------
+
+const CONFIDENCE_LABEL = { high: "확실", medium: "확인 권장", low: "직접 확인" };
+
+function renderReconcile() {
+  const c = state.clobe;
+  const head = pageHead(
+    "입금대사",
+    "클로브ai의 은행 입금내역과 미입금 요청을 대조합니다. 제안된 매칭을 확인 후 입금완료 처리하세요."
+  );
+  if (c.loading || !c.status) {
+    return `${head}<section class="panel"><div class="panel-body"><p class="muted">클로브 연동 상태를 불러오는 중…</p></div></section>`;
+  }
+  if (!c.status.connected) return `${head}${renderReconcileConnect()}`;
+  return `
+    ${head}
+    ${renderReconcileSettings()}
+    ${c.error ? `<section class="panel"><div class="panel-body"><p style="color:var(--red)">${h(c.error)}</p></div></section>` : ""}
+    ${renderReconcileResult(c.result)}
+  `;
+}
+
+function renderReconcileConnect() {
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>클로브ai 연결</h2></div>
+      <div class="panel-body">
+        <p class="muted">
+          연결하면 클로브에 등록된 회사 계좌의 입금내역을 읽어와 미입금 요청과 자동 대조합니다.
+          WooofPay는 <strong>읽기 전용</strong> 도구만 호출하며, 장부·전표를 수정하지 않습니다.
+        </p>
+        <div class="toolbar"><button class="primary" data-clobe-connect>클로브ai 연결하기</button></div>
+      </div>
+    </section>
+  `;
+}
+
+function renderReconcileSettings() {
+  const c = state.clobe;
+  const status = c.status;
+  const companyOptions = (c.companies || [])
+    .map((item) => `<option value="${h(item.companyId)}" data-name="${h(item.companyName)}" ${status.companyId === item.companyId ? "selected" : ""}>${h(item.companyName)}</option>`)
+    .join("");
+  const accountRows = (c.accounts || [])
+    .map((account) => {
+      const checked = status.accountIds.includes(Number(account.bankAccountId)) ? "checked" : "";
+      const alias = account.aliasName ? ` · ${h(account.aliasName)}` : "";
+      return `<label class="check-row"><input type="checkbox" data-clobe-account value="${account.bankAccountId}" ${checked}>
+        ${h(account.displayAccountNumber)} · ${h(account.accountName)}${alias}</label>`;
+    })
+    .join("");
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <h2>연동 상태</h2>
+        <span class="muted">${h(status.companyName || "회사 미선택")}${status.connectedBy ? ` · ${h(status.connectedBy)} 연결` : ""}</span>
+      </div>
+      <div class="panel-body">
+        ${status.encryptedAtRest ? "" : `<p class="muted" style="color:var(--red)">CLOBE_TOKEN_SECRET 미설정 — 토큰이 암호화되지 않은 채 저장됩니다.</p>`}
+        <div class="field two">
+          <div><label>대사 대상 회사</label>
+            <select data-clobe-company><option value="">회사 선택</option>${companyOptions}</select></div>
+          <div><label>입금예정일 허용 오차 (일)</label>
+            <input type="number" min="0" max="60" data-clobe-window value="${Number(status.windowDays)}"></div>
+        </div>
+        ${accountRows ? `<div class="field"><label>대사에 포함할 계좌 (미선택 시 전체)</label><div class="check-grid">${accountRows}</div></div>` : ""}
+        <div class="field two">
+          <div><label>조회 시작일</label><input type="date" data-clobe-start value="${h(state.clobe.startDate)}"></div>
+          <div><label>조회 종료일</label><input type="date" data-clobe-end value="${h(state.clobe.endDate)}"></div>
+        </div>
+        <div class="toolbar">
+          <button class="primary" data-clobe-run ${state.clobe.running ? "disabled" : ""}>${state.clobe.running ? "대조 중…" : "입금내역 대조"}</button>
+          <button class="ghost" data-clobe-disconnect>연결 해제</button>
+          <span class="muted">${status.lastSyncAt ? `마지막 대조 ${h(status.lastSyncAt.slice(0, 16).replace("T", " "))}` : "아직 대조하지 않았습니다."}</span>
+        </div>
+        <p class="muted">클로브 은행데이터는 실시간이 아니라 마지막 수집 시점 기준입니다. 최신화는 app.clobe.ai 에서 직접 실행하세요.</p>
+      </div>
+    </section>
+  `;
+}
+
+function renderReconcileResult(result) {
+  if (!result) return "";
+  const summary = result.summary || {};
+  const matchRows = (result.matches || [])
+    .map((match, index) => {
+      const orders = match.requests
+        .map((request) => `${h(request.brandName || "-")} · ${h(request.orderNo)} · ${money.format(Number(request.expectedAmount || 0))}원`)
+        .join("<br>");
+      const busy = state.clobe.confirming === String(index);
+      return `
+        <tr>
+          <td><span class="badge clobe-${match.confidence}">${CONFIDENCE_LABEL[match.confidence] || match.confidence}</span></td>
+          <td>${h((match.transaction.transactionAt || "").slice(0, 16).replace("T", " "))}<br>
+            <span class="muted">${h(match.transaction.transactionName || "")}</span></td>
+          <td class="num"><strong>${money.format(match.amount)}원</strong><br>
+            <span class="muted">${match.kind === "many_to_one" ? `${match.requests.length}건 합산` : "1:1"}</span></td>
+          <td>${orders}</td>
+          <td><span class="muted">${match.reasons.map((reason) => h(reason)).join(" · ")}</span></td>
+          <td><button class="primary" data-clobe-confirm="${index}" ${busy ? "disabled" : ""}>${busy ? "처리 중…" : "입금완료"}</button></td>
+        </tr>`;
+    })
+    .join("");
+
+  const unmatchedDeposits = (result.unmatchedDeposits || [])
+    .map((tx) => `<tr>
+      <td>${h((tx.transactionAt || "").slice(0, 16).replace("T", " "))}</td>
+      <td>${h(tx.transactionName || "")}</td>
+      <td class="num">${money.format(Math.round(Number(tx.inAmount || 0)))}원</td>
+      <td><span class="muted">${h(tx.category || "")}</span></td>
+    </tr>`)
+    .join("");
+
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <h2>대조 결과</h2>
+        <span class="muted">입금 ${summary.depositCount || 0}건 · 미입금 요청 ${summary.requestCount || 0}건 ·
+          매칭 ${summary.matchedCount || 0}건(요청 ${summary.matchedRequestCount || 0}건) · 확실 ${summary.highConfidenceCount || 0}건</span>
+      </div>
+      <div class="panel-body">
+        ${matchRows
+          ? `<div class="table-wrap"><table><thead><tr>
+              <th>신뢰도</th><th>입금</th><th>금액</th><th>대응 요청</th><th>근거</th><th></th>
+            </tr></thead><tbody>${matchRows}</tbody></table></div>`
+          : `<p class="muted">매칭된 입금이 없습니다. 기간이나 계좌 설정을 확인하세요.</p>`}
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>미매칭 입금 ${(result.unmatchedDeposits || []).length}건</h2>
+        <span class="muted">요청과 짝이 없는 입금 — 수동 확인이 필요합니다.</span>
+      </div>
+      <div class="panel-body">
+        ${unmatchedDeposits
+          ? `<div class="table-wrap"><table><thead><tr><th>일시</th><th>입금자</th><th>금액</th><th>분류</th></tr></thead>
+             <tbody>${unmatchedDeposits}</tbody></table></div>`
+          : `<p class="muted">미매칭 입금이 없습니다.</p>`}
+      </div>
+    </section>
+  `;
+}
+
+function bindReconcile() {
+  const c = state.clobe;
+  if (!c.status && !c.loading) {
+    c.loading = true;
+    loadClobeStatus().finally(() => {
+      c.loading = false;
+      renderApp();
+    });
+    return;
+  }
+
+  app.querySelector("[data-clobe-connect]")?.addEventListener("click", async () => {
+    try {
+      const { authorizeUrl } = await api("/api/clobe/connect", { method: "POST" });
+      // Full-page navigation, not a popup: the OAuth callback needs to land
+      // back on this origin with the session cookie attached.
+      window.location.href = authorizeUrl;
+    } catch (error) {
+      showToast(error.message || "클로브 연결 준비 실패", "error");
+    }
+  });
+
+  app.querySelector("[data-clobe-disconnect]")?.addEventListener("click", async () => {
+    if (!confirm("클로브 연결을 해제할까요? 저장된 토큰이 삭제됩니다.")) return;
+    await api("/api/clobe/disconnect", { method: "POST" });
+    state.clobe.status = null;
+    state.clobe.result = null;
+    state.clobe.companies = null;
+    state.clobe.accounts = null;
+    renderApp();
+  });
+
+  app.querySelector("[data-clobe-company]")?.addEventListener("change", async (event) => {
+    const option = event.target.selectedOptions[0];
+    await saveClobeSettings({ companyId: event.target.value, companyName: option?.dataset.name || "" });
+    state.clobe.accounts = null;
+    await loadClobeStatus();
+    renderApp();
+  });
+
+  app.querySelector("[data-clobe-window]")?.addEventListener("change", async (event) => {
+    await saveClobeSettings({ windowDays: Number(event.target.value) });
+  });
+
+  app.querySelectorAll("[data-clobe-account]").forEach((box) => {
+    box.addEventListener("change", async () => {
+      const accountIds = Array.from(app.querySelectorAll("[data-clobe-account]"))
+        .filter((item) => item.checked)
+        .map((item) => Number(item.value));
+      await saveClobeSettings({ accountIds });
+    });
+  });
+
+  app.querySelector("[data-clobe-start]")?.addEventListener("change", (event) => {
+    state.clobe.startDate = event.target.value;
+  });
+  app.querySelector("[data-clobe-end]")?.addEventListener("change", (event) => {
+    state.clobe.endDate = event.target.value;
+  });
+
+  app.querySelector("[data-clobe-run]")?.addEventListener("click", async () => {
+    if (!state.clobe.status?.companyId) return showToast("대사 대상 회사를 먼저 선택하세요.", "error");
+    state.clobe.running = true;
+    state.clobe.error = "";
+    renderApp();
+    try {
+      state.clobe.result = await api("/api/clobe/reconcile", {
+        method: "POST",
+        body: { startDate: state.clobe.startDate, endDate: state.clobe.endDate }
+      });
+      await loadClobeStatus();
+      const matched = state.clobe.result.summary?.matchedCount || 0;
+      showToast(matched ? `${matched}건의 입금을 매칭했습니다.` : "매칭된 입금이 없습니다.");
+    } catch (error) {
+      state.clobe.error = error.message || "대조에 실패했습니다.";
+      showToast(state.clobe.error, "error");
+    } finally {
+      state.clobe.running = false;
+      renderApp();
+    }
+  });
+
+  app.querySelectorAll("[data-clobe-confirm]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const index = button.dataset.clobeConfirm;
+      const match = state.clobe.result?.matches?.[Number(index)];
+      if (!match) return;
+      const orders = match.requests.map((request) => request.orderNo).join(", ");
+      if (!confirm(`${money.format(match.amount)}원 입금을 다음 요청에 입금완료 처리할까요?\n${orders}`)) return;
+      state.clobe.confirming = String(index);
+      renderApp();
+      try {
+        // paidAmount is intentionally omitted so each request keeps its own
+        // amount — mark-paid falls back to the request's depositAmount, which
+        // is what an N:1 lump deposit needs.
+        await api("/api/requests/mark-paid", {
+          method: "POST",
+          body: {
+            requestIds: match.requests.map((request) => request.id),
+            paidAt: match.transaction.transactionAt || state.clobe.endDate
+          }
+        });
+        state.clobe.result.matches.splice(Number(index), 1);
+        await loadAll();
+        showToast(`${match.requests.length}건 입금완료 처리했습니다.`);
+      } catch (error) {
+        showToast(error.message || "입금완료 처리 실패", "error");
+      } finally {
+        state.clobe.confirming = "";
+        renderApp();
+      }
+    });
+  });
+}
+
+async function loadClobeStatus() {
+  const status = await api("/api/clobe/status");
+  state.clobe.status = status;
+  if (!status.connected) return;
+  try {
+    if (!state.clobe.companies) {
+      state.clobe.companies = (await api("/api/clobe/companies")).companies || [];
+    }
+    if (status.companyId && !state.clobe.accounts) {
+      state.clobe.accounts = (await api("/api/clobe/accounts")).accounts || [];
+    }
+  } catch (error) {
+    state.clobe.error = error.message || "클로브 데이터를 불러오지 못했습니다.";
+  }
+}
+
+async function saveClobeSettings(patch) {
+  try {
+    state.clobe.status = await api("/api/clobe/settings", { method: "POST", body: patch });
+  } catch (error) {
+    showToast(error.message || "설정 저장 실패", "error");
   }
 }
 

@@ -1072,3 +1072,41 @@ input.num {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* 입금대사 (클로브ai) */
+.badge.clobe-high {
+  border-color: #137333;
+  background: #e6f4ea;
+  color: #137333;
+}
+
+.badge.clobe-medium {
+  border-color: #b26b00;
+  background: #fef7e0;
+  color: #b26b00;
+}
+
+.badge.clobe-low {
+  border-color: var(--red);
+  background: #fce8e6;
+  color: var(--red);
+}
+
+.check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 6px 16px;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.check-row input {
+  width: auto;
+  margin: 0;
+}
