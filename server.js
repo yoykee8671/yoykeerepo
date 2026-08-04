@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import os from "node:os";
-import { gzipSync } from "node:zlib";
+import { gzip as gzipCb } from "node:zlib";
 import pg from "pg";
 import * as clobe from "./lib/clobe-mcp.mjs";
 import { reconcile } from "./lib/clobe-reconcile.mjs";
@@ -1048,12 +1048,27 @@ function buildClobeNamespace() {
 }
 
 let cachedDb = null;
+// In-flight read shared by every caller. A page load fires ten API calls at
+// once; without this they each see an empty cache and each fetch and parse the
+// whole state blob — on a 0.5 vCPU instance those parses serialise and even a
+// 340-byte response waits behind them.
+let cachedDbPromise = null;
+
 async function readDb() {
   await ensureDb();
   if (pgPool) {
     if (cachedDb) return cachedDb;
-    cachedDb = await readPostgresDb();
-    return cachedDb;
+    if (!cachedDbPromise) {
+      cachedDbPromise = readPostgresDb()
+        .then((db) => {
+          cachedDb = db;
+          return db;
+        })
+        .finally(() => {
+          cachedDbPromise = null;
+        });
+    }
+    return cachedDbPromise;
   }
   return JSON.parse(await readFile(DB_PATH, "utf8"));
 }
@@ -1112,17 +1127,28 @@ function addAudit(db, actor, action, entityType, entityId, summary, before, afte
 // gzip-compress text responses when the client supports it; cuts transfer size
 // of large JSON payloads (request lists, audit logs) dramatically. Small bodies
 // are sent raw since compression overhead isn't worth it under ~1KB.
+const gzipAsync = promisify(gzipCb);
+
 function endMaybeGzip(res, status, headers, body) {
   const buffer = Buffer.isBuffer(body) ? body : Buffer.from(body);
   const accept = res.req?.headers?.["accept-encoding"] || "";
-  if (buffer.length >= 1024 && /\bgzip\b/.test(accept)) {
-    const zipped = gzipSync(buffer);
-    res.writeHead(status, { ...headers, "content-encoding": "gzip", vary: "accept-encoding" });
-    res.end(zipped);
+  if (buffer.length < 1024 || !/\bgzip\b/.test(accept)) {
+    res.writeHead(status, headers);
+    res.end(buffer);
     return;
   }
-  res.writeHead(status, headers);
-  res.end(buffer);
+  // Compress off the event loop. gzipSync blocks every other in-flight request
+  // for its duration, which is exactly the wrong thing when ten responses are
+  // being produced at once.
+  gzipAsync(buffer)
+    .then((zipped) => {
+      res.writeHead(status, { ...headers, "content-encoding": "gzip", vary: "accept-encoding" });
+      res.end(zipped);
+    })
+    .catch(() => {
+      res.writeHead(status, headers);
+      res.end(buffer);
+    });
 }
 
 function sendJson(res, status, data, headers = {}) {
@@ -4093,8 +4119,17 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // 감사로그는 전체가 2MB가 넘는다. 화면을 열 때마다 통째로 보내면 다른 응답까지
+  // 같이 느려지므로 기본은 최근 것만 준다.
   if (pathname === "/api/audits" && method === "GET") {
-    sendJson(res, 200, { auditLogs: db.auditLogs });
+    const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get("limit") || 200)));
+    const offset = Math.max(0, Number(url.searchParams.get("offset") || 0));
+    sendJson(res, 200, {
+      auditLogs: db.auditLogs.slice(offset, offset + limit),
+      total: db.auditLogs.length,
+      offset,
+      limit
+    });
     return;
   }
 
