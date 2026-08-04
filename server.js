@@ -263,6 +263,91 @@ function normalizeShippingPolicy(input = {}, current = {}) {
   };
 }
 
+// --- 브랜드 규칙 유효기간 (계약 변경 이력) --------------------------------
+//
+// 계약이 바뀌면(예: 릴리스키친 2026-08-01부터 수수료 20%→25%, 무료배송→4,000원)
+// 브랜드 필드를 덮어쓰는 것으로 끝내면 과거 정산이 새 규칙으로 계산돼 전부 오류가
+// 난다. 그래서 규칙은 버전으로 쌓고, 정산할 때 그 주문이 배송완료된 시점에
+// 유효했던 버전을 골라 쓴다.
+//
+// brand 최상위 필드는 "오늘 유효한 버전"의 사본으로 유지된다 — 신규 입금요청과
+// 기존 화면들이 그대로 동작하고, 미래 날짜로 예약해둔 변경이 당겨 적용되지 않는다.
+const BRAND_RULE_FIELDS = [
+  "commissionRate",
+  "shippingPolicyType",
+  "shippingFlatFee",
+  "shippingThresholdAmount",
+  "shippingThresholdFee",
+  "shippingThresholdBase",
+  "shippingRule"
+];
+
+// 이력이 없던 시절의 데이터를 덮기 위한 최초 버전의 시작일.
+const BRAND_RULE_EPOCH = "2000-01-01";
+
+function pickBrandRuleFields(source = {}) {
+  const rule = {};
+  for (const key of BRAND_RULE_FIELDS) rule[key] = source[key];
+  return rule;
+}
+
+// 기준일 정규화. dateOnly 는 정확히 yyyy-MM-dd 만 받아들이는데 now() 는 ISO
+// 타임스탬프를 주므로, 여기서 날짜 부분만 떼어낸다. 이걸 빠뜨리면 기준일이
+// 빈 문자열이 되어 어떤 버전도 매칭되지 않고 늘 최초 버전으로 떨어진다.
+function asOfDate(value) {
+  const text = String(value || "").trim();
+  const direct = dateOnly(text);
+  if (direct) return direct;
+  const head = text.slice(0, 10);
+  return dateOnly(head) || dateOnly(new Date().toISOString().slice(0, 10));
+}
+
+function buildBrandRule(source, validFrom, note = "") {
+  return {
+    id: id("brule"),
+    validFrom: validFrom ? asOfDate(validFrom) : BRAND_RULE_EPOCH,
+    ...pickBrandRuleFields(source),
+    note: String(note || ""),
+    createdAt: now()
+  };
+}
+
+// 정렬된 이력에서 asOf 시점에 유효한 버전을 고른다. asOf 가 최초 버전보다도
+// 이르면 최초 버전을 쓴다 — 그 이전 계약은 기록이 없으므로 가장 오래된 것이
+// 최선의 근사다.
+function brandRuleAt(brand, asOf) {
+  const history = Array.isArray(brand?.ruleHistory) ? brand.ruleHistory : [];
+  if (!history.length) return null;
+  const sorted = [...history].sort((a, b) => String(a.validFrom).localeCompare(String(b.validFrom)));
+  const target = asOfDate(asOf);
+  let chosen = null;
+  for (const rule of sorted) {
+    if (String(rule.validFrom) <= target) chosen = rule;
+  }
+  return chosen || sorted[0];
+}
+
+// asOf 시점 규칙이 반영된 브랜드 사본. 배송비 헬퍼들이 평범한 객체를 받으므로
+// 그대로 넘겨 쓸 수 있다.
+function effectiveBrand(brand, asOf) {
+  const rule = brandRuleAt(brand, asOf);
+  return rule ? { ...brand, ...pickBrandRuleFields(rule) } : brand;
+}
+
+// 최상위 규칙 필드를 "오늘 유효한 버전"으로 맞춘다.
+function syncBrandCurrentRules(brand) {
+  const rule = brandRuleAt(brand, now());
+  if (!rule) return false;
+  let changed = false;
+  for (const key of BRAND_RULE_FIELDS) {
+    if (brand[key] !== rule[key]) {
+      brand[key] = rule[key];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 // 배송비 임계 기준금액 선택: 기본은 제품매출, 브랜드 설정이 supply면 공급가 합계.
 function shippingThresholdBaseAmount(brand = {}, { salesAmount = 0, supplyAmount = 0 } = {}) {
   return brand.shippingThresholdBase === "supply" ? number(supplyAmount) : number(salesAmount);
@@ -632,9 +717,11 @@ function buildInitialDb() {
       requiredMemo: "",
       googleSheetUrl: "",
       shareToken: crypto.randomBytes(12).toString("hex"),
+      ruleHistory: [],
       createdAt,
       updatedAt: createdAt
     };
+    brand.ruleHistory = [buildBrandRule(brand, BRAND_RULE_EPOCH, "최초 등록 규칙")];
     brands.push(brand);
     brandByName.set(normalizeName(rawName), brand);
   }
@@ -819,6 +906,12 @@ function migrateDb(db) {
     touch(brand, "shippingThresholdFee", 0);
     touch(brand, "shippingThresholdBase", "sales");
     touch(brand, "shippingRule", "");
+    // 규칙 이력이 없는 기존 브랜드는 현재 규칙을 최초 버전으로 이관한다.
+    // 시작일을 EPOCH 로 두어 과거 정산이 지금과 동일하게 계산되도록 한다.
+    if (!Array.isArray(brand.ruleHistory) || !brand.ruleHistory.length) {
+      brand.ruleHistory = [buildBrandRule(brand, BRAND_RULE_EPOCH, "최초 등록 규칙 (자동 이관)")];
+      changed = true;
+    }
     if (!shippingPolicyTypes.has(brand.shippingPolicyType)) {
       brand.shippingPolicyType = "free";
       changed = true;
@@ -1192,6 +1285,14 @@ function cafe24RowMatchesBrand(row, brand) {
   return target === code || target === name;
 }
 
+// cafe24 날짜 컬럼은 "2026-06-15", "2026-06-15 13:20:00", "20260615" 등으로
+// 들쭉날쭉하다. 숫자만 뽑아 앞 8자리를 yyyy-MM-dd 로 되돌린다.
+function cafe24DateOnly(raw) {
+  const digits = String(raw || "").replace(/[^0-9]/g, "").slice(0, 8);
+  if (digits.length !== 8) return "";
+  return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`;
+}
+
 function cafe24RowIsCancelled(row) {
   return Boolean(
     String(row["환불완료일"] || "").trim() ||
@@ -1304,8 +1405,30 @@ function buildCanonPriceMatcher(db, brand) {
 function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   const monthPrefix = `${year}${String(month).padStart(2, "0")}`;
   const settlementType = brand.settlementType || "prepay_fee";
-  const rate = number(brand.commissionRate);
   const suppliers = distinctCafe24Suppliers(cafe24Rows);
+
+  // 계약 규칙은 주문이 배송완료된 시점 기준으로 고른다. 8월부터 수수료가 오른
+  // 브랜드의 7월 정산이 새 요율로 계산되는 것을 막고, 월 중간 변경도 건별로
+  // 정확히 갈린다. settlementType 은 정산 흐름 자체를 가르는 구조적 값이라
+  // 건별로 흔들면 안 되므로 브랜드 현재값을 그대로 쓴다.
+  // 정산서 머리말에 찍히는 대표 요율. 건별 요율이 갈릴 수 있으므로 정산월
+  // 말일 기준 규칙을 대표값으로 쓰고, 실제로 섞였다면 아래에서 경고를 낸다.
+  const periodEnd = new Date(Date.UTC(Number(year), Number(month), 0)).toISOString().slice(0, 10);
+  const rate = number(effectiveBrand(brand, periodEnd).commissionRate);
+
+  const appliedRules = new Map(); // validFrom -> 적용 건수
+  const ruleFor = (deliveredDate) => {
+    const asOf = cafe24DateOnly(deliveredDate) || `${year}-${String(month).padStart(2, "0")}-01`;
+    const rule = brandRuleAt(brand, asOf);
+    if (rule) appliedRules.set(rule.validFrom, (appliedRules.get(rule.validFrom) || 0) + 1);
+    return rule ? { ...brand, ...pickBrandRuleFields(rule) } : brand;
+  };
+  // 주문 단위 규칙: 한 주문 안의 품목은 같은 규칙으로 계산되어야 하므로
+  // 그 주문에서 가장 늦은 배송완료일 하나로 정한다.
+  const ruleForOrder = (rowsOfOrder) => {
+    const dates = rowsOfOrder.map((r) => cafe24DateOnly(r["배송완료일"])).filter(Boolean).sort();
+    return ruleFor(dates.length ? dates[dates.length - 1] : "");
+  };
 
   if (!String(brand.cafe24Supplier || "").trim()) {
     return { needsMapping: true, suppliers, settlementType };
@@ -1380,6 +1503,8 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   if (isConsignment) {
     for (const [orderNo, rowsOfOrder] of includedByOrder) {
       const orderShip = cafe24OrderShipping(rowsOfOrder);
+      const orderBrand = ruleForOrder(rowsOfOrder);
+      const orderRate = number(orderBrand.commissionRate);
       rowsOfOrder.forEach((r, idx) => {
         seq++;
         const qty = Math.max(1, number(r["수량"], 1));
@@ -1388,7 +1513,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
         const discountRate = original > 0 && qty > 0 ? Math.max(0, Number((lineDisc / (qty * original)).toFixed(4))) : 0;
         const unitSale = Math.round(original * (1 - discountRate));
         const saleTotal = Math.max(0, original * qty - lineDisc);
-        const commissionWon = Math.round(saleTotal * (rate / 100));
+        const commissionWon = Math.round(saleTotal * (orderRate / 100));
         lines.push({
           itemNo: r["품목별 주문번호"] || `${orderNo}-${String(idx + 1).padStart(2, "0")}`,
           name: r["주문상품명(기본)"] || "",
@@ -1399,7 +1524,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
           saleTotal,
           ship: idx === 0 ? orderShip : 0,
           refundShip: 0,
-          ratePct: rate,
+          ratePct: orderRate,
           commissionWon,
           supplyAmt: saleTotal - commissionWon,
           payDate: "",
@@ -1421,6 +1546,8 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
         errors.push({ orderNo, type: "unpaid", message: `입금완료되지 않은 주문입니다: ${orderNo}` });
       }
     }
+    const orderBrand = ruleForOrder(rowsOfOrder);
+    const orderRate = number(orderBrand.commissionRate);
     const wooofSales = number(req.productSalesAmount);
     if (priceBasis === "catalog" && canon.hasCatalog) {
       // 정가 기준: 카페24 품목을 단가표 정가로 환산해 기대금액 계산.
@@ -1444,11 +1571,11 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
           message: `정가 기준 금액 불일치 ${orderNo}: 정가 ${expected.toLocaleString()} vs 입금요청 ${wooofSales.toLocaleString()}`
         });
       } else {
-        const shipBase = shippingThresholdBaseAmount(brand, {
+        const shipBase = shippingThresholdBaseAmount(orderBrand, {
           salesAmount: expected,
           supplyAmount: number(req.supplyAmount)
         });
-        const expectedShip = calculateBaseShippingFee(brand, shipBase);
+        const expectedShip = calculateBaseShippingFee(orderBrand, shipBase);
         const reqShip = number(req.shippingFee);
         if (Math.abs(expectedShip - reqShip) > 1) {
           errors.push({
@@ -1497,7 +1624,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
     detail.forEach((it, idx) => {
       seq++;
       const saleTotal = number(it.totalSaleAmount, number(it.unitSalePrice) * number(it.quantity));
-      const commissionWon = Math.round(saleTotal * (rate / 100));
+      const commissionWon = Math.round(saleTotal * (orderRate / 100));
       const unitSale = number(it.unitSalePrice);            // 현재판매가(할인가)
       const original = number(it.originalPrice) || unitSale; // 원판매가(정가)
       const discountRate = original > 0 ? Math.max(0, Number((1 - unitSale / original).toFixed(4))) : 0;
@@ -1511,13 +1638,28 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
         saleTotal,
         ship: idx === 0 ? orderShip : 0,
         refundShip: 0,
-        ratePct: rate,
+        ratePct: orderRate,
         commissionWon,
         supplyAmt: saleTotal - commissionWon,
         payDate: req.paidAt || "",
         note: it.note || ""
       });
     });
+  }
+
+  // 한 정산 안에서 계약 규칙이 갈렸으면 반드시 드러낸다 — 조용히 섞이면
+  // 합계만 보고는 어느 요율이 적용됐는지 알 수 없다.
+  if (appliedRules.size > 1) {
+    const detail = [...appliedRules.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([validFrom, count]) => {
+        const rule = (brand.ruleHistory || []).find((item) => item.validFrom === validFrom);
+        const rateText = rule ? `수수료 ${number(rule.commissionRate)}%` : "";
+        const shipText = rule?.shippingRule ? ` · ${rule.shippingRule}` : "";
+        return `${validFrom}~ (${rateText}${shipText}) ${count}건`;
+      })
+      .join(" / ");
+    warnings.push(`이 정산에 계약 규칙 ${appliedRules.size}개 버전이 적용됐습니다 — ${detail}`);
   }
 
   const salesTotal = lines.reduce((s, l) => s + l.saleTotal, 0);
@@ -3351,8 +3493,59 @@ async function routeApi(req, res, url) {
     brand.hasReceivable = brand.hasReceivable === true || brand.hasReceivable === "true";
     if (!settlementTypes.has(brand.settlementType)) brand.settlementType = "prepay_fee";
     Object.assign(brand, normalizeShippingPolicy(brand, before));
+
+    // 계약 규칙 변경: ruleValidFrom 이 오면 덮어쓰지 않고 그 날짜의 버전을
+    // 새로 쌓는다. 같은 날짜가 이미 있으면 그 버전을 고쳐 쓴다(오타 정정).
+    // 그러고 나서 최상위 필드를 "오늘 유효한 버전"으로 되돌린다 — 미래로
+    // 예약한 변경이 지금 만드는 입금요청에 당겨 적용되면 안 되기 때문.
+    const ruleValidFrom = dateOnly(body.ruleValidFrom);
+    if (ruleValidFrom) {
+      if (!Array.isArray(brand.ruleHistory)) brand.ruleHistory = [];
+      const existing = brand.ruleHistory.find((item) => item.validFrom === ruleValidFrom);
+      if (existing) {
+        Object.assign(existing, pickBrandRuleFields(brand), { note: String(body.ruleNote ?? existing.note ?? "") });
+      } else {
+        brand.ruleHistory.push(buildBrandRule(brand, ruleValidFrom, body.ruleNote || ""));
+      }
+      brand.ruleHistory.sort((a, b) => String(a.validFrom).localeCompare(String(b.validFrom)));
+      syncBrandCurrentRules(brand);
+    } else if (Array.isArray(brand.ruleHistory) && brand.ruleHistory.length) {
+      // 시작일 없이 규칙을 고치면 "지금 유효한 버전"을 그 자리에서 수정한 것으로 본다.
+      const current = brandRuleAt(brand, now());
+      if (current) Object.assign(current, pickBrandRuleFields(brand));
+    }
+
     brand.updatedAt = now();
     addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 브랜드 수정`, before, brand);
+    await writeDb(db);
+    sendJson(res, 200, { brand: hydrateBrand(db, brand) });
+    return;
+  }
+
+  // 잘못 등록한 계약 규칙 버전 삭제. 마지막 한 개는 남긴다 — 규칙이 하나도
+  // 없으면 과거 정산의 기준이 사라진다.
+  const brandRuleMatch = pathname.match(/^\/api\/brands\/([^/]+)\/rules\/([^/]+)$/);
+  if (brandRuleMatch && method === "DELETE") {
+    const brand = db.brands.find((item) => item.id === brandRuleMatch[1]);
+    if (!brand) {
+      sendJson(res, 404, { error: "브랜드를 찾을 수 없습니다." });
+      return;
+    }
+    const history = Array.isArray(brand.ruleHistory) ? brand.ruleHistory : [];
+    if (history.length <= 1) {
+      sendJson(res, 400, { error: "규칙 버전은 최소 1개가 있어야 합니다." });
+      return;
+    }
+    const index = history.findIndex((item) => item.id === brandRuleMatch[2]);
+    if (index === -1) {
+      sendJson(res, 404, { error: "규칙 버전을 찾을 수 없습니다." });
+      return;
+    }
+    const before = { ...brand };
+    const [removed] = history.splice(index, 1);
+    syncBrandCurrentRules(brand);
+    brand.updatedAt = now();
+    addAudit(db, actor, "delete", "brand_rule", brand.id, `${brand.name} 계약규칙 ${removed.validFrom} 삭제`, removed, null);
     await writeDb(db);
     sendJson(res, 200, { brand: hydrateBrand(db, brand) });
     return;

@@ -1515,6 +1515,61 @@ function renderBrandRow(brand) {
   `;
 }
 
+// 계약 규칙은 버전으로 쌓인다. 시작일을 비우고 저장하면 지금 적용 중인 버전을
+// 고친 것으로 보고, 날짜를 넣으면 그 날짜부터 유효한 새 버전이 생긴다. 정산은
+// 주문의 배송완료일 시점에 유효했던 버전으로 계산하므로, 지난달 정산이 이번 달
+// 새 계약으로 다시 계산되는 일이 없다.
+function renderBrandRuleSection(brand) {
+  if (!brand?.id) {
+    return `<div class="field"><label>계약 규칙 변경</label>
+      <span class="muted">브랜드를 저장한 뒤에 규칙 변경 이력을 관리할 수 있습니다.</span></div>`;
+  }
+  const history = [...(brand.ruleHistory || [])].sort((a, b) => String(b.validFrom).localeCompare(String(a.validFrom)));
+  const today = new Date().toISOString().slice(0, 10);
+  const activeId = history.filter((r) => String(r.validFrom) <= today).sort((a, b) => String(a.validFrom).localeCompare(String(b.validFrom))).pop()?.id;
+  const rows = history
+    .map((rule) => {
+      const isActive = rule.id === activeId;
+      const isFuture = String(rule.validFrom) > today;
+      const badge = isActive
+        ? `<span class="badge clobe-high">적용중</span>`
+        : isFuture
+          ? `<span class="badge clobe-medium">예정</span>`
+          : `<span class="badge">과거</span>`;
+      return `<tr>
+        <td>${badge}</td>
+        <td>${h(rule.validFrom)}${rule.validFrom === "2000-01-01" ? `<br><span class="muted">최초</span>` : ""}</td>
+        <td class="num">${h(Number(rule.commissionRate || 0))}%</td>
+        <td>${h(rule.shippingRule || "")}</td>
+        <td>${h(rule.note || "")}</td>
+        <td>
+          <button type="button" data-edit-brand-rule="${rule.id}">이 버전 수정</button>
+          ${history.length > 1 ? `<button type="button" class="danger" data-remove-brand-rule="${rule.id}">삭제</button>` : ""}
+        </td>
+      </tr>`;
+    })
+    .join("");
+  return `
+    <div class="field">
+      <label>계약 규칙 변경 (적용 시작일)</label>
+      <input name="ruleValidFrom" type="date" value="">
+      <span class="muted">
+        위 수수료율·배송비를 <b>언제부터</b> 적용할지 지정합니다. 비워두면 지금 적용 중인 규칙을 수정합니다.
+        정산은 주문의 <b>배송완료일</b> 기준으로 그 시점 규칙을 적용하므로, 지난 달 정산은 옛 규칙 그대로 계산됩니다.
+      </span>
+    </div>
+    <div class="field"><label>변경 사유 (선택)</label>
+      <input name="ruleNote" placeholder="예: 2026년 재계약 — 수수료 25%, 배송비 4,000원"></div>
+    <div class="field">
+      <label>규칙 이력</label>
+      <div class="table-wrap" style="max-height:220px">
+        <table><thead><tr><th>상태</th><th>적용 시작</th><th>수수료</th><th>배송비</th><th>사유</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table>
+      </div>
+    </div>
+  `;
+}
+
 function renderBrandForm() {
   const b = state.editingBrand || {};
   return `
@@ -1562,6 +1617,7 @@ function renderBrandForm() {
       </div>
       <div class="field"><label>적용 미리보기</label><input value="${h(describeShippingRule(b))}" disabled></div>
       <div class="field"><label>배송비 운영 메모</label><input value="지역 추가배송비는 입금요청 입력에서 필요할 때만 별도 기입합니다." disabled></div>
+      ${renderBrandRuleSection(b)}
       <div class="field two">
         <div>
           <label>출고 기준</label>
@@ -3373,6 +3429,47 @@ function bindBrands() {
     }
     state.editingBrand = null;
     await refreshAndRender();
+  });
+  // 과거 버전을 고쳐야 하는 경우가 실제로 있다 — 계약이 바뀐 뒤에야 이력 기능을
+  // 쓰기 시작하면, 지금 저장된 값은 새 계약이고 옛 계약은 어디에도 없다.
+  // 행의 값을 폼에 실어주고 시작일을 그 버전 날짜로 맞춰두면, 저장 시 같은
+  // 날짜의 버전을 덮어쓴다.
+  app.querySelectorAll("[data-edit-brand-rule]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const rule = (state.editingBrand?.ruleHistory || []).find((item) => item.id === button.dataset.editBrandRule);
+      if (!rule) return;
+      const form = app.querySelector("[data-brand-form]");
+      if (!form) return;
+      const set = (name, value) => {
+        const input = form.querySelector(`[name='${name}']`);
+        if (input) input.value = value ?? "";
+      };
+      set("commissionRate", rule.commissionRate);
+      set("shippingPolicyType", rule.shippingPolicyType || "free");
+      set("shippingFlatFee", rule.shippingFlatFee || "");
+      set("shippingThresholdAmount", rule.shippingThresholdAmount || "");
+      set("shippingThresholdFee", rule.shippingThresholdFee || "");
+      set("shippingThresholdBase", rule.shippingThresholdBase || "sales");
+      set("ruleValidFrom", rule.validFrom);
+      set("ruleNote", rule.note || "");
+      showToast(`${rule.validFrom} 버전을 폼에 불러왔습니다. 수정 후 저장하세요.`);
+    });
+  });
+  app.querySelectorAll("[data-remove-brand-rule]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const brandId = state.editingBrand?.id;
+      if (!brandId) return;
+      if (!confirm("이 계약 규칙 버전을 삭제할까요? 해당 기간의 과거 정산 결과가 달라집니다.")) return;
+      try {
+        const result = await api(`/api/brands/${brandId}/rules/${button.dataset.removeBrandRule}`, { method: "DELETE" });
+        state.editingBrand = result.brand;
+        await loadAll();
+        showToast("규칙 버전을 삭제했습니다.");
+        renderApp();
+      } catch (error) {
+        showToast(error.message || "규칙 삭제 실패", "error");
+      }
+    });
   });
   app.querySelector("[data-brand-form] [name='hasReceivable']")?.addEventListener("change", (event) => {
     const wrap = app.querySelector("[data-brand-receivable-fields]");
