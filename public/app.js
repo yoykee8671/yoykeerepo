@@ -25,7 +25,7 @@ const state = {
   brandFilterQ: "",
   selectedRequestIds: [],
   bulkPaidAt: new Date().toISOString().slice(0, 10),
-  settlement: { year: new Date().getFullYear(), month: new Date().getMonth() + 1, brandId: "", cafe24: null, bank: null, result: null, running: false },
+  settlement: { year: new Date().getFullYear(), month: new Date().getMonth() + 1, brandId: "", cafe24: null, bank: null, useClobe: true, result: null, running: false },
   clobe: {
     status: null,
     loading: false,
@@ -3540,8 +3540,14 @@ function renderSettlement() {
         <div class="field two">
           <div><label>카페24 주문내역 (CSV)</label><input type="file" accept=".csv" data-settlement-cafe24>
             <span class="muted">${s.cafe24 ? h(s.cafe24.name) : "월 전체 공급사 포함 파일"}</span></div>
-          <div><label>은행 거래내역 (XLSX, 선택)</label><input type="file" accept=".xlsx" data-settlement-bank>
-            <span class="muted">${s.bank ? h(s.bank.name) : "출금 대조용 (선택)"}</span></div>
+          <div><label>은행 거래내역</label>
+            <label class="check-row"><input type="checkbox" data-settlement-useclobe ${s.useClobe ? "checked" : ""}>
+              클로브ai에서 자동 조회 (파일 업로드 없이)</label>
+            ${s.useClobe
+              ? `<span class="muted">정산월 전후 범위를 자동 조회합니다. 계좌 범위는 입금대사 탭에서 설정합니다.</span>`
+              : `<input type="file" accept=".xlsx" data-settlement-bank>
+                 <span class="muted">${s.bank ? h(s.bank.name) : "출금 대조용 (선택)"}</span>`}
+          </div>
         </div>
         <div class="toolbar">
           <button class="primary" data-settlement-run ${s.running ? "disabled" : ""}>${s.running ? "정산 중…" : "정산 시작"}</button>
@@ -3551,6 +3557,18 @@ function renderSettlement() {
     </section>
     ${renderSettlementResult(s.result)}
   `;
+}
+
+// Makes the bank data's provenance visible on the result, so an unexpected
+// 은행 출금합 can be traced to the source before anyone edits a spreadsheet.
+function bankSourceLabel(bankSource) {
+  if (!bankSource) return "";
+  if (bankSource.source === "clobe") {
+    const range = bankSource.range ? ` ${bankSource.range.startDate}~${bankSource.range.endDate}` : "";
+    return `은행내역: 클로브ai${range} · ${bankSource.rowCount}건`;
+  }
+  if (bankSource.source === "upload") return `은행내역: 업로드 파일 · ${bankSource.rowCount}건`;
+  return "은행내역 없음 — 출금 대조를 건너뜁니다";
 }
 
 function renderSettlementResult(result) {
@@ -3583,7 +3601,10 @@ function renderSettlementResult(result) {
     : "";
   return `
     <section class="panel">
-      <div class="panel-head"><h2>정산 결과</h2></div>
+      <div class="panel-head">
+        <h2>정산 결과</h2>
+        <span class="muted">${bankSourceLabel(result.bankSource)}</span>
+      </div>
       <div class="panel-body">
         <div class="fixed-summary-grid">
           <div class="fixed-card"><span>포함 주문</span><strong>${sum.orderCount || 0}건</strong></div>
@@ -3624,6 +3645,11 @@ function bindSettlement() {
     s.bank = file ? { name: file.name, base64: await readFileAsBase64(file) } : null;
     renderApp();
   });
+  app.querySelector("[data-settlement-useclobe]")?.addEventListener("change", (e) => {
+    s.useClobe = e.target.checked;
+    if (s.useClobe) s.bank = null;
+    renderApp();
+  });
   app.querySelector("[data-settlement-run]")?.addEventListener("click", async () => {
     if (!s.brandId) return showToast("브랜드를 선택하세요.", "error");
     if (!s.cafe24) return showToast("카페24 CSV를 업로드하세요.", "error");
@@ -3631,7 +3657,12 @@ function bindSettlement() {
     try {
       s.result = await api("/api/settlement/run", {
         method: "POST",
-        body: { brandId: s.brandId, year: s.year, month: s.month, cafe24Csv: s.cafe24.base64, bankXlsx: s.bank?.base64 || "" }
+        body: {
+          brandId: s.brandId, year: s.year, month: s.month,
+          cafe24Csv: s.cafe24.base64,
+          useClobe: s.useClobe,
+          bankXlsx: s.useClobe ? "" : s.bank?.base64 || ""
+        }
       });
     } catch (error) {
       showToast(error.message || "정산 실행 실패", "error");
@@ -3657,7 +3688,12 @@ function bindSettlement() {
         method: "POST",
         headers: { "content-type": "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify({ brandId: s.brandId, year: s.year, month: s.month, cafe24Csv: s.cafe24.base64, bankXlsx: s.bank?.base64 || "" })
+        body: JSON.stringify({
+          brandId: s.brandId, year: s.year, month: s.month,
+          cafe24Csv: s.cafe24.base64,
+          useClobe: s.useClobe,
+          bankXlsx: s.useClobe ? "" : s.bank?.base64 || ""
+        })
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));

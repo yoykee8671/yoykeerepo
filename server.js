@@ -2661,9 +2661,9 @@ async function clobeCall(db, tool, input) {
   return clobe.callTool(accessToken, tool, input);
 }
 
-// Pulls every incoming bank transaction in the range, following the keyset
-// cursor. Capped so a wide date range can't spin forever.
-async function clobeFetchDeposits(db, { startDate, endDate }) {
+// Pulls every bank transaction in the range, following the keyset cursor.
+// Capped so a wide date range can't spin forever. Omit direction for both ways.
+async function clobeFetchTransactions(db, { startDate, endDate, direction = null }) {
   if (!clobeIsConnected(db)) throw new Error("클로브가 연결되지 않았습니다. 먼저 연결하세요.");
   const companyId = db.clobe.companyId;
   if (!companyId) throw new Error("대사 대상 회사를 먼저 선택하세요.");
@@ -2672,10 +2672,10 @@ async function clobeFetchDeposits(db, { startDate, endDate }) {
   for (let page = 0; page < 20; page += 1) {
     const payload = await clobeCall(db, "get_labeled_transactions", {
       companyId,
-      direction: "IN",
       startDate,
       endDate,
       size: 100,
+      ...(direction ? { direction } : {}),
       ...(cursor ? { cursor } : {})
     });
     collected.push(...(payload.content || []));
@@ -2683,6 +2683,62 @@ async function clobeFetchDeposits(db, { startDate, endDate }) {
     cursor = payload.nextCursor;
   }
   return collected;
+}
+
+// Adapts clobe transactions to the Korean-keyed row shape the settlement
+// engine already expects from an uploaded bank XLSX, so computeSettlementResult
+// works identically whether the data came from a file or from clobe.
+// Mirrors the columns read by bankBrandMovements/bankRowMatchesBrand.
+function clobeRowsToBankRows(transactions, accountIds = []) {
+  const allowed = accountIds.length ? new Set(accountIds.map(Number)) : null;
+  return transactions
+    .filter((tx) => !allowed || allowed.has(Number(tx.accountId)))
+    .map((tx) => {
+      const at = String(tx.transactionAt || "");
+      return {
+        "거래 연도": Number(at.slice(0, 4)) || 0,
+        "거래 월": Number(at.slice(5, 7)) || 0,
+        "거래일시": at.replace("T", " "),
+        "출금": Number(tx.outAmount || 0),
+        "입금": Number(tx.inAmount || 0),
+        "적요": tx.transactionDescription || "",
+        "거래자명": tx.transactionName || "",
+        "거래처 라벨": tx.businessEntityName || tx.customLabel || tx.category || ""
+      };
+    });
+}
+
+// Settlement pulls a wider range than the settlement month itself: brands that
+// pay after delivery routinely cross the month boundary, and the engine
+// deliberately searches the whole dataset rather than just the target month.
+function clobeSettlementRange(year, month) {
+  const start = new Date(Date.UTC(Number(year), Number(month) - 1, 1));
+  start.setUTCMonth(start.getUTCMonth() - 1);
+  const end = new Date(Date.UTC(Number(year), Number(month) + 1, 0));
+  const today = new Date();
+  return {
+    startDate: start.toISOString().slice(0, 10),
+    endDate: (end > today ? today : end).toISOString().slice(0, 10)
+  };
+}
+
+// Shared by /api/settlement/run and /api/settlement/export so the exported
+// workbook is computed from exactly the same bank data as the preview.
+async function settlementBankRows(db, body, actor) {
+  if (body.useClobe) {
+    if (!canManageAdmins(actor)) {
+      const error = new Error("클로브 은행내역 조회는 오너 또는 매니저만 사용할 수 있습니다.");
+      error.status = 403;
+      throw error;
+    }
+    const range = clobeSettlementRange(body.year, body.month);
+    const transactions = await clobeFetchTransactions(db, range);
+    return { rows: clobeRowsToBankRows(transactions, db.clobe?.accountIds || []), source: "clobe", range };
+  }
+  if (body.bankXlsx) {
+    return { rows: await parseBankXlsxUpload(body.bankXlsx), source: "upload", range: null };
+  }
+  return { rows: [], source: "none", range: null };
 }
 
 function clobePublicState(db) {
@@ -3734,19 +3790,22 @@ async function routeApi(req, res, url) {
     if (!brand) { sendJson(res, 400, { error: "브랜드를 선택하세요." }); return; }
     if (!body.year || !body.month) { sendJson(res, 400, { error: "정산 연/월을 선택하세요." }); return; }
     let cafe24Rows = [];
-    let bankRows = [];
+    let bank = { rows: [], source: "none", range: null };
     try {
       if (body.cafe24Csv) cafe24Rows = parseCafe24Csv(body.cafe24Csv);
-      if (body.bankXlsx) bankRows = await parseBankXlsxUpload(body.bankXlsx);
+      bank = await settlementBankRows(db, body, actor);
     } catch (error) {
-      sendJson(res, 400, { error: `파일 파싱 실패: ${error.message}` });
+      sendJson(res, error.status || (error.needsReauth ? 401 : 400), {
+        error: body.useClobe ? `클로브 은행내역 조회 실패: ${error.message}` : `파일 파싱 실패: ${error.message}`
+      });
       return;
     }
     if (!cafe24Rows.length) { sendJson(res, 400, { error: "카페24 주문내역(CSV)을 업로드하세요." }); return; }
-    const result = computeSettlementResult(db, brand, body.year, body.month, cafe24Rows, bankRows);
+    const result = computeSettlementResult(db, brand, body.year, body.month, cafe24Rows, bank.rows);
     sendJson(res, 200, {
       brand: { id: brand.id, name: brand.name, settlementType: brand.settlementType, cafe24Supplier: brand.cafe24Supplier || "" },
       ...result,
+      bankSource: { source: bank.source, rowCount: bank.rows.length, range: bank.range },
       lines: result.needsMapping ? [] : result.lines
     });
     return;
@@ -3757,15 +3816,17 @@ async function routeApi(req, res, url) {
     const brand = db.brands.find((item) => item.id === body.brandId);
     if (!brand) { sendJson(res, 400, { error: "브랜드를 선택하세요." }); return; }
     let cafe24Rows = [];
-    let bankRows = [];
+    let bank = { rows: [], source: "none", range: null };
     try {
       if (body.cafe24Csv) cafe24Rows = parseCafe24Csv(body.cafe24Csv);
-      if (body.bankXlsx) bankRows = await parseBankXlsxUpload(body.bankXlsx);
+      bank = await settlementBankRows(db, body, actor);
     } catch (error) {
-      sendJson(res, 400, { error: `파일 파싱 실패: ${error.message}` });
+      sendJson(res, error.status || (error.needsReauth ? 401 : 400), {
+        error: body.useClobe ? `클로브 은행내역 조회 실패: ${error.message}` : `파일 파싱 실패: ${error.message}`
+      });
       return;
     }
-    const result = computeSettlementResult(db, brand, body.year, body.month, cafe24Rows, bankRows);
+    const result = computeSettlementResult(db, brand, body.year, body.month, cafe24Rows, bank.rows);
     if (result.needsMapping) { sendJson(res, 409, { error: "먼저 카페24 공급사 매핑을 저장하세요." }); return; }
     if (result.errors.length && !body.force) {
       sendJson(res, 409, { error: "정산 오류가 있어 출력할 수 없습니다.", errors: result.errors });
@@ -3931,7 +3992,7 @@ async function routeApi(req, res, url) {
       return;
     }
     try {
-      const transactions = await clobeFetchDeposits(db, { startDate, endDate });
+      const transactions = await clobeFetchTransactions(db, { startDate, endDate, direction: "IN" });
       const unpaid = db.requests
         .filter((item) => item.status !== "paid" && item.status !== "deleted")
         .map((item) => ({
