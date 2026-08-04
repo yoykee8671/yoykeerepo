@@ -348,6 +348,15 @@ function syncBrandCurrentRules(brand) {
   return changed;
 }
 
+// 정산월을 가르는 날짜 기준. 명시적으로 고르지 않은 브랜드는 기존 동작을
+// 그대로 유지한다 — 위탁은 배송완료일, 나머지는 주문일.
+const settlementDateBases = new Set(["order", "delivered"]);
+
+function brandSettlementDateBasis(brand = {}) {
+  if (settlementDateBases.has(brand.settlementDateBasis)) return brand.settlementDateBasis;
+  return brand.settlementType === "consignment" ? "delivered" : "order";
+}
+
 // 배송비 임계 기준금액 선택: 기본은 제품매출, 브랜드 설정이 supply면 공급가 합계.
 function shippingThresholdBaseAmount(brand = {}, { salesAmount = 0, supplyAmount = 0 } = {}) {
   return brand.shippingThresholdBase === "supply" ? number(supplyAmount) : number(salesAmount);
@@ -905,6 +914,7 @@ function migrateDb(db) {
     touch(brand, "shippingThresholdAmount", 0);
     touch(brand, "shippingThresholdFee", 0);
     touch(brand, "shippingThresholdBase", "sales");
+    touch(brand, "settlementDateBasis", brand.settlementType === "consignment" ? "delivered" : "order");
     touch(brand, "shippingRule", "");
     // 규칙 이력이 없는 기존 브랜드는 현재 규칙을 최초 버전으로 이관한다.
     // 시작일을 EPOCH 로 두어 과거 정산이 지금과 동일하게 계산되도록 한다.
@@ -1424,27 +1434,32 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   const settlementType = brand.settlementType || "prepay_fee";
   const suppliers = distinctCafe24Suppliers(cafe24Rows);
 
-  // 계약 규칙은 주문이 배송완료된 시점 기준으로 고른다. 8월부터 수수료가 오른
-  // 브랜드의 7월 정산이 새 요율로 계산되는 것을 막고, 월 중간 변경도 건별로
-  // 정확히 갈린다. settlementType 은 정산 흐름 자체를 가르는 구조적 값이라
-  // 건별로 흔들면 안 되므로 브랜드 현재값을 그대로 쓴다.
   // 정산서 머리말에 찍히는 대표 요율. 건별 요율이 갈릴 수 있으므로 정산월
   // 말일 기준 규칙을 대표값으로 쓰고, 실제로 섞였다면 아래에서 경고를 낸다.
   const periodEnd = new Date(Date.UTC(Number(year), Number(month), 0)).toISOString().slice(0, 10);
   const rate = number(effectiveBrand(brand, periodEnd).commissionRate);
 
+  // 계약 규칙은 "이 정산이 그 건을 어느 달로 묶는지"와 같은 날짜로 고른다.
+  // 선매입은 주문일로 정산월을 가르므로 주문일, 위탁은 배송완료월로 가르므로
+  // 배송완료일이다. 기준이 어긋나면 7/31 주문·8/3 배송완료 건이 7월 정산에
+  // 들어가면서 8월 요율로 계산되는 모순이 생긴다.
+  // settlementType 은 정산 흐름 자체를 가르는 구조적 값이라 건별로 흔들면
+  // 안 되므로 브랜드 현재값을 그대로 쓴다.
   const appliedRules = new Map(); // validFrom -> 적용 건수
-  const ruleFor = (deliveredDate) => {
-    const asOf = cafe24DateOnly(deliveredDate) || `${year}-${String(month).padStart(2, "0")}-01`;
-    const rule = brandRuleAt(brand, asOf);
+  const ruleFor = (asOf) => {
+    const target = asOf || `${year}-${String(month).padStart(2, "0")}-01`;
+    const rule = brandRuleAt(brand, target);
     if (rule) appliedRules.set(rule.validFrom, (appliedRules.get(rule.validFrom) || 0) + 1);
     return rule ? { ...brand, ...pickBrandRuleFields(rule) } : brand;
   };
   // 주문 단위 규칙: 한 주문 안의 품목은 같은 규칙으로 계산되어야 하므로
-  // 그 주문에서 가장 늦은 배송완료일 하나로 정한다.
-  const ruleForOrder = (rowsOfOrder) => {
-    const dates = rowsOfOrder.map((r) => cafe24DateOnly(r["배송완료일"])).filter(Boolean).sort();
-    return ruleFor(dates.length ? dates[dates.length - 1] : "");
+  // 주문당 날짜 하나로 정한다.
+  const ruleForOrder = (orderNo, rowsOfOrder) => {
+    if (brandSettlementDateBasis(brand) === "delivered") {
+      const dates = rowsOfOrder.map((r) => cafe24DateOnly(r["배송완료일"])).filter(Boolean).sort();
+      return ruleFor(dates.length ? dates[dates.length - 1] : "");
+    }
+    return ruleFor(cafe24DateOnly(String(orderNo || "").slice(0, 8)));
   };
 
   if (!String(brand.cafe24Supplier || "").trim()) {
@@ -1454,10 +1469,14 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   // data2: cafe24 rows for this brand
   const brandRows = cafe24Rows.filter((r) => cafe24RowMatchesBrand(r, brand));
 
-  // 위탁(consignment)은 [배송완료일]이 정산월인 건을 포함(주문일 무관).
-  // 그 외(채권/수수료)는 [주문일](주문번호 앞 8자리)이 정산월 + 배송완료 건.
+  // 어느 날짜로 정산월을 가를지는 브랜드 설정(settlementDateBasis)을 따른다.
+  //   delivered : [배송완료일]이 정산월인 건 (주문일 무관) — 위탁 기본값
+  //   order     : [주문일](주문번호 앞 8자리)이 정산월 + 배송완료된 건 — 그 외 기본값
+  // 계약이 브랜드마다 다르므로 정산유형에 묶지 않고 브랜드별로 고르게 둔다.
+  const dateBasis = brandSettlementDateBasis(brand);
   const isConsignment = settlementType === "consignment";
-  const ymOf = (raw) => String(raw || "").replace(/[^0-9]/g, "").slice(0, 6);
+  const byDelivered = dateBasis === "delivered";
+  const ymOf = (raw) => String(cafe24DateOnly(raw) || "").replace(/[^0-9]/g, "").slice(0, 6);
   const cancels = [];
   const includedByOrder = new Map(); // orderNo -> [정산 포함 cafe24 rows]
   const allRowsByOrder = new Map(); // orderNo -> [all non-cancelled rows] (부분배송 대조용)
@@ -1478,10 +1497,10 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
       });
       continue;
     }
-    const included = isConsignment
-      ? (delivered && ymOf(deliveredDate) === monthPrefix)      // 위탁: 배송완료월 기준
-      : (orderDate.startsWith(monthPrefix) && delivered);       // 그 외: 주문일 기준 + 배송완료
-    const inScope = isConsignment ? included : orderDate.startsWith(monthPrefix);
+    const included = byDelivered
+      ? (delivered && ymOf(deliveredDate) === monthPrefix)      // 배송완료월 기준
+      : (orderDate.startsWith(monthPrefix) && delivered);       // 주문일 기준 + 배송완료
+    const inScope = byDelivered ? included : orderDate.startsWith(monthPrefix);
     if (inScope) {
       if (!allRowsByOrder.has(orderNo)) allRowsByOrder.set(orderNo, []);
       allRowsByOrder.get(orderNo).push(r);
@@ -1520,7 +1539,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   if (isConsignment) {
     for (const [orderNo, rowsOfOrder] of includedByOrder) {
       const orderShip = cafe24OrderShipping(rowsOfOrder);
-      const orderBrand = ruleForOrder(rowsOfOrder);
+      const orderBrand = ruleForOrder(orderNo, rowsOfOrder);
       const orderRate = number(orderBrand.commissionRate);
       rowsOfOrder.forEach((r, idx) => {
         seq++;
@@ -1563,7 +1582,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
         errors.push({ orderNo, type: "unpaid", message: `입금완료되지 않은 주문입니다: ${orderNo}` });
       }
     }
-    const orderBrand = ruleForOrder(rowsOfOrder);
+    const orderBrand = ruleForOrder(orderNo, rowsOfOrder);
     const orderRate = number(orderBrand.commissionRate);
     const wooofSales = number(req.productSalesAmount);
     if (priceBasis === "catalog" && canon.hasCatalog) {
@@ -3484,6 +3503,7 @@ async function routeApi(req, res, url) {
       "shippingThresholdAmount",
       "shippingThresholdFee",
       "shippingThresholdBase",
+      "settlementDateBasis",
       "isActive",
       "starred",
       "businessName",
@@ -3509,6 +3529,9 @@ async function routeApi(req, res, url) {
     brand.receivableTotal = number(brand.receivableTotal);
     brand.hasReceivable = brand.hasReceivable === true || brand.hasReceivable === "true";
     if (!settlementTypes.has(brand.settlementType)) brand.settlementType = "prepay_fee";
+    if (!settlementDateBases.has(brand.settlementDateBasis)) {
+      brand.settlementDateBasis = brandSettlementDateBasis(brand);
+    }
     Object.assign(brand, normalizeShippingPolicy(brand, before));
 
     // 계약 규칙 변경: ruleValidFrom 이 오면 덮어쓰지 않고 그 날짜의 버전을

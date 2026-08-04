@@ -1585,6 +1585,17 @@ function renderBrandForm() {
           ${["prepay_debt", "prepay_fee", "prepay_supply", "consignment", "direct_purchase"].map((s) => `<option value="${s}" ${(b.settlementType || "prepay_fee") === s ? "selected" : ""}>${settlementLabel(s)}</option>`).join("")}
         </select>
       </div>
+      <div class="field">
+        <label>정산 월 기준일</label>
+        <select name="settlementDateBasis">
+          <option value="order" ${(b.settlementDateBasis || (b.settlementType === "consignment" ? "delivered" : "order")) === "order" ? "selected" : ""}>주문일 기준 (주문번호 앞 8자리) · 배송완료 건만</option>
+          <option value="delivered" ${(b.settlementDateBasis || (b.settlementType === "consignment" ? "delivered" : "order")) === "delivered" ? "selected" : ""}>배송완료일 기준 (주문일 무관)</option>
+        </select>
+        <span class="muted">
+          어느 날짜로 정산월을 가를지 정합니다. 계약 규칙(수수료·배송비)도 같은 날짜로 적용됩니다.
+          주문일 기준에서도 <b>배송완료된 건만</b> 정산에 들어갑니다 — 카페24에 배송완료가 안 찍힌 주문은 다음 달로 넘어갑니다.
+        </span>
+      </div>
       <div class="field two">
         <div><label>계약 수수료율(%)</label><input name="commissionRate" type="number" min="0" max="100" step="0.1" value="${h(b.commissionRate ?? "")}"></div>
         <div><label>채권액 있음</label><select name="hasReceivable"><option value="false" ${!b.hasReceivable ? "selected" : ""}>없음</option><option value="true" ${b.hasReceivable ? "selected" : ""}>있음</option></select></div>
@@ -4149,7 +4160,11 @@ function renderReconcileResult(result) {
           <td>${h((match.transaction.transactionAt || "").slice(0, 16).replace("T", " "))}<br>
             <span class="muted">${h(match.transaction.transactionName || "")}</span></td>
           <td class="num"><strong>${money.format(match.amount)}원</strong><br>
-            <span class="muted">${match.kind === "many_to_one" ? `${match.requests.length}건 합산` : "1:1"}</span></td>
+            <span class="muted">${
+              match.kind === "memo" ? `메모 지정${match.requests.length > 1 ? ` ${match.requests.length}건` : ""}`
+              : match.kind === "many_to_one" ? `${match.requests.length}건 합산`
+              : "1:1"
+            }</span></td>
           <td>${orders}</td>
           <td><span class="muted">${match.reasons.map((reason) => h(reason)).join(" · ")}</span></td>
           <td><button class="primary" data-clobe-confirm="${index}" ${busy ? "disabled" : ""}>${busy ? "처리 중…" : "입금완료"}</button></td>
