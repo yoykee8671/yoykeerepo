@@ -1110,3 +1110,73 @@ input.num {
   width: auto;
   margin: 0;
 }
+
+/* 클로브 계좌 선택 목록 */
+.acct-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.acct-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 8px;
+}
+
+.acct {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.acct:hover {
+  border-color: #94a3b8;
+}
+
+.acct.on {
+  border-color: #137333;
+  background: #f2fbf5;
+}
+
+.acct input {
+  width: auto;
+  margin: 0;
+  flex: none;
+}
+
+.acct-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.acct-title {
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.acct-sub {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.acct-bal {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
