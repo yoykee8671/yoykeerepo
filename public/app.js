@@ -35,6 +35,7 @@ const state = {
     result: null,
     error: "",
     confirming: "",
+    showAllAccounts: false,
     startDate: new Date(Date.now() - 13 * 86400000).toISOString().slice(0, 10),
     endDate: new Date().toISOString().slice(0, 10)
   },
@@ -4158,17 +4159,58 @@ function renderReconcileConnect() {
   `;
 }
 
+const BANK_NAMES = {
+  "004": "국민", "003": "기업", "007": "수협", "011": "농협", "020": "우리",
+  "023": "SC제일", "027": "씨티", "031": "대구", "032": "부산", "034": "광주",
+  "035": "제주", "037": "전북", "039": "경남", "045": "새마을", "048": "신협",
+  "071": "우체국", "081": "하나", "088": "신한", "089": "케이뱅크",
+  "090": "카카오뱅크", "092": "토스뱅크"
+};
+
+// 계좌가 열 개 넘게 한 줄로 깔리면 어느 걸 골랐는지 읽히지 않는다. 실제로는
+// 두세 개만 쓰므로 고른 계좌를 위로 올리고, 나머지는 접어둔다.
+function renderClobeAccounts(accounts, selectedIds) {
+  if (!accounts.length) return "";
+  const selected = new Set((selectedIds || []).map(Number));
+  const sorted = [...accounts].sort((a, b) => {
+    const pick = Number(selected.has(Number(b.bankAccountId))) - Number(selected.has(Number(a.bankAccountId)));
+    if (pick) return pick;
+    return Number(b.krwBalance || 0) - Number(a.krwBalance || 0);
+  });
+  const showAll = state.clobe.showAllAccounts || !selected.size;
+  const visible = showAll ? sorted : sorted.filter((a) => selected.has(Number(a.bankAccountId)));
+  const hidden = sorted.length - visible.length;
+
+  const card = (account) => {
+    const id = Number(account.bankAccountId);
+    const on = selected.has(id);
+    const bank = BANK_NAMES[String(account.bankCode)] || "";
+    const title = account.aliasName || account.accountName || "계좌";
+    const fx = account.currencyCode && account.currencyCode !== "KRW" ? ` · ${h(account.currencyCode)}` : "";
+    return `
+      <label class="acct ${on ? "on" : ""}">
+        <input type="checkbox" data-clobe-account value="${id}" ${on ? "checked" : ""}>
+        <span class="acct-main">
+          <span class="acct-title">${h(title)}</span>
+          <span class="acct-sub">${h(bank)} ${h(account.displayAccountNumber || "")}${fx}</span>
+        </span>
+        <span class="acct-bal">${money.format(Math.round(Number(account.krwBalance || 0)))}원</span>
+      </label>`;
+  };
+
+  return `
+    <div class="acct-head">
+      <span class="muted">전체 ${sorted.length}개 중 <b>${selected.size || sorted.length}개</b> 대사 대상${selected.size ? "" : " (미선택 = 전체)"}</span>
+      <button type="button" class="ghost" data-clobe-toggle-accounts>${showAll ? "선택한 계좌만 보기" : `전체 보기 (+${hidden})`}</button>
+    </div>
+    <div class="acct-list">${visible.map(card).join("")}</div>
+  `;
+}
+
 function renderReconcileSettings() {
   const c = state.clobe;
   const status = c.status;
-  const accountRows = (c.accounts || [])
-    .map((account) => {
-      const checked = status.accountIds.includes(Number(account.bankAccountId)) ? "checked" : "";
-      const alias = account.aliasName ? ` · ${h(account.aliasName)}` : "";
-      return `<label class="check-row"><input type="checkbox" data-clobe-account value="${account.bankAccountId}" ${checked}>
-        ${h(account.displayAccountNumber)} · ${h(account.accountName)}${alias}</label>`;
-    })
-    .join("");
+  const accountRows = renderClobeAccounts(c.accounts || [], status.accountIds || []);
   return `
     <section class="panel">
       <div class="panel-head">
@@ -4184,7 +4226,7 @@ function renderReconcileSettings() {
           <div><label>입금예정일 허용 오차 (일)</label>
             <input type="number" min="0" max="60" data-clobe-window value="${Number(status.windowDays)}"></div>
         </div>
-        ${accountRows ? `<div class="field"><label>대사에 포함할 계좌 (미선택 시 전체)</label><div class="check-grid">${accountRows}</div></div>` : ""}
+        ${accountRows ? `<div class="field"><label>대사에 포함할 계좌</label>${accountRows}</div>` : ""}
         <div class="field two">
           <div><label>조회 시작일</label><input type="date" data-clobe-start value="${h(state.clobe.startDate)}"></div>
           <div><label>조회 종료일</label><input type="date" data-clobe-end value="${h(state.clobe.endDate)}"></div>
@@ -4339,6 +4381,11 @@ function bindReconcile() {
 
   app.querySelector("[data-clobe-window]")?.addEventListener("change", async (event) => {
     await saveClobeSettings({ windowDays: Number(event.target.value) });
+  });
+
+  app.querySelector("[data-clobe-toggle-accounts]")?.addEventListener("click", () => {
+    state.clobe.showAllAccounts = !state.clobe.showAllAccounts;
+    renderApp();
   });
 
   app.querySelectorAll("[data-clobe-account]").forEach((box) => {
