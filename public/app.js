@@ -25,7 +25,7 @@ const state = {
   brandFilterQ: "",
   selectedRequestIds: [],
   bulkPaidAt: new Date().toISOString().slice(0, 10),
-  settlement: { year: new Date().getFullYear(), month: new Date().getMonth() + 1, brandId: "", cafe24: null, bank: null, useClobe: true, result: null, running: false },
+  settlement: { year: new Date().getFullYear(), month: new Date().getMonth() + 1, brandId: "", cafe24: null, bank: null, useClobe: true, result: null, running: false, comparing: false, compare: null },
   clobe: {
     status: null,
     loading: false,
@@ -3674,8 +3674,12 @@ function renderSettlement() {
         </div>
         <div class="toolbar">
           <button class="primary" data-settlement-run ${s.running ? "disabled" : ""}>${s.running ? "정산 중…" : "정산 시작"}</button>
+          ${canUseClobe() && s.cafe24
+            ? `<button data-settlement-compare ${s.comparing ? "disabled" : ""}>${s.comparing ? "대조 중…" : "카페24 API와 대조"}</button>`
+            : ""}
           <span class="muted">입금요청 데이터는 시스템에서 자동 조회됩니다.</span>
         </div>
+        ${renderCafe24Compare(s.compare)}
       </div>
     </section>
     ${renderSettlementResult(s.result)}
@@ -3684,6 +3688,39 @@ function renderSettlement() {
 
 // Makes the bank data's provenance visible on the result, so an unexpected
 // 은행 출금합 can be traced to the source before anyone edits a spreadsheet.
+// 변환기가 기존 CSV 내보내기를 그대로 재현하는지 눈으로 확인하는 자리.
+// 차이가 0이어야 CSV 업로드를 API 조회로 바꿔도 정산 금액이 그대로다.
+function renderCafe24Compare(compare) {
+  if (!compare) return "";
+  if (compare.error) {
+    return `<p class="muted" style="color:var(--red)">대조 실패: ${h(compare.error)}</p>`;
+  }
+  const fields = Object.entries(compare.diffsByField || {});
+  const clean = compare.diffCount === 0 && !compare.onlyInCsvCount;
+  return `
+    <div class="panel-body" style="border-top:1px solid var(--line);margin-top:8px">
+      <h3 style="color:${clean ? "#137333" : "var(--red)"}">
+        ${clean ? "대조 일치 — API 데이터가 CSV와 동일합니다" : `차이 ${compare.diffCount}건`}
+      </h3>
+      <p class="muted">
+        API 주문 ${money.format(compare.orderCount || 0)}건 · 변환 행 ${money.format(compare.apiRowCount || 0)} ·
+        CSV 행 ${money.format(compare.csvRowCount || 0)} · 대조한 품목 ${money.format(compare.compared || 0)}
+      </p>
+      ${compare.onlyInCsvCount ? `<p class="muted">CSV에만 있는 품목 ${compare.onlyInCsvCount}건 — 조회 기간/기준일을 확인하세요.</p>` : ""}
+      ${compare.onlyInApiCount ? `<p class="muted">API에만 있는 품목 ${compare.onlyInApiCount}건 (CSV 내려받은 뒤 생긴 주문일 수 있습니다).</p>` : ""}
+      ${fields.length
+        ? `<div class="table-wrap" style="max-height:260px"><table>
+            <thead><tr><th>필드</th><th>차이</th><th>예시 (품목 / API / CSV)</th></tr></thead>
+            <tbody>${fields.map(([field, count]) => {
+              const ex = (compare.diffs || []).find((d) => d.field === field);
+              return `<tr><td>${h(field)}</td><td class="num">${count}건</td>
+                <td><span class="muted">${ex ? `${h(ex.itemNo)} · API ${h(ex.api)} · CSV ${h(ex.csv)}` : ""}</span></td></tr>`;
+            }).join("")}</tbody></table></div>`
+        : ""}
+    </div>
+  `;
+}
+
 function bankSourceLabel(bankSource) {
   if (!bankSource) return "";
   if (bankSource.source === "clobe") {
@@ -3776,6 +3813,36 @@ function bindSettlement() {
     if (s.useClobe) s.bank = null;
     renderApp();
   });
+  // 브랜드를 고르면 그 공급사만, 아니면 전체를 대조한다. 기준일은 브랜드
+  // 설정을 따라가 정산이 실제로 쓰는 범위와 같은 조건으로 비교한다.
+  app.querySelector("[data-settlement-compare]")?.addEventListener("click", async () => {
+    const brand = state.brands.find((b) => b.id === s.brandId);
+    const basis = brand?.settlementDateBasis || (brand?.settlementType === "consignment" ? "delivered" : "order");
+    const pad = (n) => String(n).padStart(2, "0");
+    const startDate = `${s.year}-${pad(s.month)}-01`;
+    const endDate = new Date(Date.UTC(s.year, s.month, 0)).toISOString().slice(0, 10);
+    s.comparing = true;
+    s.compare = null;
+    renderApp();
+    try {
+      s.compare = await api("/api/cafe24/compare", {
+        method: "POST",
+        body: {
+          cafe24Csv: s.cafe24.base64,
+          startDate,
+          endDate,
+          dateType: basis === "delivered" ? "shipend_date" : "order_date",
+          supplierId: brand?.cafe24Supplier || ""
+        }
+      });
+    } catch (error) {
+      s.compare = { error: error.message || "대조에 실패했습니다." };
+    } finally {
+      s.comparing = false;
+      renderApp();
+    }
+  });
+
   app.querySelector("[data-settlement-run]")?.addEventListener("click", async () => {
     if (!s.brandId) return showToast("브랜드를 선택하세요.", "error");
     if (!s.cafe24) return showToast("카페24 CSV를 업로드하세요.", "error");
