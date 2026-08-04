@@ -2933,6 +2933,43 @@ function clobeSettlementRange(year, month) {
   };
 }
 
+// Orders come either from an uploaded export or straight from Cafe24. The API
+// path deliberately does not filter by supplier: the engine needs every
+// supplier in the month to offer the 공급사 매핑 list, and it narrows to the
+// brand itself anyway — same shape as the "월 전체 공급사 포함" export.
+// 실패한 갈래를 알려주지 않으면 어디를 손봐야 할지 알 수 없다.
+function settlementSourceError(body, error) {
+  if (error.status === 403) return error.message;
+  if (body.useCafe24 && /카페24/.test(error.message)) return `카페24 주문 조회 실패: ${error.message}`;
+  if (body.useClobe && /클로브/.test(error.message)) return `클로브 은행내역 조회 실패: ${error.message}`;
+  return `데이터 준비 실패: ${error.message}`;
+}
+
+async function settlementOrderRows(db, body, actor, brand) {
+  if (body.useCafe24) {
+    if (!canManageAdmins(actor)) {
+      const error = new Error("카페24 주문 조회는 오너 또는 매니저만 사용할 수 있습니다.");
+      error.status = 403;
+      throw error;
+    }
+    const pad = (n) => String(n).padStart(2, "0");
+    const startDate = `${body.year}-${pad(body.month)}-01`;
+    const endDate = new Date(Date.UTC(Number(body.year), Number(body.month), 0)).toISOString().slice(0, 10);
+    // 정산이 그 달로 묶는 기준과 같은 날짜로 조회해야 범위가 어긋나지 않는다.
+    const dateType = brandSettlementDateBasis(brand) === "delivered" ? "shipend_date" : "order_date";
+    const accessToken = await cafe24AccessToken(db);
+    const orders = await cafe24.fetchOrders(accessToken, { startDate, endDate, dateType });
+    db.cafe24.lastSyncAt = now();
+    return {
+      rows: cafe24OrdersToRows(orders),
+      source: "cafe24",
+      range: { startDate, endDate, dateType },
+      orderCount: orders.length
+    };
+  }
+  return { rows: body.cafe24Csv ? parseCafe24Csv(body.cafe24Csv) : [], source: "upload", range: null };
+}
+
 // Shared by /api/settlement/run and /api/settlement/export so the exported
 // workbook is computed from exactly the same bank data as the preview.
 async function settlementBankRows(db, body, actor) {
@@ -4111,22 +4148,29 @@ async function routeApi(req, res, url) {
     const brand = db.brands.find((item) => item.id === body.brandId);
     if (!brand) { sendJson(res, 400, { error: "브랜드를 선택하세요." }); return; }
     if (!body.year || !body.month) { sendJson(res, 400, { error: "정산 연/월을 선택하세요." }); return; }
-    let cafe24Rows = [];
+    let orders = { rows: [], source: "upload", range: null };
     let bank = { rows: [], source: "none", range: null };
     try {
-      if (body.cafe24Csv) cafe24Rows = parseCafe24Csv(body.cafe24Csv);
+      orders = await settlementOrderRows(db, body, actor, brand);
       bank = await settlementBankRows(db, body, actor);
+      if (orders.source === "cafe24" || bank.source === "clobe") await writeDb(db);
     } catch (error) {
-      sendJson(res, error.status || (error.needsReauth ? 401 : 400), {
-        error: body.useClobe ? `클로브 은행내역 조회 실패: ${error.message}` : `파일 파싱 실패: ${error.message}`
+      sendJson(res, error.status || (error.needsReauth ? 401 : 400), { error: settlementSourceError(body, error) });
+      return;
+    }
+    if (!orders.rows.length) {
+      sendJson(res, 400, {
+        error: body.useCafe24
+          ? "카페24에서 해당 기간 주문을 찾지 못했습니다. 기간과 기준일 설정을 확인하세요."
+          : "카페24 주문내역(CSV)을 업로드하세요."
       });
       return;
     }
-    if (!cafe24Rows.length) { sendJson(res, 400, { error: "카페24 주문내역(CSV)을 업로드하세요." }); return; }
-    const result = computeSettlementResult(db, brand, body.year, body.month, cafe24Rows, bank.rows);
+    const result = computeSettlementResult(db, brand, body.year, body.month, orders.rows, bank.rows);
     sendJson(res, 200, {
       brand: { id: brand.id, name: brand.name, settlementType: brand.settlementType, cafe24Supplier: brand.cafe24Supplier || "" },
       ...result,
+      orderSource: { source: orders.source, rowCount: orders.rows.length, orderCount: orders.orderCount || 0, range: orders.range },
       bankSource: { source: bank.source, rowCount: bank.rows.length, range: bank.range },
       lines: result.needsMapping ? [] : result.lines
     });
@@ -4137,18 +4181,17 @@ async function routeApi(req, res, url) {
     const body = await readBody(req);
     const brand = db.brands.find((item) => item.id === body.brandId);
     if (!brand) { sendJson(res, 400, { error: "브랜드를 선택하세요." }); return; }
-    let cafe24Rows = [];
+    let orders = { rows: [], source: "upload", range: null };
     let bank = { rows: [], source: "none", range: null };
     try {
-      if (body.cafe24Csv) cafe24Rows = parseCafe24Csv(body.cafe24Csv);
+      orders = await settlementOrderRows(db, body, actor, brand);
       bank = await settlementBankRows(db, body, actor);
+      if (orders.source === "cafe24" || bank.source === "clobe") await writeDb(db);
     } catch (error) {
-      sendJson(res, error.status || (error.needsReauth ? 401 : 400), {
-        error: body.useClobe ? `클로브 은행내역 조회 실패: ${error.message}` : `파일 파싱 실패: ${error.message}`
-      });
+      sendJson(res, error.status || (error.needsReauth ? 401 : 400), { error: settlementSourceError(body, error) });
       return;
     }
-    const result = computeSettlementResult(db, brand, body.year, body.month, cafe24Rows, bank.rows);
+    const result = computeSettlementResult(db, brand, body.year, body.month, orders.rows, bank.rows);
     if (result.needsMapping) { sendJson(res, 409, { error: "먼저 카페24 공급사 매핑을 저장하세요." }); return; }
     if (result.errors.length && !body.force) {
       sendJson(res, 409, { error: "정산 오류가 있어 출력할 수 없습니다.", errors: result.errors });
