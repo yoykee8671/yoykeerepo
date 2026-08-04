@@ -11,6 +11,7 @@ import { gzipSync } from "node:zlib";
 import pg from "pg";
 import * as clobe from "./lib/clobe-mcp.mjs";
 import { reconcile } from "./lib/clobe-reconcile.mjs";
+import * as cafe24 from "./lib/cafe24-api.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -1003,7 +1004,29 @@ function migrateDb(db) {
     const clobeSeed = buildClobeNamespace();
     for (const key of Object.keys(clobeSeed)) touch(db.clobe, key, clobeSeed[key]);
   }
+
+  // Cafe24 Admin API connection state, same shape and lifecycle as db.clobe.
+  if (!db.cafe24 || typeof db.cafe24 !== "object") {
+    db.cafe24 = buildCafe24Namespace();
+    changed = true;
+  } else {
+    const cafe24Seed = buildCafe24Namespace();
+    for (const key of Object.keys(cafe24Seed)) touch(db.cafe24, key, cafe24Seed[key]);
+  }
   return { db, changed };
+}
+
+function buildCafe24Namespace() {
+  return {
+    accessToken: "",
+    refreshToken: "",
+    expiresAt: "",
+    refreshTokenExpiresAt: "",
+    mallId: "",
+    connectedBy: "",
+    connectedAt: "",
+    lastSyncAt: ""
+  };
 }
 
 function buildClobeNamespace() {
@@ -2943,6 +2966,62 @@ function clobePublicState(db) {
   };
 }
 
+// --- Cafe24 Admin API integration ---------------------------------------
+
+const cafe24PendingAuth = new Map();
+
+function cafe24RedirectUri(req) {
+  const configured = String(process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
+  if (configured) return `${configured}/api/cafe24/callback`;
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const host = req.headers["x-forwarded-host"] || req.headers.host || `localhost:${PORT}`;
+  const proto = forwardedProto || (/^localhost|^127\.0\.0\.1/.test(String(host)) ? "http" : "https");
+  return `${proto}://${host}/api/cafe24/callback`;
+}
+
+function cafe24IsConnected(db) {
+  return Boolean(db.cafe24?.refreshToken);
+}
+
+// Cafe24's refresh token lives 2 weeks. Once it lapses there is no automated
+// recovery — say so plainly instead of retrying.
+async function cafe24AccessToken(db) {
+  const state = db.cafe24;
+  if (!cafe24IsConnected(db)) throw new Error("카페24가 연결되지 않았습니다. 먼저 연결하세요.");
+  const expiresAt = state.expiresAt ? new Date(state.expiresAt).getTime() : 0;
+  if (state.accessToken && expiresAt - Date.now() > 60000) {
+    return clobe.openSecret(state.accessToken);
+  }
+  let tokens;
+  try {
+    tokens = await cafe24.refreshTokens({ refreshToken: clobe.openSecret(state.refreshToken) });
+  } catch (error) {
+    const failure = new Error(`카페24 재연결이 필요합니다 (갱신 토큰 만료 가능): ${error.message}`);
+    failure.needsReauth = true;
+    throw failure;
+  }
+  state.accessToken = clobe.sealSecret(tokens.accessToken);
+  if (tokens.refreshToken) state.refreshToken = clobe.sealSecret(tokens.refreshToken);
+  state.expiresAt = tokens.expiresAt;
+  state.refreshTokenExpiresAt = tokens.refreshTokenExpiresAt || state.refreshTokenExpiresAt;
+  await writeDb(db);
+  return tokens.accessToken;
+}
+
+function cafe24PublicState(db) {
+  const state = db.cafe24 || {};
+  const config = cafe24.cafe24Config();
+  return {
+    configured: cafe24.cafe24Configured(),
+    connected: cafe24IsConnected(db),
+    mallId: state.mallId || config.mallId || "",
+    connectedBy: state.connectedBy || "",
+    connectedAt: state.connectedAt || "",
+    lastSyncAt: state.lastSyncAt || "",
+    refreshTokenExpiresAt: state.refreshTokenExpiresAt || ""
+  };
+}
+
 async function routeApi(req, res, url) {
   const pathname = url.pathname;
   const method = req.method || "GET";
@@ -4083,6 +4162,106 @@ async function routeApi(req, res, url) {
         { "content-disposition": contentDisposition(`(우프) ${spec.supplierName}_${ym}.xlsx`) });
     } catch (error) {
       sendJson(res, 500, { error: `정산서 생성 실패: ${error.message}` });
+    }
+    return;
+  }
+
+  // --- Cafe24 Admin API endpoints -----------------------------------------
+  // Order data and a delegated credential — owner/manager only, same as clobe.
+  if (pathname.startsWith("/api/cafe24/")) {
+    if (!canManageAdmins(actor)) {
+      sendJson(res, 403, { error: "카페24 연동은 오너 또는 매니저만 사용할 수 있습니다." });
+      return;
+    }
+    if (!db.cafe24 || typeof db.cafe24 !== "object") db.cafe24 = buildCafe24Namespace();
+  }
+
+  if (pathname === "/api/cafe24/status" && method === "GET") {
+    sendJson(res, 200, cafe24PublicState(db));
+    return;
+  }
+
+  if (pathname === "/api/cafe24/connect" && method === "POST") {
+    if (!cafe24.cafe24Configured()) {
+      sendJson(res, 400, { error: "CAFE24_MALL_ID / CAFE24_CLIENT_ID / CAFE24_CLIENT_SECRET 환경변수를 먼저 설정하세요." });
+      return;
+    }
+    try {
+      const redirectUri = cafe24RedirectUri(req);
+      const state = cafe24.createState();
+      cafe24PendingAuth.set(state, { redirectUri, actorId: actor.id, createdAt: Date.now() });
+      for (const [key, value] of cafe24PendingAuth) {
+        if (Date.now() - value.createdAt > CLOBE_AUTH_TTL_MS) cafe24PendingAuth.delete(key);
+      }
+      sendJson(res, 200, { authorizeUrl: cafe24.buildAuthorizeUrl({ redirectUri, state }) });
+    } catch (error) {
+      sendJson(res, 502, { error: `카페24 연결 준비 실패: ${error.message}` });
+    }
+    return;
+  }
+
+  if (pathname === "/api/cafe24/callback" && method === "GET") {
+    const code = url.searchParams.get("code") || "";
+    const state = url.searchParams.get("state") || "";
+    const pending = cafe24PendingAuth.get(state);
+    cafe24PendingAuth.delete(state);
+    const fail = (reason) => {
+      res.writeHead(302, { location: `/?cafe24=error&reason=${encodeURIComponent(reason)}` });
+      res.end();
+    };
+    if (url.searchParams.get("error")) return void fail(url.searchParams.get("error"));
+    if (!code || !pending) return void fail("인증 요청이 만료되었습니다. 다시 시도하세요.");
+    // Cafe24 authorization codes expire after one minute.
+    if (Date.now() - pending.createdAt > CLOBE_AUTH_TTL_MS) return void fail("인증 요청이 만료되었습니다.");
+    if (pending.actorId !== actor.id) return void fail("인증을 시작한 계정과 다릅니다.");
+    try {
+      const tokens = await cafe24.exchangeCode({ code, redirectUri: pending.redirectUri });
+      db.cafe24.accessToken = clobe.sealSecret(tokens.accessToken);
+      db.cafe24.refreshToken = clobe.sealSecret(tokens.refreshToken);
+      db.cafe24.expiresAt = tokens.expiresAt;
+      db.cafe24.refreshTokenExpiresAt = tokens.refreshTokenExpiresAt || "";
+      db.cafe24.mallId = tokens.mallId || "";
+      db.cafe24.connectedBy = actor.name || actor.email || "";
+      db.cafe24.connectedAt = now();
+      addAudit(db, actor, "update", "cafe24", "connection", `카페24 연동 연결 (${db.cafe24.mallId})`, null, cafe24PublicState(db));
+      await writeDb(db);
+      res.writeHead(302, { location: "/?cafe24=connected" });
+      res.end();
+    } catch (error) {
+      fail(error.message);
+    }
+    return;
+  }
+
+  if (pathname === "/api/cafe24/disconnect" && method === "POST") {
+    addAudit(db, actor, "delete", "cafe24", "connection", "카페24 연동 해제", cafe24PublicState(db), null);
+    db.cafe24 = buildCafe24Namespace();
+    await writeDb(db);
+    sendJson(res, 200, cafe24PublicState(db));
+    return;
+  }
+
+  // Returns one raw order exactly as Cafe24 sends it. The settlement engine
+  // consumes Korean-keyed spreadsheet columns, so the API→column adapter has
+  // to be written against real field names rather than guessed from docs.
+  if (pathname === "/api/cafe24/sample" && method === "GET") {
+    try {
+      const accessToken = await cafe24AccessToken(db);
+      const startDate = url.searchParams.get("startDate") || "";
+      const endDate = url.searchParams.get("endDate") || "";
+      const payload = await cafe24.apiGet(accessToken, "/api/v2/admin/orders", {
+        start_date: startDate,
+        end_date: endDate,
+        date_type: url.searchParams.get("dateType") || "order_date",
+        supplier_id: url.searchParams.get("supplierId") || "",
+        embed: "items",
+        limit: Number(url.searchParams.get("limit") || 2)
+      });
+      db.cafe24.lastSyncAt = now();
+      await writeDb(db);
+      sendJson(res, 200, payload);
+    } catch (error) {
+      sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
     }
     return;
   }
