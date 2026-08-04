@@ -1527,6 +1527,10 @@ function renderBrandRow(brand) {
 // 고친 것으로 보고, 날짜를 넣으면 그 날짜부터 유효한 새 버전이 생긴다. 정산은
 // 주문의 배송완료일 시점에 유효했던 버전으로 계산하므로, 지난달 정산이 이번 달
 // 새 계약으로 다시 계산되는 일이 없다.
+function brandPayAfterShipping(brand) {
+  return brand?.payAfterShipping === true || brand?.payAfterShipping === "true";
+}
+
 function renderBrandRuleSection(brand) {
   if (!brand?.id) {
     return `<div class="field"><label>계약 규칙 변경</label>
@@ -1592,6 +1596,17 @@ function renderBrandForm() {
         <select name="settlementType">
           ${["prepay_debt", "prepay_fee", "prepay_supply", "consignment", "direct_purchase"].map((s) => `<option value="${s}" ${(b.settlementType || "prepay_fee") === s ? "selected" : ""}>${settlementLabel(s)}</option>`).join("")}
         </select>
+      </div>
+      <div class="field">
+        <label>입금 시점</label>
+        <select name="payAfterShipping">
+          <option value="false" ${brandPayAfterShipping(b) ? "" : "selected"}>주문 즉시 입금요청 (기본)</option>
+          <option value="true" ${brandPayAfterShipping(b) ? "selected" : ""}>출고 후 입금 — 송장이 찍히면 입금요청으로 전환</option>
+        </select>
+        <span class="muted">
+          품절이 잦거나 오더메이드라 출고까지 며칠 걸리는 브랜드는 <b>출고 후 입금</b>으로 두세요.
+          주문이 들어오면 <b>입금대기</b> 상태로 올라가고, 카페24에 송장이 입력되면 <b>입금요청</b>으로 바뀝니다.
+        </span>
       </div>
       <div class="field">
         <label>정산 월 기준일</label>
@@ -3459,6 +3474,7 @@ function bindBrands() {
     const body = formObject(event.currentTarget);
     body.isActive = body.isActive === "true";
     body.hasReceivable = body.hasReceivable === "true";
+    body.payAfterShipping = body.payAfterShipping === "true";
     body.starred = false;
     let savedId = state.editingBrand?.id || "";
     if (state.editingBrand) {

@@ -39,3 +39,7 @@ services:
         sync: false
       - key: CAFE24_CLIENT_SECRET
         sync: false
+      # 기본은 읽기 전용. 주문 상태 쓰기를 켤 때만
+      # mall.read_order,mall.write_order 로 바꾸고 재연결한다.
+      - key: CAFE24_SCOPE
+        sync: false
