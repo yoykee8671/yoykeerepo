@@ -38,6 +38,7 @@ const state = {
     startDate: new Date(Date.now() - 13 * 86400000).toISOString().slice(0, 10),
     endDate: new Date().toISOString().slice(0, 10)
   },
+  cafe24: { status: null, sample: "", sampling: false, error: "" },
   npb: {
     screen: "list",
     loaded: false,
@@ -394,14 +395,18 @@ async function init() {
   }
   // Landing back from the clobe OAuth redirect. Strip the query so a reload
   // doesn't replay the toast.
-  const clobeResult = new URLSearchParams(location.search).get("clobe");
-  if (clobeResult) {
+  const params = new URLSearchParams(location.search);
+  const clobeResult = params.get("clobe");
+  const cafe24Result = params.get("cafe24");
+  if (clobeResult || cafe24Result) {
     state.tab = "reconcile";
-    const reason = new URLSearchParams(location.search).get("reason") || "";
+    const reason = params.get("reason") || "";
+    const label = clobeResult ? "클로브ai" : "카페24";
+    const result = clobeResult || cafe24Result;
     history.replaceState(null, "", location.pathname);
     renderApp();
-    if (clobeResult === "connected") showToast("클로브ai가 연결되었습니다.");
-    else showToast(reason ? `클로브 연결 실패: ${reason}` : "클로브 연결에 실패했습니다.", "error");
+    if (result === "connected") showToast(`${label}가 연결되었습니다.`);
+    else showToast(reason ? `${label} 연결 실패: ${reason}` : `${label} 연결에 실패했습니다.`, "error");
     return;
   }
   renderApp();
@@ -4077,15 +4082,65 @@ function renderReconcile() {
     return `${head}<section class="panel"><div class="panel-body"><p class="muted">이 메뉴는 오너 또는 매니저만 사용할 수 있습니다.</p></div></section>`;
   }
   if (c.loading || !c.status) {
-    return `${head}<section class="panel"><div class="panel-body"><p class="muted">클로브 연동 상태를 불러오는 중…</p></div></section>`;
+    return `${head}<section class="panel"><div class="panel-body"><p class="muted">연동 상태를 불러오는 중…</p></div></section>`;
   }
-  if (!c.status.connected) return `${head}${renderReconcileConnect()}`;
-  return `
-    ${head}
-    ${renderReconcileSettings()}
-    ${c.error ? `<section class="panel"><div class="panel-body"><p style="color:var(--red)">${h(c.error)}</p></div></section>` : ""}
-    ${renderReconcileResult(c.result)}
-  `;
+  const clobeBody = c.status.connected
+    ? `
+      ${renderReconcileSettings()}
+      ${c.error ? `<section class="panel"><div class="panel-body"><p style="color:var(--red)">${h(c.error)}</p></div></section>` : ""}
+      ${renderReconcileResult(c.result)}
+    `
+    : renderReconcileConnect();
+  return `${head}${clobeBody}${renderCafe24Panel()}`;
+}
+
+// 카페24 주문내역 자동 조회 연결. 클로브와 같은 자리에 두어 외부 연동을 한
+// 화면에서 관리한다. 카페24는 https 리다이렉트만 허용하므로 배포된 주소에서만
+// 연결이 성립한다.
+function renderCafe24Panel() {
+  const state24 = state.cafe24 || {};
+  const status = state24.status;
+  if (!status) {
+    return `<section class="panel"><div class="panel-head"><h2>카페24 연동</h2></div>
+      <div class="panel-body"><p class="muted">상태를 불러오는 중…</p></div></section>`;
+  }
+  if (!status.configured) {
+    return `<section class="panel">
+      <div class="panel-head"><h2>카페24 연동</h2></div>
+      <div class="panel-body">
+        <p class="muted" style="color:var(--red)">
+          CAFE24_MALL_ID / CAFE24_CLIENT_ID / CAFE24_CLIENT_SECRET 환경변수가 설정되지 않았습니다.
+        </p>
+      </div></section>`;
+  }
+  if (!status.connected) {
+    return `<section class="panel">
+      <div class="panel-head"><h2>카페24 연동</h2><span class="muted">쇼핑몰 ${h(status.mallId)}</span></div>
+      <div class="panel-body">
+        <p class="muted">
+          연결하면 카페24 주문내역을 직접 조회합니다. 정산할 때 CSV를 내려받아 올리는 단계가 없어지고,
+          내려받은 시점 이후에 배송완료된 주문이 누락되는 문제도 사라집니다. <strong>읽기 전용</strong>으로만 접근합니다.
+        </p>
+        <div class="toolbar"><button class="primary" data-cafe24-connect>카페24 연결하기</button></div>
+      </div></section>`;
+  }
+  return `<section class="panel">
+    <div class="panel-head">
+      <h2>카페24 연동</h2>
+      <span class="muted">쇼핑몰 ${h(status.mallId)}${status.connectedBy ? ` · ${h(status.connectedBy)} 연결` : ""}</span>
+    </div>
+    <div class="panel-body">
+      <p class="muted">
+        연결됨. 주문내역을 조회할 수 있습니다.
+        ${status.refreshTokenExpiresAt ? `갱신 토큰 만료 ${h(String(status.refreshTokenExpiresAt).slice(0, 16).replace("T", " "))}` : "갱신 토큰은 2주마다 자동 연장됩니다."}
+      </p>
+      ${state24.sample ? `<pre class="table-wrap" style="max-height:260px;padding:12px;font-size:12px">${h(state24.sample)}</pre>` : ""}
+      <div class="toolbar">
+        <button data-cafe24-sample ${state24.sampling ? "disabled" : ""}>${state24.sampling ? "조회 중…" : "주문 응답 샘플 보기"}</button>
+        <button class="ghost" data-cafe24-disconnect>연결 해제</button>
+      </div>
+      ${state24.error ? `<p class="muted" style="color:var(--red)">${h(state24.error)}</p>` : ""}
+    </div></section>`;
 }
 
 function renderReconcileConnect() {
@@ -4215,12 +4270,51 @@ function bindReconcile() {
   const c = state.clobe;
   if (!c.status && !c.loading) {
     c.loading = true;
-    loadClobeStatus().finally(() => {
+    Promise.all([loadClobeStatus(), loadCafe24Status()]).finally(() => {
       c.loading = false;
       renderApp();
     });
     return;
   }
+  if (!state.cafe24.status) {
+    loadCafe24Status().then(renderApp);
+  }
+
+  app.querySelector("[data-cafe24-connect]")?.addEventListener("click", async () => {
+    try {
+      const { authorizeUrl } = await api("/api/cafe24/connect", { method: "POST" });
+      window.location.href = authorizeUrl;
+    } catch (error) {
+      showToast(error.message || "카페24 연결 준비 실패", "error");
+    }
+  });
+
+  app.querySelector("[data-cafe24-disconnect]")?.addEventListener("click", async () => {
+    if (!confirm("카페24 연결을 해제할까요? 저장된 토큰이 삭제됩니다.")) return;
+    await api("/api/cafe24/disconnect", { method: "POST" });
+    state.cafe24.status = null;
+    state.cafe24.sample = "";
+    await loadCafe24Status();
+    renderApp();
+  });
+
+  // 정산 엔진이 읽는 한글 컬럼과 매핑하려면 실제 응답의 필드명이 필요하다.
+  app.querySelector("[data-cafe24-sample]")?.addEventListener("click", async () => {
+    state.cafe24.sampling = true;
+    state.cafe24.error = "";
+    renderApp();
+    try {
+      const end = new Date().toISOString().slice(0, 10);
+      const start = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+      const payload = await api(`/api/cafe24/sample?startDate=${start}&endDate=${end}&limit=1`);
+      state.cafe24.sample = JSON.stringify(payload, null, 2).slice(0, 20000);
+    } catch (error) {
+      state.cafe24.error = error.message || "샘플 조회 실패";
+    } finally {
+      state.cafe24.sampling = false;
+      renderApp();
+    }
+  });
 
   app.querySelector("[data-clobe-connect]")?.addEventListener("click", async () => {
     try {
@@ -4331,6 +4425,14 @@ async function loadClobeStatus() {
     }
   } catch (error) {
     state.clobe.error = error.message || "클로브 데이터를 불러오지 못했습니다.";
+  }
+}
+
+async function loadCafe24Status() {
+  try {
+    state.cafe24.status = await api("/api/cafe24/status");
+  } catch (error) {
+    state.cafe24.error = error.message || "카페24 상태를 불러오지 못했습니다.";
   }
 }
 
