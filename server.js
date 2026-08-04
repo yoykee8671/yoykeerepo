@@ -1285,11 +1285,28 @@ function cafe24RowMatchesBrand(row, brand) {
   return target === code || target === name;
 }
 
-// cafe24 날짜 컬럼은 "2026-06-15", "2026-06-15 13:20:00", "20260615" 등으로
-// 들쭉날쭉하다. 숫자만 뽑아 앞 8자리를 yyyy-MM-dd 로 되돌린다.
+// cafe24 날짜 컬럼은 내보내기마다 형식이 다르다: "2026-06-15", "2026.7.7 12:19"
+// (점 구분·월/일 0 미패딩), "2026/07/15", "20260615 13:20:00".
+//
+// 구분자를 지우고 앞 8자리를 취하는 방식은 0 미패딩 형식에서 조용히 망가진다 —
+// "2026.7.7 12:19" 이 "2026-77-12" 가 되어 어떤 실제 날짜보다도 커지고, 계약
+// 규칙이 미래 버전으로 잘못 잡힌다. 그래서 구분자가 있으면 자리별로 파싱한다.
 function cafe24DateOnly(raw) {
-  const digits = String(raw || "").replace(/[^0-9]/g, "").slice(0, 8);
-  if (digits.length !== 8) return "";
+  const text = String(raw || "").trim();
+  if (!text) return "";
+  const parts = text.match(/^(\d{4})[-./](\d{1,2})[-./](\d{1,2})/);
+  if (parts) {
+    const [, y, m, d] = parts;
+    const month = Number(m);
+    const day = Number(d);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return "";
+    return `${y}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+  const digits = text.replace(/[^0-9]/g, "");
+  if (digits.length < 8) return "";
+  const month = Number(digits.slice(4, 6));
+  const day = Number(digits.slice(6, 8));
+  if (month < 1 || month > 12 || day < 1 || day > 31) return "";
   return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`;
 }
 

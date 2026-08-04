@@ -3650,7 +3650,7 @@ function renderSettlement() {
                   클로브ai에서 자동 조회 (파일 업로드 없이)</label>`
               : ""}
             ${s.useClobe
-              ? `<span class="muted">정산월 전후 범위를 자동 조회합니다. 계좌 범위는 입금대사 탭에서 설정합니다.</span>`
+              ? `<span class="muted">정산월 전후 범위를 자동 조회합니다. 계좌 범위는 클로브ai 탭에서 설정합니다.</span>`
               : `<input type="file" accept=".xlsx" data-settlement-bank>
                  <span class="muted">${s.bank ? h(s.bank.name) : "출금 대조용 (선택)"}</span>`}
           </div>
@@ -3727,7 +3727,10 @@ function renderSettlementResult(result) {
       ${cancelBlock}
       <div class="panel-body toolbar">
         <button class="primary" data-settlement-export ${errs.length ? "disabled" : ""}>정산서 엑셀 다운로드</button>
-        ${errs.length ? `<span class="muted">오류 해결 후 다운로드할 수 있습니다.</span>` : ""}
+        ${errs.length
+          ? `<button data-settlement-export-force>오류 무시하고 출력 (${errs.length}건)</button>
+             <span class="muted">엑셀에서 직접 고치는 편이 빠른 업체용입니다. 오류 건은 정산서에 그대로 실립니다.</span>`
+          : ""}
       </div>
     </section>`;
 }
@@ -3788,7 +3791,9 @@ function bindSettlement() {
       showToast(error.message || "매핑 저장 실패", "error");
     }
   });
-  app.querySelector("[data-settlement-export]")?.addEventListener("click", async () => {
+  // force=true 는 서버의 오류 게이트를 건너뛴다. 오류 건을 고쳐서 다시 돌리는
+  // 것보다 엑셀에서 직접 손보는 편이 빠른 업체가 있어 필요한 출구다.
+  const exportSettlement = async (force = false) => {
     try {
       const res = await fetch("/api/settlement/export", {
         method: "POST",
@@ -3798,7 +3803,8 @@ function bindSettlement() {
           brandId: s.brandId, year: s.year, month: s.month,
           cafe24Csv: s.cafe24.base64,
           useClobe: s.useClobe,
-          bankXlsx: s.useClobe ? "" : s.bank?.base64 || ""
+          bankXlsx: s.useClobe ? "" : s.bank?.base64 || "",
+          ...(force ? { force: true } : {})
         })
       });
       if (!res.ok) {
@@ -3810,13 +3816,20 @@ function bindSettlement() {
       const a = document.createElement("a");
       a.href = url;
       const brand = state.brands.find((b) => b.id === s.brandId);
-      a.download = `(우프) ${brand?.name || brand?.cafe24Supplier}_${s.year}${String(s.month).padStart(2, "0")}.xlsx`;
+      const suffix = force ? "_오류포함" : "";
+      a.download = `(우프) ${brand?.name || brand?.cafe24Supplier}_${s.year}${String(s.month).padStart(2, "0")}${suffix}.xlsx`;
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
-      showToast("정산서를 다운로드했습니다.");
+      showToast(force ? "오류를 포함한 정산서를 다운로드했습니다. 엑셀에서 확인 후 사용하세요." : "정산서를 다운로드했습니다.");
     } catch (error) {
       showToast(error.message || "다운로드 실패", "error");
     }
+  };
+  app.querySelector("[data-settlement-export]")?.addEventListener("click", () => exportSettlement(false));
+  app.querySelector("[data-settlement-export-force]")?.addEventListener("click", () => {
+    const count = (s.result?.errors || []).length;
+    if (!confirm(`오류 ${count}건을 무시하고 정산서를 출력할까요?\n오류 건이 그대로 실리므로 엑셀에서 반드시 확인하세요.`)) return;
+    exportSettlement(true);
   });
 }
 
