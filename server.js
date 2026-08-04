@@ -12,6 +12,7 @@ import pg from "pg";
 import * as clobe from "./lib/clobe-mcp.mjs";
 import { reconcile } from "./lib/clobe-reconcile.mjs";
 import * as cafe24 from "./lib/cafe24-api.mjs";
+import { cafe24OrdersToRows, compareRows } from "./lib/cafe24-rows.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -4260,6 +4261,40 @@ async function routeApi(req, res, url) {
       db.cafe24.lastSyncAt = now();
       await writeDb(db);
       sendJson(res, 200, payload);
+    } catch (error) {
+      sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
+    }
+    return;
+  }
+
+  // Diffs the adapted API rows against an uploaded CSV for the same period.
+  // The adapter was written from one sample response, so before it replaces the
+  // upload it has to be shown to reproduce the export field by field — a value
+  // mapped at the wrong granularity would otherwise shift settlements silently.
+  if (pathname === "/api/cafe24/compare" && method === "POST") {
+    const body = await readBody(req);
+    try {
+      const csvRows = body.cafe24Csv ? parseCafe24Csv(body.cafe24Csv) : [];
+      if (!csvRows.length) {
+        sendJson(res, 400, { error: "비교할 카페24 CSV를 올려주세요." });
+        return;
+      }
+      const accessToken = await cafe24AccessToken(db);
+      const orders = await cafe24.fetchOrders(accessToken, {
+        startDate: body.startDate,
+        endDate: body.endDate,
+        dateType: body.dateType || "order_date",
+        supplierId: body.supplierId || ""
+      });
+      const apiRows = cafe24OrdersToRows(orders);
+      db.cafe24.lastSyncAt = now();
+      await writeDb(db);
+      sendJson(res, 200, {
+        orderCount: orders.length,
+        apiRowCount: apiRows.length,
+        csvRowCount: csvRows.length,
+        ...compareRows(csvRows, apiRows)
+      });
     } catch (error) {
       sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
     }
