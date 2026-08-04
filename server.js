@@ -917,6 +917,9 @@ function migrateDb(db) {
     touch(brand, "shippingThresholdFee", 0);
     touch(brand, "shippingThresholdBase", "sales");
     touch(brand, "settlementDateBasis", brand.settlementType === "consignment" ? "delivered" : "order");
+    // 출고 후 입금 브랜드: 주문 시점엔 입금대기로 두고, 송장이 찍히면 입금요청으로
+    // 올린다. 지금까지는 배송 메모에 글로만 적혀 있어 자동화가 읽을 수 없었다.
+    touch(brand, "payAfterShipping", false);
     touch(brand, "shippingRule", "");
     // 규칙 이력이 없는 기존 브랜드는 현재 규칙을 최초 버전으로 이관한다.
     // 시작일을 EPOCH 로 두어 과거 정산이 지금과 동일하게 계산되도록 한다.
@@ -3656,6 +3659,7 @@ async function routeApi(req, res, url) {
       "shippingThresholdFee",
       "shippingThresholdBase",
       "settlementDateBasis",
+      "payAfterShipping",
       "isActive",
       "starred",
       "businessName",
@@ -3684,6 +3688,7 @@ async function routeApi(req, res, url) {
     if (!settlementDateBases.has(brand.settlementDateBasis)) {
       brand.settlementDateBasis = brandSettlementDateBasis(brand);
     }
+    brand.payAfterShipping = brand.payAfterShipping === true || brand.payAfterShipping === "true";
     Object.assign(brand, normalizeShippingPolicy(brand, before));
 
     // 계약 규칙 변경: ruleValidFrom 이 오면 덮어쓰지 않고 그 날짜의 버전을
@@ -4559,8 +4564,10 @@ async function routeApi(req, res, url) {
           expectedAmount: finalDepositAmount(item),
           expectedDepositDate: item.expectedDepositDate,
           createdAt: item.createdAt,
-          // 위탁은 브랜드가 우프에 보내는 입금, 나머지는 우프가 지급하는 출금.
-          direction: (db.brands.find((b) => b.id === item.brandId)?.settlementType === "consignment") ? "IN" : "OUT"
+          // 입금요청은 종류를 불문하고 우프가 브랜드에 지급하는 건이라 통장에서는
+          // 출금이다. 위탁도 마찬가지 — 수수료를 공제하고 익월 말에 지급한다.
+          // 실제 거래로 확인: 올데이올가닉·라이펫 등 위탁 브랜드 거래 7건이 모두 출금.
+          direction: "OUT"
         }));
       const result = reconcile({
         requests: unpaid,
