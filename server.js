@@ -1356,7 +1356,16 @@ function cafe24RowIsCancelled(row) {
 // Unit sale price for a cafe24 line = 판매가 + 옵션추가 가격 (options change the
 // price, e.g. 7,900 + 1,000 = 8,900). Note the "옵션+판매가" column is a UNIT
 // price (does NOT include quantity), so the line total is always unit × 수량.
+// 단가 = 옵션까지 포함한 1개 가격.
+//
+// 내보내기 형식마다 컬럼이 다르다. 어떤 파일은 "판매가" + "옵션추가 가격" 으로
+// 나뉘어 오고, 어떤 파일은 "옵션+판매가" 한 컬럼에 합쳐서 온다. 후자만 있는
+// 파일에서 "옵션추가 가격" 을 찾으면 0 이 되어 옵션가가 통째로 빠진다 —
+// 2026-07 파일 417행 중 80행이 여기 해당했고, 옵션이 45,000원인 상품이
+// 25,000원으로 계산됐다. 합쳐진 컬럼이 있으면 그것을 우선한다.
 function cafe24UnitPrice(row) {
+  const combined = number(row["옵션+판매가"]);
+  if (combined > 0) return combined;
   return number(row["판매가"]) + number(row["옵션추가 가격"]);
 }
 function cafe24RowSaleAmount(row) {
