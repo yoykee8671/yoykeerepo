@@ -4509,7 +4509,8 @@ async function routeApi(req, res, url) {
       return;
     }
     try {
-      const transactions = await clobeFetchTransactions(db, { startDate, endDate, direction: "IN" });
+      // 양방향을 모두 가져온다. 요청마다 기대 방향이 다르므로 매칭 단계에서 가른다.
+      const transactions = await clobeFetchTransactions(db, { startDate, endDate });
       const unpaid = db.requests
         .filter((item) => item.status !== "paid" && item.status !== "deleted")
         .map((item) => ({
@@ -4522,7 +4523,9 @@ async function routeApi(req, res, url) {
           status: item.status,
           expectedAmount: finalDepositAmount(item),
           expectedDepositDate: item.expectedDepositDate,
-          createdAt: item.createdAt
+          createdAt: item.createdAt,
+          // 위탁은 브랜드가 우프에 보내는 입금, 나머지는 우프가 지급하는 출금.
+          direction: (db.brands.find((b) => b.id === item.brandId)?.settlementType === "consignment") ? "IN" : "OUT"
         }));
       const result = reconcile({
         requests: unpaid,
