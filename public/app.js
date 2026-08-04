@@ -43,6 +43,12 @@ const state = {
     endDate: new Date().toISOString().slice(0, 10)
   },
   cafe24: { status: null, sample: "", sampling: false, error: "" },
+  pipeline: {
+    startDate: new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10),
+    endDate: new Date().toISOString().slice(0, 10),
+    collecting: false, collect: null, selected: [],
+    shipping: false, shipped: null, shippedSelected: [], error: ""
+  },
   npb: {
     screen: "list",
     loaded: false,
