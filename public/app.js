@@ -10,6 +10,9 @@ const state = {
   paymentLogs: [],
   admins: [],
   audits: [],
+  auditsTotal: 0,
+  auditsLoaded: false,
+  archivesLoaded: false,
   archives: [],
   dashboard: null,
   filters: { q: "", statusValues: null, brandIds: null, settlementTypes: null, promotionRuleId: "", dateFrom: "", dateTo: "" },
@@ -414,7 +417,9 @@ async function init() {
 }
 
 async function loadAll() {
-  const [dashboard, brands, requests, priceEntries, priceAliases, promotionRules, paymentLogs, admins, audits, archives] = await Promise.all([
+  // 이력·아카이브는 화면을 열 때가 아니라 해당 탭을 눌렀을 때 부른다. 감사로그
+  // 전체는 2MB가 넘어서, 매번 실어 보내면 나머지 응답까지 같이 밀린다.
+  const [dashboard, brands, requests, priceEntries, priceAliases, promotionRules, paymentLogs, admins] = await Promise.all([
     api("/api/dashboard"),
     api("/api/brands"),
     api("/api/requests"),
@@ -423,8 +428,6 @@ async function loadAll() {
     api("/api/promotion-rules"),
     api("/api/payment-logs"),
     api("/api/admins"),
-    api("/api/audits"),
-    api("/api/archives")
   ]);
   state.dashboard = dashboard;
   state.brands = brands.brands;
@@ -435,8 +438,7 @@ async function loadAll() {
   state.promotionRules = promotionRules.promotionRules;
   state.paymentLogs = paymentLogs.paymentLogs;
   state.admins = admins.admins;
-  state.audits = audits.auditLogs;
-  state.archives = archives.archiveHistory;
+
   ensureRequestFilterDefaults();
   state.selectedRequestIds = state.selectedRequestIds.filter((id) =>
     state.requests.some((item) => item.id === id && item.status !== "deleted")
@@ -1859,7 +1861,7 @@ function renderAudits() {
   return `
     ${pageHead("이력", "관리자의 입력, 수정, 삭제, 로그인, 아카이브 작업을 시간순으로 확인합니다.")}
     <section class="panel">
-      <div class="panel-head"><h2>감사 로그</h2><span class="muted">${money.format(state.audits.length)}건</span></div>
+      <div class="panel-head"><h2>감사 로그</h2><span class="muted">최근 ${money.format(state.audits.length)}건${state.auditsTotal > state.audits.length ? ` / 전체 ${money.format(state.auditsTotal)}건` : ""}</span></div>
       <div class="panel-body">${renderAuditList(state.audits)}</div>
     </section>
   `;
@@ -1947,7 +1949,34 @@ async function renderShare(token) {
   }
 }
 
+// 이력·아카이브는 탭을 실제로 열었을 때만 가져온다.
+async function ensureTabData() {
+  if (state.tab === "audits" && !state.auditsLoaded) {
+    state.auditsLoaded = true;
+    try {
+      const data = await api("/api/audits?limit=200");
+      state.audits = data.auditLogs || [];
+      state.auditsTotal = data.total || state.audits.length;
+      renderApp();
+    } catch (error) {
+      state.auditsLoaded = false;
+      showToast(error.message || "이력을 불러오지 못했습니다.", "error");
+    }
+  }
+  if (state.tab === "archive" && !state.archivesLoaded) {
+    state.archivesLoaded = true;
+    try {
+      state.archives = (await api("/api/archives")).archiveHistory || [];
+      renderApp();
+    } catch (error) {
+      state.archivesLoaded = false;
+      showToast(error.message || "아카이브를 불러오지 못했습니다.", "error");
+    }
+  }
+}
+
 function bindCurrentTab() {
+  ensureTabData();
   if (state.tab === "requests") bindRequests();
   if (state.tab === "prices") bindPrices();
   if (state.tab === "brands") bindBrands();
@@ -3622,6 +3651,7 @@ function bindAdmins() {
 function bindArchive() {
   app.querySelector("[data-sync-all]").addEventListener("click", async () => {
     await api("/api/archives/google-sync", { method: "POST", body: {} });
+    state.archivesLoaded = false;
     await refreshAndRender();
   });
   app.querySelectorAll("[data-sync-brand]").forEach((button) => {
