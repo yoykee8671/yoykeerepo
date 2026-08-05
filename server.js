@@ -3053,8 +3053,8 @@ async function settlementOrderRows(db, body, actor, brand) {
     const endDate = new Date(Date.UTC(Number(body.year), Number(body.month), 0)).toISOString().slice(0, 10);
     // 정산이 그 달로 묶는 기준과 같은 날짜로 조회해야 범위가 어긋나지 않는다.
     const dateType = brandSettlementDateBasis(brand) === "delivered" ? "shipend_date" : "order_date";
-    const accessToken = await cafe24AccessToken(db);
-    const orders = await cafe24.fetchOrders(accessToken, { startDate, endDate, dateType });
+    const orders = await withCafe24Token(db, (token) =>
+      cafe24.fetchOrders(token, { startDate, endDate, dateType }));
     db.cafe24.lastSyncAt = now();
     return {
       rows: cafe24OrdersToRows(orders),
@@ -3192,11 +3192,11 @@ function cafe24IsConnected(db) {
 
 // Cafe24's refresh token lives 2 weeks. Once it lapses there is no automated
 // recovery — say so plainly instead of retrying.
-async function cafe24AccessToken(db) {
+async function cafe24AccessToken(db, { force = false } = {}) {
   const state = db.cafe24;
   if (!cafe24IsConnected(db)) throw new Error("카페24가 연결되지 않았습니다. 먼저 연결하세요.");
   const expiresAt = state.expiresAt ? new Date(state.expiresAt).getTime() : 0;
-  if (state.accessToken && expiresAt - Date.now() > 60000) {
+  if (!force && state.accessToken && expiresAt - Date.now() > 60000) {
     return clobe.openSecret(state.accessToken);
   }
   let tokens;
@@ -3213,6 +3213,21 @@ async function cafe24AccessToken(db) {
   state.refreshTokenExpiresAt = tokens.refreshTokenExpiresAt || state.refreshTokenExpiresAt;
   await writeDb(db);
   return tokens.accessToken;
+}
+
+// 만료 시각 판정이 어긋나도 서비스가 멈추지 않도록, invalid_token 이면 한 번
+// 강제로 갱신하고 다시 시도한다. 카페24가 오프셋 없는 현지시각을 주기 때문에
+// 시계 해석이 틀어질 여지가 늘 있다.
+async function withCafe24Token(db, run) {
+  const token = await cafe24AccessToken(db);
+  try {
+    return await run(token);
+  } catch (error) {
+    const looksExpired = error.status === 401 || /invalid_token|expired/i.test(String(error.message || ""));
+    if (!looksExpired) throw error;
+    const fresh = await cafe24AccessToken(db, { force: true });
+    return run(fresh);
+  }
 }
 
 function cafe24PublicState(db) {
@@ -4407,8 +4422,8 @@ async function routeApi(req, res, url) {
       const endDate = dateOnly(body.endDate) || now().slice(0, 10);
       const startDate = dateOnly(body.startDate) ||
         new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
-      const accessToken = await cafe24AccessToken(db);
-      const orders = await cafe24.fetchOrders(accessToken, { startDate, endDate, dateType: "order_date" });
+      const orders = await withCafe24Token(db, (token) =>
+        cafe24.fetchOrders(token, { startDate, endDate, dateType: "order_date" }));
       const result = buildRequestDrafts({
         orders,
         brands: db.brands,
@@ -4474,8 +4489,8 @@ async function routeApi(req, res, url) {
       const endDate = dateOnly(body.endDate) || now().slice(0, 10);
       const startDate = dateOnly(body.startDate) ||
         new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-      const accessToken = await cafe24AccessToken(db);
-      const orders = await cafe24.fetchOrders(accessToken, { startDate, endDate, dateType: "order_date" });
+      const orders = await withCafe24Token(db, (token) =>
+        cafe24.fetchOrders(token, { startDate, endDate, dateType: "order_date" }));
       const found = findShippedAwaiting({ orders, requests: db.requests, brands: db.brands });
       sendJson(res, 200, {
         range: { startDate, endDate },
@@ -4591,17 +4606,16 @@ async function routeApi(req, res, url) {
   // to be written against real field names rather than guessed from docs.
   if (pathname === "/api/cafe24/sample" && method === "GET") {
     try {
-      const accessToken = await cafe24AccessToken(db);
       const startDate = url.searchParams.get("startDate") || "";
       const endDate = url.searchParams.get("endDate") || "";
-      const payload = await cafe24.apiGet(accessToken, "/api/v2/admin/orders", {
+      const payload = await withCafe24Token(db, (token) => cafe24.apiGet(token, "/api/v2/admin/orders", {
         start_date: startDate,
         end_date: endDate,
         date_type: url.searchParams.get("dateType") || "order_date",
         supplier_id: url.searchParams.get("supplierId") || "",
         embed: "items",
         limit: Number(url.searchParams.get("limit") || 2)
-      });
+      }));
       db.cafe24.lastSyncAt = now();
       await writeDb(db);
       sendJson(res, 200, payload);
@@ -4623,13 +4637,12 @@ async function routeApi(req, res, url) {
         sendJson(res, 400, { error: "비교할 카페24 CSV를 올려주세요." });
         return;
       }
-      const accessToken = await cafe24AccessToken(db);
-      const orders = await cafe24.fetchOrders(accessToken, {
+      const orders = await withCafe24Token(db, (token) => cafe24.fetchOrders(token, {
         startDate: body.startDate,
         endDate: body.endDate,
         dateType: body.dateType || "order_date",
         supplierId: body.supplierId || ""
-      });
+      }));
       const apiRows = cafe24OrdersToRows(orders);
       db.cafe24.lastSyncAt = now();
       await writeDb(db);
