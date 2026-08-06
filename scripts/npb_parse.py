@@ -519,6 +519,95 @@ def parse_terrymarket(rows, channel, warnings):
 
 # --- dispatch ---------------------------------------------------------------
 
+# --- generic fallback -------------------------------------------------------
+#
+# 전용 레시피가 없는 채널을 위한 범용 파서.
+#
+# 채널마다 엑셀 양식이 다르지만 정산에 필요한 것은 "무슨 상품이 몇 개 팔렸나"
+# 둘뿐이다. 컬럼을 이름 후보로 찾아내면 대부분의 채널이 코드 수정 없이 읽힌다.
+# 양식이 특이한 채널만 전용 레시피를 추가하면 된다 — 채널을 하나 늘릴 때마다
+# 파이썬을 고쳐야 하는 구조가 병목이었다.
+
+GENERIC_QTY_COLS = ("주문수량", "판매수량", "결제수량", "구매수량", "출고수량", "수량")
+GENERIC_NAME_COLS = ("상품명", "옵션명", "품목명", "제품명", "상품이름", "품목", "상품")
+GENERIC_BARCODE_COLS = ("바코드", "barcode")
+GENERIC_CODE_COLS = ("상품코드", "품목코드", "자체상품코드", "sku")
+
+
+def pick_col(idx, candidates):
+    """이름이 정확히 맞는 컬럼을 우선하고, 없으면 부분 일치로 찾는다."""
+    for c in candidates:
+        if c in idx:
+            return idx[c], c
+    for key, i in idx.items():
+        low = key.lower()
+        for c in candidates:
+            if c.lower() in low:
+                return i, key
+    return None, None
+
+
+def parse_generic(rows, channel, warnings):
+    """상품명·수량 컬럼을 이름으로 찾아 집계한다."""
+    agg = Aggregator()
+    if not rows:
+        warnings.append("[%s] empty sheet" % channel)
+        return agg.lines()
+
+    # 헤더가 첫 행이 아닐 수 있다 — 수량 컬럼이 잡히는 첫 행을 헤더로 본다.
+    header_row = 0
+    idx = header_index(rows[0])
+    ci_qty, qty_name = pick_col(idx, GENERIC_QTY_COLS)
+    if ci_qty is None:
+        for r in range(1, min(len(rows), 10)):
+            probe = header_index(rows[r])
+            ci_qty, qty_name = pick_col(probe, GENERIC_QTY_COLS)
+            if ci_qty is not None:
+                header_row, idx = r, probe
+                break
+    if ci_qty is None:
+        warnings.append(
+            "[%s] 수량 컬럼을 찾지 못했습니다. 헤더에서 읽은 이름: %s"
+            % (channel, ", ".join(list(idx.keys())[:12]) or "(없음)")
+        )
+        return agg.lines()
+
+    ci_name, name_col = pick_col(idx, GENERIC_NAME_COLS)
+    ci_barcode, _ = pick_col(idx, GENERIC_BARCODE_COLS)
+    ci_code, _ = pick_col(idx, GENERIC_CODE_COLS)
+    if ci_name is None and ci_barcode is None and ci_code is None:
+        warnings.append(
+            "[%s] 상품을 식별할 컬럼(상품명/바코드/상품코드)을 찾지 못했습니다" % channel
+        )
+        return agg.lines()
+
+    warnings.append(
+        "[%s] 범용 파서로 읽었습니다 (상품='%s', 수량='%s'). 금액이 맞는지 확인하세요."
+        % (channel, name_col or "(바코드/코드)", qty_name)
+    )
+
+    def cell(row, i):
+        return row[i] if (i is not None and i < len(row)) else None
+
+    for r in rows[header_row + 1:]:
+        if r is None or all(x is None for x in r):
+            continue
+        qty = to_int(cell(r, ci_qty))
+        if qty <= 0:
+            continue
+        product = identify_product(
+            name=cell(r, ci_name), barcode=cell(r, ci_barcode), code=cell(r, ci_code)
+        )
+        if product is None:
+            warnings.append(
+                "[%s] unrecognized product (수량=%d): %r"
+                % (channel, qty, norm(cell(r, ci_name)))
+            )
+            continue
+        agg.add(product, orders=1, ea=qty, ea_per_unit=1)
+    return agg.lines()
+
+
 def parse(channel, rows, warnings, meta):
     if channel == "gongu":
         return parse_cafe24(rows, channel, warnings, is_gongu=True)
@@ -538,8 +627,9 @@ def parse(channel, rows, warnings, meta):
         return parse_pharmasquare(rows, channel, warnings)
     if channel == "terrymarket":
         return parse_terrymarket(rows, channel, warnings)
-    warnings.append("unknown channel '%s' — no parser recipe" % channel)
-    return []
+    # 전용 레시피가 없으면 범용 파서로 넘긴다. 화면에서 채널을 추가하고 바로
+    # 파일을 올릴 수 있어야 한다.
+    return parse_generic(rows, channel, warnings)
 
 
 def main():

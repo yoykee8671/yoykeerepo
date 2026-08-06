@@ -1180,3 +1180,95 @@ input.num {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+
+/* 링크를 버튼처럼 — 자동화 화면의 클로브 최신화 이동 */
+a.button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text, #0f172a);
+  font-size: 13px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+a.button:hover {
+  border-color: #94a3b8;
+}
+
+/* 관리자 메뉴 권한 표 */
+.perm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.perm-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.perm-box input {
+  width: auto;
+  margin: 0;
+  flex: none;
+}
+
+/* npb 업로드 — 한 곳에 올리고 파일명으로 채널 인식 */
+.npb-dropzone {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: #fbfdff;
+}
+
+.npb-ch-chips {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.npb-ch-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  font-size: 13px;
+}
+
+.npb-ch-chip.on {
+  border-color: #137333;
+  background: #f2fbf5;
+}
+
+.npb-pending-wrap {
+  margin-top: 12px;
+}
+
+.npb-pending {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  flex-wrap: wrap;
+}
+
+.npb-pending select {
+  width: auto;
+  min-width: 160px;
+}
