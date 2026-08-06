@@ -20,6 +20,9 @@ const state = {
   editingRequest: null,
   editingBrand: null,
   editingAdmin: null,
+  editingPermissions: null,
+  menus: [],
+  actionLabels: {},
   editingPriceEntry: null,
   editingPriceAlias: null,
   editingPromotionRule: null,
@@ -47,7 +50,8 @@ const state = {
     startDate: new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10),
     endDate: new Date().toISOString().slice(0, 10),
     collecting: false, collect: null, selected: [],
-    shipping: false, shipped: null, shippedSelected: [], error: ""
+    shipping: false, shipped: null, shippedSelected: [], error: "",
+    scraping: null
   },
   npb: {
     screen: "list",
@@ -59,6 +63,7 @@ const state = {
     currentKey: "",
     periodMonth: `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`,
     parsePreview: null,
+    pendingUploads: [],
     logisticsCounts: { small: 0, large: 0 },
     worksheet: null,
     inventory: null,
@@ -172,6 +177,7 @@ async function api(path, options = {}) {
   if (!response.ok) {
     const error = new Error(data?.error || "요청에 실패했습니다.");
     if (data?.details) error.details = data.details;
+    error.payload = data;
     throw error;
   }
   return data;
@@ -425,7 +431,7 @@ async function init() {
 async function loadAll() {
   // 이력·아카이브는 화면을 열 때가 아니라 해당 탭을 눌렀을 때 부른다. 감사로그
   // 전체는 2MB가 넘어서, 매번 실어 보내면 나머지 응답까지 같이 밀린다.
-  const [dashboard, brands, requests, priceEntries, priceAliases, promotionRules, paymentLogs, admins] = await Promise.all([
+  const [dashboard, brands, requests, priceEntries, priceAliases, promotionRules, paymentLogs, admins, menus] = await Promise.all([
     api("/api/dashboard"),
     api("/api/brands"),
     api("/api/requests"),
@@ -434,7 +440,10 @@ async function loadAll() {
     api("/api/promotion-rules"),
     api("/api/payment-logs"),
     api("/api/admins"),
+    api("/api/menus")
   ]);
+  state.menus = menus.menus || [];
+  state.actionLabels = menus.actionLabels || {};
   state.dashboard = dashboard;
   state.brands = brands.brands;
   state.requests = requests.requests;
@@ -541,9 +550,10 @@ function renderApp() {
     ["audits", "이력"],
     ["archive", "아카이브"],
     ["settlement", "정산"],
+    ["pipeline", "자동화"],
     ["reconcile", "클로브ai"],
     ["npb", "npb정산"]
-  ].filter(([key]) => key !== "reconcile" || canUseClobe());
+  ].filter(([key]) => can(key, "view"));
   app.innerHTML = `
     <div class="shell">
       <aside class="sidebar">
@@ -665,6 +675,7 @@ function renderCurrentTab() {
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
   if (state.tab === "settlement") return renderSettlement();
+  if (state.tab === "pipeline") return renderPipeline();
   if (state.tab === "reconcile") return renderReconcile();
   if (state.tab === "npb") return renderNpb();
   return renderDashboard();
@@ -1846,6 +1857,44 @@ function renderAdmins() {
   `;
 }
 
+// 메뉴 목록은 서버가 준다. 새 메뉴가 생겨도 여기를 고칠 필요가 없다.
+function renderPermissionGrid(admin) {
+  const role = state.editingPermissions?.role ?? (admin.role || "operator");
+  if (role === "owner") {
+    return `<div class="field"><label>메뉴 권한</label>
+      <span class="muted">오너는 모든 메뉴에 대한 전체 권한을 가집니다.</span></div>`;
+  }
+  const current = state.editingPermissions?.permissions
+    || admin.permissions
+    || {};
+  const rows = state.menus.map((menu) => {
+    const granted = current[menu.key] || [];
+    const boxes = menu.actions.map((action) => `
+      <label class="perm-box">
+        <input type="checkbox" data-perm-menu="${h(menu.key)}" data-perm-action="${h(action)}"
+          ${granted.includes(action) ? "checked" : ""}>
+        ${h(state.actionLabels[action] || action)}
+      </label>`).join("");
+    return `<tr>
+      <td><strong>${h(menu.label)}</strong></td>
+      <td><div class="perm-actions">${boxes}</div></td>
+    </tr>`;
+  }).join("");
+  return `
+    <div class="field">
+      <label>메뉴 권한</label>
+      <span class="muted">
+        체크한 메뉴만 화면에 나타나고, 체크한 동작만 허용됩니다.
+        하위 동작을 주면 접근·읽기는 자동으로 함께 부여됩니다.
+      </span>
+      <div class="table-wrap" style="max-height:320px;margin-top:6px">
+        <table><thead><tr><th style="width:120px">메뉴</th><th>허용할 동작</th></tr></thead>
+        <tbody>${rows}</tbody></table>
+      </div>
+    </div>
+  `;
+}
+
 function renderAdminRow(admin) {
   return `
     <tr>
@@ -1870,6 +1919,7 @@ function renderAdminForm() {
         <div><label>상태</label><select name="isActive"><option value="true" ${a.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${a.isActive === false ? "selected" : ""}>N</option></select></div>
       </div>
       <div class="field"><label>비밀번호 ${state.editingAdmin ? "(변경 시에만 입력)" : ""}</label><input name="password" type="password" ${state.editingAdmin ? "" : "required"}></div>
+      ${renderPermissionGrid(a)}
       <div class="toolbar">
         <button class="primary" type="submit">${state.editingAdmin ? "수정 저장" : "관리자 추가"}</button>
         ${state.editingAdmin ? `<button type="button" data-cancel-edit>취소</button>` : ""}
@@ -2004,6 +2054,7 @@ function bindCurrentTab() {
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
   if (state.tab === "settlement") bindSettlement();
+  if (state.tab === "pipeline") bindPipeline();
   if (state.tab === "reconcile") bindReconcile();
   if (state.tab === "npb") bindNpb();
 }
@@ -3642,6 +3693,7 @@ function bindAdmins() {
   app.querySelectorAll("[data-edit-admin]").forEach((button) => {
     button.addEventListener("click", () => {
       state.editingAdmin = state.admins.find((item) => item.id === button.dataset.editAdmin);
+      state.editingPermissions = null;
       renderApp();
     });
   });
@@ -3652,20 +3704,62 @@ function bindAdmins() {
       await refreshAndRender();
     });
   });
+  // 체크박스를 그릴 때마다 폼을 통째로 다시 그리면 입력 중이던 값이 날아가므로,
+  // 편집 중 권한은 state 에 따로 들고 다닌다.
+  const currentPermissions = () => {
+    const base = state.editingPermissions?.permissions
+      || state.editingAdmin?.permissions
+      || {};
+    return JSON.parse(JSON.stringify(base));
+  };
+  app.querySelectorAll("[data-perm-menu]").forEach((box) => {
+    box.addEventListener("change", () => {
+      const perms = currentPermissions();
+      const menuKey = box.dataset.permMenu;
+      const action = box.dataset.permAction;
+      const set = new Set(perms[menuKey] || []);
+      if (box.checked) {
+        set.add(action);
+        set.add("view");
+      } else {
+        set.delete(action);
+        // 접근을 빼면 그 메뉴는 통째로 못 쓴다.
+        if (action === "view") set.clear();
+      }
+      perms[menuKey] = [...set];
+      state.editingPermissions = {
+        role: app.querySelector("[data-admin-form] [name=role]")?.value || state.editingAdmin?.role || "operator",
+        permissions: perms
+      };
+      renderApp();
+    });
+  });
+  app.querySelector("[data-admin-form] [name=role]")?.addEventListener("change", (event) => {
+    // 등급을 바꾸면 그 등급의 기본 권한을 보여준다 — 이후 개별 조정은 그대로 가능.
+    state.editingPermissions = { role: event.target.value, permissions: null };
+    renderApp();
+  });
   app.querySelector("[data-admin-form]").addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = formObject(event.currentTarget);
     body.isActive = body.isActive === "true";
+    if (body.role !== "owner") {
+      body.permissions = state.editingPermissions?.permissions
+        || state.editingAdmin?.permissions
+        || undefined;
+    }
     if (state.editingAdmin) {
       await api(`/api/admins/${state.editingAdmin.id}`, { method: "PUT", body });
     } else {
       await api("/api/admins", { method: "POST", body });
     }
     state.editingAdmin = null;
+    state.editingPermissions = null;
     await refreshAndRender();
   });
   app.querySelector("[data-cancel-edit]")?.addEventListener("click", () => {
     state.editingAdmin = null;
+    state.editingPermissions = null;
     renderApp();
   });
 }
@@ -4074,9 +4168,51 @@ async function npbLoadDetail(key) {
 // Build the editable worksheet: one block per channel, seeded from
 // channelLineConfigs (so blocks are visible pre-upload), overlaid with any
 // qty/price/fee already stored on settlement.lines (parsed or hand-edited).
+// 채널의 워크시트 행을 만든다.
+//
+// 행은 채널과 상품에서 직접 파생시킨다 — 저장된 channelLineConfigs 를 조건으로
+// 걸면, 화면에서 새로 추가한 채널은 라인 설정이 없어서 워크시트에 아예 나타나지
+// 않는다(채널 설정 저장은 channels 만 갱신한다). 도톤은 판매 SKU 가 두 개뿐이고
+// 팔렸든 안 팔렸든 모든 채널에 있어야 하므로, 파생이 곧 올바른 규칙이다.
+// 저장된 라인 설정은 가격·수수료 덮어쓰기로만 쓴다.
+function npbChannelSeeds(channel, products, lineConfigs) {
+  const saved = lineConfigs.filter((lc) => lc.channelCode === channel.code);
+  const savedFor = (productId, tier) =>
+    saved.find((lc) => lc.productId === productId && (!tier || (lc.lineLabel || "").includes(tier)));
+
+  if (channel.tiers && channel.tiers.length) {
+    return channel.tiers.map((t) => {
+      const override = savedFor("os", t.tier);
+      return {
+        productId: "os",
+        lineLabel: override?.lineLabel || `DOTEON Outdoor Spray ${t.tier}`,
+        tier: t.tier,
+        salePrice: override?.salePrice ?? t.salePrice ?? channel.salePrice ?? 0,
+        feeRate: override?.feeRate ?? channel.feeRate ?? 0
+      };
+    });
+  }
+  return products.map((p) => {
+    const override = savedFor(p.id, "");
+    return {
+      productId: p.id,
+      lineLabel: override?.lineLabel
+        || (p.id === "fc" ? "DOTEON Foot Cleaner" : "DOTEON Outdoor Spray"),
+      tier: "",
+      salePrice: override?.salePrice ?? channel.salePrice ?? 0,
+      feeRate: override?.feeRate ?? channel.feeRate ?? 0
+    };
+  });
+}
+
+function npbChannelName(code) {
+  return (state.npb.config?.channels || []).find((c) => c.code === code)?.name || code || "";
+}
+
 function npbBuildWorksheet(config, lines) {
   const cfg = config || {};
   const channels = cfg.channels || [];
+  const products = cfg.products || [];
   const lineConfigs = cfg.channelLineConfigs || [];
   const byChannel = new Map(channels.map((c) => [c.code, c]));
   // Index stored lines by channel|productId|tier for overlay lookup.
@@ -4092,12 +4228,10 @@ function npbBuildWorksheet(config, lines) {
   for (const code of order) {
     const channel = byChannel.get(code);
     if (!channel || channel.active === false) continue;
-    const seeds = lineConfigs.filter((lc) => lc.channelCode === code);
+    const seeds = npbChannelSeeds(channel, products, lineConfigs);
     if (!seeds.length) continue;
     const rows = seeds.map((seed) => {
-      const tierLabel = channel.tiers && seed.lineLabel
-        ? (seed.lineLabel.match(/(\d개)$/) || [])[1] || ""
-        : "";
+      const tierLabel = seed.tier || "";
       const key = `${code}|${seed.productId}|${tierLabel}`;
       const stLine = stored.get(key)
         || stored.get(`${code}|${seed.productId}|`);
@@ -4216,8 +4350,174 @@ const CONFIDENCE_LABEL = { high: "확실", medium: "확인 권장", low: "직접
 
 // Banking data — owner/manager only. The server enforces this on every
 // /api/clobe/* route; hiding the tab keeps operators from hitting a dead end.
+// 서버의 can() 과 같은 규칙. 화면을 숨기는 것은 편의일 뿐이고 진짜 차단은
+// 서버에서 한다.
+function can(menuKey, action = "view") {
+  const me = state.admin;
+  if (!me) return false;
+  if (me.role === "owner") return true;
+  const granted = me.permissions?.[menuKey];
+  return Array.isArray(granted) && granted.includes(action);
+}
+
 function canUseClobe() {
   return state.admin?.role === "owner" || state.admin?.role === "manager";
+}
+
+// --- 반자동 파이프라인 ------------------------------------------------------
+// 단계마다 버튼이 하나씩 있고, 각 버튼은 먼저 "무엇을 하게 될지"만 보여준다.
+// 실제 생성·상태변경은 확인한 뒤 별도 버튼으로만 일어난다.
+function renderPipeline() {
+  const p = state.pipeline;
+  const head = pageHead("자동화", "카페24 주문 수집 → 확인 → 입금매칭 → 카페24 반영. 단계마다 눌러서 진행합니다.");
+  if (!canUseClobe()) {
+    return `${head}<section class="panel"><div class="panel-body"><p class="muted">이 메뉴는 오너 또는 매니저만 사용할 수 있습니다.</p></div></section>`;
+  }
+  return `
+    ${head}
+    ${renderClobeFreshness(p.scraping)}
+    <section class="panel">
+      <div class="panel-head"><h2>① 수집 — 카페24 주문에서 입금요청 만들기</h2></div>
+      <div class="panel-body">
+        <div class="field two">
+          <div><label>조회 시작일</label><input type="date" data-pipe-start value="${h(p.startDate)}"></div>
+          <div><label>조회 종료일</label><input type="date" data-pipe-end value="${h(p.endDate)}"></div>
+        </div>
+        <div class="toolbar">
+          <button class="primary" data-pipe-collect ${p.collecting ? "disabled" : ""}>${p.collecting ? "수집 중…" : "수집하기"}</button>
+          <span class="muted">결제된 주문만 가져옵니다. 이미 등록된 건은 건너뜁니다. 여기서는 아무것도 저장하지 않습니다.</span>
+        </div>
+        ${p.error ? `<p class="muted" style="color:var(--red)">${h(p.error)}</p>` : ""}
+        ${renderPipelineCollect(p.collect)}
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>⑤ 출고 확인 — 입금대기를 입금요청으로</h2></div>
+      <div class="panel-body">
+        <p class="muted">출고 후 입금 브랜드의 입금대기 건 중, 카페24에 송장이 찍힌 것을 찾습니다.</p>
+        <div class="toolbar">
+          <button data-pipe-shipped ${p.shipping ? "disabled" : ""}>${p.shipping ? "확인 중…" : "출고 확인하기"}</button>
+        </div>
+        ${renderPipelineShipped(p.shipped)}
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>③ 입금매칭 · ④ 카페24 반영</h2></div>
+      <div class="panel-body">
+        <p class="muted">
+          ③ 통장 출금과 입금요청 대조는 <b>클로브ai</b> 탭에서 실행합니다.<br>
+          ④ 입금완료 건을 카페24에서 배송준비중으로 바꾸는 단계는 아직 없습니다 — 쓰기 권한이 필요해 마지막에 붙입니다.
+        </p>
+      </div>
+    </section>
+  `;
+}
+
+// 클로브 데이터가 언제까지 반영된 것인지 보여준다. MCP 로는 재수집을 시킬 수
+// 없어서(도구 자체가 없다) 최신화는 app.clobe.ai 에서 해야 한다 — 그 사실을
+// 숨기지 말고 바로 갈 수 있게 링크를 둔다.
+function renderClobeFreshness(scraping) {
+  const assets = scraping?.assets || scraping?.content || [];
+  const rows = (Array.isArray(assets) ? assets : []).map((a) => {
+    const at = String(a.scrapedAt || "").slice(0, 16).replace("T", " ");
+    const stale = a.scrapedAt ? (Date.now() - new Date(a.scrapedAt).getTime()) > 24 * 3600 * 1000 : true;
+    const badge = a.status === "ERROR"
+      ? `<span class="badge clobe-low">오류</span>`
+      : stale ? `<span class="badge clobe-medium">오래됨</span>` : `<span class="badge clobe-high">최신</span>`;
+    return `<tr><td>${badge}</td><td>${h(a.assetName || a.name || a.assetType || "")}</td>
+      <td>${h(at || "-")}</td><td><span class="muted">${h(a.failureMessage || "")}</span></td></tr>`;
+  }).join("");
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <h2>클로브 데이터 최신성</h2>
+        <span class="muted">은행·카드 내역이 언제까지 수집된 것인지</span>
+      </div>
+      <div class="panel-body">
+        <div class="toolbar">
+          <button data-pipe-scraping>수집 상태 확인</button>
+          <a class="button" href="https://app.clobe.ai" target="_blank" rel="noreferrer">클로브ai에서 최신화하기 ↗</a>
+        </div>
+        <p class="muted">
+          최신화(재수집)는 클로브 쪽에서만 실행할 수 있습니다. 우프페이에서 대신 눌러줄 방법이 없어
+          (클로브 MCP에 해당 기능이 없습니다), 위 링크로 이동해 실행한 뒤 돌아와서 수집하세요.
+        </p>
+        ${rows ? `<div class="table-wrap" style="max-height:220px"><table>
+            <thead><tr><th>상태</th><th>자산</th><th>마지막 수집</th><th>비고</th></tr></thead>
+            <tbody>${rows}</tbody></table></div>` : ""}
+      </div>
+    </section>
+  `;
+}
+
+function renderPipelineCollect(collect) {
+  if (!collect) return "";
+  const drafts = collect.drafts || [];
+  if (!drafts.length) {
+    return `<p class="muted">새로 만들 입금요청이 없습니다. (조회 주문 ${money.format(collect.orderCount || 0)}건 ·
+      이미 등록 ${collect.skipped?.duplicate || 0} · 미결제 제외 ${collect.skipped?.unpaid || 0})</p>`;
+  }
+  const selected = new Set(state.pipeline.selected);
+  const rows = drafts.map((d, i) => {
+    const lines = d.lineItems.map((l) => `${h(l.itemName)} ×${l.quantity}`).join("<br>");
+    const codes = d.lineItems.map((l) => `<span class="muted">${h(l.orderItemCode)}</span>`).join("<br>");
+    return `<tr>
+      <td><input type="checkbox" data-pipe-draft="${i}" ${selected.has(i) ? "checked" : ""}></td>
+      <td>${h(d.orderNo)}<br><span class="muted">${h(d.customerName)}</span></td>
+      <td>${h(d.brandName)}<br><span class="muted">${d.payAfterShipping ? "출고후입금 → 입금대기" : "입금요청"}</span></td>
+      <td>${lines}</td>
+      <td>${codes}</td>
+      <td class="num"><strong>${money.format(d.depositAmount || 0)}원</strong><br>
+        <span class="muted">판매 ${money.format(d.productSalesAmount || 0)} · 배송 ${money.format(d.baseShippingFee || 0)}</span></td>
+      <td>${d.shippingMismatch
+        ? `<span class="badge clobe-medium">배송비 확인</span><br><span class="muted">카페24 ${money.format(d.cafe24ShippingFee || 0)}원</span>`
+        : `<span class="muted">-</span>`}</td>
+    </tr>`;
+  }).join("");
+  return `
+    <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
+      <h3>② 확인 — 만들어질 요청 ${drafts.length}건</h3>
+      <p class="muted">
+        조회 주문 ${money.format(collect.orderCount || 0)}건 · 이미 등록 ${collect.skipped?.duplicate || 0} ·
+        미결제 제외 ${collect.skipped?.unpaid || 0} · 취소만 있는 주문 ${collect.skipped?.cancelled || 0}
+      </p>
+      ${(collect.unmappedSuppliers || []).length
+        ? `<p class="muted" style="color:var(--red)">브랜드 매핑이 없는 공급사 ${collect.unmappedSuppliers.length}곳 —
+            ${collect.unmappedSuppliers.slice(0, 5).map((s) => `${h(s.supplierName)}(${h(s.supplierId)}) ${s.orderCount}건`).join(", ")}.
+            브랜드 화면에서 카페24 공급사코드를 지정하면 다음 수집부터 포함됩니다.</p>`
+        : ""}
+      <div class="table-wrap" style="max-height:420px"><table>
+        <thead><tr><th><input type="checkbox" data-pipe-all></th><th>주문</th><th>브랜드</th><th>품목</th><th>품목번호</th><th>입금액</th><th>비고</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+      <div class="toolbar">
+        <button class="primary" data-pipe-apply>선택한 ${state.pipeline.selected.length}건 입금요청 생성</button>
+        <span class="muted">배송비가 어긋나는 건은 기본 선택에서 빼뒀습니다.</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderPipelineShipped(shipped) {
+  if (!shipped) return "";
+  const items = shipped.items || [];
+  if (!items.length) return `<p class="muted">송장이 찍힌 입금대기 건이 없습니다.</p>`;
+  const selected = new Set(state.pipeline.shippedSelected);
+  const rows = items.map((it) => `<tr>
+    <td><input type="checkbox" data-pipe-ship="${h(it.requestId)}" ${selected.has(it.requestId) ? "checked" : ""}></td>
+    <td>${h(it.orderNo)}</td><td>${h(it.brandName)}</td>
+    <td class="num">${money.format(it.amount || 0)}원</td>
+    <td><span class="muted">송장 ${h(it.trackingNo)}</span></td>
+  </tr>`).join("");
+  return `
+    <div class="table-wrap" style="max-height:300px"><table>
+      <thead><tr><th><input type="checkbox" data-pipe-ship-all></th><th>주문</th><th>브랜드</th><th>금액</th><th>송장</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    <div class="toolbar">
+      <button class="primary" data-pipe-ship-apply>선택한 ${state.pipeline.shippedSelected.length}건 입금요청으로 전환</button>
+    </div>
+  `;
 }
 
 function renderReconcile() {
@@ -4453,6 +4753,102 @@ function renderReconcileResult(result) {
       </div>
     </section>
   `;
+}
+
+function bindPipeline() {
+  const p = state.pipeline;
+  app.querySelector("[data-pipe-start]")?.addEventListener("change", (e) => { p.startDate = e.target.value; });
+  app.querySelector("[data-pipe-end]")?.addEventListener("change", (e) => { p.endDate = e.target.value; });
+
+  app.querySelector("[data-pipe-scraping]")?.addEventListener("click", async () => {
+    try {
+      p.scraping = await api("/api/clobe/scraping");
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "수집 상태를 불러오지 못했습니다.", "error");
+    }
+  });
+
+  app.querySelector("[data-pipe-collect]")?.addEventListener("click", async () => {
+    p.collecting = true; p.error = ""; p.collect = null; p.selected = [];
+    renderApp();
+    try {
+      p.collect = await api("/api/pipeline/collect", { method: "POST", body: { startDate: p.startDate, endDate: p.endDate } });
+      // 배송비가 어긋나는 건은 사람이 먼저 보게 기본 선택에서 뺀다.
+      p.selected = (p.collect.drafts || []).map((d, i) => (d.shippingMismatch ? null : i)).filter((v) => v !== null);
+    } catch (error) {
+      p.error = error.message || "수집에 실패했습니다.";
+    } finally {
+      p.collecting = false; renderApp();
+    }
+  });
+
+  app.querySelectorAll("[data-pipe-draft]").forEach((box) => {
+    box.addEventListener("change", () => {
+      const i = Number(box.dataset.pipeDraft);
+      p.selected = box.checked ? [...new Set([...p.selected, i])] : p.selected.filter((x) => x !== i);
+      renderApp();
+    });
+  });
+  app.querySelector("[data-pipe-all]")?.addEventListener("change", (e) => {
+    p.selected = e.target.checked ? (p.collect?.drafts || []).map((_, i) => i) : [];
+    renderApp();
+  });
+
+  app.querySelector("[data-pipe-apply]")?.addEventListener("click", async () => {
+    const drafts = p.selected.map((i) => p.collect?.drafts?.[i]).filter(Boolean);
+    if (!drafts.length) return showToast("생성할 요청을 선택하세요.", "error");
+    if (!confirm(`${drafts.length}건의 입금요청을 생성할까요?`)) return;
+    try {
+      const result = await api("/api/pipeline/collect/apply", { method: "POST", body: { drafts } });
+      showToast(`${result.createdCount}건 생성했습니다.${result.skipped?.length ? ` (중복 ${result.skipped.length}건 제외)` : ""}`);
+      p.collect = null; p.selected = [];
+      await loadAll();
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "생성에 실패했습니다.", "error");
+    }
+  });
+
+  app.querySelector("[data-pipe-shipped]")?.addEventListener("click", async () => {
+    p.shipping = true; p.shipped = null; p.shippedSelected = [];
+    renderApp();
+    try {
+      p.shipped = await api("/api/pipeline/shipped", { method: "POST", body: {} });
+      p.shippedSelected = (p.shipped.items || []).map((it) => it.requestId);
+    } catch (error) {
+      showToast(error.message || "출고 확인에 실패했습니다.", "error");
+    } finally {
+      p.shipping = false; renderApp();
+    }
+  });
+
+  app.querySelectorAll("[data-pipe-ship]").forEach((box) => {
+    box.addEventListener("change", () => {
+      const id = box.dataset.pipeShip;
+      p.shippedSelected = box.checked
+        ? [...new Set([...p.shippedSelected, id])]
+        : p.shippedSelected.filter((x) => x !== id);
+      renderApp();
+    });
+  });
+  app.querySelector("[data-pipe-ship-all]")?.addEventListener("change", (e) => {
+    p.shippedSelected = e.target.checked ? (p.shipped?.items || []).map((it) => it.requestId) : [];
+    renderApp();
+  });
+
+  app.querySelector("[data-pipe-ship-apply]")?.addEventListener("click", async () => {
+    if (!p.shippedSelected.length) return showToast("전환할 건을 선택하세요.", "error");
+    try {
+      const result = await api("/api/pipeline/shipped/apply", { method: "POST", body: { requestIds: p.shippedSelected } });
+      showToast(`${result.updatedCount}건을 입금요청으로 전환했습니다.`);
+      p.shipped = null; p.shippedSelected = [];
+      await loadAll();
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "전환에 실패했습니다.", "error");
+    }
+  });
 }
 
 function bindReconcile() {
@@ -4713,35 +5109,64 @@ function renderNpbList() {
 function renderNpbUpload() {
   const n = state.npb;
   if (!n.currentKey) return npbNeedSelect();
-  const channels = n.config?.channels || [];
+  const channels = (n.config?.channels || []).filter((c) => c.active !== false);
   const uploads = n.current?.uploads || {};
-  const chZones = channels
-    .map((c) => {
-      const up = uploads[c.code];
-      return `
-        <div class="npb-upload-card">
-          <div class="npb-upload-head"><strong>${h(c.name)}</strong><span class="muted">${h(c.code)}</span></div>
-          <input type="file" accept=".csv,.xlsx,.xls" data-npb-upload-channel="${h(c.code)}">
-          <span class="muted">${up ? h(up.fileName || "업로드됨") : "미업로드"}</span>
-        </div>`;
-    })
-    .join("") || `<div class="empty">채널 설정이 없습니다. [채널 설정]에서 먼저 등록하세요.</div>`;
-  const preview = n.parsePreview ? renderNpbParsePreview(n.parsePreview) : "";
+
+  // 채널별 업로드 칸을 늘어놓는 대신, 어느 채널이 들어왔고 무엇이 비었는지만
+  // 보여준다. 파일은 한 곳에 올리고 파일명이 채널을 결정한다.
+  const done = channels.filter((c) => uploads[c.code]);
+  const todo = channels.filter((c) => !uploads[c.code]);
+  const chip = (c, isDone) => {
+    const up = uploads[c.code];
+    return `<div class="npb-ch-chip ${isDone ? "on" : ""}">
+      <strong>${h(c.name)}</strong>
+      <span class="muted">${isDone ? h(up.fileName || "업로드됨") : "미업로드"}</span>
+    </div>`;
+  };
+
+  const pending = (n.pendingUploads || []).map((f, i) => `
+    <div class="npb-pending">
+      <span>${h(f.fileName)}</span>
+      <select data-npb-assign="${i}">
+        <option value="">채널 선택…</option>
+        ${channels.map((c) => `<option value="${h(c.code)}">${h(c.name)}</option>`).join("")}
+      </select>
+      <button data-npb-assign-go="${i}">이 채널로 처리</button>
+    </div>`).join("");
+
   return `
     <section class="panel">
-      <div class="panel-head"><h2>채널 파일 업로드</h2></div>
-      <div class="panel-body"><div class="npb-upload-grid">${chZones}</div></div>
+      <div class="panel-head">
+        <h2>채널 파일 업로드</h2>
+        <span class="muted">${done.length} / ${channels.length} 채널 수집됨</span>
+      </div>
+      <div class="panel-body">
+        <div class="npb-dropzone">
+          <input type="file" accept=".csv,.xlsx,.xls" multiple data-npb-upload-any>
+          <span class="muted">
+            여러 파일을 한 번에 올릴 수 있습니다. <b>파일명으로 채널을 자동 인식</b>합니다
+            (채널 설정의 '파일명 키워드' 또는 채널명·코드 기준).
+          </span>
+        </div>
+        ${pending ? `<div class="npb-pending-wrap">
+          <p class="muted" style="color:var(--red)">채널을 알 수 없는 파일이 있습니다. 직접 지정하세요.</p>
+          ${pending}</div>` : ""}
+        <div class="npb-ch-chips">
+          ${done.map((c) => chip(c, true)).join("")}
+          ${todo.map((c) => chip(c, false)).join("")}
+        </div>
+      </div>
     </section>
     <section class="panel">
       <div class="panel-head"><h2>입출고 원장 (물류)</h2></div>
       <div class="panel-body">
         <div class="npb-upload-card">
           <input type="file" accept=".csv,.xlsx,.xls" data-npb-upload-logistics>
-          <span class="muted">3PL 입출고/재고 원장 파일</span>
+          <span class="muted">${uploads.logistics ? h(uploads.logistics.fileName || "업로드됨") : "미업로드"}</span>
         </div>
       </div>
     </section>
-    ${preview}
+    ${n.parsePreview ? renderNpbParsePreview(n.parsePreview) : ""}
   `;
 }
 
@@ -4996,21 +5421,24 @@ function renderNpbChannels() {
         <td><input class="num" type="number" data-npb-ch="${i}" data-npb-cfield="feeRate" value="${h(c.feeRate ?? "")}"></td>
         <td><input class="num" type="number" data-npb-ch="${i}" data-npb-cfield="supplyPrice" value="${h(c.supplyPrice ?? "")}"></td>
         <td><input type="text" data-npb-ch="${i}" data-npb-cfield="archetype" value="${h(c.archetype || "")}"></td>
+        <td><input type="text" data-npb-ch="${i}" data-npb-cfield="filenameKeywords"
+              value="${h((c.filenameKeywords || []).join(", "))}" placeholder="예: bmw, 조이몰"></td>
         <td><button class="danger" data-npb-ch-del="${i}">삭제</button></td>
       </tr>`)
-    .join("") || `<tr><td colspan="8" class="empty">등록된 채널이 없습니다.</td></tr>`;
+    .join("") || `<tr><td colspan="9" class="empty">등록된 채널이 없습니다.</td></tr>`;
   return `
     <section class="panel">
       <div class="panel-head"><h2>채널 설정</h2><span class="muted">${channels.length}개</span></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>코드</th><th>이름</th><th>계산방식</th><th>판매가</th><th>수수료율</th><th>공급가</th><th>아키타입</th><th></th></tr></thead>
+          <thead><tr><th>코드</th><th>이름</th><th>계산방식</th><th>판매가</th><th>수수료율</th><th>공급가</th><th>아키타입</th><th>파일명 키워드</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
       <div class="panel-body toolbar">
         <button data-npb-ch-add>채널 추가</button>
         <button class="primary" data-npb-config-save>설정 저장</button>
+        <span class="muted">파일명 키워드를 등록하면 업로드할 때 채널이 자동으로 인식됩니다. 쉼표로 여러 개.</span>
       </div>
     </section>
     ${renderNpbCostEditor()}
@@ -5177,13 +5605,52 @@ function bindNpbList() {
 }
 
 function bindNpbUpload() {
-  app.querySelectorAll("[data-npb-upload-channel]").forEach((inp) => {
-    inp.addEventListener("change", async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-      await npbDoUpload({ kind: "channel", channel: inp.dataset.npbUploadChannel, file });
+  const n = state.npb;
+  app.querySelector("[data-npb-upload-any]")?.addEventListener("change", async (e) => {
+    const files = [...(e.target.files || [])];
+    if (!files.length) return;
+    const ok = [];
+    const unknown = [];
+    for (const file of files) {
+      const result = await npbDoUpload({ kind: "channel", file, quiet: true });
+      if (result?.needsChannel) unknown.push(result.pending);
+      else if (result?.ok) {
+        const name = npbChannelName(result.channel);
+        ok.push(`${name}(${result.rowCount}행)`);
+        if (result.alternatives?.length) {
+          showToast(
+            `"${result.fileName}" 은(는) ${name} 로 넣었습니다. ` +
+            `${result.alternatives.map((a) => a.name).join(", ")} 에도 해당돼 보이니 확인하세요.`,
+            "error"
+          );
+        }
+      }
+    }
+    n.pendingUploads = [...(n.pendingUploads || []), ...unknown];
+    if (ok.length) showToast(`업로드 완료 — ${ok.join(", ")}`);
+    if (unknown.length) showToast(`채널을 알 수 없는 파일 ${unknown.length}건 — 직접 지정하세요.`, "error");
+    await npbLoadDetail(n.currentKey);
+    renderApp();
+  });
+
+  app.querySelectorAll("[data-npb-assign-go]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const i = Number(btn.dataset.npbAssignGo);
+      const pending = (n.pendingUploads || [])[i];
+      const channel = app.querySelector(`[data-npb-assign="${i}"]`)?.value;
+      if (!pending || !channel) return showToast("채널을 선택하세요.", "error");
+      const result = await npbDoUpload({
+        kind: "channel", channel, preread: pending, quiet: true
+      });
+      if (result?.ok) {
+        n.pendingUploads.splice(i, 1);
+        showToast(`업로드 완료 (${result.rowCount}행)`);
+        await npbLoadDetail(n.currentKey);
+      }
+      renderApp();
     });
   });
+
   app.querySelector("[data-npb-upload-logistics]")?.addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -5191,11 +5658,12 @@ function bindNpbUpload() {
   });
 }
 
-async function npbDoUpload({ kind, channel, file }) {
+async function npbDoUpload({ kind, channel, file, preread, quiet = false }) {
   const n = state.npb;
   try {
-    const fileBase64 = await readFileAsBase64(file);
-    const body = { kind, fileBase64, fileName: file.name };
+    const fileName = preread ? preread.fileName : file.name;
+    const fileBase64 = preread ? preread.fileBase64 : await readFileAsBase64(file);
+    const body = { kind, fileBase64, fileName };
     if (channel) body.channel = channel;
     const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/upload`, {
       method: "POST",
@@ -5203,11 +5671,32 @@ async function npbDoUpload({ kind, channel, file }) {
     });
     const parsedRows = res.rows || res.lines || [];
     n.parsePreview = { lines: parsedRows, warnings: res.warnings || [] };
-    await npbLoadDetail(n.currentKey);
-    showToast(`업로드 완료 (${parsedRows.length}행)`);
-    renderApp();
+    if (!quiet) {
+      await npbLoadDetail(n.currentKey);
+      showToast(`업로드 완료 (${parsedRows.length}행)`);
+      renderApp();
+    }
+    return {
+      ok: true,
+      channel: res.channel || channel,
+      rowCount: parsedRows.length,
+      alternatives: res.alternatives || [],
+      fileName
+    };
   } catch (error) {
+    // 채널을 못 찾은 파일은 버리지 않고 들고 있다가 사용자가 지정하게 한다 —
+    // 다시 고르게 하면 여러 파일을 올린 의미가 없다.
+    if (error.payload?.needsChannel) {
+      return {
+        needsChannel: true,
+        pending: {
+          fileName: preread ? preread.fileName : file.name,
+          fileBase64: preread ? preread.fileBase64 : await readFileAsBase64(file)
+        }
+      };
+    }
     showToast(error.message || "업로드 실패", "error");
+    return { ok: false };
   }
 }
 
@@ -5391,7 +5880,11 @@ function bindNpbChannels() {
       const i = Number(inp.dataset.npbCh);
       const f = inp.dataset.npbCfield;
       const num = ["salePrice", "feeRate", "supplyPrice"].includes(f);
-      channels[i][f] = num ? Number(e.target.value) : e.target.value;
+      if (f === "filenameKeywords") {
+        channels[i][f] = e.target.value.split(",").map((k) => k.trim()).filter(Boolean);
+      } else {
+        channels[i][f] = num ? Number(e.target.value) : e.target.value;
+      }
     });
   });
   app.querySelectorAll("[data-npb-ch-del]").forEach((btn) => {
@@ -5411,7 +5904,9 @@ function bindNpbChannels() {
       calcType: "",
       salePrice: 0,
       feeRate: 0,
-      supplyPrice: 0
+      supplyPrice: 0,
+      filenameKeywords: [],
+      active: true
     });
     renderApp();
   });

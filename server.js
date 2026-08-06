@@ -533,7 +533,26 @@ function verifyPassword(password, stored) {
 
 function publicAdmin(admin) {
   const { passwordHash, ...safe } = admin;
-  return safe;
+  // owner 는 저장값과 무관하게 전권이고, 아직 권한을 지정하지 않은 계정은
+  // 지금 실제로 적용되는 기본값을 그대로 보여준다 — 화면과 동작이 어긋나지
+  // 않게 한다.
+  return {
+    ...safe,
+    permissions: admin.role === "owner" ? fullPermissions() : actorPermissions(admin)
+  };
+}
+
+// owner 가 한 명도 없게 되는 변경을 막는다. 그렇게 되면 권한을 되돌릴 수 있는
+// 사람이 아무도 남지 않는다.
+function isLastActiveOwner(db, adminId) {
+  const owners = db.admins.filter((item) => item.role === "owner" && item.isActive !== false);
+  return owners.length <= 1 && owners.some((item) => item.id === adminId);
+}
+
+function fullPermissions() {
+  const all = {};
+  for (const menu of MENU_REGISTRY) all[menu.key] = [...menu.actions];
+  return all;
 }
 
 // NPB (도톤 운영대행) namespace seed — brand DOTEON, products, channels, and
@@ -2002,6 +2021,86 @@ function npbNamespaceChannel(code) {
   return code;
 }
 
+// 파일명으로 채널을 찾는다. 채널 설정의 filenameKeywords 를 먼저 보고, 없으면
+// 채널명·코드로 매칭한다. 화면에서 채널을 추가하면 파서 코드를 고치지 않아도
+// 파일명 인식이 따라오게 하는 것이 목적이다.
+//
+// 한 파일이 여러 채널에 걸릴 수 있다 — "DB_cafe24_영이공구_202605" 는 cafe24 와
+// 영이공구 둘 다에 맞는다. 내보내기 파일명이 DB_플랫폼_채널_연월 순서라 뒤쪽이
+// 더 구체적인 채널이므로, 나중에 나오는 키워드를 택한다. 잘못 고르면 매출이
+// 엉뚱한 채널에 붙으므로 후보를 함께 돌려주어 화면에서 확인할 수 있게 한다.
+// macOS 는 한글 파일명을 NFD 로 저장하므로 양쪽 다 NFC 로 맞춘다.
+function npbMatchChannels(channels, fileName) {
+  const base = String(fileName || "").normalize("NFC").toLowerCase().replace(/\s+/g, "");
+  if (!base) return [];
+  const hits = [];
+  for (const channel of channels || []) {
+    if (channel.active === false) continue;
+    const keys = [
+      ...(Array.isArray(channel.filenameKeywords) ? channel.filenameKeywords : []),
+      channel.name,
+      channel.code
+    ]
+      .map((k) => String(k || "").normalize("NFC").toLowerCase().replace(/\s+/g, ""))
+      .filter(Boolean);
+    let best = null;
+    for (const key of keys) {
+      const at = base.indexOf(key);
+      if (at < 0) continue;
+      if (!best || at > best.at || (at === best.at && key.length > best.length)) {
+        best = { at, length: key.length, key };
+      }
+    }
+    if (best) hits.push({ code: channel.code, name: channel.name, ...best });
+  }
+  hits.sort((a, b) => (b.at - a.at) || (b.length - a.length));
+  return hits;
+}
+
+// 라인에 채널 단가·수수료를 채우고 합계·물류비·이익배분까지 다시 계산한다.
+// 업로드와 워크시트 저장이 같은 경로를 쓰도록 함수로 뺐다 — 업로드 후 사람이
+// [저장(계산)] 을 눌러야 숫자가 맞는 것이 병목이었다.
+// 생략한 값은 저장된 값을 그대로 쓰므로, 인자 없이 불러도 안전하다.
+function npbRecompute(db, settlement, opts = {}) {
+  const brand = npbGetBrand(db, settlement.brand);
+  const costConfig = brand?.costConfig || {};
+  const npbChannels = (db.npb?.channels || []).filter(
+    (c) => !brand || String(c.brandId).toLowerCase() === String(brand.id).toLowerCase()
+  );
+  const lines = (settlement.lines || []).map((line) => npbEnrichLine(line, npbChannels));
+  settlement.lines = lines;
+  const small = number(opts?.logistics?.smallCount, number(settlement.logistics?.smallCount));
+  const large = number(opts?.logistics?.largeCount, number(settlement.logistics?.largeCount));
+  const logisticsCost = npbComputeLogistics(small, large, costConfig);
+  const carryOver = number(opts?.carryOver, number(settlement.carryOver));
+  const rollup = npbComputeRollup(lines, logisticsCost, carryOver);
+  const parties = settlement.parties && settlement.parties.length
+    ? settlement.parties
+    : db.npb.defaultProfitSplit || [];
+  const profitSplit = npbComputeProfitSplit(rollup.profit, parties);
+  const pickPack = number(costConfig.pickPack);
+  settlement.logistics = {
+    smallCount: small,
+    largeCount: large,
+    smallShip: number(costConfig.smallShip),
+    largeShip: number(costConfig.largeShip),
+    pickPack,
+    smallTotal: small * (number(costConfig.smallShip) + pickPack),
+    largeTotal: large * (number(costConfig.largeShip) + pickPack),
+    grandTotal: logisticsCost
+  };
+  settlement.carryOver = carryOver;
+  settlement.rollup = rollup;
+  settlement.profitSplit = profitSplit;
+  if (Array.isArray(opts.inventory)) settlement.inventory = opts.inventory;
+  settlement.updatedAt = now();
+  return { rollup, logistics: settlement.logistics, profitSplit, inventory: settlement.inventory };
+}
+
+function npbDetectChannelFromName(channels, fileName) {
+  return npbMatchChannels(channels, fileName)[0]?.code || "";
+}
+
 function npbFindChannel(channels, code) {
   const want = String(code || "").trim().toLowerCase();
   if (!want) return null;
@@ -2250,8 +2349,96 @@ function requireActor(actor, res) {
   return true;
 }
 
-function canManageAdmins(actor) {
-  return actor?.role === "owner" || actor?.role === "manager";
+// --- 메뉴 권한 -------------------------------------------------------------
+//
+// 메뉴를 여기 한 곳에만 등록하면 관리자 화면의 권한 표에 자동으로 나온다.
+// 새 메뉴가 생길 때 권한 화면을 따로 고칠 필요가 없다.
+//
+// owner 는 항상 전권이라 저장된 값을 보지 않는다 — 잘못 저장해서 스스로를
+// 잠그는 사고를 구조적으로 막는다.
+//
+// actions 는 그 메뉴에서 의미가 있는 것만 적는다. 이력처럼 읽기만 있는 곳에
+// 쓰기·삭제 체크박스를 두면 무엇을 허용한 건지 알 수 없어진다.
+const MENU_REGISTRY = [
+  { key: "dashboard", label: "대시보드", actions: ["view"] },
+  { key: "requests", label: "입금요청", actions: ["view", "create", "edit", "delete", "pay"] },
+  { key: "prices", label: "단가표", actions: ["view", "create", "edit", "delete"] },
+  { key: "brands", label: "브랜드", actions: ["view", "create", "edit", "delete"] },
+  { key: "admins", label: "관리자", actions: ["view", "create", "edit", "delete"] },
+  { key: "audits", label: "이력", actions: ["view"] },
+  { key: "archive", label: "아카이브", actions: ["view", "edit"] },
+  { key: "settlement", label: "정산", actions: ["view", "export"] },
+  { key: "pipeline", label: "자동화", actions: ["view", "apply"] },
+  { key: "reconcile", label: "클로브ai", actions: ["view", "apply"] },
+  { key: "npb", label: "npb정산", actions: ["view", "edit"] }
+];
+
+const ACTION_LABELS = {
+  view: "접근·읽기",
+  create: "등록",
+  edit: "수정",
+  delete: "삭제",
+  pay: "입금완료 처리",
+  export: "정산서 출력",
+  apply: "실행·반영"
+};
+
+// 권한을 손대기 전의 동작. manager 는 지금까지 owner 와 같았고 operator 는
+// 연동 메뉴만 막혀 있었다 — 그대로 옮겨와야 이 기능을 켜는 것만으로 누군가의
+// 권한이 조용히 바뀌지 않는다.
+function defaultPermissions(role) {
+  const all = {};
+  for (const menu of MENU_REGISTRY) {
+    if (role === "manager") {
+      all[menu.key] = [...menu.actions];
+      continue;
+    }
+    // operator 등 그 외 등급은 권한 기능을 켜기 전과 똑같이 둔다.
+    // 연동 메뉴는 막혀 있었고, 관리자 메뉴는 목록 조회만 열려 있었다
+    // (GET /api/admins 에는 검사가 없었고 생성·수정·삭제만 막혀 있었다).
+    if (menu.key === "reconcile" || menu.key === "pipeline") all[menu.key] = [];
+    else if (menu.key === "admins") all[menu.key] = ["view"];
+    else all[menu.key] = [...menu.actions];
+  }
+  return all;
+}
+
+function actorPermissions(actor) {
+  if (!actor) return {};
+  const stored = actor.permissions && typeof actor.permissions === "object" ? actor.permissions : null;
+  return stored || defaultPermissions(actor.role);
+}
+
+function can(actor, menuKey, action = "view") {
+  if (!actor) return false;
+  if (actor.role === "owner") return true;
+  const menu = MENU_REGISTRY.find((item) => item.key === menuKey);
+  if (!menu || !menu.actions.includes(action)) return false;
+  const granted = actorPermissions(actor)[menuKey];
+  return Array.isArray(granted) && granted.includes(action);
+}
+
+function requirePermission(actor, res, menuKey, action, message) {
+  if (can(actor, menuKey, action)) return true;
+  const menu = MENU_REGISTRY.find((item) => item.key === menuKey);
+  sendJson(res, 403, {
+    error: message || `${menu?.label || menuKey} ${ACTION_LABELS[action] || action} 권한이 없습니다.`
+  });
+  return false;
+}
+
+// 저장 시 정규화: 등록되지 않은 메뉴·액션은 버린다. 메뉴가 사라졌는데 권한만
+// 남아 도는 것을 막는다.
+function sanitizePermissions(raw) {
+  const clean = {};
+  for (const menu of MENU_REGISTRY) {
+    const given = Array.isArray(raw?.[menu.key]) ? raw[menu.key] : [];
+    const actions = menu.actions.filter((action) => given.includes(action));
+    // 하위 권한만 주고 접근을 안 주면 화면에 못 들어가 아무 의미가 없다.
+    if (actions.length && !actions.includes("view")) actions.unshift("view");
+    clean[menu.key] = actions;
+  }
+  return clean;
 }
 
 function finalDepositAmount(item) {
@@ -3043,8 +3230,8 @@ function settlementSourceError(body, error) {
 
 async function settlementOrderRows(db, body, actor, brand) {
   if (body.useCafe24) {
-    if (!canManageAdmins(actor)) {
-      const error = new Error("카페24 주문 조회는 오너 또는 매니저만 사용할 수 있습니다.");
+    if (!can(actor, "pipeline", "view")) {
+      const error = new Error("카페24 주문 조회 권한이 없습니다.");
       error.status = 403;
       throw error;
     }
@@ -3070,8 +3257,8 @@ async function settlementOrderRows(db, body, actor, brand) {
 // workbook is computed from exactly the same bank data as the preview.
 async function settlementBankRows(db, body, actor) {
   if (body.useClobe) {
-    if (!canManageAdmins(actor)) {
-      const error = new Error("클로브 은행내역 조회는 오너 또는 매니저만 사용할 수 있습니다.");
+    if (!can(actor, "reconcile", "view")) {
+      const error = new Error("클로브 은행내역 조회 권한이 없습니다.");
       error.status = 403;
       throw error;
     }
@@ -4188,16 +4375,20 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // 등록된 메뉴와 액션. 새 메뉴는 MENU_REGISTRY 에 넣기만 하면 권한 화면에
+  // 자동으로 나타난다.
+  if (pathname === "/api/menus" && method === "GET") {
+    sendJson(res, 200, { menus: MENU_REGISTRY, actionLabels: ACTION_LABELS });
+    return;
+  }
+
   if (pathname === "/api/admins" && method === "GET") {
     sendJson(res, 200, { admins: db.admins.map(publicAdmin) });
     return;
   }
 
   if (pathname === "/api/admins" && method === "POST") {
-    if (!canManageAdmins(actor)) {
-      sendJson(res, 403, { error: "관리자 생성 권한이 없습니다." });
-      return;
-    }
+    if (!requirePermission(actor, res, "admins", "create")) return;
     const body = await readBody(req);
     const email = String(body.email || "").trim().toLowerCase();
     if (!email || !body.password) {
@@ -4214,6 +4405,7 @@ async function routeApi(req, res, url) {
       email,
       role: body.role || "operator",
       isActive: body.isActive !== false,
+      permissions: sanitizePermissions(body.permissions || defaultPermissions(body.role || "operator")),
       passwordHash: hashPassword(body.password),
       createdAt: now(),
       updatedAt: now()
@@ -4227,10 +4419,7 @@ async function routeApi(req, res, url) {
 
   const adminMatch = pathname.match(/^\/api\/admins\/([^/]+)$/);
   if (adminMatch && method === "PUT") {
-    if (!canManageAdmins(actor)) {
-      sendJson(res, 403, { error: "관리자 수정 권한이 없습니다." });
-      return;
-    }
+    if (!requirePermission(actor, res, "admins", "edit")) return;
     const body = await readBody(req);
     const admin = db.admins.find((item) => item.id === adminMatch[1]);
     if (!admin) {
@@ -4238,8 +4427,26 @@ async function routeApi(req, res, url) {
       return;
     }
     const before = publicAdmin(admin);
+    // owner 는 자기 계정의 권한이나 등급을 스스로 낮출 수 없다. 마지막 owner 가
+    // 실수로 자신을 강등하면 아무도 권한을 되돌릴 수 없게 된다.
+    const demotingSelf = admin.id === actor.id && admin.role === "owner"
+      && "role" in body && body.role !== "owner";
+    if (demotingSelf) {
+      sendJson(res, 400, { error: "본인의 오너 권한은 해제할 수 없습니다. 다른 오너 계정으로 변경하세요." });
+      return;
+    }
+    const losingOwner = ("role" in body && body.role !== "owner") || body.isActive === false;
+    if (admin.role === "owner" && losingOwner && isLastActiveOwner(db, admin.id)) {
+      sendJson(res, 400, { error: "마지막 오너 계정입니다. 다른 오너를 먼저 지정하세요." });
+      return;
+    }
     for (const key of ["name", "role", "isActive"]) {
       if (key in body) admin[key] = body[key];
+    }
+    if ("permissions" in body) {
+      admin.permissions = sanitizePermissions(body.permissions);
+    } else if ("role" in body && !admin.permissions) {
+      admin.permissions = sanitizePermissions(defaultPermissions(admin.role));
     }
     if (body.password) admin.passwordHash = hashPassword(body.password);
     admin.updatedAt = now();
@@ -4250,10 +4457,7 @@ async function routeApi(req, res, url) {
   }
 
   if (adminMatch && method === "DELETE") {
-    if (!canManageAdmins(actor)) {
-      sendJson(res, 403, { error: "관리자 삭제 권한이 없습니다." });
-      return;
-    }
+    if (!requirePermission(actor, res, "admins", "delete")) return;
     const index = db.admins.findIndex((item) => item.id === adminMatch[1]);
     if (index === -1) {
       sendJson(res, 404, { error: "관리자를 찾을 수 없습니다." });
@@ -4261,6 +4465,10 @@ async function routeApi(req, res, url) {
     }
     if (db.admins[index].id === actor.id) {
       sendJson(res, 400, { error: "본인 계정은 삭제할 수 없습니다." });
+      return;
+    }
+    if (isLastActiveOwner(db, db.admins[index].id)) {
+      sendJson(res, 400, { error: "마지막 오너 계정은 삭제할 수 없습니다." });
       return;
     }
     const [before] = db.admins.splice(index, 1);
@@ -4409,10 +4617,9 @@ async function routeApi(req, res, url) {
   // 각 단계는 버튼 하나에 대응하고, 수집·확인은 미리보기만 하고 아무것도 쓰지
   // 않는다. 실제 생성/전환은 사람이 확인한 뒤 apply 로만 일어난다.
   if (pathname.startsWith("/api/pipeline/")) {
-    if (!canManageAdmins(actor)) {
-      sendJson(res, 403, { error: "파이프라인은 오너 또는 매니저만 사용할 수 있습니다." });
-      return;
-    }
+    // 미리보기는 접근 권한, 실제 생성·전환은 실행 권한을 따로 본다.
+    const action = /\/apply$/.test(pathname) ? "apply" : "view";
+    if (!requirePermission(actor, res, "pipeline", action)) return;
   }
 
   // ① 수집 (미리보기) — 결제된 카페24 주문에서 만들어질 입금요청을 보여준다.
@@ -4529,10 +4736,7 @@ async function routeApi(req, res, url) {
   // --- Cafe24 Admin API endpoints -----------------------------------------
   // Order data and a delegated credential — owner/manager only, same as clobe.
   if (pathname.startsWith("/api/cafe24/")) {
-    if (!canManageAdmins(actor)) {
-      sendJson(res, 403, { error: "카페24 연동은 오너 또는 매니저만 사용할 수 있습니다." });
-      return;
-    }
+    if (!requirePermission(actor, res, "pipeline", "view", "카페24 연동 권한이 없습니다.")) return;
     if (!db.cafe24 || typeof db.cafe24 !== "object") db.cafe24 = buildCafe24Namespace();
   }
 
@@ -4661,10 +4865,7 @@ async function routeApi(req, res, url) {
   // --- Clobe (클로브ai) 입금대사 endpoints ---------------------------------
   // Banking data and a long-lived delegated credential — owner/manager only.
   if (pathname.startsWith("/api/clobe/")) {
-    if (!canManageAdmins(actor)) {
-      sendJson(res, 403, { error: "클로브 연동은 오너 또는 매니저만 사용할 수 있습니다." });
-      return;
-    }
+    if (!requirePermission(actor, res, "reconcile", "view", "클로브 연동 권한이 없습니다.")) return;
     if (!db.clobe || typeof db.clobe !== "object") db.clobe = buildClobeNamespace();
   }
 
@@ -4772,6 +4973,18 @@ async function routeApi(req, res, url) {
         await writeDb(db);
       }
       sendJson(res, 200, { companies: [company] });
+    } catch (error) {
+      sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
+    }
+    return;
+  }
+
+  // 클로브 데이터가 언제까지 수집된 것인지. 재수집은 클로브에서만 가능해서
+  // (MCP 에 트리거 도구가 없다) 여기서는 상태만 보여주고 링크로 안내한다.
+  if (pathname === "/api/clobe/scraping" && method === "GET") {
+    try {
+      const payload = await clobeCall(db, "get_scraping_status", { companyId: db.clobe.companyId });
+      sendJson(res, 200, payload);
     } catch (error) {
       sendJson(res, error.needsReauth ? 401 : 502, { error: error.message });
     }
@@ -5011,15 +5224,27 @@ async function routeApi(req, res, url) {
       }
       try {
         if (kind === "channel") {
-          if (!body.channel) { sendJson(res, 400, { error: "채널을 선택하세요." }); return; }
-          const parsed = await runNpbParse(body.fileBase64, body.fileName, body.channel);
+          // 채널을 명시하지 않으면 파일명으로 찾는다. 한 곳에 몰아서 올리고
+          // 파일명이 채널을 결정하게 하는 것이 실제 업무 흐름에 맞다.
+          const matches = body.channel ? [] : npbMatchChannels(db.npb.channels, body.fileName);
+          const channelCode = body.channel || matches[0]?.code || "";
+          if (!channelCode) {
+            sendJson(res, 400, {
+              error: `파일명으로 채널을 알 수 없습니다: ${body.fileName || "(이름 없음)"}. ` +
+                `채널 설정에서 그 채널의 '파일명 키워드'를 등록하거나, 아래에서 채널을 직접 고르세요.`,
+              needsChannel: true,
+              fileName: body.fileName || ""
+            });
+            return;
+          }
+          const parsed = await runNpbParse(body.fileBase64, body.fileName, channelCode);
           const parsedLines = (parsed.lines || []).map((line) => ({
             ...line,
-            channel: body.channel
+            channel: channelCode
           }));
-          settlement.uploads[body.channel] = {
+          settlement.uploads[channelCode] = {
             kind,
-            channel: body.channel,
+            channel: channelCode,
             fileName: body.fileName || "",
             lines: parsedLines,
             warnings: parsed.warnings || [],
@@ -5028,15 +5253,20 @@ async function routeApi(req, res, url) {
           // Accumulate parsed lines into the editable grid: drop any prior lines
           // for this channel (idempotent re-upload) and append the fresh ones.
           settlement.lines = (settlement.lines || [])
-            .filter((line) => line.channel !== body.channel)
+            .filter((line) => line.channel !== channelCode)
             .concat(parsedLines);
-          settlement.updatedAt = now();
+          // 업로드 즉시 집계까지 끝낸다. 사람이 워크시트로 건너가 [저장(계산)]
+          // 을 눌러야 숫자가 맞는 구조가 병목이었다.
+          const computed = npbRecompute(db, settlement);
           await writeDb(db);
           sendJson(res, 200, {
             kind,
-            channel: parsed.channel || body.channel,
+            channel: channelCode,
+            // 파일명이 여러 채널에 걸렸으면 무엇을 골랐고 무엇이 밀렸는지 알린다.
+            alternatives: matches.slice(1).map((m) => ({ code: m.code, name: m.name })),
             rows: parsedLines,
-            warnings: parsed.warnings || []
+            warnings: parsed.warnings || [],
+            rollup: computed.rollup
           });
         } else {
           const rows = await parseBankXlsxUpload(body.fileBase64);
@@ -5068,45 +5298,9 @@ async function routeApi(req, res, url) {
 
     if (action === "compute" && method === "POST") {
       const body = await readBody(req);
-      const brand = npbGetBrand(db, settlement.brand);
-      const costConfig = brand?.costConfig || {};
-      const npbChannels = (db.npb?.channels || []).filter(
-        (c) => !brand || String(c.brandId).toLowerCase() === String(brand.id).toLowerCase()
-      );
-      const lines = (settlement.lines || []).map((line) => npbEnrichLine(line, npbChannels));
-      settlement.lines = lines;
-      const small = number(body?.logistics?.smallCount, number(settlement.logistics?.smallCount));
-      const large = number(body?.logistics?.largeCount, number(settlement.logistics?.largeCount));
-      const logisticsCost = npbComputeLogistics(small, large, costConfig);
-      const carryOver = number(body?.carryOver, number(settlement.carryOver));
-      const rollup = npbComputeRollup(lines, logisticsCost, carryOver);
-      const parties = settlement.parties && settlement.parties.length
-        ? settlement.parties
-        : db.npb.defaultProfitSplit || [];
-      const profitSplit = npbComputeProfitSplit(rollup.profit, parties);
-      const pickPack = number(costConfig.pickPack);
-      settlement.logistics = {
-        smallCount: small,
-        largeCount: large,
-        smallShip: number(costConfig.smallShip),
-        largeShip: number(costConfig.largeShip),
-        pickPack,
-        smallTotal: small * (number(costConfig.smallShip) + pickPack),
-        largeTotal: large * (number(costConfig.largeShip) + pickPack),
-        grandTotal: logisticsCost
-      };
-      settlement.carryOver = carryOver;
-      settlement.rollup = rollup;
-      settlement.profitSplit = profitSplit;
-      if (Array.isArray(body.inventory)) settlement.inventory = body.inventory;
-      settlement.updatedAt = now();
+      const result = npbRecompute(db, settlement, body);
       await writeDb(db);
-      sendJson(res, 200, {
-        rollup,
-        logistics: settlement.logistics,
-        profitSplit,
-        inventory: settlement.inventory
-      });
+      sendJson(res, 200, result);
       return;
     }
 
