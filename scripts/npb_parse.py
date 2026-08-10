@@ -158,19 +158,23 @@ class Aggregator:
         self._lines = {}
 
     def add(self, product, orders, ea, ea_per_unit=1, tier=None, raw=None):
+        # 미식별 라인은 원본 이름별로 모은다 — 서버가 나중에 매칭한다.
+        if product is None:
+            tier = (raw or {}).get("sourceName") or tier
         key = (product, tier)
         line = self._lines.get(key)
         if line is None:
             line = {
                 "productKey": product,
-                "label": PRODUCT_LABELS.get(product, product),
+                "label": PRODUCT_LABELS.get(product, product)
+                if product else ((raw or {}).get("sourceName") or "(미식별)"),
                 "qtyEa": 0,
                 "qtyOrders": 0,
                 "eaPerUnit": ea_per_unit,
                 "tier": tier,
                 "raw": dict(raw or {}),
             }
-            if tier:
+            if tier and product:
                 line["label"] = PRODUCT_LABELS.get(product, product) + " " + tier
             self._lines[key] = line
         line["qtyEa"] += ea
@@ -193,7 +197,7 @@ class Aggregator:
                 item["tier"] = line["tier"]
             out.append(item)
         # stable ordering: product then tier
-        out.sort(key=lambda x: (x["productKey"], x.get("tier") or ""))
+        out.sort(key=lambda x: (x["productKey"] or "~", x.get("tier") or ""))
         return out
 
 
@@ -599,10 +603,11 @@ def parse_generic(rows, channel, warnings):
             name=cell(r, ci_name), barcode=cell(r, ci_barcode), code=cell(r, ci_code)
         )
         if product is None:
-            warnings.append(
-                "[%s] unrecognized product (수량=%d): %r"
-                % (channel, qty, norm(cell(r, ci_name)))
-            )
+            # 이름을 못 알아봐도 버리지 않는다. 원본 이름을 그대로 넘기면
+            # 서버가 상품표·별칭으로 다시 맞춰보고, 그래도 모르면 사람이
+            # 한 번 지정해 다음부터 자동으로 인식되게 한다.
+            unresolved_key = norm(cell(r, ci_name)) or "(이름 없음)"
+            agg.add(None, orders=1, ea=qty, ea_per_unit=1, raw={"sourceName": unresolved_key})
             continue
         agg.add(product, orders=1, ea=qty, ea_per_unit=1)
     return agg.lines()

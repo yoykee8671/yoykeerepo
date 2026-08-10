@@ -67,6 +67,8 @@ const state = {
     parsePreview: null,
     pendingUploads: [],
     logisticsCounts: {},
+    unresolved: [],
+    aliasDraft: {},
     adCost: null,
     adCostLoading: false,
     worksheet: null,
@@ -4183,7 +4185,7 @@ async function npbLoadDetail(key) {
 // 않는다(채널 설정 저장은 channels 만 갱신한다). 도톤은 판매 SKU 가 두 개뿐이고
 // 팔렸든 안 팔렸든 모든 채널에 있어야 하므로, 파생이 곧 올바른 규칙이다.
 // 저장된 라인 설정은 가격·수수료 덮어쓰기로만 쓴다.
-function npbChannelSeeds(channel, products, lineConfigs, packTiers) {
+function npbChannelSeeds(channel, products, lineConfigs) {
   const saved = lineConfigs.filter((lc) => lc.channelCode === channel.code);
   const savedFor = (productId, tier) =>
     saved.find((lc) => lc.productId === productId && (!tier || (lc.lineLabel || "").includes(tier)));
@@ -4202,18 +4204,20 @@ function npbChannelSeeds(channel, products, lineConfigs, packTiers) {
     });
   }
 
-  // 브랜드 단위 번들(픽키 필바이츠의 1·2·5·10팩, 박스). 맛 × 번들로 행이 생기고
-  // 모든 채널에 동일하게 깔린다 — 팔렸든 안 팔렸든 보여야 한다.
-  if (Array.isArray(packTiers) && packTiers.length) {
+  // 상품이 자기 번들을 갖는 브랜드(픽키 필바이츠). 45g 은 1·3·5·10개 묶음이
+  // 있고 180g 은 낱개뿐이라, 번들을 브랜드에 두면 없는 조합이 생긴다.
+  // 팔렸든 안 팔렸든 모든 채널에 전 SKU 가 깔려야 한다.
+  if (products.some((p) => (p.packTiers || []).length)) {
     const rows = [];
     for (const p of products) {
-      for (const t of packTiers) {
+      const tiers = (p.packTiers || []).length ? p.packTiers : [{ tier: "", ea: 1, listPrice: p.listPrice }];
+      for (const t of tiers) {
         const override = savedFor(p.id, t.tier);
         rows.push({
           productId: p.id,
-          lineLabel: override?.lineLabel || `${p.name} ${t.tier}`,
-          tier: t.tier,
-          listPrice: t.listPrice ?? 0,
+          lineLabel: override?.lineLabel || `${p.name}${t.tier ? ` ${t.tier}` : ""}`,
+          tier: t.tier || "",
+          listPrice: t.listPrice ?? p.listPrice ?? 0,
           eaPerUnit: t.ea ?? 1,
           salePrice: override?.salePrice ?? t.listPrice ?? 0,
           feeRate: override?.feeRate ?? channel.feeRate ?? 0
@@ -4241,7 +4245,6 @@ function npbBuildWorksheet(config, lines) {
   const channels = cfg.channels || [];
   const products = cfg.products || [];
   const lineConfigs = cfg.channelLineConfigs || [];
-  const packTiers = cfg.packTiers || [];
   const byChannel = new Map(channels.map((c) => [c.code, c]));
   // Index stored lines by channel|productId|tier for overlay lookup.
   const stored = new Map();
@@ -4256,7 +4259,7 @@ function npbBuildWorksheet(config, lines) {
   for (const code of order) {
     const channel = byChannel.get(code);
     if (!channel || channel.active === false) continue;
-    const seeds = npbChannelSeeds(channel, products, lineConfigs, packTiers);
+    const seeds = npbChannelSeeds(channel, products, lineConfigs);
     if (!seeds.length) continue;
     const rows = seeds.map((seed) => {
       const tierLabel = seed.tier || "";
@@ -5224,6 +5227,7 @@ function renderNpbUpload() {
             (채널 설정의 '파일명 키워드' 또는 채널명·코드 기준).
           </span>
         </div>
+        ${renderNpbUnresolved()}
         ${pending ? `<div class="npb-pending-wrap">
           <p class="muted" style="color:var(--red)">채널을 알 수 없는 파일이 있습니다. 직접 지정하세요.</p>
           ${pending}</div>` : ""}
@@ -5244,6 +5248,51 @@ function renderNpbUpload() {
     </section>
     ${n.parsePreview ? renderNpbParsePreview(n.parsePreview) : ""}
   `;
+}
+
+// 판매처마다 상품명이 달라 자동으로 못 맞춘 것들. 한 번 지정하면 별칭으로
+// 저장돼 다음 업로드부터는 그대로 인식된다.
+function renderNpbUnresolved() {
+  const n = state.npb;
+  const list = n.unresolved || [];
+  if (!list.length) return "";
+  const products = n.config?.products || [];
+  const options = [];
+  for (const p of products) {
+    const tiers = (p.packTiers || []).length ? p.packTiers : [{ tier: "" }];
+    for (const t of tiers) {
+      options.push({
+        value: `${p.id}|${t.tier || ""}`,
+        label: `${p.name}${t.tier ? ` ${t.tier}` : ""}`
+      });
+    }
+  }
+  const rows = list.map((u, i) => `
+    <tr>
+      <td class="wrap">${h(u.sourceName)}</td>
+      <td class="num">${money.format(u.qty || 0)}</td>
+      <td>
+        <select data-npb-alias="${i}">
+          <option value="">상품 선택…</option>
+          ${options.map((o) => `<option value="${h(o.value)}" ${n.aliasDraft?.[i] === o.value ? "selected" : ""}>${h(o.label)}</option>`).join("")}
+        </select>
+      </td>
+    </tr>`).join("");
+  return `
+    <div class="npb-pending-wrap">
+      <h3 style="color:var(--red)">상품을 알 수 없는 이름 ${list.length}건</h3>
+      <p class="muted">
+        판매처마다 상품명이 조금씩 다릅니다. 여기서 한 번 지정하면 <b>다음부터는 자동으로 인식</b>됩니다.
+        지정한 뒤 파일을 다시 올려주세요.
+      </p>
+      <div class="table-wrap" style="max-height:280px"><table>
+        <thead><tr><th>판매처 상품명</th><th>수량</th><th>이 상품으로 인식</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+      <div class="toolbar">
+        <button class="primary" data-npb-alias-save>매칭 저장</button>
+        <button class="ghost" data-npb-alias-clear>목록 비우기</button>
+      </div>
+    </div>`;
 }
 
 function renderNpbParsePreview(p) {
@@ -5751,6 +5800,39 @@ function bindNpbList() {
 
 function bindNpbUpload() {
   const n = state.npb;
+  app.querySelectorAll("[data-npb-alias]").forEach((sel) => {
+    sel.addEventListener("change", () => {
+      n.aliasDraft = { ...(n.aliasDraft || {}), [sel.dataset.npbAlias]: sel.value };
+    });
+  });
+  app.querySelector("[data-npb-alias-save]")?.addEventListener("click", async () => {
+    const draft = n.aliasDraft || {};
+    const aliases = (n.unresolved || [])
+      .map((u, i) => {
+        const v = draft[i];
+        if (!v) return null;
+        const [productId, tier] = v.split("|");
+        return { brandId: npbBrand(), sourceName: u.sourceName, productId, tier: tier || "" };
+      })
+      .filter(Boolean);
+    if (!aliases.length) return showToast("지정할 상품을 선택하세요.", "error");
+    try {
+      const res = await api("/api/npb/aliases", { method: "POST", body: { aliases } });
+      showToast(`${res.saved}건 저장했습니다. 파일을 다시 올리면 자동으로 인식됩니다.`);
+      // 지정한 것만 목록에서 뺀다.
+      const done = new Set(aliases.map((a) => a.sourceName));
+      n.unresolved = (n.unresolved || []).filter((u) => !done.has(u.sourceName));
+      n.aliasDraft = {};
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "매칭 저장 실패", "error");
+    }
+  });
+  app.querySelector("[data-npb-alias-clear]")?.addEventListener("click", () => {
+    n.unresolved = [];
+    n.aliasDraft = {};
+    renderApp();
+  });
   app.querySelector("[data-npb-upload-any]")?.addEventListener("change", async (e) => {
     const files = [...(e.target.files || [])];
     if (!files.length) return;
@@ -5816,6 +5898,11 @@ async function npbDoUpload({ kind, channel, file, preread, quiet = false }) {
     });
     const parsedRows = res.rows || res.lines || [];
     n.parsePreview = { lines: parsedRows, warnings: res.warnings || [] };
+    if (res.unresolved?.length) {
+      // 이름이 겹치면 한 번만 남긴다 — 같은 이름을 여러 번 지정할 이유가 없다.
+      const seen = new Set(n.unresolved.map((u) => u.sourceName));
+      n.unresolved = [...n.unresolved, ...res.unresolved.filter((u) => !seen.has(u.sourceName))];
+    }
     if (!quiet) {
       await npbLoadDetail(n.currentKey);
       showToast(`업로드 완료 (${parsedRows.length}행)`);

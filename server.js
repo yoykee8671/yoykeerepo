@@ -613,29 +613,42 @@ export function buildNpbNamespace() {
       // 광고비는 이 시트에 누적된다. 정산에는 넣지 않고 별도 청구한다.
       adCostSheetUrl: "https://docs.google.com/spreadsheets/d/1RA45qIvKCGRh5evCtiXMmpypdNb8gxvKWAkwfu-MHz0/edit"
     },
-    // 번들 단위. 맛(상품) × 번들로 워크시트 행이 생긴다. 1팩 = 5개입이고
-    // 팩 정가는 6,800원 × 팩수로 정확히 선형이라(1팩 6,800 / 2팩 13,600 /
-    // 5팩 34,000) 10팩도 그 규칙을 따랐다. 박스는 낱개 20P 별도 상품이라
-    // 팩 단가 체계와 다르다. 값은 화면에서 고칠 수 있다.
-    packTiers: [
-      { tier: "1팩(5개입)", ea: 5, listPrice: 6800 },
-      { tier: "2팩(10개입)", ea: 10, listPrice: 13600 },
-      { tier: "5팩(25개입)", ea: 25, listPrice: 34000 },
-      { tier: "10팩(50개입)", ea: 50, listPrice: 68000 },
-      { tier: "박스(20P입)", ea: 20, listPrice: 26900 }
-    ]
   };
+
+  // 번들 구성이 상품마다 다르다 — 45g 는 1·3·5·10개 묶음이 있고 180g 는 낱개뿐이다.
+  // "필바이츠 상품 목록 및 SKU 정보 최신" 기준.
+  const pickyPackTiers45 = [
+    { tier: "1개", ea: 1, listPrice: 6800 },
+    { tier: "3개", ea: 3, listPrice: 20400 },
+    { tier: "5개", ea: 5, listPrice: 34000 },
+    { tier: "10개", ea: 10, listPrice: 68000 }
+  ];
+  const pickyPackTiers180 = [{ tier: "1개", ea: 1, listPrice: 26900 }];
 
   const pickyProducts = [
     {
-      id: "pb_chicken", brandId: "pickydog", barcode: "8809879544071",
-      name: "필바이츠 오리지널 치킨", listPrice: 6800,
-      nameKeywords: ["치킨", "오리지널"], skuCodes: ["P000BLOX"]
+      id: "pb45_chicken", brandId: "pickydog", barcode: "8809879544071",
+      name: "픽키도기클럽 필바이츠 45g (5개입) - 치킨 오리지널", listPrice: 6800,
+      nameKeywords: ["45g", "치킨", "오리지널"], skuCodes: ["P000BLOX"],
+      packTiers: pickyPackTiers45
     },
     {
-      id: "pb_vegan", brandId: "pickydog", barcode: "",
-      name: "필바이츠 비건 고구마 피넛버터", listPrice: 6800,
-      nameKeywords: ["비건", "고구마", "피넛버터"], skuCodes: []
+      id: "pb180_chicken", brandId: "pickydog", barcode: "",
+      name: "픽키도기클럽 필바이츠 180g (20개입) - 치킨 오리지널", listPrice: 26900,
+      nameKeywords: ["180g", "치킨", "오리지널"], skuCodes: [],
+      packTiers: pickyPackTiers180
+    },
+    {
+      id: "pb45_vegan", brandId: "pickydog", barcode: "",
+      name: "픽키도기클럽 필바이츠 45g (5개입) - 비건 고구마와 피넛버터", listPrice: 6800,
+      nameKeywords: ["45g", "비건", "고구마", "피넛버터"], skuCodes: [],
+      packTiers: pickyPackTiers45
+    },
+    {
+      id: "pb180_vegan", brandId: "pickydog", barcode: "",
+      name: "픽키도기클럽 필바이츠 180g (20개입) - 비건 고구마와 피넛버터", listPrice: 26900,
+      nameKeywords: ["180g", "비건", "고구마", "피넛버터"], skuCodes: [],
+      packTiers: pickyPackTiers180
     }
   ];
 
@@ -1135,7 +1148,7 @@ function migrateDb(db) {
       // 값이 비어 있을 때만 채운다 — 화면에서 고친 값을 덮어쓰지 않는다.
       const seeded = (npbSeed.brands || []).find((b) => b.id === npbBrand.id);
       if (seeded) {
-        for (const key of ["packTiers", "businessName", "productLine"]) {
+        for (const key of ["businessName", "productLine"]) {
           if (npbBrand[key] === undefined && seeded[key] !== undefined) {
             npbBrand[key] = seeded[key];
             changed = true;
@@ -2411,6 +2424,77 @@ export function npbParseAdCost(csvText, periodMonth) {
     items.push({ period: current, medium, amount });
   }
   return { items, total: items.reduce((sum, i) => sum + i.amount, 0) };
+}
+
+// 판매처마다 상품명이 다르다. 파서가 못 알아본 이름은 버리지 않고 여기서
+// 다시 맞춰본다 — 먼저 사람이 지정해둔 별칭, 그다음 상품표 키워드.
+// 그래도 모르면 사람이 한 번 지정하고, 그 지정이 별칭으로 저장돼 다음부터는
+// 자동으로 인식된다.
+// 정산 key 는 DOTEON_202606 처럼 대문자를 쓰고 상품·채널은 소문자 id 를 쓴다.
+// 브랜드를 가릴 때는 항상 이걸로 비교한다 — 대소문자가 갈리면 상품표도 별칭도
+// 빈 목록이 되어 아무것도 매칭되지 않는다.
+function npbSameBrand(a, b) {
+  return String(a ?? "doteon").trim().toLowerCase() === String(b ?? "doteon").trim().toLowerCase();
+}
+
+function npbNormalizeName(value) {
+  return String(value || "").normalize("NFC").toLowerCase().replace(/\s+/g, "");
+}
+
+// "(3팩/15개)" → 3개, "(5개입)" → 1개, "(20개입/1박스)" → 1개(180g)
+function npbGuessTier(sourceName, product) {
+  const text = String(sourceName || "");
+  const tiers = product?.packTiers || [];
+  const packs = text.match(/(\d+)\s*팩/);
+  if (packs) {
+    const want = `${Number(packs[1])}개`;
+    const hit = tiers.find((t) => t.tier === want);
+    if (hit) return hit.tier;
+  }
+  return tiers[0]?.tier || "";
+}
+
+function npbMatchProduct(sourceName, products) {
+  const norm = npbNormalizeName(sourceName);
+  if (!norm) return null;
+  // 키워드가 모두 들어 있는 상품만 후보로 본다. 하나만 남을 때 채택한다 —
+  // 맛이나 용량을 못 가르면 임의로 고르지 않는다.
+  const hits = products.filter((p) =>
+    (p.nameKeywords || []).length &&
+    (p.nameKeywords || []).every((k) => norm.includes(npbNormalizeName(k)))
+  );
+  return hits.length === 1 ? hits[0] : null;
+}
+
+function npbResolveLines(lines, products, aliases) {
+  const aliasByName = new Map(
+    (aliases || []).map((a) => [npbNormalizeName(a.sourceName), a])
+  );
+  const resolved = [];
+  const unresolved = new Map();
+  for (const line of lines || []) {
+    if (line.productKey) {
+      resolved.push(line);
+      continue;
+    }
+    const sourceName = line.raw?.sourceName || line.tier || line.label || "";
+    const alias = aliasByName.get(npbNormalizeName(sourceName));
+    if (alias) {
+      resolved.push({ ...line, productKey: alias.productId, tier: alias.tier || "", label: alias.label || sourceName });
+      continue;
+    }
+    const product = npbMatchProduct(sourceName, products);
+    if (product) {
+      const tier = npbGuessTier(sourceName, product);
+      resolved.push({ ...line, productKey: product.id, tier, label: `${product.name}${tier ? ` ${tier}` : ""}` });
+      continue;
+    }
+    const key = npbNormalizeName(sourceName);
+    const cur = unresolved.get(key) || { sourceName, qty: 0 };
+    cur.qty += number(line.qtyEa ?? line.qty);
+    unresolved.set(key, cur);
+  }
+  return { resolved, unresolved: [...unresolved.values()] };
 }
 
 function npbDetectChannelFromName(channels, fileName) {
@@ -5395,12 +5479,46 @@ async function routeApi(req, res, url) {
   }
 
   // --- NPB (도톤 운영대행) settlement endpoints (plan §F) -------------------
+  // 상품명 별칭. 한 번 지정하면 그 이름은 다음부터 자동으로 인식된다.
+  if (pathname === "/api/npb/aliases" && method === "POST") {
+    const body = await readBody(req);
+    const items = Array.isArray(body.aliases) ? body.aliases : [];
+    if (!items.length) { sendJson(res, 400, { error: "저장할 매칭이 없습니다." }); return; }
+    if (!Array.isArray(db.npb.productAliases)) db.npb.productAliases = [];
+    let saved = 0;
+    for (const item of items) {
+      const sourceName = String(item.sourceName || "").trim();
+      const productId = String(item.productId || "").trim();
+      if (!sourceName || !productId) continue;
+      const brandId = String(item.brandId || "doteon");
+      const key = npbNormalizeName(sourceName);
+      const existing = db.npb.productAliases.find(
+        (a) => a.brandId === brandId && npbNormalizeName(a.sourceName) === key
+      );
+      const product = (db.npb.products || []).find((p) => p.id === productId);
+      const tier = String(item.tier || "");
+      const label = product ? `${product.name}${tier ? ` ${tier}` : ""}` : sourceName;
+      if (existing) {
+        Object.assign(existing, { productId, tier, label, updatedAt: now() });
+      } else {
+        db.npb.productAliases.push({
+          id: id("npbalias"), brandId, sourceName, productId, tier, label, createdAt: now()
+        });
+      }
+      saved += 1;
+    }
+    addAudit(db, actor, "update", "npb_alias", "aliases", `상품명 매칭 ${saved}건 저장`, null, null);
+    await writeDb(db);
+    sendJson(res, 200, { saved, aliases: db.npb.productAliases });
+    return;
+  }
+
   if (pathname === "/api/npb/config" && method === "GET") {
     const brand = npbGetBrand(db, url.searchParams.get("brand") || "doteon");
     if (!brand) { sendJson(res, 404, { error: "브랜드를 찾을 수 없습니다." }); return; }
     // 브랜드가 여럿이므로 그 브랜드 것만 내려준다 — 안 그러면 픽키 워크시트에
     // 도톤 채널이 함께 뜬다. brandId 가 없는 예전 항목은 도톤 것으로 본다.
-    const ofBrand = (item) => String(item.brandId || "doteon") === brand.id;
+    const ofBrand = (item) => npbSameBrand(item.brandId, brand.id);
     sendJson(res, 200, {
       brand: brand.id,
       brands: (db.npb.brands || []).map((b) => ({
@@ -5408,11 +5526,11 @@ async function routeApi(req, res, url) {
       })),
       channels: (db.npb.channels || []).filter(ofBrand),
       costConfig: brand.costConfig || {},
-      packTiers: brand.packTiers || [],
       products: (db.npb.products || []).filter(ofBrand),
       channelLineConfigs: (db.npb.channelLineConfigs || []).filter(
         (lc) => (db.npb.channels || []).some((c) => c.code === lc.channelCode && ofBrand(c))
       ),
+      productAliases: (db.npb.productAliases || []).filter((a) => npbSameBrand(a.brandId, brand.id)),
       defaultProfitSplit: db.npb.defaultProfitSplit || []
     });
     return;
@@ -5425,14 +5543,13 @@ async function routeApi(req, res, url) {
     if (Array.isArray(body.channels)) {
       // 이 브랜드 채널만 교체한다. 전체를 덮어쓰면 다른 브랜드 채널이 사라진다.
       const others = (db.npb.channels || []).filter(
-        (c) => String(c.brandId || "doteon") !== brand.id
+        (c) => !npbSameBrand(c.brandId, brand.id)
       );
       db.npb.channels = [...others, ...body.channels.map((c) => ({ ...c, brandId: brand.id }))];
     }
     if (body.costConfig && typeof body.costConfig === "object") {
       brand.costConfig = { ...brand.costConfig, ...body.costConfig };
     }
-    if (Array.isArray(body.packTiers)) brand.packTiers = body.packTiers;
     if (Array.isArray(body.products)) {
       // 이 브랜드 상품만 교체한다.
       const others = (db.npb.products || []).filter(
@@ -5577,7 +5694,17 @@ async function routeApi(req, res, url) {
             return;
           }
           const parsed = await runNpbParse(body.fileBase64, body.fileName, channelCode);
-          const parsedLines = (parsed.lines || []).map((line) => ({
+          // 판매처 상품명을 상품표·별칭으로 맞춘다. 못 맞춘 것은 화면에서
+          // 한 번 지정하면 별칭으로 남아 다음부터 자동 인식된다.
+          const uploadProducts = (db.npb.products || []).filter(
+            (p) => npbSameBrand(p.brandId, settlement.brand)
+          );
+          const resolvedOut = npbResolveLines(
+            parsed.lines || [],
+            uploadProducts,
+            (db.npb.productAliases || []).filter((a) => npbSameBrand(a.brandId, settlement.brand))
+          );
+          const parsedLines = resolvedOut.resolved.map((line) => ({
             ...line,
             channel: channelCode
           }));
@@ -5605,6 +5732,7 @@ async function routeApi(req, res, url) {
             alternatives: matches.slice(1).map((m) => ({ code: m.code, name: m.name })),
             rows: parsedLines,
             warnings: parsed.warnings || [],
+            unresolved: resolvedOut.unresolved,
             rollup: computed.rollup
           });
         } else {
@@ -5618,7 +5746,7 @@ async function routeApi(req, res, url) {
           // 입출고 원장에서 상품별 입고·출고를 바로 채운다. 기초는 전월 마감을
           // 이월하고, 마감 = 기초 + 입고 - 출고 로 계산한다.
           const brandProducts = (db.npb.products || []).filter(
-            (p) => String(p.brandId || "doteon") === String(settlement.brand)
+            (p) => npbSameBrand(p.brandId, settlement.brand)
           );
           const derived = npbInventoryFromLogistics(rows, brandProducts);
           const opening = npbPriorClosing(db, settlement);
