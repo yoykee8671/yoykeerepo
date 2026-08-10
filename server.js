@@ -566,6 +566,15 @@ export function buildNpbNamespace() {
       smallShip: 2650, // VAT-included, documentation-only (never recomputed)
       largeShip: 4400,
       pickPack: 1430,
+      // 출고 유형별 실비. 유형이 브랜드마다 다르다 — 도톤은 소형/대형으로
+      // 갈리고, 픽키는 출고지(3PL/본사)로 갈린다. 목록으로 두면 계산식을
+      // 건드리지 않고 유형을 늘릴 수 있다.
+      shipTypes: [
+        { key: "small", label: "소형 출고", freight: 2650, handling: 1430 },
+        { key: "large", label: "대형 출고", freight: 4400, handling: 1430 }
+      ],
+      // 실비를 정산에서 공제하지 않고 별도 청구할지. 브랜드마다 다르다.
+      billSeparately: false,
       threePlTable: [
         { item: "보관료", unitPrice: null, unit: "월/평당", note: "청구제외" },
         { item: "입고비용", unitPrice: 0, unit: "건", note: "청구제외" },
@@ -575,6 +584,78 @@ export function buildNpbNamespace() {
       ]
     }
   };
+
+  // 픽키도기클럽(사업자 픽키파크) — 제품 필바이츠. 실비(물류·광고)는 정산에서
+  // 공제하지 않고 별도 청구한다.
+  const pickyBrand = {
+    id: "pickydog",
+    name: "픽키도기클럽",
+    businessName: "픽키파크",
+    productLine: "필바이츠",
+    costConfig: {
+      billSeparately: true,
+      shipTypes: [
+        { key: "3pl", label: "3PL 출고 (택배)", freight: 2650, handling: 1430 },
+        { key: "hq", label: "본사 출고 (택배)", freight: 3300, handling: 550 },
+        // 용달·퀵은 건마다 금액이 달라 실비를 직접 적는다.
+        { key: "quick", label: "용달/퀵", freight: 0, handling: 0, manual: true, excludeFromTotal: true }
+      ],
+      threePlTable: [
+        { item: "보관료", unitPrice: 4000, unit: "월/평당", note: "청구제외 / 한시적 무상제공" },
+        { item: "입고비용", unitPrice: null, unit: "건", note: "청구제외 / 한시적 무상제공" },
+        { item: "물류솔루션", unitPrice: 300000, unit: "월별", note: "청구제외 / 한시적 무상제공" },
+        { item: "택배운임비", unitPrice: 2500, unit: "건", note: "로젠택배(소형)" },
+        { item: "택배운임비", unitPrice: 4000, unit: "건", note: "로젠택배(중형이상)" },
+        { item: "물류사용비", unitPrice: 1300, unit: "건", note: "박스·부자재 / 피킹 / 패킹" },
+        { item: "본사 택배운임비", unitPrice: 3000, unit: "건", note: "로젠택배(소형)" },
+        { item: "본사 부자재(박스)", unitPrice: 500, unit: "건", note: "" }
+      ],
+      // 광고비는 이 시트에 누적된다. 정산에는 넣지 않고 별도 청구한다.
+      adCostSheetUrl: "https://docs.google.com/spreadsheets/d/1RA45qIvKCGRh5evCtiXMmpypdNb8gxvKWAkwfu-MHz0/edit"
+    },
+    // 번들 단위. 맛(상품) × 번들로 워크시트 행이 생긴다. 1팩 = 5개입이고
+    // 팩 정가는 6,800원 × 팩수로 정확히 선형이라(1팩 6,800 / 2팩 13,600 /
+    // 5팩 34,000) 10팩도 그 규칙을 따랐다. 박스는 낱개 20P 별도 상품이라
+    // 팩 단가 체계와 다르다. 값은 화면에서 고칠 수 있다.
+    packTiers: [
+      { tier: "1팩(5개입)", ea: 5, listPrice: 6800 },
+      { tier: "2팩(10개입)", ea: 10, listPrice: 13600 },
+      { tier: "5팩(25개입)", ea: 25, listPrice: 34000 },
+      { tier: "10팩(50개입)", ea: 50, listPrice: 68000 },
+      { tier: "박스(20P입)", ea: 20, listPrice: 26900 }
+    ]
+  };
+
+  const pickyProducts = [
+    {
+      id: "pb_chicken", brandId: "pickydog", barcode: "8809879544071",
+      name: "필바이츠 오리지널 치킨", listPrice: 6800,
+      nameKeywords: ["치킨", "오리지널"], skuCodes: ["P000BLOX"]
+    },
+    {
+      id: "pb_vegan", brandId: "pickydog", barcode: "",
+      name: "필바이츠 비건 고구마 피넛버터", listPrice: 6800,
+      nameKeywords: ["비건", "고구마", "피넛버터"], skuCodes: []
+    }
+  ];
+
+  // 정산서의 채널·수수료율을 그대로 옮겼다. 정산형태는 계산서를 누가 발행하는지
+  // 구분하는 값이라 계산에는 쓰지 않고 표기용으로 남긴다.
+  const pickyChannels = [
+    { code: "picky_b2c", name: "wooof-B2C", feeRate: 0.1, settleBy: "우프", filenameKeywords: ["b2c", "cafe24"] },
+    { code: "picky_b2b", name: "wooof-B2B", feeRate: 0.05, settleBy: "우프", filenameKeywords: ["b2b"] },
+    { code: "picky_tailit", name: "테일릿(대리점)", feeRate: 0.52, settleBy: "우프", filenameKeywords: ["대리점", "테일릿"] },
+    { code: "picky_coupang", name: "쿠팡", feeRate: 0, settleBy: "우프", filenameKeywords: ["쿠팡", "coupang"], feeNote: "품목별 상이" },
+    { code: "picky_smartstore", name: "스마트스토어", feeRate: 0, settleBy: "픽키파크", filenameKeywords: ["smartstore", "스마트스토어"], feeNote: "네이버 기준" },
+    { code: "picky_kurly", name: "마켓컬리", feeRate: 0.35, settleBy: "픽키파크", filenameKeywords: ["컬리", "kurly"] },
+    { code: "picky_sparkpet", name: "스파크펫", feeRate: 0.35, settleBy: "픽키파크", filenameKeywords: ["스파크펫", "sparkpet"] },
+    { code: "picky_mongshu", name: "몽슈슈", feeRate: 0.4, settleBy: "우프", filenameKeywords: ["몽슈슈"] },
+    { code: "picky_popup", name: "팝업/외부행사", feeRate: 0.05, settleBy: "우프", filenameKeywords: ["행사", "팝업"] }
+  ].map((c, i) => ({
+    ...c, brandId: "pickydog", category: "온라인", archetype: "consignment",
+    calcType: "rate_on_sale", salePrice: 6800, supplyPrice: null,
+    vatIncluded: true, active: true, sortOrder: 100 + i
+  }));
 
   const products = [
     {
@@ -694,9 +775,9 @@ export function buildNpbNamespace() {
   return {
     version: 1,
     createdAt,
-    brands: [brand],
-    products,
-    channels,
+    brands: [brand, pickyBrand],
+    products: [...products, ...pickyProducts],
+    channels: [...channels, ...pickyChannels],
     channelLineConfigs,
     defaultProfitSplit: [
       { partyName: "유씨엘주식회사", ratio: 0.4, sortOrder: 1 },
@@ -1017,6 +1098,61 @@ function migrateDb(db) {
   } else {
     const npbSeed = buildNpbNamespace();
     for (const key of Object.keys(npbSeed)) touch(db.npb, key, npbSeed[key]);
+    // touch 는 최상위 키만 채운다. 브랜드·채널·상품은 이미 존재하는 배열이라
+    // 새로 추가된 항목이 들어가지 못하므로 id 기준으로 병합한다. 이미 있는
+    // 항목은 손대지 않는다 — 화면에서 고친 값을 덮어쓰면 안 된다.
+    const mergeById = (listKey, idKey) => {
+      const current = Array.isArray(db.npb[listKey]) ? db.npb[listKey] : [];
+      const have = new Set(current.map((item) => String(item?.[idKey] ?? "")));
+      const missing = (npbSeed[listKey] || []).filter(
+        (item) => !have.has(String(item?.[idKey] ?? ""))
+      );
+      if (missing.length) {
+        db.npb[listKey] = [...current, ...missing];
+        changed = true;
+      }
+    };
+    mergeById("brands", "id");
+    mergeById("products", "id");
+    mergeById("channels", "code");
+
+    // 출고 실비를 유형 목록으로 옮긴다. 기존 브랜드는 소형/대형 단가를 그대로
+    // 옮겨 담아 금액이 바뀌지 않는다.
+    for (const npbBrand of db.npb.brands || []) {
+      const cfg = npbBrand.costConfig || (npbBrand.costConfig = {});
+      if (!Array.isArray(cfg.shipTypes) || !cfg.shipTypes.length) {
+        cfg.shipTypes = [
+          { key: "small", label: "소형 출고", freight: number(cfg.smallShip), handling: number(cfg.pickPack) },
+          { key: "large", label: "대형 출고", freight: number(cfg.largeShip), handling: number(cfg.pickPack) }
+        ];
+        changed = true;
+      }
+      if (cfg.billSeparately === undefined) {
+        cfg.billSeparately = false;
+        changed = true;
+      }
+      // 시드에 뒤늦게 붙은 필드는 브랜드가 이미 존재하면 병합에서 빠진다.
+      // 값이 비어 있을 때만 채운다 — 화면에서 고친 값을 덮어쓰지 않는다.
+      const seeded = (npbSeed.brands || []).find((b) => b.id === npbBrand.id);
+      if (seeded) {
+        for (const key of ["packTiers", "businessName", "productLine"]) {
+          if (npbBrand[key] === undefined && seeded[key] !== undefined) {
+            npbBrand[key] = seeded[key];
+            changed = true;
+          }
+        }
+        if (!cfg.adCostSheetUrl && seeded.costConfig?.adCostSheetUrl) {
+          cfg.adCostSheetUrl = seeded.costConfig.adCostSheetUrl;
+          changed = true;
+        }
+        if (!Array.isArray(cfg.threePlTable) || !cfg.threePlTable.length) {
+          if (seeded.costConfig?.threePlTable) {
+            cfg.threePlTable = seeded.costConfig.threePlTable;
+            changed = true;
+          }
+        }
+      }
+    }
   }
 
   // Clobe (클로브ai) connection state. Tokens live here rather than in env
@@ -1076,15 +1212,25 @@ let cachedDb = null;
 // whole state blob — on a 0.5 vCPU instance those parses serialise and even a
 // 340-byte response waits behind them.
 let cachedDbPromise = null;
+let cachedDbAt = 0;
+
+// The whole state is one JSON document, so every write replaces it entirely.
+// A cache that never expires therefore lets a stale instance overwrite newer
+// data — that actually happened: a local server holding a pre-migration
+// snapshot wiped a brand that another instance had just added. The TTL keeps
+// the read savings while bounding how stale a snapshot can get, and the
+// revision check below makes an overwrite impossible rather than merely rare.
+const DB_CACHE_TTL_MS = 3000;
 
 async function readDb() {
   await ensureDb();
   if (pgPool) {
-    if (cachedDb) return cachedDb;
+    if (cachedDb && Date.now() - cachedDbAt < DB_CACHE_TTL_MS) return cachedDb;
     if (!cachedDbPromise) {
       cachedDbPromise = readPostgresDb()
         .then((db) => {
           cachedDb = db;
+          cachedDbAt = Date.now();
           return db;
         })
         .finally(() => {
@@ -1100,6 +1246,7 @@ async function writeDb(db) {
   if (pgPool) {
     await writePostgresDb(db);
     cachedDb = db;
+    cachedDbAt = Date.now();
     return;
   }
   await writeJson(DB_PATH, db);
@@ -1115,16 +1262,36 @@ async function readPostgresDb() {
   return result.rows[0].state;
 }
 
+// Every write replaces the whole document, so two instances that both read
+// before either wrote will silently destroy each other's changes. The write is
+// therefore conditional on the revision that was read: if the stored revision
+// moved, someone else wrote first and this write is refused rather than
+// applied on top of a stale snapshot.
 async function writePostgresDb(db) {
-  await pgPool.query(
+  const prevRev = Number(db.__rev || 0);
+  const nextRev = prevRev + 1;
+  const next = { ...db, __rev: nextRev };
+  const result = await pgPool.query(
     `
       insert into app_state (id, state, updated_at)
       values ($1, $2::jsonb, now())
       on conflict (id)
       do update set state = excluded.state, updated_at = now()
+      where coalesce((app_state.state->>'__rev')::bigint, 0) = $3
     `,
-    [POSTGRES_STATE_ROW_ID, JSON.stringify(db)]
+    [POSTGRES_STATE_ROW_ID, JSON.stringify(next), prevRev]
   );
+  if (!result.rowCount) {
+    // 다른 인스턴스가 먼저 저장했다. 낡은 스냅샷을 덮어쓰지 않고 실패시킨다.
+    cachedDb = null;
+    cachedDbAt = 0;
+    const error = new Error(
+      "다른 곳에서 먼저 저장되었습니다. 화면을 새로고침한 뒤 다시 시도하세요."
+    );
+    error.status = 409;
+    throw error;
+  }
+  db.__rev = nextRev;
 }
 
 async function writeJson(file, value) {
@@ -1982,6 +2149,45 @@ export function npbComputeRollup(lines, logisticsCost, carryOver = 0) {
 
 // 실비(운임/물류) = 소형*(택배소형+피킹) + 중대형*(택배중대형+피킹). Unit costs
 // are VAT-included documentation values from costConfig.
+// 출고 유형별 실비. counts 는 { 유형키: 건수 } 또는 { 유형키: { count, amount } }.
+// 용달·퀵처럼 건마다 금액이 다른 유형(manual)은 적어 넣은 금액을 그대로 쓴다.
+// 유형 목록이 없는 예전 브랜드는 소형/대형 단가로 자동 구성해 결과가 같다.
+export function npbComputeShipping(counts, costConfig) {
+  const cfg = costConfig || {};
+  const types = Array.isArray(cfg.shipTypes) && cfg.shipTypes.length
+    ? cfg.shipTypes
+    : [
+        { key: "small", label: "소형 출고", freight: number(cfg.smallShip), handling: number(cfg.pickPack) },
+        { key: "large", label: "대형 출고", freight: number(cfg.largeShip), handling: number(cfg.pickPack) }
+      ];
+  const breakdown = types.map((t) => {
+    const raw = counts?.[t.key];
+    const entry = raw && typeof raw === "object" ? raw : { count: raw };
+    const count = number(entry.count);
+    const unit = number(t.freight) + number(t.handling);
+    const amount = t.manual ? number(entry.amount) : count * unit;
+    return {
+      key: t.key,
+      label: t.label || t.key,
+      manual: Boolean(t.manual),
+      // 용달·퀵처럼 건별 사정이 다른 운송은 합계에 넣지 않고 개별 기재한다.
+      excludeFromTotal: Boolean(t.excludeFromTotal),
+      count,
+      freight: number(t.freight),
+      handling: number(t.handling),
+      amount
+    };
+  });
+  const counted = breakdown.filter((b) => !b.excludeFromTotal);
+  return {
+    total: counted.reduce((sum, b) => sum + b.amount, 0),
+    countTotal: counted.reduce((sum, b) => sum + b.count, 0),
+    // 합계에서 뺀 항목도 청구 근거로 남긴다.
+    separateTotal: breakdown.filter((b) => b.excludeFromTotal).reduce((sum, b) => sum + b.amount, 0),
+    breakdown
+  };
+}
+
 export function npbComputeLogistics(shipCountSmall, shipCountLarge, costConfig) {
   const cfg = costConfig || {};
   const pickPack = number(cfg.pickPack);
@@ -2069,32 +2275,142 @@ function npbRecompute(db, settlement, opts = {}) {
   );
   const lines = (settlement.lines || []).map((line) => npbEnrichLine(line, npbChannels));
   settlement.lines = lines;
-  const small = number(opts?.logistics?.smallCount, number(settlement.logistics?.smallCount));
-  const large = number(opts?.logistics?.largeCount, number(settlement.logistics?.largeCount));
-  const logisticsCost = npbComputeLogistics(small, large, costConfig);
+  // 출고 건수는 유형별로 받는다. 예전 정산은 소형/대형 두 값만 갖고 있으므로
+  // 그대로 옮겨 담아 결과가 달라지지 않게 한다.
+  const counts = opts?.logistics?.counts
+    || settlement.logistics?.counts
+    || {
+      small: number(settlement.logistics?.smallCount),
+      large: number(settlement.logistics?.largeCount)
+    };
+  if (opts?.logistics && !opts.logistics.counts) {
+    if (opts.logistics.smallCount !== undefined) counts.small = number(opts.logistics.smallCount);
+    if (opts.logistics.largeCount !== undefined) counts.large = number(opts.logistics.largeCount);
+  }
+  const shipping = npbComputeShipping(counts, costConfig);
+  // 실비를 별도 청구하는 브랜드는 정산 이익에서 공제하지 않는다. 금액은 그대로
+  // 산출해 청구 근거로 남긴다.
+  const billSeparately = costConfig.billSeparately === true;
   const carryOver = number(opts?.carryOver, number(settlement.carryOver));
-  const rollup = npbComputeRollup(lines, logisticsCost, carryOver);
+  const rollup = npbComputeRollup(lines, billSeparately ? 0 : shipping.total, carryOver);
   const parties = settlement.parties && settlement.parties.length
     ? settlement.parties
     : db.npb.defaultProfitSplit || [];
   const profitSplit = npbComputeProfitSplit(rollup.profit, parties);
   const pickPack = number(costConfig.pickPack);
+  const byKey = Object.fromEntries(shipping.breakdown.map((b) => [b.key, b]));
   settlement.logistics = {
-    smallCount: small,
-    largeCount: large,
+    counts,
+    breakdown: shipping.breakdown,
+    countTotal: shipping.countTotal,
+    separateTotal: shipping.separateTotal,
+    billSeparately,
+    // 예전 필드도 함께 남긴다 — 정산서 출력과 과거 데이터가 이 이름을 쓴다.
+    smallCount: number(counts.small),
+    largeCount: number(counts.large),
     smallShip: number(costConfig.smallShip),
     largeShip: number(costConfig.largeShip),
     pickPack,
-    smallTotal: small * (number(costConfig.smallShip) + pickPack),
-    largeTotal: large * (number(costConfig.largeShip) + pickPack),
-    grandTotal: logisticsCost
+    smallTotal: number(byKey.small?.amount),
+    largeTotal: number(byKey.large?.amount),
+    grandTotal: shipping.total
   };
   settlement.carryOver = carryOver;
   settlement.rollup = rollup;
   settlement.profitSplit = profitSplit;
   if (Array.isArray(opts.inventory)) settlement.inventory = opts.inventory;
   settlement.updatedAt = now();
-  return { rollup, logistics: settlement.logistics, profitSplit, inventory: settlement.inventory };
+  return { rollup, logistics: settlement.logistics, profitSplit, inventory: settlement.inventory, billSeparately };
+}
+
+// 물류 입출고 원장에서 상품별 입고·출고를 뽑는다. 지금까지는 재고를 손으로
+// 적어야 했다 — 파일에 이미 있는 숫자를 다시 옮겨 적는 셈이었다.
+// 컬럼명은 WMS 내보내기 기준이며, 없으면 비슷한 이름을 찾는다.
+export function npbInventoryFromLogistics(rows, products) {
+  const pick = (row, names) => {
+    for (const n of names) if (row[n] !== undefined) return row[n];
+    const key = Object.keys(row).find((k) => names.some((n) => k.replace(/\s+/g, "").includes(n)));
+    return key ? row[key] : undefined;
+  };
+  // 물류 양식이 둘이다. 입출고 원장은 입고수량·출고수량을 주고, 출고상세는
+  // 주문 단위라 주문수량이 곧 출고다. 상품 식별 컬럼 이름도 다르다.
+  const match = (row) => {
+    const barcode = String(pick(row, ["바코드번호", "재고매칭(1)바코드번호", "바코드"]) ?? "").trim();
+    const code = String(pick(row, ["상품코드", "판매처상품코드", "품목코드"]) ?? "").trim().toUpperCase();
+    const name = String(pick(row, ["상품명", "재고매칭(1)상품명", "판매처상품명", "품목명"]) ?? "").trim();
+    for (const p of products) {
+      if (barcode && p.barcode && barcode === String(p.barcode)) return p.id;
+      if (code && (p.skuCodes || []).some((sku) => code.startsWith(String(sku).toUpperCase()))) return p.id;
+    }
+    // 바코드·코드가 비면 이름으로 찾는다. 여러 상품에 걸리면 판단하지 않는다.
+    const hits = products.filter((p) =>
+      (p.nameKeywords || []).some((k) => name.includes(k))
+    );
+    return hits.length === 1 ? hits[0].id : "";
+  };
+
+  const totals = new Map();
+  const unmatched = new Set();
+  for (const row of rows || []) {
+    if (!row || typeof row !== "object") continue;
+    const inbound = number(pick(row, ["입고수량"]));
+    const hasLedger = pick(row, ["입고수량"]) !== undefined || pick(row, ["출고수량"]) !== undefined;
+    const outbound = hasLedger
+      ? number(pick(row, ["출고수량"]))
+      : number(pick(row, ["주문수량", "수량"]));
+    if (!inbound && !outbound) continue;
+    const id = match(row);
+    if (!id) {
+      const name = String(pick(row, ["상품명", "재고매칭(1)상품명", "판매처상품명", "품목명"]) ?? "").trim();
+      if (name) unmatched.add(name);
+      continue;
+    }
+    const cur = totals.get(id) || { inbound: 0, outbound: 0 };
+    cur.inbound += inbound;
+    cur.outbound += outbound;
+    totals.set(id, cur);
+  }
+  return { totals, unmatched: [...unmatched] };
+}
+
+// 전월 마감재고를 이번 달 기초로 이월한다. 첫 달만 손으로 넣으면 그 뒤로는
+// 이어진다.
+function npbPriorClosing(db, settlement) {
+  const list = (db.npb.settlements || [])
+    .filter((s) => s.brand === settlement.brand && s.periodMonth < settlement.periodMonth)
+    .sort((a, b) => String(b.periodMonth).localeCompare(String(a.periodMonth)));
+  const prior = list[0];
+  if (!prior) return new Map();
+  return new Map((prior.inventory || []).map((r) => [r.productKey, number(r.closing)]));
+}
+
+// 광고비는 구글시트에 누적된다. 공개 링크의 CSV 내보내기를 읽으므로 별도
+// 인증이 필요 없다. 정산에는 넣지 않고 별도 청구 근거로만 쓴다.
+export function npbAdCostCsvUrl(sheetUrl) {
+  const id = String(sheetUrl || "").match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/)?.[1];
+  return id ? `https://docs.google.com/spreadsheets/d/${id}/export?format=csv` : "";
+}
+
+// 기간 셀은 첫 행에만 있고 이후 매체 행은 비어 있다 — 마지막 기간을 물려 쓴다.
+export function npbParseAdCost(csvText, periodMonth) {
+  const rows = parseCsv(String(csvText || ""));
+  const want = String(periodMonth || "").replace(/-/g, ".");
+  const items = [];
+  let current = "";
+  for (const row of rows.slice(1)) {
+    const period = String(row[0] || "").trim();
+    if (period) current = period;
+    const medium = String(row[1] || "").trim();
+    const amount = number(String(row[2] || "").replace(/,/g, ""));
+    if (!medium || !current) continue;
+    // "2026.04.01~2026.04.30" 에서 앞쪽 연·월만 본다.
+    const month = current.match(/(\d{4})[.\-\/](\d{1,2})/);
+    if (!month) continue;
+    const key = `${month[1]}.${String(Number(month[2])).padStart(2, "0")}`;
+    if (want && key !== want) continue;
+    items.push({ period: current, medium, amount });
+  }
+  return { items, total: items.reduce((sum, i) => sum + i.amount, 0) };
 }
 
 function npbDetectChannelFromName(channels, fileName) {
@@ -5082,12 +5398,21 @@ async function routeApi(req, res, url) {
   if (pathname === "/api/npb/config" && method === "GET") {
     const brand = npbGetBrand(db, url.searchParams.get("brand") || "doteon");
     if (!brand) { sendJson(res, 404, { error: "브랜드를 찾을 수 없습니다." }); return; }
+    // 브랜드가 여럿이므로 그 브랜드 것만 내려준다 — 안 그러면 픽키 워크시트에
+    // 도톤 채널이 함께 뜬다. brandId 가 없는 예전 항목은 도톤 것으로 본다.
+    const ofBrand = (item) => String(item.brandId || "doteon") === brand.id;
     sendJson(res, 200, {
       brand: brand.id,
-      channels: db.npb.channels || [],
+      brands: (db.npb.brands || []).map((b) => ({
+        id: b.id, name: b.name, businessName: b.businessName || "", productLine: b.productLine || ""
+      })),
+      channels: (db.npb.channels || []).filter(ofBrand),
       costConfig: brand.costConfig || {},
-      products: db.npb.products || [],
-      channelLineConfigs: db.npb.channelLineConfigs || [],
+      packTiers: brand.packTiers || [],
+      products: (db.npb.products || []).filter(ofBrand),
+      channelLineConfigs: (db.npb.channelLineConfigs || []).filter(
+        (lc) => (db.npb.channels || []).some((c) => c.code === lc.channelCode && ofBrand(c))
+      ),
       defaultProfitSplit: db.npb.defaultProfitSplit || []
     });
     return;
@@ -5097,9 +5422,23 @@ async function routeApi(req, res, url) {
     const body = await readBody(req);
     const brand = npbGetBrand(db, body.brand || "doteon");
     if (!brand) { sendJson(res, 404, { error: "브랜드를 찾을 수 없습니다." }); return; }
-    if (Array.isArray(body.channels)) db.npb.channels = body.channels;
+    if (Array.isArray(body.channels)) {
+      // 이 브랜드 채널만 교체한다. 전체를 덮어쓰면 다른 브랜드 채널이 사라진다.
+      const others = (db.npb.channels || []).filter(
+        (c) => String(c.brandId || "doteon") !== brand.id
+      );
+      db.npb.channels = [...others, ...body.channels.map((c) => ({ ...c, brandId: brand.id }))];
+    }
     if (body.costConfig && typeof body.costConfig === "object") {
       brand.costConfig = { ...brand.costConfig, ...body.costConfig };
+    }
+    if (Array.isArray(body.packTiers)) brand.packTiers = body.packTiers;
+    if (Array.isArray(body.products)) {
+      // 이 브랜드 상품만 교체한다.
+      const others = (db.npb.products || []).filter(
+        (p) => String(p.brandId || "doteon") !== brand.id
+      );
+      db.npb.products = [...others, ...body.products.map((p) => ({ ...p, brandId: brand.id }))];
     }
     const parties = body.parties || body.defaultProfitSplit;
     if (Array.isArray(parties)) db.npb.defaultProfitSplit = parties;
@@ -5276,9 +5615,42 @@ async function routeApi(req, res, url) {
             rows,
             uploadedAt: now()
           };
-          settlement.updatedAt = now();
+          // 입출고 원장에서 상품별 입고·출고를 바로 채운다. 기초는 전월 마감을
+          // 이월하고, 마감 = 기초 + 입고 - 출고 로 계산한다.
+          const brandProducts = (db.npb.products || []).filter(
+            (p) => String(p.brandId || "doteon") === String(settlement.brand)
+          );
+          const derived = npbInventoryFromLogistics(rows, brandProducts);
+          const opening = npbPriorClosing(db, settlement);
+          const priorRows = new Map((settlement.inventory || []).map((r) => [r.productKey, r]));
+          settlement.inventory = brandProducts.map((p) => {
+            const kept = priorRows.get(p.id) || {};
+            const t = derived.totals.get(p.id) || { inbound: 0, outbound: 0 };
+            const open = opening.has(p.id) ? opening.get(p.id) : number(kept.opening);
+            // 비매출(협찬·샘플)은 파일로 알 수 없어 입력값을 그대로 둔다.
+            const nonSale = number(kept.nonSale);
+            return {
+              productKey: p.id,
+              name: p.name,
+              opening: open,
+              inbound: t.inbound,
+              outbound: t.outbound,
+              sold: number(kept.sold),
+              nonSale,
+              closing: open + t.inbound - t.outbound
+            };
+          });
+          const computed = npbRecompute(db, settlement);
           await writeDb(db);
-          sendJson(res, 200, { kind, rows, warnings: [] });
+          sendJson(res, 200, {
+            kind,
+            rows,
+            inventory: settlement.inventory,
+            warnings: derived.unmatched.length
+              ? [`상품을 알 수 없는 항목 ${derived.unmatched.length}건: ${derived.unmatched.slice(0, 3).join(", ")}`]
+              : [],
+            rollup: computed.rollup
+          });
         }
       } catch (error) {
         sendJson(res, 400, { error: `파일 파싱 실패: ${error.message}` });
@@ -5293,6 +5665,33 @@ async function routeApi(req, res, url) {
       settlement.updatedAt = now();
       await writeDb(db);
       sendJson(res, 200, { settlement });
+      return;
+    }
+
+    // 광고비 조회. 시트를 읽어 그 달 집행분만 추린다.
+    if (action === "adcost" && method === "GET") {
+      const brand = npbGetBrand(db, settlement.brand);
+      const sheetUrl = brand?.costConfig?.adCostSheetUrl || "";
+      const csvUrl = npbAdCostCsvUrl(sheetUrl);
+      if (!csvUrl) {
+        sendJson(res, 200, { items: [], total: 0, sheetUrl, note: "광고비 시트가 설정되지 않았습니다." });
+        return;
+      }
+      try {
+        const response = await fetch(csvUrl, { redirect: "follow" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const text = await response.text();
+        // 로그인 페이지가 오면 시트가 비공개다.
+        if (/<html/i.test(text.slice(0, 200))) {
+          throw new Error("시트를 읽을 수 없습니다. '링크가 있는 모든 사용자'로 공유해 주세요.");
+        }
+        const parsed = npbParseAdCost(text, settlement.periodMonth);
+        settlement.adCost = { ...parsed, sheetUrl, fetchedAt: now() };
+        await writeDb(db);
+        sendJson(res, 200, { ...parsed, sheetUrl });
+      } catch (error) {
+        sendJson(res, 502, { error: `광고비 시트 조회 실패: ${error.message}`, sheetUrl });
+      }
       return;
     }
 
@@ -5402,6 +5801,11 @@ const server = http.createServer(async (req, res) => {
       await serveStatic(req, res, url.pathname);
     }
   } catch (error) {
+    // 동시 저장 충돌은 서버 오류가 아니라 다시 시도하면 되는 상황이다.
+    if (error.status === 409) {
+      sendJson(res, 409, { error: error.message });
+      return;
+    }
     console.error(error);
     sendJson(res, 500, { error: "서버 오류가 발생했습니다.", detail: error.message });
   }

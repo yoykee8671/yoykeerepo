@@ -62,9 +62,13 @@ const state = {
     current: null,
     currentKey: "",
     periodMonth: `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`,
+    brandId: "doteon",
+    brands: [],
     parsePreview: null,
     pendingUploads: [],
-    logisticsCounts: { small: 0, large: 0 },
+    logisticsCounts: {},
+    adCost: null,
+    adCostLoading: false,
     worksheet: null,
     inventory: null,
     profitParties: [
@@ -75,7 +79,9 @@ const state = {
   }
 };
 
-const NPB_BRAND = "DOTEON";
+// 정산 브랜드는 화면에서 고른다. 도톤 외 브랜드도 같은 방식으로 정산한다.
+const NPB_DEFAULT_BRAND = "doteon";
+const npbBrand = () => state.npb.brandId || NPB_DEFAULT_BRAND;
 const NPB_SCREENS = [
   ["list", "월 목록/이력"],
   ["worksheet", "정산 워크시트"],
@@ -4146,7 +4152,7 @@ function npbPrevSettlement() {
 }
 
 async function npbReloadSettlements() {
-  const resp = await api(`/api/npb/settlements?brand=${NPB_BRAND}`);
+  const resp = await api(`/api/npb/settlements?brand=${npbBrand()}`);
   state.npb.settlements = (resp && resp.settlements) || [];
 }
 
@@ -4157,7 +4163,9 @@ async function npbLoadDetail(key) {
   n.current = detail;
   n.currentKey = key;
   n.profitParties = npbSeedParties(detail.profitSplit || detail.parties);
-  n.logisticsCounts = {
+  // 유형별 건수. 예전 정산은 소형/대형만 갖고 있으므로 옮겨 담는다.
+  n.adCost = detail.adCost || null;
+  n.logisticsCounts = detail.logistics?.counts || {
     small: Number(detail.logistics?.smallCount || 0),
     large: Number(detail.logistics?.largeCount || 0)
   };
@@ -4175,11 +4183,12 @@ async function npbLoadDetail(key) {
 // 않는다(채널 설정 저장은 channels 만 갱신한다). 도톤은 판매 SKU 가 두 개뿐이고
 // 팔렸든 안 팔렸든 모든 채널에 있어야 하므로, 파생이 곧 올바른 규칙이다.
 // 저장된 라인 설정은 가격·수수료 덮어쓰기로만 쓴다.
-function npbChannelSeeds(channel, products, lineConfigs) {
+function npbChannelSeeds(channel, products, lineConfigs, packTiers) {
   const saved = lineConfigs.filter((lc) => lc.channelCode === channel.code);
   const savedFor = (productId, tier) =>
     saved.find((lc) => lc.productId === productId && (!tier || (lc.lineLabel || "").includes(tier)));
 
+  // 채널 단위 티어(도톤 공구의 2개세트·3개세트)
   if (channel.tiers && channel.tiers.length) {
     return channel.tiers.map((t) => {
       const override = savedFor("os", t.tier);
@@ -4192,6 +4201,28 @@ function npbChannelSeeds(channel, products, lineConfigs) {
       };
     });
   }
+
+  // 브랜드 단위 번들(픽키 필바이츠의 1·2·5·10팩, 박스). 맛 × 번들로 행이 생기고
+  // 모든 채널에 동일하게 깔린다 — 팔렸든 안 팔렸든 보여야 한다.
+  if (Array.isArray(packTiers) && packTiers.length) {
+    const rows = [];
+    for (const p of products) {
+      for (const t of packTiers) {
+        const override = savedFor(p.id, t.tier);
+        rows.push({
+          productId: p.id,
+          lineLabel: override?.lineLabel || `${p.name} ${t.tier}`,
+          tier: t.tier,
+          listPrice: t.listPrice ?? 0,
+          eaPerUnit: t.ea ?? 1,
+          salePrice: override?.salePrice ?? t.listPrice ?? 0,
+          feeRate: override?.feeRate ?? channel.feeRate ?? 0
+        });
+      }
+    }
+    return rows;
+  }
+
   return products.map((p) => {
     const override = savedFor(p.id, "");
     return {
@@ -4205,15 +4236,12 @@ function npbChannelSeeds(channel, products, lineConfigs) {
   });
 }
 
-function npbChannelName(code) {
-  return (state.npb.config?.channels || []).find((c) => c.code === code)?.name || code || "";
-}
-
 function npbBuildWorksheet(config, lines) {
   const cfg = config || {};
   const channels = cfg.channels || [];
   const products = cfg.products || [];
   const lineConfigs = cfg.channelLineConfigs || [];
+  const packTiers = cfg.packTiers || [];
   const byChannel = new Map(channels.map((c) => [c.code, c]));
   // Index stored lines by channel|productId|tier for overlay lookup.
   const stored = new Map();
@@ -4228,7 +4256,7 @@ function npbBuildWorksheet(config, lines) {
   for (const code of order) {
     const channel = byChannel.get(code);
     if (!channel || channel.active === false) continue;
-    const seeds = npbChannelSeeds(channel, products, lineConfigs);
+    const seeds = npbChannelSeeds(channel, products, lineConfigs, packTiers);
     if (!seeds.length) continue;
     const rows = seeds.map((seed) => {
       const tierLabel = seed.tier || "";
@@ -4238,17 +4266,18 @@ function npbBuildWorksheet(config, lines) {
       return {
         productKey: seed.productId,
         label: seed.lineLabel,
-        listPrice: 22000,
+        listPrice: Number(seed.listPrice ?? 22000),
         salePrice: Number(stLine?.salePrice ?? seed.salePrice ?? 0),
         feeRate: Number(stLine?.feeRate ?? seed.feeRate ?? 0),
         qty: Number(stLine?.qty ?? stLine?.qtyEa ?? 0),
-        eaPerUnit: 1,
+        eaPerUnit: Number(seed.eaPerUnit ?? 1),
         tier: tierLabel
       };
     });
     blocks.push({
       code,
       name: channel.name,
+      settleBy: channel.settleBy || "",
       category: channel.category || "",
       priceLabel: channel.priceLabel || "기준가",
       rows
@@ -4298,7 +4327,23 @@ function npbWorksheetRollup() {
   }
   const revenueTotal = realSaleTotal - feeTotal;
   const cost = npbLogisticsCost();
+  // 정산 주체별 소계. 거래 주체가 픽키파크인 채널은 그쪽으로 계산서가 나가고,
+  // 우프 채널만 우리가 계산서 발행·수금해 합쳐서 청구한다. 월 총판매를 함께
+  // 집계하되 청구 대상이 얼마인지 바로 보여야 한다.
+  const bySettleBy = {};
+  for (const block of blocks) {
+    const who = block.settleBy || "";
+    if (!who) continue;
+    const acc = bySettleBy[who] || (bySettleBy[who] = { realSaleTotal: 0, feeTotal: 0, revenueTotal: 0 });
+    for (const row of block.rows) {
+      const m = npbRowMath(row);
+      acc.realSaleTotal += m.revenue;
+      acc.feeTotal += m.fee;
+      acc.revenueTotal += m.revenue - m.fee;
+    }
+  }
   return {
+    bySettleBy,
     qtyTotal,
     listTotal,
     discountTotal: listTotal - realSaleTotal,
@@ -4310,14 +4355,37 @@ function npbWorksheetRollup() {
   };
 }
 
-function npbLogisticsCost() {
-  const n = state.npb;
-  const cc = n.config?.costConfig || {};
+// 서버 npbComputeShipping 과 같은 규칙. 유형 목록이 없는 예전 브랜드는
+// 소형/대형 단가로 자동 구성한다.
+function npbShipTypes() {
+  const cc = state.npb.config?.costConfig || {};
+  if (Array.isArray(cc.shipTypes) && cc.shipTypes.length) return cc.shipTypes;
   const pick = Number(cc.pickPack || 0);
-  const small = Number(n.logisticsCounts?.small || 0);
-  const large = Number(n.logisticsCounts?.large || 0);
-  return small * (Number(cc.smallShip || 0) + pick)
-    + large * (Number(cc.largeShip || 0) + pick);
+  return [
+    { key: "small", label: "소형 출고", freight: Number(cc.smallShip || 0), handling: pick },
+    { key: "large", label: "대형 출고", freight: Number(cc.largeShip || 0), handling: pick }
+  ];
+}
+
+function npbShipRow(type) {
+  const raw = state.npb.logisticsCounts?.[type.key];
+  const entry = raw && typeof raw === "object" ? raw : { count: raw };
+  const count = Number(entry.count || 0);
+  const unit = Number(type.freight || 0) + Number(type.handling || 0);
+  return {
+    ...type,
+    count,
+    unit,
+    amount: type.manual ? Number(entry.amount || 0) : count * unit
+  };
+}
+
+function npbLogisticsCost() {
+  // 용달·퀵처럼 개별 기재하는 유형은 합계에서 뺀다.
+  return npbShipTypes()
+    .map(npbShipRow)
+    .filter((r) => !r.excludeFromTotal)
+    .reduce((sum, r) => sum + r.amount, 0);
 }
 
 async function npbDownloadXlsx(key) {
@@ -4333,7 +4401,7 @@ async function npbDownloadXlsx(key) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `npb_${NPB_BRAND}_${key}.xlsx`;
+    a.download = `npb_${key}.xlsx`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -5038,7 +5106,7 @@ function renderNpb() {
   const n = state.npb;
   if (n.loading) {
     return `
-      ${pageHead("npb정산", "DOTEON 채널별 매출·수수료·물류비를 집계합니다.")}
+      ${pageHead("npb정산", "채널별 매출·수수료·물류비를 집계합니다.")}
       <section class="panel"><div class="panel-body empty">불러오는 중…</div></section>`;
   }
   const subnav = NPB_SCREENS
@@ -5051,11 +5119,19 @@ function renderNpb() {
   else if (n.screen === "channels") body = renderNpbChannels();
   else if (n.screen === "preview") body = renderNpbPreview();
   else body = renderNpbList();
-  const ctx = n.currentKey
+  const brand = (n.brands || []).find((b) => b.id === npbBrand());
+  const picker = `
+    <select data-npb-brand>
+      ${(n.brands || []).map((b) => `<option value="${h(b.id)}" ${b.id === npbBrand() ? "selected" : ""}>${h(b.name)}</option>`).join("")}
+    </select>`;
+  const ctx = `${picker}${n.currentKey
     ? `<span class="muted">선택: ${h(n.currentKey)}</span>`
-    : `<span class="muted">정산 미선택</span>`;
+    : `<span class="muted">정산 미선택</span>`}`;
+  const desc = brand
+    ? `${brand.name}${brand.productLine ? ` · ${brand.productLine}` : ""} 채널별 매출·수수료·물류비를 집계하여 월 정산과 이익분배를 계산합니다.`
+    : "채널별 매출·수수료·물류비를 집계하여 월 정산과 이익분배를 계산합니다.";
   return `
-    ${pageHead("npb정산", "DOTEON 채널별 매출·수수료·물류비를 집계하여 월 정산과 이익분배를 계산합니다.", ctx)}
+    ${pageHead("npb정산", desc, ctx)}
     <div class="npb-subnav">${subnav}</div>
     ${body}
   `;
@@ -5216,6 +5292,7 @@ function renderNpbWorksheet() {
         ${n.worksheet.map((b, bi) => renderNpbWsBlock(b, bi)).join("")}
       </div>
     </section>
+    ${renderNpbSettleBy()}
     ${renderNpbCostSection()}
     ${renderNpbProfitSection()}
     ${renderNpbInventorySection()}
@@ -5312,34 +5389,90 @@ function renderNpbWsBlock(block, bi) {
     </div>`;
 }
 
+// 정산 주체별 소계 — 누구에게 계산서가 나가는지가 갈린다.
+function renderNpbSettleBy() {
+  const by = npbWorksheetRollup().bySettleBy || {};
+  const keys = Object.keys(by);
+  if (keys.length < 2) return "";
+  const rows = keys.map((k) => `
+    <tr><td><strong>${h(k)}</strong></td>
+      <td class="num">${npbWon(by[k].realSaleTotal)}</td>
+      <td class="num">${npbWon(by[k].feeTotal)}</td>
+      <td class="num"><strong>${npbWon(by[k].revenueTotal)}</strong></td></tr>`).join("");
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>정산 주체별 소계</h2>
+        <span class="muted">계산서를 누가 발행하는지에 따라 나뉩니다</span></div>
+      <div class="panel-body">
+        <div class="table-wrap"><table>
+          <thead><tr><th>주체</th><th>매출</th><th>공제</th><th>정산계</th></tr></thead>
+          <tbody>${rows}</tbody></table></div>
+        <p class="muted">
+          우프 건은 우리가 계산서 발행·수금 후 우프 판매건과 합쳐 청구하고,
+          픽키파크 건은 해당 업체가 직접 발행합니다. 월 총판매 집계를 위해 함께 표시합니다.
+        </p>
+      </div>
+    </section>`;
+}
+
 function renderNpbCostSection() {
   const n = state.npb;
-  const cc = n.config?.costConfig || {};
-  const small = Number(n.logisticsCounts?.small || 0);
-  const large = Number(n.logisticsCounts?.large || 0);
-  const pick = Number(cc.pickPack || 0);
-  const smallUnit = Number(cc.smallShip || 0) + pick;
-  const largeUnit = Number(cc.largeShip || 0) + pick;
+  const billSeparately = n.config?.costConfig?.billSeparately === true;
+  const rows = npbShipTypes().map(npbShipRow);
+  const total = rows.filter((r) => !r.excludeFromTotal).reduce((s, r) => s + r.amount, 0);
+  const separate = rows.filter((r) => r.excludeFromTotal).reduce((s, r) => s + r.amount, 0);
+
+  const inputs = rows.map((r) => `
+    <div>
+      <label>${h(r.label)} ${r.manual ? "(실비 직접 입력)" : `(단가 ${money.format(r.unit)}원)`}</label>
+      <div class="npb-ship-row">
+        <input class="num" type="number" min="0" data-npb-ship="${h(r.key)}" value="${h(r.count)}" placeholder="건수">
+        ${r.manual
+          ? `<input class="num" type="number" min="0" data-npb-ship-amt="${h(r.key)}" value="${h(r.amount)}" placeholder="금액">`
+          : `<span class="muted">= ${money.format(r.amount)}원</span>`}
+      </div>
+      ${r.excludeFromTotal ? `<span class="muted">합계에 넣지 않고 개별 기재합니다.</span>` : ""}
+    </div>`).join("");
+
   return `
     <section class="panel">
       <div class="panel-head"><h2>실비 (운임/물류)</h2>
-        <span class="muted">단가 VAT포함 · 피킹/패킹 ${money.format(pick)}원</span></div>
+        <span class="muted">단가 VAT포함${billSeparately ? " · 정산에서 공제하지 않고 별도 청구" : ""}</span></div>
       <div class="panel-body">
-        <div class="field two">
-          <div>
-            <label>소형 출고건수 (단가 ${money.format(smallUnit)}원)</label>
-            <input class="num" type="number" data-npb-ship="small" value="${h(small)}">
-          </div>
-          <div>
-            <label>중대형 출고건수 (단가 ${money.format(largeUnit)}원)</label>
-            <input class="num" type="number" data-npb-ship="large" value="${h(large)}">
-          </div>
-        </div>
-        <p class="muted">실비 = 소형 ${money.format(small)} × ${money.format(smallUnit)}
-          + 중대형 ${money.format(large)} × ${money.format(largeUnit)}
-          = <strong>${npbWon(npbLogisticsCost())}</strong></p>
+        <div class="field two">${inputs}</div>
+        ${renderNpbAdCost()}
+        <p class="muted">
+          물류 실비 합계 <strong>${npbWon(total)}</strong>
+          ${separate ? ` · 별도 기재 ${npbWon(separate)}` : ""}
+          ${billSeparately
+            ? " — 이 금액은 정산 이익에서 차감하지 않습니다. 별도 청구하세요."
+            : " — 정산 이익에서 차감됩니다."}
+        </p>
       </div>
     </section>`;
+}
+
+// 광고비는 구글시트에 누적된다. 정산에는 넣지 않고 별도 청구 근거로 보여준다.
+function renderNpbAdCost() {
+  const n = state.npb;
+  const ad = n.adCost;
+  const sheet = n.config?.costConfig?.adCostSheetUrl;
+  if (!sheet) return "";
+  const rows = (ad?.items || [])
+    .map((i) => `<tr><td>${h(i.medium)}</td><td class="num">${npbWon(i.amount)}</td></tr>`)
+    .join("");
+  return `
+    <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
+      <div class="toolbar">
+        <button data-npb-adcost ${n.adCostLoading ? "disabled" : ""}>${n.adCostLoading ? "불러오는 중…" : "광고비 불러오기"}</button>
+        <a class="button" href="${h(sheet)}" target="_blank" rel="noreferrer">광고비 시트 열기 ↗</a>
+        ${ad ? `<span class="muted">${h(n.currentKey)} 기준 합계 <strong>${npbWon(ad.total)}</strong></span>` : ""}
+      </div>
+      ${rows ? `<div class="table-wrap" style="max-height:160px"><table>
+        <thead><tr><th>매체</th><th>집행액</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}
+      ${ad && !rows ? `<p class="muted">이 달 집행 내역이 없습니다.</p>` : ""}
+      <p class="muted">광고비는 정산에서 공제하지 않습니다 — 별도 청구 항목입니다.</p>
+    </div>`;
 }
 
 function renderNpbProfitSection() {
@@ -5521,15 +5654,27 @@ function renderNpbPreview() {
 }
 
 function bindNpb() {
+  app.querySelector("[data-npb-brand]")?.addEventListener("change", async (e) => {
+    const n = state.npb;
+    n.brandId = e.target.value;
+    // 브랜드가 바뀌면 이전 브랜드의 정산·워크시트가 남아 있으면 안 된다.
+    Object.assign(n, {
+      loaded: false, current: null, currentKey: "", worksheet: null,
+      inventory: null, parsePreview: null, pendingUploads: [], screen: "list"
+    });
+    // 로딩은 아래 인라인 블록이 loaded=false 를 보고 다시 돈다.
+    renderApp();
+  });
   const n = state.npb;
   if (!n.loaded && !n.loading) {
     n.loading = true;
     Promise.all([
-      api(`/api/npb/config?brand=${NPB_BRAND}`),
-      api(`/api/npb/settlements?brand=${NPB_BRAND}`)
+      api(`/api/npb/config?brand=${npbBrand()}`),
+      api(`/api/npb/settlements?brand=${npbBrand()}`)
     ])
       .then(([config, settlements]) => {
         n.config = config || {};
+        n.brands = config?.brands || n.brands || [];
         n.settlements = (settlements && settlements.settlements) || [];
         n.loaded = true;
         n.loading = false;
@@ -5565,7 +5710,7 @@ function bindNpbList() {
     try {
       await api("/api/npb/settlements", {
         method: "POST",
-        body: { brand: NPB_BRAND, periodMonth: n.periodMonth }
+        body: { brand: npbBrand(), periodMonth: n.periodMonth }
       });
       await npbReloadSettlements();
       showToast("정산을 생성했습니다.");
@@ -5737,9 +5882,33 @@ function bindNpbWorksheet() {
       renderNpbWorksheetLive();
     });
   });
+  const setShip = (key, field, value) => {
+    const cur = n.logisticsCounts[key];
+    const entry = cur && typeof cur === "object" ? { ...cur } : { count: Number(cur) || 0 };
+    entry[field] = Number(value) || 0;
+    n.logisticsCounts[key] = entry;
+  };
+  app.querySelector("[data-npb-adcost]")?.addEventListener("click", async () => {
+    n.adCostLoading = true;
+    renderApp();
+    try {
+      n.adCost = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/adcost`);
+    } catch (error) {
+      showToast(error.message || "광고비를 불러오지 못했습니다.", "error");
+    } finally {
+      n.adCostLoading = false;
+      renderApp();
+    }
+  });
   app.querySelectorAll("[data-npb-ship]").forEach((inp) => {
     inp.addEventListener("input", (e) => {
-      n.logisticsCounts[inp.dataset.npbShip] = Number(e.target.value) || 0;
+      setShip(inp.dataset.npbShip, "count", e.target.value);
+      renderNpbWorksheetLive();
+    });
+  });
+  app.querySelectorAll("[data-npb-ship-amt]").forEach((inp) => {
+    inp.addEventListener("input", (e) => {
+      setShip(inp.dataset.npbShipAmt, "amount", e.target.value);
       renderNpbWorksheetLive();
     });
   });
@@ -5807,8 +5976,7 @@ async function npbSaveWorksheet() {
         method: "POST",
         body: {
           logistics: {
-            smallCount: n.logisticsCounts?.small || 0,
-            largeCount: n.logisticsCounts?.large || 0
+            counts: n.logisticsCounts || {}
           },
           inventory: n.inventory || []
         }
@@ -5916,7 +6084,7 @@ function bindNpbChannels() {
       await api("/api/npb/config", {
         method: "PUT",
         body: {
-          brand: NPB_BRAND,
+          brand: npbBrand(),
           channels: n.config?.channels || [],
           costConfig: n.config?.costConfig || {},
           products: n.config?.products || []
