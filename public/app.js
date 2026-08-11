@@ -96,17 +96,24 @@ const NPB_SCREENS = [
 // Client-side line math — MUST mirror server.js npbComputeLine (rate_on_sale):
 // 매출=salePrice*qty, 수수료=round(매출*feeRate), 정산=매출-수수료,
 // 정가=listPrice*qty*eaPerUnit. eaPerUnit stays 1 (qty is already total EA).
+// 서버의 npbComputeLine 과 같은 규칙으로 계산한다. 화면이 단가×수량만 쓰면
+// 파일에서 읽은 금액을 쓰는 채널(네이버·쿠팡)에서 워크시트와 정산서가 서로
+// 다른 숫자를 말하게 된다.
 function npbRowMath(row) {
   const qty = Number(row.qty || 0);
   const ea = Number(row.eaPerUnit || 1) || 1;
-  const revenue = Number(row.salePrice || 0) * qty;
-  const fee = Math.round(revenue * Number(row.feeRate || 0));
-  return {
-    revenue,
-    fee,
-    settle: revenue - fee,
-    list: Number(row.listPrice || 22000) * qty * ea
-  };
+  const src = row.source || {};
+  const has = (v) => v !== undefined && v !== null && v !== "";
+  const list = has(src.listAmount) ? Number(src.listAmount) : Number(row.listPrice || 0) * qty * ea;
+  const revenue = has(src.saleAmount) ? Number(src.saleAmount) : Number(row.salePrice || 0) * qty;
+  if (has(src.settleAmount)) {
+    const settle = Number(src.settleAmount);
+    return { revenue, fee: revenue - settle, settle, list, fromFile: true };
+  }
+  const fee = has(src.feeAmount)
+    ? Number(src.feeAmount)
+    : Math.round(revenue * Number(row.feeRate || 0));
+  return { revenue, fee, settle: revenue - fee, list, fromFile: has(src.saleAmount) };
 }
 
 // The answer-key channel order for the worksheet blocks.
@@ -4181,6 +4188,13 @@ async function npbLoadDetail(key) {
   } catch {
     n.invoices = n.invoices || [];
   }
+  // 월 목록의 합계도 같이 맞춘다. 업로드해 놓고 [월 목록/이력] 으로 가면
+  // 예전 숫자가 그대로 있어, 반영이 안 된 것으로 보인다.
+  try {
+    await npbReloadSettlements();
+  } catch {
+    // 목록 갱신은 실패해도 나머지 화면은 그대로 쓴다.
+  }
 }
 
 // Build the editable worksheet: one block per channel, seeded from
@@ -4258,7 +4272,7 @@ function npbChannelSeeds(channel, products, lineConfigs) {
 function npbBuildWorksheet(config, lines) {
   const cfg = config || {};
   const channels = cfg.channels || [];
-  const products = cfg.products || [];
+  const products = (cfg.products || []).filter((p) => p.active !== false);
   const lineConfigs = cfg.channelLineConfigs || [];
   const byChannel = new Map(channels.map((c) => [c.code, c]));
   // Index stored lines by channel|productId|tier for overlay lookup.
@@ -4270,35 +4284,60 @@ function npbBuildWorksheet(config, lines) {
   }
   const order = NPB_WS_ORDER.slice();
   channels.forEach((c) => { if (!order.includes(c.code)) order.push(c.code); });
+  const used = new Set();
   const blocks = [];
   for (const code of order) {
     const channel = byChannel.get(code);
     if (!channel || channel.active === false) continue;
     const seeds = npbChannelSeeds(channel, products, lineConfigs);
-    if (!seeds.length) continue;
     const rows = seeds.map((seed) => {
       const tierLabel = seed.tier || "";
       const key = `${code}|${seed.productId}|${tierLabel}`;
-      const stLine = stored.get(key)
-        || stored.get(`${code}|${seed.productId}|`);
+      const fallbackKey = `${code}|${seed.productId}|`;
+      const stLine = stored.get(key) || stored.get(fallbackKey);
+      if (stored.has(key)) used.add(key);
+      else if (stored.has(fallbackKey)) used.add(fallbackKey);
       return {
         productKey: seed.productId,
         label: seed.lineLabel,
-        listPrice: Number(seed.listPrice ?? 22000),
+        listPrice: Number(stLine?.listPrice ?? seed.listPrice ?? 0),
         salePrice: Number(stLine?.salePrice ?? seed.salePrice ?? 0),
         feeRate: Number(stLine?.feeRate ?? seed.feeRate ?? 0),
         qty: Number(stLine?.qty ?? stLine?.qtyEa ?? 0),
         eaPerUnit: Number(seed.eaPerUnit ?? 1),
-        tier: tierLabel
+        tier: tierLabel,
+        // 업로드로 들어온 원본을 그대로 들고 있는다. 저장할 때 이걸 되돌려주지
+        // 않으면 파일에서 읽은 금액이 통째로 날아간다.
+        source: stLine || null
       };
     });
+    // 상품표에 없는 조합(B2B 의 "수량=100개" 옵션, 네이버 배송비 줄)은 씨앗이
+    // 없어 화면에 안 뜬다. 안 뜬 채로 저장하면 그대로 사라지므로 뒤에 붙인다.
+    const extras = [];
+    for (const [key, line] of stored) {
+      if (used.has(key) || !key.startsWith(`${code}|`)) continue;
+      used.add(key);
+      extras.push({
+        productKey: line.productKey || line.productId || "",
+        label: line.label || line.productKey || "(이름 없음)",
+        listPrice: Number(line.listPrice ?? 0),
+        salePrice: Number(line.salePrice ?? 0),
+        feeRate: Number(line.feeRate ?? channel.feeRate ?? 0),
+        qty: Number(line.qty ?? line.qtyEa ?? 0),
+        eaPerUnit: Number(line.eaPerUnit ?? 1),
+        tier: line.tier || "",
+        extra: true,
+        source: line
+      });
+    }
+    if (!rows.length && !extras.length) continue;
     blocks.push({
       code,
       name: channel.name,
       settleBy: channel.settleBy || "",
       category: channel.category || "",
       priceLabel: channel.priceLabel || "기준가",
-      rows
+      rows: [...rows, ...extras]
     });
   }
   return blocks;
@@ -5508,7 +5547,9 @@ function renderNpbWsBlock(block, bi) {
       const feePct = (Number(row.feeRate || 0) * 100).toFixed(2).replace(/\.?0+$/, "");
       return `
         <tr>
-          <td>${h(row.label)}</td>
+          <td>${h(row.label)}${m.fromFile
+            ? ` <span class="badge" title="업로드한 파일의 금액을 씁니다">파일</span>`
+            : ""}${row.extra ? ` <span class="badge">추가</span>` : ""}</td>
           <td class="num">${money.format(row.listPrice)}</td>
           <td><input class="num" type="number" data-npb-ws="${bi}" data-npb-wr="${ri}"
             data-npb-wf="salePrice" value="${h(row.salePrice)}"></td>
@@ -6155,15 +6196,21 @@ function npbWorksheetLines() {
   const lines = [];
   for (const block of n.worksheet || []) {
     for (const row of block.rows) {
+      // 업로드 원본 위에 화면에서 고친 값만 얹는다. 예전에는 화면에 보이는
+      // 필드만 새로 만들어 보냈기 때문에, 저장 한 번에 파일에서 읽은 금액
+      // (money/amounts/saleAmount)과 정가가 전부 사라졌다.
+      const source = row.source || {};
       lines.push({
+        ...source,
         channel: block.code,
         productKey: row.productKey,
         label: row.label,
-        listPrice: 22000,
+        listPrice: Number(row.listPrice || 0),
         salePrice: Number(row.salePrice || 0),
         feeRate: Number(row.feeRate || 0),
         qty: Number(row.qty || 0),
-        eaPerUnit: 1,
+        qtyEa: Number(row.qty || 0),
+        eaPerUnit: Number(row.eaPerUnit || 1),
         tier: row.tier || ""
       });
     }

@@ -3006,10 +3006,13 @@ function npbApplyMoney(enriched, line, channel) {
 // 45g 1개 6,800 / 3개 20,400 / 5개 34,000. 예전에는 도톤 정가 22,000 이
 // 기본값이라 다른 브랜드 정가가 통째로 틀어졌다.
 function npbListPrice(line, products) {
-  if (line.listPrice != null) return number(line.listPrice);
   if (line.category) return 0;
+  // 상품표를 먼저 본다. 저장된 line.listPrice 를 믿으면 안 된다 — 워크시트가
+  // 한동안 도톤 정가(22,000)를 모든 줄에 박아 저장했고, 그 값을 다시 입력으로
+  // 쓰면 잘못된 정가가 영영 고쳐지지 않는다. 정가는 화면에서 고칠 수 없는
+  // 항목이라 상품표가 유일한 출처다.
   const product = (products || []).find((p) => p.id === line.productKey);
-  if (!product) return 22000;
+  if (!product) return line.listPrice != null ? number(line.listPrice) : 22000;
   const tier = (product.packTiers || []).find((t) => t.tier === line.tier);
   if (tier) return number(tier.listPrice);
   // 상품표에 없는 묶음이면 낱개 정가 × 개수. B2B 는 "수량=100개" 처럼 그때그때
