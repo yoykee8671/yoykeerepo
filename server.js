@@ -1236,16 +1236,21 @@ function migrateDb(db) {
     const seededProducts = new Map((npbSeed.products || []).map((p) => [p.id, p]));
     for (const product of db.npb.products || []) {
       const seeded = seededProducts.get(product.id);
-      if (!seeded || !Array.isArray(seeded.nameKeywords)) continue;
+      if (!seeded) continue;
+      // 원가·공급가·안전재고는 키워드 버전과 무관하게 비어 있으면 채운다.
+      for (const key of ["costPrice", "supplyPrice", "safetyStock"]) {
+        if (product[key] === undefined && seeded[key] !== undefined) {
+          product[key] = number(seeded[key]);
+          changed = true;
+        }
+      }
+      if (!Array.isArray(seeded.nameKeywords)) continue;
       if (!seeded.keywordsVersion) continue;
       if (number(product.keywordsVersion) < seeded.keywordsVersion) {
         product.keywordsVersion = seeded.keywordsVersion;
         product.nameKeywords = seeded.nameKeywords;
         product.excludeKeywords = seeded.excludeKeywords || [];
         if (seeded.piecesPerUnit) product.piecesPerUnit = seeded.piecesPerUnit;
-        for (const key of ["costPrice", "supplyPrice", "safetyStock"]) {
-          if (product[key] === undefined) product[key] = number(seeded[key]);
-        }
         if (!product.barcode && seeded.barcode) product.barcode = seeded.barcode;
         changed = true;
       }
