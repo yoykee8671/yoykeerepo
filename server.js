@@ -653,12 +653,15 @@ export function buildNpbNamespace() {
       // 치킨 오리지널로 집계하기로 했다(2026-08 운영 확인).
       nameKeywords: [size45], excludeKeywords: [...veganWords, "180g", "20개입", ...boxWords, "20p"],
       skuCodes: ["P000BLOX"], piecesPerUnit: 5,
+      // 셀메이트 상품정보 기준. 공헌이익 계산의 원가 쪽 입력이다.
+      costPrice: 1500, supplyPrice: 0, safetyStock: 0,
       packTiers: pickyPackTiers45
     },
     {
       id: "pb180_chicken", brandId: "pickydog", barcode: "",
       name: "픽키도기클럽 필바이츠 180g (20개입) - 치킨 오리지널", listPrice: 26900,
       nameKeywords: [size180], excludeKeywords: veganWords, skuCodes: [], piecesPerUnit: 20,
+      costPrice: 5060, supplyPrice: 0, safetyStock: 0,
       packTiers: pickyPackTiers180
     },
     {
@@ -666,12 +669,14 @@ export function buildNpbNamespace() {
       name: "픽키도기클럽 필바이츠 45g (5개입) - 비건 고구마와 피넛버터", listPrice: 6800,
       nameKeywords: [size45, veganWords], excludeKeywords: ["180g", "20개입", ...boxWords, "20p"],
       skuCodes: [], piecesPerUnit: 5,
+      costPrice: 0, supplyPrice: 0, safetyStock: 0,
       packTiers: pickyPackTiers45
     },
     {
       id: "pb180_vegan", brandId: "pickydog", barcode: "",
       name: "픽키도기클럽 필바이츠 180g (20개입) - 비건 고구마와 피넛버터", listPrice: 26900,
       nameKeywords: [size180, veganWords], skuCodes: [], piecesPerUnit: 20,
+      costPrice: 0, supplyPrice: 0, safetyStock: 0,
       packTiers: pickyPackTiers180
     }
   ].map((p) => ({ ...p, keywordsVersion: PICKY_KEYWORDS_VERSION }));
@@ -1238,6 +1243,9 @@ function migrateDb(db) {
         product.nameKeywords = seeded.nameKeywords;
         product.excludeKeywords = seeded.excludeKeywords || [];
         if (seeded.piecesPerUnit) product.piecesPerUnit = seeded.piecesPerUnit;
+        for (const key of ["costPrice", "supplyPrice", "safetyStock"]) {
+          if (product[key] === undefined) product[key] = number(seeded[key]);
+        }
         if (!product.barcode && seeded.barcode) product.barcode = seeded.barcode;
         changed = true;
       }
@@ -2686,6 +2694,17 @@ export function npbCountShipments(rows) {
   return { count: list.length, basis: "row", basisLabel: "행 수", rowCount: list.length };
 }
 
+// 실제로 빠진 재고 수량. 판매처가 묶음으로 팔면 주문 한 건이 낱개 여러 개다 —
+// 3팩 33건은 재고에서 99개가 빠진다. 재고매칭의 배수가 여기서 쓰인다.
+function npbSoldPieces(settlement, productId) {
+  let total = 0;
+  for (const line of settlement.lines || []) {
+    if (line.productKey !== productId) continue;
+    total += number(line.qty) * Math.max(1, number(line.multiplier, 1));
+  }
+  return total;
+}
+
 // 전월 마감재고를 이번 달 기초로 이월한다. 첫 달만 손으로 넣으면 그 뒤로는
 // 이어진다.
 function npbPriorClosing(db, settlement) {
@@ -2876,12 +2895,89 @@ function npbCostCategory(sourceName) {
   return NPB_COST_CATEGORIES.find((c) => c.match.some((m) => norm.startsWith(npbNormalizeName(m)))) || null;
 }
 
+// 매칭은 두 단계다 (셀메이트 방식).
+//
+//   1. 상품명매칭 — 판매처상품명(+옵션) 이 어느 기본 SKU 인가
+//   2. 재고매칭   — 그 한 건이 기본 SKU 를 몇 개 빼는가 (주문수량 × 배수)
+//
+// 이렇게 나누면 "3팩", "x 3개묶음", "15P", "(3팩/15개입)" 이 전부 같은 규칙
+// 하나로 정리된다. 이름에서 묶음 수를 정규식으로 알아맞히려던 방식은 판매처가
+// 이름을 바꾸면 바로 깨졌고, 조합형(치킨2+고구마1)은 아예 표현할 수 없었다.
+//
+// 별칭 하나가 기본 SKU 여럿을 가리킬 수 있다:
+//   targets: [{ productId: "pb45_chicken", multiplier: 2 },
+//             { productId: "pb45_vegan",   multiplier: 1 }]
+function npbTierMultiplier(tier) {
+  const n = Number(String(tier || "").match(/^(\d+)\s*개/)?.[1] || 0);
+  return n > 0 ? n : 1;
+}
+
+function npbAliasTargets(alias) {
+  const list = Array.isArray(alias?.targets) ? alias.targets.filter((t) => t && t.productId) : [];
+  if (list.length) {
+    return list.map((t) => ({
+      productId: String(t.productId),
+      multiplier: Math.max(1, number(t.multiplier, 1))
+    }));
+  }
+  // 예전 별칭(productId + tier)은 tier 의 숫자를 배수로 읽는다.
+  if (alias?.productId) {
+    return [{ productId: String(alias.productId), multiplier: npbTierMultiplier(alias.tier) }];
+  }
+  return [];
+}
+
+// 한 판매처 줄이 기본 SKU 여럿으로 갈릴 때 금액을 나눈다. 무게는 그 SKU 가
+// 차지하는 정가 몫(낱개정가 × 배수)이다.
+function npbSplitMoney(money, share) {
+  if (!money || share >= 1) return money;
+  const out = {};
+  for (const [key, value] of Object.entries(money)) {
+    if (value == null) continue;
+    out[key] = Math.round(number(value) * share);
+  }
+  return out;
+}
+
+function npbLineFromTarget(line, target, product, share, sourceName) {
+  const multiplier = Math.max(1, number(target.multiplier, 1));
+  // 이 판매처 상품 한 건의 기준가. 기본은 낱개정가 × 배수이고, 묶음 할인이
+  // 있으면 검수표에서 고친다.
+  const listPrice = number(product?.listPrice) * multiplier;
+  const label = `${product?.name || target.productId}${multiplier > 1 ? ` × ${multiplier}` : ""}`;
+  return {
+    ...line,
+    productKey: target.productId,
+    multiplier,
+    tier: multiplier > 1 ? `${multiplier}개` : "",
+    label,
+    sourceName,
+    listPrice,
+    money: npbSplitMoney(line.money, share),
+    amounts: share >= 1 ? line.amounts : undefined
+  };
+}
+
 function npbResolveLines(lines, products, aliases) {
   const aliasByName = new Map(
     (aliases || []).map((a) => [npbNormalizeName(a.sourceName), a])
   );
+  const productById = new Map((products || []).map((p) => [p.id, p]));
   const resolved = [];
   const unresolved = new Map();
+
+  const emit = (line, targets, sourceName) => {
+    const weights = targets.map((t) =>
+      Math.max(1, number(productById.get(t.productId)?.listPrice, 1)) * Math.max(1, number(t.multiplier, 1))
+    );
+    const totalWeight = weights.reduce((sum, w) => sum + w, 0) || targets.length;
+    targets.forEach((target, i) => {
+      resolved.push(npbLineFromTarget(
+        line, target, productById.get(target.productId), weights[i] / totalWeight, sourceName
+      ));
+    });
+  };
+
   for (const line of lines || []) {
     if (line.productKey) {
       resolved.push(line);
@@ -2896,13 +2992,14 @@ function npbResolveLines(lines, products, aliases) {
     const alias = aliasByName.get(npbNormalizeName(sourceName));
     if (alias?.ignore) continue;
     if (alias) {
-      resolved.push({ ...line, productKey: alias.productId, tier: alias.tier || "", label: alias.label || sourceName });
-      continue;
+      const targets = npbAliasTargets(alias);
+      if (targets.length) { emit(line, targets, sourceName); continue; }
     }
+    // 사람이 지정한 규칙이 없으면 이름으로 한 번 맞춰 본다. 상품이 하나로
+    // 좁혀질 때만 채택하고, 배수는 이름에 적힌 묶음 수를 쓴다.
     const product = npbMatchProduct(sourceName, products);
     if (product) {
-      const tier = npbGuessTier(sourceName, product);
-      resolved.push({ ...line, productKey: product.id, tier, label: `${product.name}${tier ? ` ${tier}` : ""}` });
+      emit(line, [{ productId: product.id, multiplier: npbTierMultiplier(npbGuessTier(sourceName, product)) }], sourceName);
       continue;
     }
     const key = npbNormalizeName(sourceName);
@@ -6276,27 +6373,43 @@ async function routeApi(req, res, url) {
     let saved = 0;
     for (const item of items) {
       const sourceName = String(item.sourceName || "").trim();
-      const productId = String(item.productId || "").trim();
       // 이 브랜드 상품이 아닌 이름(한 스토어에서 여러 브랜드를 파는 경우)은
       // 무시로 기억한다. 매달 같은 이름을 다시 확인하지 않아도 되게.
-      const ignore = item.ignore === true || productId === "__ignore";
-      if (!sourceName || (!productId && !ignore)) continue;
+      const ignore = item.ignore === true || String(item.productId || "") === "__ignore";
+      // 재고매칭: 이 판매처 상품 한 건이 기본 SKU 를 몇 개 빼는가.
+      // 조합형(치킨2+고구마1)을 위해 여럿을 받는다.
+      const targets = ignore ? [] : (Array.isArray(item.targets) && item.targets.length
+        ? item.targets
+        : [{ productId: item.productId, multiplier: npbTierMultiplier(item.tier) }])
+        .filter((t) => t && String(t.productId || "").trim())
+        .map((t) => ({
+          productId: String(t.productId).trim(),
+          multiplier: Math.max(1, number(t.multiplier, 1))
+        }));
+      if (!sourceName || (!targets.length && !ignore)) continue;
       const brandId = String(item.brandId || "doteon");
       const key = npbNormalizeName(sourceName);
       const existing = db.npb.productAliases.find(
         (a) => a.brandId === brandId && npbNormalizeName(a.sourceName) === key
       );
-      const product = (db.npb.products || []).find((p) => p.id === productId);
-      const tier = ignore ? "" : String(item.tier || "");
-      const label = ignore
-        ? "(이 브랜드 상품 아님)"
-        : (product ? `${product.name}${tier ? ` ${tier}` : ""}` : sourceName);
+      const describe = (t) => {
+        const product = (db.npb.products || []).find((p) => p.id === t.productId);
+        return `${product?.name || t.productId}${t.multiplier > 1 ? ` × ${t.multiplier}` : ""}`;
+      };
+      const label = ignore ? "(이 브랜드 상품 아님)" : targets.map(describe).join(" + ");
+      const record = {
+        targets,
+        label,
+        ignore,
+        // 예전 필드도 남긴다 — 한 상품만 가리킬 때는 그대로 읽힌다.
+        productId: targets[0]?.productId || "",
+        tier: targets.length === 1 && targets[0].multiplier > 1 ? `${targets[0].multiplier}개` : ""
+      };
       if (existing) {
-        Object.assign(existing, { productId: ignore ? "" : productId, tier, label, ignore, updatedAt: now() });
+        Object.assign(existing, record, { updatedAt: now() });
       } else {
         db.npb.productAliases.push({
-          id: id("npbalias"), brandId, sourceName,
-          productId: ignore ? "" : productId, tier, label, ignore, createdAt: now()
+          id: id("npbalias"), brandId, sourceName, ...record, createdAt: now()
         });
       }
       saved += 1;
@@ -6615,7 +6728,7 @@ async function routeApi(req, res, url) {
               opening: open,
               inbound: t.inbound,
               outbound: t.outbound,
-              sold: number(kept.sold),
+              sold: npbSoldPieces(settlement, p.id),
               nonSale,
               closing: open + t.inbound - t.outbound
             };

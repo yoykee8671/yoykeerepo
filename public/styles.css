@@ -1290,3 +1290,8 @@ a.button:hover {
 .npb-sum-cell input { width: 100%; }
 .npb-ch-chip select { margin-top: 4px; font-size: 12px; width: 100%; }
 .npb-row-dropped { opacity: .45; text-decoration: line-through; }
+
+/* 상품명 + 재고 배수 매칭 */
+.npb-match-target { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
+.npb-match-target select:first-child { flex: 1 1 auto; min-width: 220px; }
+.npb-match-target select + select { flex: 0 0 140px; }
