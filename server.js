@@ -709,6 +709,8 @@ export function buildNpbNamespace() {
       // 쿠팡 파일에는 공급가만 있고 정가가 없다. 매출은 상품표 정가,
       // 정산은 파일의 총단가(VAT포함 공급가) 합.
       saleBasis: "list", feeBasis: "settle",
+      // 쿠팡은 아직 치킨 오리지널만 판매등록돼 있다 (비건 미등록, 2026-08 확인).
+      productIds: ["pb45_chicken", "pb180_chicken"],
       // 쿠팡 명세서의 '총단가' 는 이름과 달리 라인 합계(VAT 포함 공급가)다.
       // 이름만으로는 알 수 없어 기본 매핑을 채널에 박아 둔다.
       columnMap: { settle: "총단가" },
@@ -1298,7 +1300,8 @@ function migrateDb(db) {
       const seeded = seededChannels.get(channel.code);
       if (!seeded) continue;
       for (const key of ["saleBasis", "feeBasis", "includeShipping", "manualEntry",
-        "dateBasis", "shippingNote", "note", "columnMap", "excludeKeywords"]) {
+        "dateBasis", "shippingNote", "note", "columnMap", "excludeKeywords",
+        "productIds"]) {
         if (channel[key] === undefined && seeded[key] !== undefined) {
           channel[key] = seeded[key];
           changed = true;

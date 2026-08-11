@@ -4217,7 +4217,14 @@ function npbChannelSeeds(channel, products, lineConfigs) {
   // 팔렸든 안 팔렸든 모든 채널에 전 SKU 가 깔려야 한다.
   if (products.some((p) => (p.packTiers || []).length)) {
     const rows = [];
+    // 채널이 취급 상품을 한정해 두면 그것만 깐다. 쿠팡은 아직 치킨만 판매등록
+    // 돼 있어, 전 SKU 를 깔면 팔 수 없는 줄이 절반이다. 목록에 없는 상품이라도
+    // 파일에서 실제로 팔려 온 줄은 지우지 않는다 — 여긴 빈 줄 생성만 한다.
+    const allow = Array.isArray(channel.productIds) && channel.productIds.length
+      ? new Set(channel.productIds)
+      : null;
     for (const p of products) {
+      if (allow && !allow.has(p.id)) continue;
       const tiers = (p.packTiers || []).length ? p.packTiers : [{ tier: "", ea: 1, listPrice: p.listPrice }];
       for (const t of tiers) {
         const override = savedFor(p.id, t.tier);
@@ -5208,7 +5215,9 @@ function renderNpbUpload() {
     const up = uploads[c.code];
     return `<div class="npb-ch-chip ${isDone ? "on" : ""}">
       <strong>${h(c.name)}</strong>
-      <span class="muted">${isDone ? h(up.fileName || "업로드됨") : "미업로드"}</span>
+      <span class="muted">${isDone
+        ? `${h(up.fileName || "업로드됨")}${up.lines ? ` · ${up.lines.length}개 품목` : ""}`
+        : "미업로드"}</span>
     </div>`;
   };
 
@@ -6044,7 +6053,11 @@ function bindNpbUpload() {
     n.pendingUploads = [...(n.pendingUploads || []), ...unknown];
     if (ok.length) showToast(`업로드 완료 — ${ok.join(", ")}`);
     if (unknown.length) showToast(`채널을 알 수 없는 파일 ${unknown.length}건 — 직접 지정하세요.`, "error");
-    await npbLoadDetail(n.currentKey);
+    try {
+      await npbLoadDetail(n.currentKey);
+    } catch (error) {
+      showToast(`업로드는 됐지만 화면을 새로 읽지 못했습니다: ${error.message}`, "error");
+    }
     renderApp();
   });
 
@@ -6086,13 +6099,29 @@ async function npbDoUpload({ kind, channel, file, preread, quiet = false }) {
     });
     const parsedRows = res.rows || res.lines || [];
     n.parsePreview = { lines: parsedRows, warnings: res.warnings || [] };
+    // 응답으로 바로 반영한다. 다시 읽어오는 데 기대면 그 호출이 실패하거나
+    // 늦을 때 화면이 '미업로드' 인 채로 남아, 올린 사람은 실패한 줄 안다.
+    if (n.current) {
+      const code = res.channel || channel;
+      if (kind === "channel" && code) {
+        n.current.uploads = { ...(n.current.uploads || {}),
+          [code]: { channel: code, fileName, lines: parsedRows, uploadedAt: new Date().toISOString() } };
+      } else if (kind === "logistics") {
+        n.current.uploads = { ...(n.current.uploads || {}),
+          logistics: { fileName, uploadedAt: new Date().toISOString() } };
+      }
+    }
     if (res.unresolved?.length) {
       // 이름이 겹치면 한 번만 남긴다 — 같은 이름을 여러 번 지정할 이유가 없다.
       const seen = new Set(n.unresolved.map((u) => u.sourceName));
       n.unresolved = [...n.unresolved, ...res.unresolved.filter((u) => !seen.has(u.sourceName))];
     }
     if (!quiet) {
-      await npbLoadDetail(n.currentKey);
+      try {
+        await npbLoadDetail(n.currentKey);
+      } catch (error) {
+        showToast(`업로드는 됐지만 화면을 새로 읽지 못했습니다: ${error.message}`, "error");
+      }
       showToast(`업로드 완료 (${parsedRows.length}행)`);
       renderApp();
     }
