@@ -688,7 +688,9 @@ export function buildNpbNamespace() {
   // 이미 그 기준으로 뽑혀 오므로 계산에는 쓰지 않는다.
   const pickyChannels = [
     { code: "picky_b2c", name: "wooof-cafe24", feeRate: 0.1, settleBy: "우프",
-      filenameKeywords: ["b2c", "자사", "cafe24", "csfe24"], dateBasis: "배송완료일",
+      // shopbetters 는 카페24 쇼핑몰 ID — 자사몰 내보내기 파일명이 이걸로 시작한다.
+      filenameKeywords: ["b2c", "자사", "cafe24", "csfe24", "shopbetters"],
+      dateBasis: "배송완료일",
       note: "자사몰" },
     { code: "picky_betters_ss", name: "betters_sm_st", feeRate: 0.05, settleBy: "우프",
       filenameKeywords: ["베럴즈", "betters"], dateBasis: "구매확정일",
@@ -1306,6 +1308,14 @@ function migrateDb(db) {
           channel[key] = seeded[key];
           changed = true;
         }
+      }
+      // 파일명 키워드는 덮지 않고 더한다. 시드에 새로 붙은 키워드(철수마켓 등)가
+      // 기존 채널에 들어가지 못해 그 파일만 매번 손으로 채널을 골라야 했다.
+      const have = new Set((channel.filenameKeywords || []).map((k) => String(k).toLowerCase()));
+      const add = (seeded.filenameKeywords || []).filter((k) => !have.has(String(k).toLowerCase()));
+      if (add.length) {
+        channel.filenameKeywords = [...(channel.filenameKeywords || []), ...add];
+        changed = true;
       }
     }
 
@@ -2446,6 +2456,29 @@ function npbNamespaceChannel(code) {
 // 더 구체적인 채널이므로, 나중에 나오는 키워드를 택한다. 잘못 고르면 매출이
 // 엉뚱한 채널에 붙으므로 후보를 함께 돌려주어 화면에서 확인할 수 있게 한다.
 // macOS 는 한글 파일명을 NFD 로 저장하므로 양쪽 다 NFC 로 맞춘다.
+// 영문 키워드는 낱말 경계를 본다. "shopbetters_20260810.csv"(카페24 자사몰
+// 내보내기 — shopbetters 는 쇼핑몰 ID다) 가 "betters" 에 걸려 베럴즈 스토어로
+// 들어가고 있었다. 한글은 파일명에서 띄어쓰기를 걷어내면 낱말이 붙어 버리므로
+// (픽키도기클럽스마트스토어) 경계를 따지지 않고 그대로 포함만 본다.
+const ASCII_WORD = /[a-z0-9]/;
+
+function npbKeywordAt(base, key) {
+  if (!key) return -1;
+  const headBounded = ASCII_WORD.test(key[0]);
+  const tailBounded = ASCII_WORD.test(key[key.length - 1]);
+  let from = 0;
+  for (;;) {
+    const at = base.indexOf(key, from);
+    if (at < 0) return -1;
+    const before = at > 0 ? base[at - 1] : "";
+    const after = base[at + key.length] || "";
+    const headOk = !headBounded || !ASCII_WORD.test(before);
+    const tailOk = !tailBounded || !ASCII_WORD.test(after);
+    if (headOk && tailOk) return at;
+    from = at + 1;
+  }
+}
+
 function npbMatchChannels(channels, fileName) {
   const base = String(fileName || "").normalize("NFC").toLowerCase().replace(/\s+/g, "");
   if (!base) return [];
@@ -2461,7 +2494,7 @@ function npbMatchChannels(channels, fileName) {
       .filter(Boolean);
     let best = null;
     for (const key of keys) {
-      const at = base.indexOf(key);
+      const at = npbKeywordAt(base, key);
       if (at < 0) continue;
       if (!best || at > best.at || (at === best.at && key.length > best.length)) {
         best = { at, length: key.length, key };
