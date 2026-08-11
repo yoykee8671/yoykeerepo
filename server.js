@@ -24,6 +24,7 @@ const SETTLEMENT_SCRIPT = path.join(__dirname, "scripts", "settlement_excel.py")
 const XLSX_PARSE_SCRIPT = path.join(__dirname, "scripts", "xlsx_to_json.py");
 const NPB_PARSE_SCRIPT = path.join(__dirname, "scripts", "npb_parse.py");
 const NPB_XLSX_SCRIPT = path.join(__dirname, "scripts", "npb_settlement_xlsx.py");
+const NPB_INVOICE_SCRIPT = path.join(__dirname, "scripts", "npb_invoice_xlsx.py");
 const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.HOST || "0.0.0.0";
 const execFileAsync = promisify(execFile);
@@ -654,19 +655,66 @@ export function buildNpbNamespace() {
 
   // 정산서의 채널·수수료율을 그대로 옮겼다. 정산형태는 계산서를 누가 발행하는지
   // 구분하는 값이라 계산에는 쓰지 않고 표기용으로 남긴다.
+  //
+  // basis 는 "무엇을 진실로 볼 것인가" 다. 정산자료를 주는 채널(네이버·쿠팡)은
+  // 그쪽 숫자가 진실이고, 수량만 주는 채널(카페24)은 우리 상품표가 진실이다.
+  //   saleBasis file = 파일 금액 우선 / list = 정가표 × 수량
+  //   feeBasis  rate = 계약 수수료율 / fee = 파일의 수수료 / settle = 파일 정산금 역산
+  //
+  // 집계기준(dateBasis)은 채널마다 달라 정산서에 그대로 적는다 — 파일 자체가
+  // 이미 그 기준으로 뽑혀 오므로 계산에는 쓰지 않는다.
   const pickyChannels = [
-    { code: "picky_b2c", name: "wooof-B2C", feeRate: 0.1, settleBy: "우프", filenameKeywords: ["b2c", "cafe24"] },
-    { code: "picky_b2b", name: "wooof-B2B", feeRate: 0.05, settleBy: "우프", filenameKeywords: ["b2b"] },
-    { code: "picky_tailit", name: "테일릿(대리점)", feeRate: 0.52, settleBy: "우프", filenameKeywords: ["대리점", "테일릿"] },
-    { code: "picky_coupang", name: "쿠팡", feeRate: 0, settleBy: "우프", filenameKeywords: ["쿠팡", "coupang"], feeNote: "품목별 상이" },
-    { code: "picky_smartstore", name: "스마트스토어", feeRate: 0, settleBy: "픽키파크", filenameKeywords: ["smartstore", "스마트스토어"], feeNote: "네이버 기준" },
-    { code: "picky_kurly", name: "마켓컬리", feeRate: 0.35, settleBy: "픽키파크", filenameKeywords: ["컬리", "kurly"] },
-    { code: "picky_sparkpet", name: "스파크펫", feeRate: 0.35, settleBy: "픽키파크", filenameKeywords: ["스파크펫", "sparkpet"] },
-    { code: "picky_mongshu", name: "몽슈슈", feeRate: 0.4, settleBy: "우프", filenameKeywords: ["몽슈슈"] },
-    { code: "picky_popup", name: "팝업/외부행사", feeRate: 0.05, settleBy: "우프", filenameKeywords: ["행사", "팝업"] }
+    { code: "picky_b2c", name: "wooof-cafe24", feeRate: 0.1, settleBy: "우프",
+      filenameKeywords: ["b2c", "자사", "cafe24", "csfe24"], dateBasis: "배송완료일",
+      note: "자사몰" },
+    { code: "picky_betters_ss", name: "betters_sm_st", feeRate: 0.05, settleBy: "우프",
+      filenameKeywords: ["베럴즈", "betters"], dateBasis: "구매확정일",
+      // 배송비는 베럴즈 스토어가 가져간다 — 우리 매출이 아니다.
+      includeShipping: false, note: "베럴즈스토어(네이버스마트스토어)" },
+    { code: "picky_b2b", name: "wooof-B2B", feeRate: 0.05, settleBy: "우프",
+      filenameKeywords: ["b2b"], dateBasis: "배송완료일",
+      note: "대리점 역할의 사업자몰 (병원·오프라인·대량구매)" },
+    { code: "picky_tailit", name: "테일릿(대리점)", feeRate: 0.52, settleBy: "우프",
+      filenameKeywords: ["대리점", "테일릿"], dateBasis: "배송완료일",
+      note: "대리점 공급가 그대로 정산 (우프마진 공제 없음)" },
+    { code: "picky_coupang", name: "coupang", feeRate: 0, settleBy: "우프",
+      filenameKeywords: ["쿠팡", "coupang"], feeNote: "품목별상이",
+      dateBasis: "쿠팡 입고명세서 일자", shippingNote: "쿠팡배송",
+      // 쿠팡 파일에는 공급가만 있고 정가가 없다. 매출은 상품표 정가,
+      // 정산은 파일의 총단가(VAT포함 공급가) 합.
+      saleBasis: "list", feeBasis: "settle",
+      note: "쿠팡 수수료만 공제 / 우프마진 없이 그대로 정산" },
+    { code: "picky_smartstore", name: "smartstore", feeRate: 0, settleBy: "픽키파크",
+      filenameKeywords: ["smartstore", "스마트스토어", "픽키도기클럽"], feeNote: "네이버기준",
+      dateBasis: "네이버 계산서발행 일자", saleBasis: "file", feeBasis: "fee",
+      note: "직접발행 (정산서 전달)" },
+    { code: "picky_smartstore_park", name: "smartstore(픽키파크)", feeRate: 0, settleBy: "픽키파크",
+      filenameKeywords: ["픽키파크스토어", "smartstore_park"], feeNote: "네이버기준",
+      dateBasis: "네이버 계산서발행 일자", saleBasis: "file", feeBasis: "fee",
+      // 26년 7월 신규 개설. 사업자 상호와 동명의 스토어라 마감자료가 따로 나온다.
+      note: "26.7 신규개설 / 직접발행 (정산서 전달)" },
+    { code: "picky_kurly", name: "kurly", feeRate: 0.35, settleBy: "픽키파크",
+      filenameKeywords: ["컬리", "kurly"], dateBasis: "컬리 계산서 발행 일자",
+      shippingNote: "컬리배송", note: "직접발행 (정산서 전달)" },
+    { code: "picky_sparkpet", name: "sparkpet", feeRate: 0.35, settleBy: "픽키파크",
+      filenameKeywords: ["스파크펫", "sparkpet"], dateBasis: "월 정산서 기준",
+      shippingNote: "자체배송", note: "직접발행 (정산서 전달)" },
+    { code: "picky_pharmasquare", name: "파마스퀘어", feeRate: 0.45, settleBy: "픽키파크",
+      filenameKeywords: ["파마스퀘어", "엘피네트웍스"], dateBasis: "월 정산서 기준",
+      shippingNote: "자체배송", manualEntry: true,
+      note: "직접발행 (정산서 전달) / 자료가 이미지로 와 수기 입력" },
+    { code: "picky_mongshu", name: "몽슈슈", feeRate: 0.4, settleBy: "우프",
+      filenameKeywords: ["몽슈슈"], dateBasis: "월 정산서 기준",
+      shippingNote: "매장위탁판매", note: "몽슈슈 수수료만 공제 / 우프 마진 없이 그대로 정산" },
+    { code: "picky_popup", name: "팝업", feeRate: 0.25, settleBy: "우프",
+      filenameKeywords: ["행사", "팝업", "철수마켓"], dateBasis: "최종매출기준",
+      shippingNote: "현장판매", note: "우프(PG수수료)만 공제 후 전체입금" }
   ].map((c, i) => ({
     ...c, brandId: "pickydog", category: "온라인", archetype: "consignment",
     calcType: "rate_on_sale", salePrice: 6800, supplyPrice: null,
+    saleBasis: c.saleBasis || "file", feeBasis: c.feeBasis || "rate",
+    includeShipping: c.includeShipping !== false,
+    manualEntry: c.manualEntry === true,
     vatIncluded: true, active: true, sortOrder: 100 + i
   }));
 
@@ -797,7 +845,13 @@ export function buildNpbNamespace() {
       { partyName: "우프컴퍼니(주)", ratio: 0.3, sortOrder: 2 },
       { partyName: "재계약중", ratio: 0.3, sortOrder: 3 }
     ],
-    settlements: []
+    settlements: [],
+    productAliases: [],
+    // 채널별로 "이 열이 매출" 이라고 사람이 고쳐 준 매핑. 자동 추정이 틀린
+    // 채널은 한 번 고치면 다음 달부터 그대로 적용된다.
+    columnMaps: {},
+    // 실비(운임/광고) 청구서. 정산과 분리해 따로 발행하고 입금을 확인한다.
+    invoices: []
   };
 }
 
@@ -1128,6 +1182,21 @@ function migrateDb(db) {
     mergeById("brands", "id");
     mergeById("products", "id");
     mergeById("channels", "code");
+
+    // 채널에 뒤늦게 붙은 설정(금액 기준·집계기준·배송비 포함 여부)을 시드에서
+    // 채운다. 이미 값이 있으면 손대지 않는다 — 화면에서 고친 것이 우선이다.
+    const seededChannels = new Map((npbSeed.channels || []).map((c) => [c.code, c]));
+    for (const channel of db.npb.channels || []) {
+      const seeded = seededChannels.get(channel.code);
+      if (!seeded) continue;
+      for (const key of ["saleBasis", "feeBasis", "includeShipping", "manualEntry",
+        "dateBasis", "shippingNote", "note"]) {
+        if (channel[key] === undefined && seeded[key] !== undefined) {
+          channel[key] = seeded[key];
+          changed = true;
+        }
+      }
+    }
 
     // 출고 실비를 유형 목록으로 옮긴다. 기존 브랜드는 소형/대형 단가를 그대로
     // 옮겨 담아 금액이 바뀌지 않는다.
@@ -2117,14 +2186,26 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
 export function npbComputeLine(line) {
   const qty = number(line.qty);
   const ea = number(line.eaPerUnit, 1) || 1;
-  const listTotal = number(line.listPrice) * qty * ea;
+  const listTotal = line.listAmount != null
+    ? number(line.listAmount)
+    : number(line.listPrice) * qty * ea;
   if (line.calcType === "margin_supply") {
-    const saleTotal = number(line.salePrice) * qty;
-    const settleTotal = number(line.supplyPrice) * qty;
+    const saleTotal = line.saleAmount != null ? number(line.saleAmount) : number(line.salePrice) * qty;
+    const settleTotal = line.settleAmount != null
+      ? number(line.settleAmount)
+      : number(line.supplyPrice) * qty;
     return { listTotal, saleTotal, feeTotal: saleTotal - settleTotal, settleTotal };
   }
-  const saleTotal = number(line.salePrice) * qty;
-  const feeTotal = Math.round(saleTotal * number(line.feeRate));
+  const saleTotal = line.saleAmount != null ? number(line.saleAmount) : number(line.salePrice) * qty;
+  // 정산금이 파일에 있으면 공제는 역산한다 — 매출·공제·정산 셋이 서로 안 맞는
+  // 정산서가 나가는 것이 가장 나쁜 결과다.
+  if (line.settleAmount != null) {
+    const settleTotal = number(line.settleAmount);
+    return { listTotal, saleTotal, feeTotal: saleTotal - settleTotal, settleTotal };
+  }
+  const feeTotal = line.feeAmount != null
+    ? number(line.feeAmount)
+    : Math.round(saleTotal * number(line.feeRate));
   return { listTotal, saleTotal, feeTotal, settleTotal: saleTotal - feeTotal };
 }
 
@@ -2137,12 +2218,20 @@ export function npbComputeRollup(lines, logisticsCost, carryOver = 0) {
   let listTotal = 0;
   let realSaleTotal = 0;
   let feeTotal = 0;
+  let shippingTotal = 0;
+  let fileDiscountTotal = 0;
+  let hasFileDiscount = false;
   for (const line of lines) {
     const computed = npbComputeLine(line);
     qtyTotal += number(line.qty) * (number(line.eaPerUnit, 1) || 1);
     listTotal += computed.listTotal;
     realSaleTotal += computed.saleTotal;
     feeTotal += computed.feeTotal;
+    shippingTotal += number(line.shippingAmount);
+    if (line.discountAmount != null) {
+      fileDiscountTotal += number(line.discountAmount);
+      hasFileDiscount = true;
+    }
   }
   const revenueTotal = realSaleTotal - feeTotal;
   const cost = number(logisticsCost);
@@ -2150,7 +2239,10 @@ export function npbComputeRollup(lines, logisticsCost, carryOver = 0) {
   return {
     qtyTotal,
     listTotal,
-    discountTotal: listTotal - realSaleTotal,
+    shippingTotal,
+    // 정가 - 할인 + 배송비 = 최종결제. 파일이 할인액을 직접 주면 그 값을 믿고,
+    // 아니면 나머지에서 되짚는다.
+    discountTotal: hasFileDiscount ? fileDiscountTotal : listTotal + shippingTotal - realSaleTotal,
     realSaleTotal,
     feeTotal,
     revenueTotal,
@@ -2386,6 +2478,37 @@ export function npbInventoryFromLogistics(rows, products) {
   return { totals, unmatched: [...unmatched] };
 }
 
+// 출고내역 파일에서 출고 건수를 센다.
+//
+// 한 출고(=한 송장)에 상품이 여러 개면 행도 여러 개다. 그래서 행을 세면 안 되고
+// 송장번호를 세야 한다. 5월 3PL 파일은 209행이지만 실제 출고는 152건이었다.
+// 송장번호 칸이 없는 양식은 주문번호로, 그것도 없으면 행 수로 되돌린다 —
+// 어느 기준으로 셌는지 함께 돌려주어 화면에서 확인하고 고칠 수 있게 한다.
+export function npbCountShipments(rows) {
+  const pick = (row, names) => {
+    for (const n of names) if (row[n] !== undefined && String(row[n]).trim()) return row[n];
+    const key = Object.keys(row).find((k) => {
+      const flat = k.replace(/\s+/g, "");
+      return names.some((n) => flat.includes(n)) && String(row[k]).trim();
+    });
+    return key ? row[key] : undefined;
+  };
+  const bases = [
+    { key: "invoice", label: "송장번호", names: ["송장번호", "운송장번호", "운송장"] },
+    { key: "order", label: "주문번호", names: ["주문번호", "주문No", "orderNo"] }
+  ];
+  const list = Array.isArray(rows) ? rows.filter((r) => r && typeof r === "object") : [];
+  for (const basis of bases) {
+    const seen = new Set();
+    for (const row of list) {
+      const value = String(pick(row, basis.names) ?? "").trim();
+      if (value) seen.add(value);
+    }
+    if (seen.size) return { count: seen.size, basis: basis.key, basisLabel: basis.label, rowCount: list.length };
+  }
+  return { count: list.length, basis: "row", basisLabel: "행 수", rowCount: list.length };
+}
+
 // 전월 마감재고를 이번 달 기초로 이월한다. 첫 달만 손으로 넣으면 그 뒤로는
 // 이어진다.
 function npbPriorClosing(db, settlement) {
@@ -2395,6 +2518,68 @@ function npbPriorClosing(db, settlement) {
   const prior = list[0];
   if (!prior) return new Map();
   return new Map((prior.inventory || []).map((r) => [r.productKey, number(r.closing)]));
+}
+
+// 실비 청구서. 26년 6월분부터 운임/광고 실비를 매출에 합치지 않고 따로
+// 발행하기로 했다 — 공헌이익을 볼 때 계정별로 갈라 보기 위해서다. 그래서
+// 정산서에서는 빼고, 여기서 청구서를 따로 만들어 입금까지 확인한다.
+const NPB_INVOICE_TYPES = {
+  logistics: { label: "운임/물류 실비", account: "운반비" },
+  ad: { label: "광고홍보 실비", account: "광고선전비" }
+};
+
+// 정산 월 기준 익월 말일. 계산서 발행(신고) 기준일도 같은 날짜를 쓴다.
+function npbNextMonthEnd(periodMonth) {
+  const match = String(periodMonth || "").match(/(\d{4})[.\-/](\d{1,2})/);
+  if (!match) return "";
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  // Date(y, m+1, 0) = (m+1)월의 마지막 날. month 는 1-based 이므로 그대로 넘긴다.
+  const end = new Date(Date.UTC(year, month + 1, 0));
+  return end.toISOString().slice(0, 10);
+}
+
+function npbBuildInvoice(db, settlement, type) {
+  const brand = npbGetBrand(db, settlement.brand);
+  const meta = NPB_INVOICE_TYPES[type];
+  if (!meta) throw new Error("알 수 없는 청구 유형입니다.");
+  const items = [];
+  if (type === "logistics") {
+    for (const row of settlement.logistics?.breakdown || []) {
+      if (!number(row.count) && !number(row.amount)) continue;
+      items.push({
+        label: row.label,
+        count: number(row.count),
+        unit: row.manual ? 0 : number(row.freight) + number(row.handling),
+        amount: number(row.amount),
+        note: row.manual ? "건별 실비" : `운임 ${number(row.freight).toLocaleString()} + 부자재/피킹 ${number(row.handling).toLocaleString()}`
+      });
+    }
+  } else {
+    for (const item of settlement.adCost?.items || []) {
+      items.push({ label: item.medium, count: 0, unit: 0, amount: number(item.amount), note: item.period || "" });
+    }
+  }
+  const total = items.reduce((sum, item) => sum + number(item.amount), 0);
+  return {
+    id: crypto.randomBytes(8).toString("hex"),
+    brand: settlement.brand,
+    brandName: brand?.name || settlement.brand,
+    businessName: brand?.businessName || "",
+    settlementKey: settlement.key,
+    periodMonth: settlement.periodMonth,
+    type,
+    typeLabel: meta.label,
+    account: meta.account,
+    title: `${meta.label} 청구서 (${settlement.periodMonth})`,
+    items,
+    total,
+    issuedAt: now(),
+    dueDate: npbNextMonthEnd(settlement.periodMonth),
+    paidAt: "",
+    paidAmount: 0,
+    note: ""
+  };
 }
 
 // 광고비는 구글시트에 누적된다. 공개 링크의 CSV 내보내기를 읽으므로 별도
@@ -2497,6 +2682,40 @@ function npbResolveLines(lines, products, aliases) {
   return { resolved, unresolved: [...unresolved.values()] };
 }
 
+// 열 매핑 학습. 자동 추정이 틀린 채널은 화면에서 한 번 고치면 그 매핑이
+// 채널에 남아 다음 달 파일부터 그대로 적용된다. 파서가 숫자 열을 머리글
+// 이름과 함께 전부 넘겨 주므로, 다시 올리지 않아도 되짚어 계산할 수 있다.
+const NPB_MONEY_ROLES = ["list", "sale", "discount", "shipping", "fee", "settle"];
+
+function npbColumnMapKey(brand, channelCode) {
+  return `${String(brand || "").toLowerCase()}::${String(channelCode || "").toLowerCase()}`;
+}
+
+function npbSanitizeColumnMap(raw) {
+  const out = {};
+  for (const role of NPB_MONEY_ROLES) {
+    const value = raw?.[role];
+    if (value === undefined) continue;
+    // 빈 문자열은 "이 역할은 파일에서 쓰지 않음" 이라는 뜻이다.
+    out[role] = String(value || "").trim();
+  }
+  return out;
+}
+
+function npbApplyColumnMap(lines, map) {
+  if (!map || !Object.keys(map).length) return lines;
+  return lines.map((line) => {
+    const amounts = line.amounts || {};
+    const money = { ...(line.money || {}) };
+    for (const [role, label] of Object.entries(map)) {
+      if (!label) { delete money[role]; continue; }
+      if (amounts[label] !== undefined) money[role] = amounts[label];
+      else delete money[role];
+    }
+    return { ...line, money };
+  });
+}
+
 function npbDetectChannelFromName(channels, fileName) {
   return npbMatchChannels(channels, fileName)[0]?.code || "";
 }
@@ -2519,6 +2738,43 @@ function npbFindChannel(channels, code) {
 // is per-EA, so eaPerUnit collapses to 1. 공구 tier rows resolve their per-EA
 // price from channel.tiers by leading digit. Fields already present on the line
 // (manual grid edits) win over config defaults.
+// 파일이 알려준 금액을 채널 규칙에 따라 계산에 쓸 값으로 바꾼다.
+//
+// 채널마다 무엇이 진실인지가 다르다. 네이버는 자기가 확정한 정산기준금액과
+// 수수료를 주고, 쿠팡은 공급가만 주며 정가는 우리 상품표에만 있다. 카페24는
+// 수량만 준다. 그래서 "매출을 어디서 가져올지"와 "공제를 어떻게 정할지"를
+// 채널 설정으로 두고, 화면에서 바꿀 수 있게 한다.
+//
+//   saleBasis  file  = 파일 금액(없으면 정가표로 대체)   list = 정가표 × 수량
+//   feeBasis   rate  = 매출 × 수수료율                  fee  = 파일의 수수료
+//                      settle = 파일의 정산금에서 역산
+function npbApplyMoney(enriched, line, channel) {
+  const money = line.money || {};
+  const has = (v) => v !== undefined && v !== null && v !== "";
+  const saleBasis = channel?.saleBasis || "file";
+  const feeBasis = channel?.feeBasis || "rate";
+  // 고객이 낸 배송비를 매출로 볼지는 채널마다 다르다. 베럴즈 스토어처럼
+  // 배송비를 판매처가 가져가는 곳은 우리 매출이 아니다.
+  const includeShipping = channel ? channel.includeShipping !== false : true;
+
+  if (has(money.list)) enriched.listAmount = number(money.list);
+  if (saleBasis !== "list") {
+    let sale = has(money.sale) ? number(money.sale) : null;
+    if (sale === null && has(money.list)) {
+      sale = number(money.list) - (has(money.discount) ? number(money.discount) : 0);
+    }
+    if (sale !== null) {
+      if (includeShipping && has(money.shipping)) sale += number(money.shipping);
+      enriched.saleAmount = sale;
+    }
+  }
+  if (feeBasis === "fee" && has(money.fee)) enriched.feeAmount = number(money.fee);
+  if (feeBasis === "settle" && has(money.settle)) enriched.settleAmount = number(money.settle);
+  if (has(money.discount)) enriched.discountAmount = number(money.discount);
+  if (has(money.shipping)) enriched.shippingAmount = number(money.shipping);
+  return enriched;
+}
+
 function npbEnrichLine(line, channels) {
   const channel = npbFindChannel(channels, line.channel);
   const qty = line.qty != null ? number(line.qty) : number(line.qtyEa);
@@ -2529,6 +2785,16 @@ function npbEnrichLine(line, channels) {
     eaPerUnit: 1,
     listPrice: line.listPrice != null ? number(line.listPrice) : 22000
   };
+  // 손으로 고친 값은 파일보다 우선한다 — 화면에서 고친 것이 무시되면
+  // 고칠 방법이 없어진다.
+  const manual = new Set(Array.isArray(line.manualFields) ? line.manualFields : []);
+  for (const field of ["listAmount", "saleAmount", "feeAmount", "settleAmount"]) {
+    if (!manual.has(field)) delete enriched[field];
+  }
+  npbApplyMoney(enriched, line, channel);
+  for (const field of ["listAmount", "saleAmount", "feeAmount", "settleAmount"]) {
+    if (manual.has(field) && line[field] != null) enriched[field] = number(line[field]);
+  }
   if (!channel) return enriched;
   enriched.calcType = line.calcType || channel.calcType || "rate_on_sale";
   let tierPrice = null;
@@ -2602,7 +2868,7 @@ function npbFindSettlement(db, key) {
 // Write the uploaded base64 to a temp file then run npb_parse.py, mirroring
 // parseBankXlsxUpload. Channel is passed explicitly (temp filename is random,
 // so filename-based detection can't work). Returns the parser JSON.
-async function runNpbParse(base64, fileName, channel) {
+async function runNpbParse(base64, fileName, channel, block = null) {
   const buf = Buffer.from(base64 || "", "base64");
   const ext = path.extname(fileName || "") || ".xlsx";
   const tmpPath = path.join(os.tmpdir(), `wooofpay-npb-${crypto.randomBytes(8).toString("hex")}${ext}`);
@@ -2611,6 +2877,11 @@ async function runNpbParse(base64, fileName, channel) {
     const args = [NPB_PARSE_SCRIPT, "--input", tmpPath];
     const parserChannel = NPB_PARSER_CHANNEL[channel] || channel;
     if (parserChannel) args.push("--channel", parserChannel);
+    // 자동으로 고른 표가 틀렸을 때 사람이 지정한 시트·머리글 행.
+    if (block?.sheet && block?.headerRow) {
+      args.push("--block-sheet", String(block.sheet));
+      args.push("--block-header-row", String(number(block.headerRow)));
+    }
     let stdout;
     try {
       ({ stdout } = await execFileAsync("python3", args, {
@@ -2694,6 +2965,23 @@ function npbBuildXlsxSpec(db, settlement) {
     ledger: settlement.ledger || {},
     memo: settlement.memo || []
   };
+}
+
+async function generateNpbInvoiceXlsx(invoice) {
+  const tmpBase = path.join(os.tmpdir(), `wooofpay-npb-invoice-${crypto.randomBytes(8).toString("hex")}`);
+  const inputPath = `${tmpBase}.json`;
+  const outputPath = `${tmpBase}.xlsx`;
+  try {
+    await writeFile(inputPath, JSON.stringify(invoice), "utf8");
+    await execFileAsync("python3", [NPB_INVOICE_SCRIPT, "--input", inputPath, "--output", outputPath], {
+      cwd: __dirname,
+      maxBuffer: 20 * 1024 * 1024
+    });
+    return await readFile(outputPath);
+  } finally {
+    await safeUnlink(inputPath);
+    await safeUnlink(outputPath);
+  }
 }
 
 async function generateNpbXlsx(spec) {
@@ -5479,6 +5767,69 @@ async function routeApi(req, res, url) {
   }
 
   // --- NPB (도톤 운영대행) settlement endpoints (plan §F) -------------------
+  // 메뉴 권한을 서버에서도 막는다. 화면에서 탭을 숨기는 것만으로는 API 를 직접
+  // 부르는 것을 막지 못한다.
+  if (pathname.startsWith("/api/npb/")) {
+    const writing = method !== "GET";
+    if (!requirePermission(actor, res, "npb", writing ? "edit" : "view",
+      writing ? "npb정산을 수정할 권한이 없습니다." : "npb정산을 볼 권한이 없습니다.")) {
+      return;
+    }
+  }
+
+  // 실비 청구서 목록·입금확인·출력.
+  if (pathname === "/api/npb/invoices" && method === "GET") {
+    const brand = String(url.searchParams.get("brand") || "").trim();
+    const list = (db.npb.invoices || [])
+      .filter((item) => !brand || npbSameBrand(item.brand, brand))
+      .sort((a, b) => String(b.periodMonth).localeCompare(String(a.periodMonth))
+        || String(a.type).localeCompare(String(b.type)));
+    sendJson(res, 200, { invoices: list });
+    return;
+  }
+
+  if (pathname.startsWith("/api/npb/invoices/")) {
+    const segments = pathname.split("/");
+    const invoiceId = decodeURIComponent(segments[4] || "");
+    const invoice = (db.npb.invoices || []).find((item) => item.id === invoiceId);
+    if (!invoice) { sendJson(res, 404, { error: "청구서를 찾을 수 없습니다." }); return; }
+    const action = segments[5] || "";
+
+    if (!action && method === "PUT") {
+      const body = await readBody(req);
+      if (body.paidAt !== undefined) invoice.paidAt = String(body.paidAt || "");
+      if (body.paidAmount !== undefined) invoice.paidAmount = number(body.paidAmount);
+      if (body.note !== undefined) invoice.note = String(body.note || "");
+      if (body.dueDate !== undefined) invoice.dueDate = String(body.dueDate || "");
+      await writeDb(db);
+      sendJson(res, 200, { invoice });
+      return;
+    }
+
+    if (!action && method === "DELETE") {
+      db.npb.invoices = (db.npb.invoices || []).filter((item) => item.id !== invoiceId);
+      await writeDb(db);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (action === "xlsx" && method === "GET") {
+      try {
+        const buffer = await generateNpbInvoiceXlsx(invoice);
+        const name = `${invoice.brandName}_${invoice.periodMonth}_${invoice.typeLabel}.xlsx`;
+        sendBuffer(res, 200, buffer,
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          { "content-disposition": contentDisposition(name) });
+      } catch (error) {
+        sendJson(res, 500, { error: `청구서 생성 실패: ${error.message}` });
+      }
+      return;
+    }
+
+    sendJson(res, 404, { error: "API를 찾을 수 없습니다." });
+    return;
+  }
+
   // 상품명 별칭. 한 번 지정하면 그 이름은 다음부터 자동으로 인식된다.
   if (pathname === "/api/npb/aliases" && method === "POST") {
     const body = await readBody(req);
@@ -5693,14 +6044,18 @@ async function routeApi(req, res, url) {
             });
             return;
           }
-          const parsed = await runNpbParse(body.fileBase64, body.fileName, channelCode);
+          const parsed = await runNpbParse(body.fileBase64, body.fileName, channelCode, body.block);
+          // 이 채널에서 사람이 고쳐 둔 열 매핑을 먼저 씌운다.
+          const mapKey = npbColumnMapKey(settlement.brand, channelCode);
+          const columnMap = db.npb.columnMaps?.[mapKey] || null;
+          const mappedLines = npbApplyColumnMap(parsed.lines || [], columnMap);
           // 판매처 상품명을 상품표·별칭으로 맞춘다. 못 맞춘 것은 화면에서
           // 한 번 지정하면 별칭으로 남아 다음부터 자동 인식된다.
           const uploadProducts = (db.npb.products || []).filter(
             (p) => npbSameBrand(p.brandId, settlement.brand)
           );
           const resolvedOut = npbResolveLines(
-            parsed.lines || [],
+            mappedLines,
             uploadProducts,
             (db.npb.productAliases || []).filter((a) => npbSameBrand(a.brandId, settlement.brand))
           );
@@ -5714,6 +6069,10 @@ async function routeApi(req, res, url) {
             fileName: body.fileName || "",
             lines: parsedLines,
             warnings: parsed.warnings || [],
+            // 열을 다시 고를 수 있도록 파서가 본 표 구조를 남긴다.
+            layout: parsed.meta?.chosenBlock || null,
+            layoutAlternatives: parsed.meta?.blocks || [],
+            columnMap,
             uploadedAt: now()
           };
           // Accumulate parsed lines into the editable grid: drop any prior lines
@@ -5733,6 +6092,9 @@ async function routeApi(req, res, url) {
             rows: parsedLines,
             warnings: parsed.warnings || [],
             unresolved: resolvedOut.unresolved,
+            layout: parsed.meta?.chosenBlock || null,
+            layoutAlternatives: parsed.meta?.blocks || [],
+            columnMap,
             rollup: computed.rollup
           });
         } else {
@@ -5783,6 +6145,156 @@ async function routeApi(req, res, url) {
       } catch (error) {
         sendJson(res, 400, { error: `파일 파싱 실패: ${error.message}` });
       }
+      return;
+    }
+
+    // 열 매핑을 고친다. 파일을 다시 올릴 필요 없이 이미 읽어 둔 숫자 열에서
+    // 되짚어 계산하고, 매핑은 채널에 남아 다음 달부터 자동 적용된다.
+    if (action === "remap" && method === "PUT") {
+      const body = await readBody(req);
+      const channelCode = String(body.channel || "").trim();
+      if (!channelCode) { sendJson(res, 400, { error: "채널을 지정해 주세요." }); return; }
+      const map = npbSanitizeColumnMap(body.map);
+      const mapKey = npbColumnMapKey(settlement.brand, channelCode);
+      if (!db.npb.columnMaps || typeof db.npb.columnMaps !== "object") db.npb.columnMaps = {};
+      db.npb.columnMaps[mapKey] = map;
+      const remapped = npbApplyColumnMap(
+        (settlement.lines || []).filter((line) => line.channel === channelCode),
+        map
+      );
+      settlement.lines = (settlement.lines || [])
+        .filter((line) => line.channel !== channelCode)
+        .concat(remapped);
+      if (settlement.uploads?.[channelCode]) {
+        settlement.uploads[channelCode].lines = remapped;
+        settlement.uploads[channelCode].columnMap = map;
+      }
+      const computed = npbRecompute(db, settlement);
+      await writeDb(db);
+      sendJson(res, 200, { channel: channelCode, map, rows: remapped, rollup: computed.rollup });
+      return;
+    }
+
+    // 출고내역 파일을 유형별로 올려 건수를 센다. 자동으로 센 값을 그대로 쓰되
+    // 화면에서 고칠 수 있다 — 5월 자료는 송장 152건인데 정산서에는 155건으로
+    // 적혀 있었다. 자동값을 강제하면 과거와 어긋난다.
+    if (action === "shipping-file" && method === "POST") {
+      const body = await readBody(req);
+      const shipType = String(body.shipType || "").trim();
+      if (!shipType) { sendJson(res, 400, { error: "출고 유형을 지정해 주세요." }); return; }
+      if (!body.fileBase64) { sendJson(res, 400, { error: "업로드할 파일이 없습니다." }); return; }
+      try {
+        const rows = await parseBankXlsxUpload(body.fileBase64);
+        const counted = npbCountShipments(rows);
+        if (!settlement.shipFiles || typeof settlement.shipFiles !== "object") settlement.shipFiles = {};
+        settlement.shipFiles[shipType] = {
+          shipType,
+          fileName: body.fileName || "",
+          rowCount: counted.rowCount,
+          autoCount: counted.count,
+          basis: counted.basis,
+          basisLabel: counted.basisLabel,
+          uploadedAt: now()
+        };
+        const counts = { ...(settlement.logistics?.counts || {}) };
+        const prev = counts[shipType];
+        const entry = prev && typeof prev === "object" ? { ...prev } : { count: number(prev) };
+        entry.count = counted.count;
+        counts[shipType] = entry;
+        const computed = npbRecompute(db, settlement, { logistics: { counts } });
+        await writeDb(db);
+        sendJson(res, 200, {
+          shipType,
+          file: settlement.shipFiles[shipType],
+          logistics: computed.logistics,
+          rollup: computed.rollup
+        });
+      } catch (error) {
+        sendJson(res, 400, { error: `파일 파싱 실패: ${error.message}` });
+      }
+      return;
+    }
+
+    // 실비 청구서를 만든다. 정산과 분리해 따로 발행하고 입금을 확인한다.
+    if (action === "invoice" && method === "POST") {
+      const body = await readBody(req);
+      const type = String(body.type || "").trim();
+      if (!NPB_INVOICE_TYPES[type]) { sendJson(res, 400, { error: "청구 유형이 올바르지 않습니다." }); return; }
+      let invoice;
+      try {
+        invoice = npbBuildInvoice(db, settlement, type);
+      } catch (error) {
+        sendJson(res, 400, { error: error.message });
+        return;
+      }
+      if (!invoice.items.length) {
+        sendJson(res, 400, {
+          error: type === "logistics"
+            ? "출고 실비가 0원입니다. 출고내역을 먼저 올려 주세요."
+            : "광고비가 없습니다. 광고비 시트를 먼저 불러오세요."
+        });
+        return;
+      }
+      if (!Array.isArray(db.npb.invoices)) db.npb.invoices = [];
+      // 같은 정산 월의 같은 유형은 다시 만들면 갈아끼운다 — 청구서가 중복
+      // 발행되는 것보다 최신 하나만 남는 편이 안전하다. 입금 표시는 이어받는다.
+      const priorIndex = db.npb.invoices.findIndex(
+        (item) => item.settlementKey === settlement.key && item.type === type
+      );
+      if (priorIndex >= 0) {
+        const prior = db.npb.invoices[priorIndex];
+        invoice.id = prior.id;
+        invoice.paidAt = prior.paidAt || "";
+        invoice.paidAmount = number(prior.paidAmount);
+        invoice.note = prior.note || "";
+        db.npb.invoices[priorIndex] = invoice;
+      } else {
+        db.npb.invoices.push(invoice);
+      }
+      await writeDb(db);
+      sendJson(res, 200, { invoice });
+      return;
+    }
+
+    // 파일이 없는 채널(자료가 이미지·구두로 오는 곳)을 손으로 채운다.
+    if (action === "manual-lines" && method === "PUT") {
+      const body = await readBody(req);
+      const channelCode = String(body.channel || "").trim();
+      if (!channelCode) { sendJson(res, 400, { error: "채널을 지정해 주세요." }); return; }
+      if (!Array.isArray(body.lines)) { sendJson(res, 400, { error: "lines 배열이 필요합니다." }); return; }
+      const lines = body.lines
+        .filter((line) => line && (line.productKey || line.label))
+        .map((line) => ({
+          channel: channelCode,
+          productKey: String(line.productKey || ""),
+          label: String(line.label || ""),
+          tier: String(line.tier || ""),
+          qty: number(line.qty),
+          qtyEa: number(line.qty),
+          manualEntry: true,
+          money: {
+            list: line.listAmount != null ? number(line.listAmount) : undefined,
+            sale: line.saleAmount != null ? number(line.saleAmount) : undefined,
+            discount: line.discountAmount != null ? number(line.discountAmount) : undefined,
+            shipping: line.shippingAmount != null ? number(line.shippingAmount) : undefined,
+            fee: line.feeAmount != null ? number(line.feeAmount) : undefined,
+            settle: line.settleAmount != null ? number(line.settleAmount) : undefined
+          }
+        }));
+      settlement.lines = (settlement.lines || [])
+        .filter((line) => line.channel !== channelCode)
+        .concat(lines);
+      settlement.uploads[channelCode] = {
+        kind: "manual",
+        channel: channelCode,
+        fileName: "(수기 입력)",
+        lines,
+        warnings: [],
+        uploadedAt: now()
+      };
+      const computed = npbRecompute(db, settlement);
+      await writeDb(db);
+      sendJson(res, 200, { channel: channelCode, rows: lines, rollup: computed.rollup });
       return;
     }
 
