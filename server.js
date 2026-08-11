@@ -2944,7 +2944,7 @@ function npbSplitMoney(money, share) {
   return out;
 }
 
-function npbLineFromTarget(line, target, product, share, sourceName) {
+function npbLineFromTarget(line, target, product, share, sourceName, savedUnitPrice) {
   const multiplier = Math.max(1, number(target.multiplier, 1));
   // 이 판매처 상품 한 건의 기준가. 기본은 낱개정가 × 배수이고, 묶음 할인이
   // 있으면 검수표에서 고친다.
@@ -2958,6 +2958,8 @@ function npbLineFromTarget(line, target, product, share, sourceName) {
     label,
     sourceName,
     listPrice,
+    // 지난달 확정 때 사람이 정한 기준가. 있으면 그게 기본값이 된다.
+    savedUnitPrice: savedUnitPrice != null && share >= 1 ? number(savedUnitPrice) : undefined,
     money: npbSplitMoney(line.money, share),
     amounts: share >= 1 ? line.amounts : undefined
   };
@@ -2999,14 +3001,14 @@ function npbResolveLines(lines, products, aliases, channelCode = "") {
   const resolved = [];
   const unresolved = new Map();
 
-  const emit = (line, targets, sourceName) => {
+  const emit = (line, targets, sourceName, savedUnitPrice) => {
     const weights = targets.map((t) =>
       Math.max(1, number(productById.get(t.productId)?.listPrice, 1)) * Math.max(1, number(t.multiplier, 1))
     );
     const totalWeight = weights.reduce((sum, w) => sum + w, 0) || targets.length;
     targets.forEach((target, i) => {
       resolved.push(npbLineFromTarget(
-        line, target, productById.get(target.productId), weights[i] / totalWeight, sourceName
+        line, target, productById.get(target.productId), weights[i] / totalWeight, sourceName, savedUnitPrice
       ));
     });
   };
@@ -3040,7 +3042,7 @@ function npbResolveLines(lines, products, aliases, channelCode = "") {
     if (alias?.ignore) continue;
     if (alias) {
       const targets = npbAliasTargets(alias);
-      if (targets.length) { emit(line, targets, sourceName); continue; }
+      if (targets.length) { emit(line, targets, sourceName, alias.unitPrice); continue; }
     }
 
     // 3) 규칙이 없으면 사람에게 넘긴다. 이름 키워드로 짐작한 값은 화면의
@@ -6733,6 +6735,15 @@ async function routeApi(req, res, url) {
                 const ratio = base > 0 ? unit / base : 0;
                 if (ratio >= 0.3 && ratio <= 1.5) unit *= multiplier;
               }
+              const saved = line.savedUnitPrice;
+              if (saved != null && saved > 0) {
+                // 파일이 말하는 단가와 지난번에 정한 단가가 다르면 알린다 —
+                // 판매처가 말없이 공급가를 바꾸는 걸 여기서 잡는다.
+                const changed = unit > 0 && unit !== saved
+                  ? { from: saved, to: unit }
+                  : null;
+                return { ...line, unitPrice: saved, priceChanged: changed };
+              }
               return { ...line, unitPrice: unit };
             });
           settlement.uploads[channelCode] = {
@@ -6855,6 +6866,25 @@ async function routeApi(req, res, url) {
       settlement.lines = (settlement.lines || [])
         .filter((line) => line.channel !== channelCode)
         .concat(rows);
+      // 확정한 기준가를 규칙에 남긴다. 다음 달 같은 코드가 올라오면 이 값이
+      // 기본으로 채워지고, 파일이 다른 값을 말하면 화면에서 알려준다.
+      // 한 이름이 여러 상품으로 갈리는 조합형은 단가를 하나로 못 정하므로 뺀다.
+      const bySource = new Map();
+      for (const row of rows) {
+        const key = `${String(row.raw?.code || "").toLowerCase()}::${npbNormalizeName(row.sourceName)}`;
+        bySource.set(key, bySource.has(key) ? null : row);
+      }
+      for (const alias of db.npb.productAliases || []) {
+        if (String(alias.channel || "") !== channelCode) continue;
+        const key = `${String(alias.sourceCode || "").toLowerCase()}::${npbNormalizeName(alias.sourceName)}`;
+        const row = bySource.get(key);
+        if (!row || row.unitPrice == null) continue;
+        const price = number(row.unitPrice);
+        if (price > 0 && number(alias.unitPrice) !== price) {
+          alias.unitPrice = price;
+          alias.unitPriceAt = now();
+        }
+      }
       if (settlement.uploads?.[channelCode]) {
         settlement.uploads[channelCode].lines = rows;
         settlement.uploads[channelCode].confirmed = true;

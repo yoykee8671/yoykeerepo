@@ -5505,7 +5505,11 @@ function renderNpbReview() {
           ${fromFile ? `<span class="badge">${fromFile}</span>` : ""}</td>
         <td class="num">${money.format(row.listPrice ?? 0)}</td>
         <td><input class="num" type="number" data-npb-rv="${i}" data-npb-rf="unitPrice"
-          value="${h(row.unitPrice ?? row.listPrice ?? 0)}"></td>
+          value="${h(row.unitPrice ?? row.listPrice ?? 0)}">
+          ${row.priceChanged
+            ? `<div class="muted" style="color:var(--red)">파일은 ${money.format(row.priceChanged.to)}
+               (지난번 ${money.format(row.priceChanged.from)})</div>`
+            : ""}</td>
         <td><input class="num" type="number" data-npb-rv="${i}" data-npb-rf="qty"
           value="${h(row.qty ?? 0)}"></td>
         <td><input class="num" type="number" data-npb-rv="${i}" data-npb-rf="discountAmount"
@@ -5531,6 +5535,8 @@ function renderNpbReview() {
       ${warns ? `<div class="panel-body">${warns}</div>` : ""}
       <div class="panel-body">
         <p class="muted">
+          <b>기준가</b>는 그 판매처에서 실제로 팔린 단가입니다 — 확정하면 기억해 두었다가
+          다음 달 같은 코드에 자동으로 채웁니다. 파일이 다른 단가를 말하면 빨간 글씨로 알려드립니다.
           기준가·수량·할인·수수료율을 여기서 고칠 수 있습니다. 고치면 그 행은 <b>파일 금액 대신
           계산식</b>을 씁니다. <b>[확정/반영]</b> 을 눌러야 워크시트와 정산서에 들어갑니다.
         </p>
