@@ -644,11 +644,13 @@ export function buildNpbNamespace() {
   // 인식 키워드를 고치면 이 번호를 올린다. 마이그레이션이 그때만 다시 씌운다 —
   // 조건 없이 매번 덮으면 화면에서 고친 값을 잃고, 한 번만 씌우면 지금처럼
   // 두 번째 수정이 반영되지 않는다.
-  const PICKY_KEYWORDS_VERSION = 2;
+  const PICKY_KEYWORDS_VERSION = 3;
   const pickyProducts = [
     {
       id: "pb45_chicken", brandId: "pickydog", barcode: "8809879544071",
       name: "픽키도기클럽 필바이츠 45g (5개입) - 치킨 오리지널", listPrice: 6800,
+      // 쿠팡은 "45g 3개 혼합맛" 으로 판다. 맛이 섞인 묶음이지만 재고·정산 모두
+      // 치킨 오리지널로 집계하기로 했다(2026-08 운영 확인).
       nameKeywords: [size45], excludeKeywords: [...veganWords, "180g", "20개입", ...boxWords, "20p"],
       skuCodes: ["P000BLOX"], piecesPerUnit: 5,
       packTiers: pickyPackTiers45
@@ -1225,6 +1227,26 @@ function migrateDb(db) {
         product.excludeKeywords = seeded.excludeKeywords || [];
         if (seeded.piecesPerUnit) product.piecesPerUnit = seeded.piecesPerUnit;
         if (!product.barcode && seeded.barcode) product.barcode = seeded.barcode;
+        changed = true;
+      }
+    }
+
+    // 브랜드가 다른 채널에 붙은 정산 라인을 걷어낸다. 채널 매칭이 브랜드를
+    // 가리지 않던 때 픽키 파일이 도톤 채널(smartstore/coupang)에 붙어 저장됐고,
+    // 그 줄은 화면에 유령 채널로 남는다. 다시 올리면 제대로 들어간다.
+    for (const settlement of db.npb.settlements || []) {
+      const own = new Set(
+        (db.npb.channels || [])
+          .filter((c) => npbSameBrand(c.brandId, settlement.brand))
+          .map((c) => String(c.code))
+      );
+      if (!own.size) continue;
+      const kept = (settlement.lines || []).filter((line) => own.has(String(line.channel)));
+      if (kept.length !== (settlement.lines || []).length) {
+        settlement.lines = kept;
+        for (const code of Object.keys(settlement.uploads || {})) {
+          if (!own.has(code)) delete settlement.uploads[code];
+        }
         changed = true;
       }
     }
@@ -6385,8 +6407,23 @@ async function routeApi(req, res, url) {
         if (kind === "channel") {
           // 채널을 명시하지 않으면 파일명으로 찾는다. 한 곳에 몰아서 올리고
           // 파일명이 채널을 결정하게 하는 것이 실제 업무 흐름에 맞다.
-          const matches = body.channel ? [] : npbMatchChannels(db.npb.channels, body.fileName);
-          const channelCode = body.channel || matches[0]?.code || "";
+          // 채널은 이 정산의 브랜드 안에서만 찾는다. 브랜드를 안 가리면
+          // "쿠팡" 파일이 도톤 채널에 붙어 도톤 파서로 넘어가고, 필바이츠는
+          // 도톤 상품이 아니라 전 행이 미식별로 떨어진다.
+          const brandChannels = (db.npb.channels || []).filter(
+            (c) => npbSameBrand(c.brandId, settlement.brand)
+          );
+          const matches = body.channel ? [] : npbMatchChannels(brandChannels, body.fileName);
+          const requested = body.channel
+            ? brandChannels.find((c) => String(c.code) === String(body.channel))
+            : null;
+          if (body.channel && !requested) {
+            sendJson(res, 400, {
+              error: `${body.channel} 는 이 브랜드의 채널이 아닙니다.`
+            });
+            return;
+          }
+          const channelCode = requested?.code || matches[0]?.code || "";
           if (!channelCode) {
             sendJson(res, 400, {
               error: `파일명으로 채널을 알 수 없습니다: ${body.fileName || "(이름 없음)"}. ` +
@@ -6396,7 +6433,7 @@ async function routeApi(req, res, url) {
             });
             return;
           }
-          const uploadChannel = npbFindChannel(db.npb.channels, channelCode);
+          const uploadChannel = npbFindChannel(brandChannels, channelCode);
           const parsed = await runNpbParse(body.fileBase64, body.fileName, channelCode, body.block, {
             period: settlement.periodMonth,
             dateBasis: uploadChannel?.dateBasis || ""
