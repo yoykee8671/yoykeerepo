@@ -880,12 +880,57 @@ def looks_order_level(label):
     return any(h in key for h in ORDER_LEVEL_HINTS)
 
 
-def scan_rows(block, channel, warnings):
+def parse_date(value):
+    """거래처 파일의 날짜 표기를 (연, 월) 로 떨어뜨린다.
+
+    엑셀 날짜(datetime), '2026.6.9 13:52', '2026-06-30 19:20:00',
+    '2026/06/02 19:04:44', '2026-05-02T22:27:37' 이 모두 실제로 들어온다."""
+    if value is None:
+        return None
+    if hasattr(value, "year") and hasattr(value, "month"):
+        return (value.year, value.month)
+    text = str(value).strip()
+    if not text:
+        return None
+    m = re.match(r"^(\d{4})\s*[.\-/년]\s*(\d{1,2})", text)
+    if m:
+        month = int(m.group(2))
+        return (int(m.group(1)), month) if 1 <= month <= 12 else None
+    digits = re.sub(r"[^0-9]", "", text)
+    if len(digits) >= 6:
+        month = int(digits[4:6])
+        if 1 <= month <= 12:
+            return (int(digits[:4]), month)
+    return None
+
+
+def pick_date_column(block, wanted):
+    """집계기준에 맞는 날짜 열. 이름이 맞는 것을 우선하고 없으면 첫 날짜 열."""
+    idxs = (block["roles"].get("date") or [])
+    if not idxs:
+        return None, ""
+    labels = block["labels"].get("date") or []
+    want = norm(wanted).replace(" ", "")
+    if want:
+        for i, label in zip(idxs, labels):
+            if want in norm(label).replace(" ", ""):
+                return i, label
+    return idxs[0], (labels[0] if labels else "")
+
+
+def scan_rows(block, channel, warnings, period=None, date_basis=""):
     """채택한 블록을 상품 라인으로 집계한다. 금액이 있으면 함께 담는다."""
     agg = Aggregator()
     roles = block["roles"]
     numeric = block.get("numeric") or {}
     skipped_cancel = 0
+    skipped_period = 0
+
+    # 집계기준일이 정산 월을 벗어난 행은 이 달 매출이 아니다. 6/30 주문이지만
+    # 7/2 배송완료된 건은 배송완료일 기준 채널에서 다음 달로 넘어간다.
+    date_idx, date_label = (None, "")
+    if period:
+        date_idx, date_label = pick_date_column(block, date_basis)
 
     # 자동 추정이 주문 단위 열을 매출로 집었으면 물린다 — 합계가 배로 튄다.
     sale_idxs = roles.get("saleAmount") or []
@@ -911,6 +956,12 @@ def scan_rows(block, channel, warnings):
         if gubun and any(w in gubun for w in CANCEL_WORDS):
             skipped_cancel += 1
             continue
+        if date_idx is not None:
+            when = parse_date(cell_of(row, date_idx))
+            # 날짜를 못 읽은 행은 버리지 않는다 — 거르는 쪽이 더 위험하다.
+            if when is not None and when != period:
+                skipped_period += 1
+                continue
         qty_raw = role_value(row, roles, "qty")
         qty = int(round(qty_raw)) if qty_raw is not None else 0
         amounts = {}
@@ -973,10 +1024,15 @@ def scan_rows(block, channel, warnings):
         warnings.append(
             "[%s] 취소/반품/반출로 보이는 %d행을 제외했습니다." % (channel, skipped_cancel)
         )
+    if skipped_period:
+        warnings.append(
+            "[%s] '%s' 기준 %d-%02d 이 아닌 %d행을 제외했습니다."
+            % (channel, date_label or "날짜", period[0], period[1], skipped_period)
+        )
     return agg.lines()
 
 
-def parse_scan(sheets, channel, warnings, meta, hint=None):
+def parse_scan(sheets, channel, warnings, meta, hint=None, period=None, date_basis=""):
     """전용 레시피가 없는 모든 채널의 기본 경로."""
     blocks = find_blocks(sheets)
     if not blocks:
@@ -1037,7 +1093,7 @@ def parse_scan(sheets, channel, warnings, meta, hint=None):
             "[%s] '%s' 시트 %d행 머리글로 읽었습니다 (후보 %d개 중). 다르면 화면에서 바꾸세요."
             % (channel, chosen["sheet"], chosen["headerRow"] + 1, len(scored))
         )
-    return scan_rows(chosen, channel, warnings)
+    return scan_rows(chosen, channel, warnings, period, date_basis)
 
 
 def parse_generic(rows, channel, warnings):
@@ -1045,7 +1101,7 @@ def parse_generic(rows, channel, warnings):
     return parse_scan([("sheet1", rows or [])], channel, warnings, {})
 
 
-def parse(channel, sheets, warnings, meta, hint=None):
+def parse(channel, sheets, warnings, meta, hint=None, period=None, date_basis=""):
     rows = sheets[0][1] if sheets else []
     if channel == "gongu":
         return parse_cafe24(rows, channel, warnings, is_gongu=True)
@@ -1067,7 +1123,7 @@ def parse(channel, sheets, warnings, meta, hint=None):
         return parse_terrymarket(rows, channel, warnings)
     # 전용 레시피가 없으면 스캐너로 넘긴다. 화면에서 채널을 추가하고 바로
     # 파일을 올릴 수 있어야 한다.
-    return parse_scan(sheets, channel, warnings, meta, hint)
+    return parse_scan(sheets, channel, warnings, meta, hint, period, date_basis)
 
 
 def main():
@@ -1077,6 +1133,9 @@ def main():
     # 사람이 화면에서 "이 시트의 이 행이 머리글" 이라고 고쳐 준 경우.
     ap.add_argument("--block-sheet", default="")
     ap.add_argument("--block-header-row", type=int, default=0)
+    # 정산 월과 그 채널의 집계기준일. 기준 밖 행은 이 달 매출이 아니다.
+    ap.add_argument("--period", default="")
+    ap.add_argument("--date-basis", default="")
     args = ap.parse_args()
 
     warnings = []
@@ -1105,7 +1164,13 @@ def main():
         )
         sheets = None
 
-    lines = parse(channel, sheets, warnings, meta, hint) if sheets else []
+    period = None
+    if args.period:
+        pm = re.match(r"(\d{4})[.\-/]?(\d{1,2})", args.period)
+        if pm:
+            period = (int(pm.group(1)), int(pm.group(2)))
+
+    lines = parse(channel, sheets, warnings, meta, hint, period, args.date_basis) if sheets else []
 
     result = {
         "channel": channel,

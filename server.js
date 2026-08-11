@@ -25,6 +25,7 @@ const XLSX_PARSE_SCRIPT = path.join(__dirname, "scripts", "xlsx_to_json.py");
 const NPB_PARSE_SCRIPT = path.join(__dirname, "scripts", "npb_parse.py");
 const NPB_XLSX_SCRIPT = path.join(__dirname, "scripts", "npb_settlement_xlsx.py");
 const NPB_INVOICE_SCRIPT = path.join(__dirname, "scripts", "npb_invoice_xlsx.py");
+const NPB_PICKY_SCRIPT = path.join(__dirname, "scripts", "npb_settlement_picky.py");
 const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.HOST || "0.0.0.0";
 const execFileAsync = promisify(execFile);
@@ -593,6 +594,8 @@ export function buildNpbNamespace() {
     name: "픽키도기클럽",
     businessName: "픽키파크",
     productLine: "필바이츠",
+    // 정산서 양식. 도톤과 표가 달라 생성기가 갈린다.
+    settlementLayout: "picky",
     costConfig: {
       billSeparately: true,
       shipTypes: [
@@ -626,29 +629,39 @@ export function buildNpbNamespace() {
   ];
   const pickyPackTiers180 = [{ tier: "1개", ea: 1, listPrice: 26900 }];
 
+  // 판매처가 부르는 이름이 제각각이라 키워드를 "이 중 하나" 형태로 둔다.
+  // 45g 계열은 45g / 5개입 / N팩 으로, 180g 계열은 180g / 20개입 / N박스 로
+  // 불린다. 치킨은 이름에 맛을 안 적으므로 비건 표시가 없는 것을 치킨으로 본다.
+  // 15P·20P 처럼 개수만 적어 보내는 판매처도 있다. 45g 는 5개들이라 5의 배수,
+  // 180g 박스는 20P 한 종류다.
+  const size45 = ["45g", "5개입", "팩", "5p", "15p", "25p", "50p"];
+  const size180 = ["180g", "20개입", "박스", "20p"];
+  const veganWords = ["비건", "고구마", "피넛"];
   const pickyProducts = [
     {
       id: "pb45_chicken", brandId: "pickydog", barcode: "8809879544071",
       name: "픽키도기클럽 필바이츠 45g (5개입) - 치킨 오리지널", listPrice: 6800,
-      nameKeywords: ["45g", "치킨", "오리지널"], skuCodes: ["P000BLOX"],
+      nameKeywords: [size45], excludeKeywords: [...veganWords, "180g", "20개입", "박스", "20p"],
+      skuCodes: ["P000BLOX"], piecesPerUnit: 5,
       packTiers: pickyPackTiers45
     },
     {
       id: "pb180_chicken", brandId: "pickydog", barcode: "",
       name: "픽키도기클럽 필바이츠 180g (20개입) - 치킨 오리지널", listPrice: 26900,
-      nameKeywords: ["180g", "치킨", "오리지널"], skuCodes: [],
+      nameKeywords: [size180], excludeKeywords: veganWords, skuCodes: [], piecesPerUnit: 20,
       packTiers: pickyPackTiers180
     },
     {
-      id: "pb45_vegan", brandId: "pickydog", barcode: "",
+      id: "pb45_vegan", brandId: "pickydog", barcode: "8809990970018",
       name: "픽키도기클럽 필바이츠 45g (5개입) - 비건 고구마와 피넛버터", listPrice: 6800,
-      nameKeywords: ["45g", "비건", "고구마", "피넛버터"], skuCodes: [],
+      nameKeywords: [size45, veganWords], excludeKeywords: ["180g", "20개입", "박스", "20p"],
+      skuCodes: [], piecesPerUnit: 5,
       packTiers: pickyPackTiers45
     },
     {
       id: "pb180_vegan", brandId: "pickydog", barcode: "",
       name: "픽키도기클럽 필바이츠 180g (20개입) - 비건 고구마와 피넛버터", listPrice: 26900,
-      nameKeywords: ["180g", "비건", "고구마", "피넛버터"], skuCodes: [],
+      nameKeywords: [size180, veganWords], skuCodes: [], piecesPerUnit: 20,
       packTiers: pickyPackTiers180
     }
   ];
@@ -683,6 +696,9 @@ export function buildNpbNamespace() {
       // 쿠팡 파일에는 공급가만 있고 정가가 없다. 매출은 상품표 정가,
       // 정산은 파일의 총단가(VAT포함 공급가) 합.
       saleBasis: "list", feeBasis: "settle",
+      // 쿠팡 명세서의 '총단가' 는 이름과 달리 라인 합계(VAT 포함 공급가)다.
+      // 이름만으로는 알 수 없어 기본 매핑을 채널에 박아 둔다.
+      columnMap: { settle: "총단가" },
       note: "쿠팡 수수료만 공제 / 우프마진 없이 그대로 정산" },
     { code: "picky_smartstore", name: "smartstore", feeRate: 0, settleBy: "픽키파크",
       filenameKeywords: ["smartstore", "스마트스토어", "픽키도기클럽"], feeNote: "네이버기준",
@@ -1183,6 +1199,46 @@ function migrateDb(db) {
     mergeById("products", "id");
     mergeById("channels", "code");
 
+    // 상품 인식 키워드를 시드 형태로 올린다. 처음 시드는 "치킨"·"오리지널"이
+    // 상품명에 들어 있다고 가정했는데, 실제 판매처 이름에는 맛이 안 적혀 있어
+    // 아무것도 매칭되지 않았다. 키워드가 예전 형태(문자열만)일 때만 바꾼다.
+    const seededProducts = new Map((npbSeed.products || []).map((p) => [p.id, p]));
+    for (const product of db.npb.products || []) {
+      const seeded = seededProducts.get(product.id);
+      if (!seeded || !Array.isArray(seeded.nameKeywords)) continue;
+      const seedNested = seeded.nameKeywords.some((k) => Array.isArray(k));
+      const storedFlat = (product.nameKeywords || []).every((k) => !Array.isArray(k));
+      if (seedNested && storedFlat && product.excludeKeywords === undefined) {
+        product.nameKeywords = seeded.nameKeywords;
+        product.excludeKeywords = seeded.excludeKeywords || [];
+        if (seeded.piecesPerUnit) product.piecesPerUnit = seeded.piecesPerUnit;
+        if (!product.barcode && seeded.barcode) product.barcode = seeded.barcode;
+        changed = true;
+      }
+    }
+
+    // periodMonth 를 채운다. 없으면 전월 이월도 광고비 월 필터도 동작하지 않는다.
+    for (const settlement of db.npb.settlements || []) {
+      const want = npbPeriodMonth(settlement);
+      if (want && settlement.periodMonth !== want) {
+        settlement.periodMonth = want;
+        changed = true;
+      }
+    }
+
+    // 첫 시드에서 맛만으로 갈랐던 상품(pb_chicken/pb_vegan)은 45g·180g 구분이
+    // 없어 SKU 목록과 맞지 않는다. 쓰인 적이 없으면 감춘다 — 지우지는 않는다.
+    const referenced = new Set(
+      (db.npb.settlements || []).flatMap((s) => (s.lines || []).map((l) => l.productKey))
+    );
+    for (const product of db.npb.products || []) {
+      if (!["pb_chicken", "pb_vegan"].includes(product.id)) continue;
+      if (referenced.has(product.id) || product.active === false) continue;
+      product.active = false;
+      product.retiredNote = "45g/180g 구분 SKU로 대체됨";
+      changed = true;
+    }
+
     // 채널에 뒤늦게 붙은 설정(금액 기준·집계기준·배송비 포함 여부)을 시드에서
     // 채운다. 이미 값이 있으면 손대지 않는다 — 화면에서 고친 것이 우선이다.
     const seededChannels = new Map((npbSeed.channels || []).map((c) => [c.code, c]));
@@ -1190,7 +1246,7 @@ function migrateDb(db) {
       const seeded = seededChannels.get(channel.code);
       if (!seeded) continue;
       for (const key of ["saleBasis", "feeBasis", "includeShipping", "manualEntry",
-        "dateBasis", "shippingNote", "note"]) {
+        "dateBasis", "shippingNote", "note", "columnMap"]) {
         if (channel[key] === undefined && seeded[key] !== undefined) {
           channel[key] = seeded[key];
           changed = true;
@@ -1217,7 +1273,7 @@ function migrateDb(db) {
       // 값이 비어 있을 때만 채운다 — 화면에서 고친 값을 덮어쓰지 않는다.
       const seeded = (npbSeed.brands || []).find((b) => b.id === npbBrand.id);
       if (seeded) {
-        for (const key of ["businessName", "productLine"]) {
+        for (const key of ["businessName", "productLine", "settlementLayout"]) {
           if (npbBrand[key] === undefined && seeded[key] !== undefined) {
             npbBrand[key] = seeded[key];
             changed = true;
@@ -2378,7 +2434,10 @@ function npbRecompute(db, settlement, opts = {}) {
   const npbChannels = (db.npb?.channels || []).filter(
     (c) => !brand || String(c.brandId).toLowerCase() === String(brand.id).toLowerCase()
   );
-  const lines = (settlement.lines || []).map((line) => npbEnrichLine(line, npbChannels));
+  const npbProducts = (db.npb?.products || []).filter(
+    (p) => !brand || npbSameBrand(p.brandId, brand.id)
+  );
+  const lines = (settlement.lines || []).map((line) => npbEnrichLine(line, npbChannels, npbProducts));
   settlement.lines = lines;
   // 출고 건수는 유형별로 받는다. 예전 정산은 소형/대형 두 값만 갖고 있으므로
   // 그대로 옮겨 담아 결과가 달라지지 않게 한다.
@@ -2626,29 +2685,74 @@ function npbNormalizeName(value) {
   return String(value || "").normalize("NFC").toLowerCase().replace(/\s+/g, "");
 }
 
-// "(3팩/15개)" → 3개, "(5개입)" → 1개, "(20개입/1박스)" → 1개(180g)
+// 판매처마다 묶음을 다르게 부른다. 스마트스토어는 "(3팩/15개입)", 카페24는
+// "(수량=3개)", B2B는 "x 3개묶음", 쿠팡은 SKU명 꼬리에 "45g 3개" 로 적는다.
+// 어느 표현이든 "3개" 로 떨어뜨린다.
+const NPB_TIER_PATTERNS = [
+  /(\d+)\s*팩/,
+  /수량\s*=\s*(\d+)\s*개/,
+  /[x×]\s*(\d+)\s*개\s*묶음/,
+  /(\d+)\s*박스/,
+  /\d+\s*g\s*(\d+)\s*개(?!입)/
+];
+
 function npbGuessTier(sourceName, product) {
   const text = String(sourceName || "");
   const tiers = product?.packTiers || [];
-  const packs = text.match(/(\d+)\s*팩/);
-  if (packs) {
-    const want = `${Number(packs[1])}개`;
-    const hit = tiers.find((t) => t.tier === want);
-    if (hit) return hit.tier;
+  for (const pattern of NPB_TIER_PATTERNS) {
+    const hit = text.match(pattern);
+    if (!hit) continue;
+    const want = `${Number(hit[1])}개`;
+    const tier = tiers.find((t) => t.tier === want);
+    if (tier) return tier.tier;
+  }
+  // 묶음 수 대신 총 알 수만 적는 곳도 있다 — "15P", "총 50개입". 한 팩에 몇
+  // 알인지 알면 되짚을 수 있다 (45g = 5알, 180g = 20알).
+  const per = number(product?.piecesPerUnit);
+  if (per > 0) {
+    const pieces = text.match(/(\d+)\s*(?:개입|p\b|P\b)/);
+    if (pieces) {
+      const want = `${Number(pieces[1]) / per}개`;
+      const tier = tiers.find((t) => t.tier === want);
+      if (tier) return tier.tier;
+    }
   }
   return tiers[0]?.tier || "";
+}
+
+// 키워드 하나는 문자열(반드시 포함) 이거나 배열(그중 하나만 있으면 됨) 이다.
+// 판매처가 같은 상품을 "45g", "5개입", "3팩" 으로 제각기 부르기 때문에
+// 하나만 요구하면 절반이 안 잡히고, 전부 요구하면 아무것도 안 잡힌다.
+function npbKeywordHit(norm, keyword) {
+  const list = Array.isArray(keyword) ? keyword : [keyword];
+  return list.some((k) => k && norm.includes(npbNormalizeName(k)));
 }
 
 function npbMatchProduct(sourceName, products) {
   const norm = npbNormalizeName(sourceName);
   if (!norm) return null;
-  // 키워드가 모두 들어 있는 상품만 후보로 본다. 하나만 남을 때 채택한다 —
-  // 맛이나 용량을 못 가르면 임의로 고르지 않는다.
-  const hits = products.filter((p) =>
-    (p.nameKeywords || []).length &&
-    (p.nameKeywords || []).every((k) => norm.includes(npbNormalizeName(k)))
-  );
+  // 후보가 하나로 좁혀질 때만 채택한다 — 맛이나 용량을 못 가르면 임의로
+  // 고르지 않고 사람에게 넘긴다.
+  const hits = products.filter((p) => {
+    const keywords = p.nameKeywords || [];
+    if (!keywords.length) return false;
+    if (!keywords.every((k) => npbKeywordHit(norm, k))) return false;
+    // 치킨은 이름에 맛이 안 적힌다 — 비건 표시가 없는 것이 치킨이다.
+    return !(p.excludeKeywords || []).some((k) => npbKeywordHit(norm, k));
+  });
   return hits.length === 1 ? hits[0] : null;
+}
+
+// 상품이 아닌 부대비용 줄. 네이버 결제정산은 배송비를 상품과 같은 표에 섞어
+// 준다 — 상품이 아니라고 버리면 배송비 매출이 통째로 빠진다(6월 231,000원).
+const NPB_COST_CATEGORIES = [
+  { match: ["배송비", "배송료", "운임"], category: "shipping", label: "배송비" }
+];
+
+function npbCostCategory(sourceName) {
+  const norm = npbNormalizeName(sourceName);
+  if (!norm) return null;
+  return NPB_COST_CATEGORIES.find((c) => c.match.some((m) => norm.startsWith(npbNormalizeName(m)))) || null;
 }
 
 function npbResolveLines(lines, products, aliases) {
@@ -2663,6 +2767,11 @@ function npbResolveLines(lines, products, aliases) {
       continue;
     }
     const sourceName = line.raw?.sourceName || line.tier || line.label || "";
+    const cost = npbCostCategory(sourceName);
+    if (cost) {
+      resolved.push({ ...line, productKey: "", category: cost.category, label: cost.label, tier: "" });
+      continue;
+    }
     const alias = aliasByName.get(npbNormalizeName(sourceName));
     if (alias) {
       resolved.push({ ...line, productKey: alias.productId, tier: alias.tier || "", label: alias.label || sourceName });
@@ -2751,14 +2860,31 @@ function npbFindChannel(channels, code) {
 function npbApplyMoney(enriched, line, channel) {
   const money = line.money || {};
   const has = (v) => v !== undefined && v !== null && v !== "";
-  const saleBasis = channel?.saleBasis || "file";
+  // 기본은 예전 동작(채널 단가표). 파일 금액을 쓰는 채널만 명시적으로 켠다 —
+  // 도톤 채널들은 채널별 할인가를 단가표로 들고 있어 그대로 두어야 한다.
+  const saleBasis = channel?.saleBasis || "channel";
   const feeBasis = channel?.feeBasis || "rate";
   // 고객이 낸 배송비를 매출로 볼지는 채널마다 다르다. 베럴즈 스토어처럼
   // 배송비를 판매처가 가져가는 곳은 우리 매출이 아니다.
   const includeShipping = channel ? channel.includeShipping !== false : true;
 
+  // 배송비 줄은 그 자체가 배송비이자 결제액이다. 여기에 배송비를 한 번 더
+  // 더하면 두 배가 된다.
+  if (line.category === "shipping") {
+    const amount = has(money.sale) ? number(money.sale) : number(money.shipping);
+    enriched.listAmount = 0;
+    enriched.saleAmount = amount;
+    enriched.shippingAmount = amount;
+    if (feeBasis === "fee" && has(money.fee)) enriched.feeAmount = number(money.fee);
+    if (feeBasis === "settle" && has(money.settle)) enriched.settleAmount = number(money.settle);
+    return enriched;
+  }
   if (has(money.list)) enriched.listAmount = number(money.list);
-  if (saleBasis !== "list") {
+  if (saleBasis === "list") {
+    // 쿠팡처럼 파일에 공급가만 있고 정가가 없는 채널. 매출은 우리 상품표의
+    // 정가로 잡는다.
+    enriched.saleAmount = number(enriched.listPrice) * number(enriched.qty);
+  } else {
     let sale = has(money.sale) ? number(money.sale) : null;
     if (sale === null && has(money.list)) {
       sale = number(money.list) - (has(money.discount) ? number(money.discount) : 0);
@@ -2766,6 +2892,19 @@ function npbApplyMoney(enriched, line, channel) {
     if (sale !== null) {
       if (includeShipping && has(money.shipping)) sale += number(money.shipping);
       enriched.saleAmount = sale;
+    }
+    // 정가 열이 없고 수량도 없는 파일(네이버 결제정산)은 결제액이 곧 판매가다.
+    if (enriched.listAmount === undefined && sale !== null && number(enriched.qty) <= 0) {
+      enriched.listAmount = sale - (has(money.shipping) && includeShipping ? number(money.shipping) : 0);
+    }
+    // 금액이 아예 없는 파일(카페24는 수량만 준다)은 정가 판매로 본다. 채널에
+    // 박아 둔 대표 단가를 쓰면 SKU 가 여럿인 브랜드에서 전부 틀린다.
+    //
+    // line.salePrice 로 판단하면 안 된다 — 이 함수의 결과가 다시 저장되어
+    // 다음 계산의 입력이 되므로, 직전에 채워 넣은 대표 단가가 "사람이 정한
+    // 값" 처럼 보여 두 번째 계산부터 조용히 틀어진다.
+    if (saleBasis === "file" && sale === null) {
+      enriched.saleAmount = number(enriched.listPrice) * number(enriched.qty);
     }
   }
   if (feeBasis === "fee" && has(money.fee)) enriched.feeAmount = number(money.fee);
@@ -2775,7 +2914,19 @@ function npbApplyMoney(enriched, line, channel) {
   return enriched;
 }
 
-function npbEnrichLine(line, channels) {
+// 정가는 상품표에서 온다. 묶음마다 정가가 다르므로 tier 까지 봐야 한다 —
+// 45g 1개 6,800 / 3개 20,400 / 5개 34,000. 예전에는 도톤 정가 22,000 이
+// 기본값이라 다른 브랜드 정가가 통째로 틀어졌다.
+function npbListPrice(line, products) {
+  if (line.listPrice != null) return number(line.listPrice);
+  if (line.category) return 0;
+  const product = (products || []).find((p) => p.id === line.productKey);
+  if (!product) return 22000;
+  const tier = (product.packTiers || []).find((t) => t.tier === line.tier);
+  return number(tier ? tier.listPrice : product.listPrice);
+}
+
+function npbEnrichLine(line, channels, products) {
   const channel = npbFindChannel(channels, line.channel);
   const qty = line.qty != null ? number(line.qty) : number(line.qtyEa);
   const enriched = {
@@ -2783,7 +2934,7 @@ function npbEnrichLine(line, channels) {
     channel: channel ? channel.code : line.channel,
     qty,
     eaPerUnit: 1,
-    listPrice: line.listPrice != null ? number(line.listPrice) : 22000
+    listPrice: npbListPrice(line, products)
   };
   // 손으로 고친 값은 파일보다 우선한다 — 화면에서 고친 것이 무시되면
   // 고칠 방법이 없어진다.
@@ -2861,6 +3012,15 @@ function npbGetBrand(db, brandCode) {
   return (db.npb?.brands || []).find((item) => String(item.id).toLowerCase() === code) || null;
 }
 
+// 정산 월 문자열. period 만 저장되고 periodMonth 는 한 번도 채워진 적이 없어서
+// 전월 마감재고 이월(문자열 비교)과 광고비 월 필터가 조용히 놀고 있었다.
+function npbPeriodMonth(settlement) {
+  const year = number(settlement?.period?.year);
+  const month = number(settlement?.period?.month);
+  if (!year || !month) return String(settlement?.periodMonth || "");
+  return `${year}-${String(month).padStart(2, "0")}`;
+}
+
 function npbFindSettlement(db, key) {
   return (db.npb?.settlements || []).find((item) => item.key === key) || null;
 }
@@ -2868,7 +3028,7 @@ function npbFindSettlement(db, key) {
 // Write the uploaded base64 to a temp file then run npb_parse.py, mirroring
 // parseBankXlsxUpload. Channel is passed explicitly (temp filename is random,
 // so filename-based detection can't work). Returns the parser JSON.
-async function runNpbParse(base64, fileName, channel, block = null) {
+async function runNpbParse(base64, fileName, channel, block = null, opts = {}) {
   const buf = Buffer.from(base64 || "", "base64");
   const ext = path.extname(fileName || "") || ".xlsx";
   const tmpPath = path.join(os.tmpdir(), `wooofpay-npb-${crypto.randomBytes(8).toString("hex")}${ext}`);
@@ -2882,6 +3042,10 @@ async function runNpbParse(base64, fileName, channel, block = null) {
       args.push("--block-sheet", String(block.sheet));
       args.push("--block-header-row", String(number(block.headerRow)));
     }
+    // 정산 월 밖의 행은 이 달 매출이 아니다. 어느 날짜로 자를지는 채널의
+    // 집계기준을 따른다 (배송완료일 / 구매확정일 / 계산서 발행일 ...).
+    if (opts.period) args.push("--period", String(opts.period));
+    if (opts.dateBasis) args.push("--date-basis", String(opts.dateBasis));
     let stdout;
     try {
       ({ stdout } = await execFileAsync("python3", args, {
@@ -2906,6 +3070,117 @@ async function runNpbParse(base64, fileName, channel, block = null) {
 // Build the npb_settlement_xlsx.py spec.json from a stored settlement. The
 // generator is tolerant (all fields optional), so we map what we have and let
 // missing sections fall back to its defaults.
+// 픽키도기클럽 계열 정산서. 도톤과 표가 달라 생성기를 따로 둔다 — 도톤 쪽은
+// 정답지와 바이트 단위로 맞춰 둔 코드라 손대지 않는 편이 안전하다.
+//
+// 26년 6월분부터 달라진 점:
+//   - 실비(운임/광고)는 정산서에서 빠지고 따로 청구한다
+//   - 집계 기준이 채널마다 달라 헷갈리므로, 계산서 발행(신고) 기준일과
+//     집계 기간을 나눠 적는다
+//   - 계산서를 픽키파크가 직접 발행하는 채널과 우프가 발행하는 채널의
+//     정산합계를 갈라 적는다
+function npbBuildPickySpec(db, settlement) {
+  const brand = npbGetBrand(db, settlement.brand);
+  const allChannels = db.npb?.channels || [];
+  const period = settlement.period || {};
+  const byCode = new Map();
+  for (const line of settlement.lines || []) {
+    const code = line.channelCode || line.channel || "unknown";
+    if (!byCode.has(code)) byCode.set(code, []);
+    byCode.get(code).push(line);
+  }
+
+  const order = new Map(allChannels.map((c, i) => [c.code, number(c.sortOrder, i)]));
+  const codes = [...byCode.keys()].sort(
+    (a, b) => number(order.get(a), 999) - number(order.get(b), 999)
+  );
+
+  const channels = [];
+  const bySettleBy = new Map();
+  for (const code of codes) {
+    const meta = allChannels.find((item) => item.code === code) || {};
+    const lines = byCode.get(code);
+    const totals = { qty: 0, list: 0, shipping: 0, discount: 0, sale: 0, fee: 0, settle: 0 };
+    const rows = lines.map((line) => {
+      const computed = npbComputeLine(line);
+      const shipping = number(line.shippingAmount);
+      const discount = line.discountAmount != null
+        ? number(line.discountAmount)
+        : computed.listTotal + shipping - computed.saleTotal;
+      totals.qty += number(line.qty);
+      totals.list += computed.listTotal;
+      totals.shipping += shipping;
+      totals.discount += discount;
+      totals.sale += computed.saleTotal;
+      totals.fee += computed.feeTotal;
+      totals.settle += computed.settleTotal;
+      return {
+        label: line.label || line.productKey || "",
+        qty: number(line.qty),
+        listTotal: computed.listTotal,
+        shipping,
+        discount,
+        saleTotal: computed.saleTotal,
+        feeRate: number(line.feeRate),
+        feeTotal: computed.feeTotal,
+        settleTotal: computed.settleTotal,
+        note: line.note || ""
+      };
+    });
+    const settleBy = meta.settleBy || "우프";
+    const bucket = bySettleBy.get(settleBy) || { sale: 0, fee: 0, settle: 0 };
+    bucket.sale += totals.sale;
+    bucket.fee += totals.fee;
+    bucket.settle += totals.settle;
+    bySettleBy.set(settleBy, bucket);
+    channels.push({
+      code,
+      name: meta.name || code,
+      dateBasis: meta.dateBasis || "",
+      shippingNote: meta.shippingNote || "",
+      // 요율이 품목마다 다른 채널은 숫자 대신 그 사실을 적는다.
+      feeLabel: meta.feeNote || (meta.feeRate != null ? number(meta.feeRate) : ""),
+      settleBy,
+      note: meta.note || "",
+      rows,
+      totals
+    });
+  }
+
+  const rollup = settlement.rollup || {};
+  return {
+    title: `${brand?.businessName || ""} (${brand?.name || settlement.brand}) 월별 세부 판매 현황`,
+    brandName: brand?.name || settlement.brand,
+    businessName: brand?.businessName || "",
+    periodMonth: settlement.periodMonth || "",
+    // 파일명의 월은 집계 기준이라 신고 월과 한 달 어긋난다. 둘 다 적어 둔다.
+    issueBasisDate: npbNextMonthEnd(settlement.periodMonth),
+    periodRange: period.range
+      || (period.month ? `${period.year} ${period.month}/1 - ${period.month}/${new Date(Number(period.year), Number(period.month), 0).getDate()}` : ""),
+    rollup: {
+      listTotal: number(rollup.listTotal),
+      discountTotal: number(rollup.discountTotal),
+      shippingTotal: number(rollup.shippingTotal),
+      realSaleTotal: number(rollup.realSaleTotal),
+      feeTotal: number(rollup.feeTotal),
+      settleTotal: number(rollup.realSaleTotal) - number(rollup.feeTotal)
+    },
+    settleParties: [...bySettleBy.entries()].map(([party, sums]) => ({ party, ...sums })),
+    channels,
+    billSeparately: brand?.costConfig?.billSeparately === true,
+    logistics: settlement.logistics || {},
+    adCost: settlement.adCost || null,
+    memo: settlement.memo && settlement.memo.length
+      ? settlement.memo
+      : [
+          "당월부터 실비(물류/운임비/광고홍보비)는 매출에 통합하지 않고 별도 청구합니다.",
+          "정산서에 기재된 월은 판매집계 기준이며, 계산서 발행(신고) 기준일을 함께 적었습니다.",
+          "세금계산서는 정산 월 기준 익익월 10일에 발행합니다.",
+          "정산금액은 정산 월 기준 익월 15일 이내 입금됩니다."
+        ]
+  };
+}
+
 function npbBuildXlsxSpec(db, settlement) {
   const brand = npbGetBrand(db, settlement.brand);
   const costConfig = brand?.costConfig || {};
@@ -2965,6 +3240,23 @@ function npbBuildXlsxSpec(db, settlement) {
     ledger: settlement.ledger || {},
     memo: settlement.memo || []
   };
+}
+
+async function generatePickyXlsx(spec) {
+  const tmpBase = path.join(os.tmpdir(), `wooofpay-npb-picky-${crypto.randomBytes(8).toString("hex")}`);
+  const inputPath = `${tmpBase}.json`;
+  const outputPath = `${tmpBase}.xlsx`;
+  try {
+    await writeFile(inputPath, JSON.stringify(spec), "utf8");
+    await execFileAsync("python3", [NPB_PICKY_SCRIPT, "--input", inputPath, "--output", outputPath], {
+      cwd: __dirname,
+      maxBuffer: 20 * 1024 * 1024
+    });
+    return await readFile(outputPath);
+  } finally {
+    await safeUnlink(inputPath);
+    await safeUnlink(outputPath);
+  }
 }
 
 async function generateNpbInvoiceXlsx(invoice) {
@@ -5963,6 +6255,7 @@ async function routeApi(req, res, url) {
       key,
       brand: brandLabel,
       period: { year, month },
+      periodMonth: npbPeriodMonth({ period: { year, month } }),
       status: "draft",
       uploads: {},
       lines: [],
@@ -6044,15 +6337,21 @@ async function routeApi(req, res, url) {
             });
             return;
           }
-          const parsed = await runNpbParse(body.fileBase64, body.fileName, channelCode, body.block);
-          // 이 채널에서 사람이 고쳐 둔 열 매핑을 먼저 씌운다.
+          const uploadChannel = npbFindChannel(db.npb.channels, channelCode);
+          const parsed = await runNpbParse(body.fileBase64, body.fileName, channelCode, body.block, {
+            period: settlement.periodMonth,
+            dateBasis: uploadChannel?.dateBasis || ""
+          });
+          // 이 채널에서 사람이 고쳐 둔 열 매핑을 먼저 씌운다. 없으면 채널이
+          // 들고 있는 기본 매핑을 쓴다 (쿠팡의 '총단가' 처럼 이름만으로는
+          // 무슨 금액인지 알 수 없는 열).
           const mapKey = npbColumnMapKey(settlement.brand, channelCode);
-          const columnMap = db.npb.columnMaps?.[mapKey] || null;
+          const columnMap = db.npb.columnMaps?.[mapKey] || uploadChannel?.columnMap || null;
           const mappedLines = npbApplyColumnMap(parsed.lines || [], columnMap);
           // 판매처 상품명을 상품표·별칭으로 맞춘다. 못 맞춘 것은 화면에서
           // 한 번 지정하면 별칭으로 남아 다음부터 자동 인식된다.
           const uploadProducts = (db.npb.products || []).filter(
-            (p) => npbSameBrand(p.brandId, settlement.brand)
+            (p) => npbSameBrand(p.brandId, settlement.brand) && p.active !== false
           );
           const resolvedOut = npbResolveLines(
             mappedLines,
@@ -6108,7 +6407,7 @@ async function routeApi(req, res, url) {
           // 입출고 원장에서 상품별 입고·출고를 바로 채운다. 기초는 전월 마감을
           // 이월하고, 마감 = 기초 + 입고 - 출고 로 계산한다.
           const brandProducts = (db.npb.products || []).filter(
-            (p) => npbSameBrand(p.brandId, settlement.brand)
+            (p) => npbSameBrand(p.brandId, settlement.brand) && p.active !== false
           );
           const derived = npbInventoryFromLogistics(rows, brandProducts);
           const opening = npbPriorClosing(db, settlement);
@@ -6368,11 +6667,19 @@ async function routeApi(req, res, url) {
 
     if (action === "xlsx" && method === "GET") {
       try {
-        const spec = npbBuildXlsxSpec(db, settlement);
-        const buffer = await generateNpbXlsx(spec);
+        const xlsxBrand = npbGetBrand(db, settlement.brand);
+        // 브랜드마다 정산서 양식이 다르다. 도톤 생성기는 정답지와 맞춰 둔
+        // 코드라 그대로 두고, 픽키 계열은 자기 양식으로 낸다.
+        const picky = xlsxBrand?.settlementLayout === "picky";
+        const buffer = picky
+          ? await generatePickyXlsx(npbBuildPickySpec(db, settlement))
+          : await generateNpbXlsx(npbBuildXlsxSpec(db, settlement));
+        const fileName = picky
+          ? `종합_(${xlsxBrand?.businessName || ""})우프_${settlement.periodMonth} ${xlsxBrand?.productLine || xlsxBrand?.name || ""} 세부판매내역.xlsx`
+          : `(도톤) ${settlement.key}.xlsx`;
         sendBuffer(res, 200, buffer,
           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          { "content-disposition": contentDisposition(`(도톤) ${settlement.key}.xlsx`) });
+          { "content-disposition": contentDisposition(fileName) });
       } catch (error) {
         sendJson(res, 500, { error: `정산서 생성 실패: ${error.message}` });
       }

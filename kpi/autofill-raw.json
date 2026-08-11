@@ -1,0 +1,1087 @@
+{
+  "generatedAt": "2026-07-23",
+  "companyId": "336kMOHso30afzMqeUqbi",
+  "months": {
+    "1": {
+      "revenue": {
+        "entity:픽키파크": {
+          "sum": 17600000,
+          "count": 2
+        },
+        "entity:다날": {
+          "sum": 4826538,
+          "count": 19
+        },
+        "entity:네이버파이낸셜": {
+          "sum": 3576408,
+          "count": 33
+        },
+        "label:매출(카페24)": {
+          "sum": 2450172,
+          "count": 13
+        },
+        "entity:몰리스펫샵 스타필드하남점": {
+          "sum": 1578134,
+          "count": 1
+        },
+        "entity:쿠팡": {
+          "sum": 1536956,
+          "count": 23
+        },
+        "entity:모이(MOi)": {
+          "sum": 1100000,
+          "count": 1
+        },
+        "entity:롯데쇼핑e커머스사업본부": {
+          "sum": 1075060,
+          "count": 1
+        },
+        "entity:복댕이들의옷장": {
+          "sum": 946900,
+          "count": 3
+        },
+        "entity:(주)무신사페이먼츠": {
+          "sum": 772855,
+          "count": 2
+        },
+        "entity:주식회사 컬리페이": {
+          "sum": 523156,
+          "count": 17
+        },
+        "entity:엔에이치엔페이코": {
+          "sum": 289732,
+          "count": 8
+        },
+        "desc:장안나": {
+          "sum": 147200,
+          "count": 1
+        },
+        "entity:댕댕존": {
+          "sum": 122076,
+          "count": 1
+        },
+        "entity:제이엔씨": {
+          "sum": 91931,
+          "count": 1
+        },
+        "entity:테일릿(TAILIT)": {
+          "sum": 85920,
+          "count": 1
+        },
+        "entity:몽슈슈(MONCHOUCHOU Co.,Ltd.)": {
+          "sum": 84800,
+          "count": 1
+        },
+        "desc:계민영": {
+          "sum": 70000,
+          "count": 2
+        },
+        "entity:개구쟁이": {
+          "sum": 62040,
+          "count": 1
+        },
+        "entity:신세계인터내셔날": {
+          "sum": 49950,
+          "count": 1
+        },
+        "desc:이욱": {
+          "sum": 47981,
+          "count": 2
+        },
+        "desc:이선경": {
+          "sum": 44000,
+          "count": 1
+        },
+        "entity:카카오": {
+          "sum": 39510,
+          "count": 1
+        },
+        "desc:임동희": {
+          "sum": 37901,
+          "count": 1
+        },
+        "desc:현재진": {
+          "sum": 35045,
+          "count": 1
+        },
+        "entity:펫프렌즈": {
+          "sum": 22120,
+          "count": 1
+        },
+        "entity:두더지식물원": {
+          "sum": 7973,
+          "count": 1
+        },
+        "desc:황윤미": {
+          "sum": 6000,
+          "count": 1
+        }
+      },
+      "costs": {
+        "ad": 129359,
+        "logi": 2668292,
+        "storage": 0,
+        "cogs": 9972741,
+        "fee": 54558,
+        "refund": 0
+      }
+    },
+    "2": {
+      "revenue": {
+        "entity:다날": {
+          "sum": 16431506,
+          "count": 17
+        },
+        "entity:네이버파이낸셜": {
+          "sum": 7377195,
+          "count": 24
+        },
+        "label:매출(카페24)": {
+          "sum": 4342887,
+          "count": 19
+        },
+        "label:쿠팡(로켓)": {
+          "sum": 1300794,
+          "count": 12
+        },
+        "entity:몰리스펫샵 스타필드하남점": {
+          "sum": 1169065,
+          "count": 1
+        },
+        "entity:롯데쇼핑e커머스사업본부": {
+          "sum": 1116500,
+          "count": 1
+        },
+        "entity:모이(MOi)": {
+          "sum": 1100000,
+          "count": 1
+        },
+        "entity:(주)무신사페이먼츠": {
+          "sum": 1050635,
+          "count": 2
+        },
+        "entity:테일릿(TAILIT)": {
+          "sum": 882240,
+          "count": 3
+        },
+        "label:사업자몰(B2B)": {
+          "sum": 520100,
+          "count": 1
+        },
+        "entity:엔에이치엔페이코": {
+          "sum": 517291,
+          "count": 6
+        },
+        "entity:주식회사 컬리페이": {
+          "sum": 453942,
+          "count": 11
+        },
+        "entity:독클래스": {
+          "sum": 249350,
+          "count": 1
+        },
+        "desc:이유지": {
+          "sum": 112000,
+          "count": 1
+        },
+        "desc:한수경": {
+          "sum": 109000,
+          "count": 1
+        },
+        "desc:최보람": {
+          "sum": 109000,
+          "count": 1
+        },
+        "desc:이현오": {
+          "sum": 109000,
+          "count": 1
+        },
+        "entity:더힐동물의료센터": {
+          "sum": 100310,
+          "count": 1
+        },
+        "entity:쿠팡": {
+          "sum": 99144,
+          "count": 6
+        },
+        "desc:철수마켓1월정산": {
+          "sum": 96750,
+          "count": 1
+        },
+        "entity:쿠팡페이": {
+          "sum": 79573,
+          "count": 1
+        },
+        "entity:신세계인터내셔날": {
+          "sum": 77100,
+          "count": 1
+        },
+        "entity:댕스기빙데이": {
+          "sum": 66764,
+          "count": 1
+        },
+        "desc:이태훈": {
+          "sum": 60800,
+          "count": 1
+        },
+        "desc:이효린": {
+          "sum": 49511,
+          "count": 1
+        },
+        "desc:임동희": {
+          "sum": 39500,
+          "count": 1
+        },
+        "entity:펫프렌즈": {
+          "sum": 31600,
+          "count": 1
+        },
+        "entity:카카오": {
+          "sum": 31450,
+          "count": 1
+        },
+        "desc:김주영": {
+          "sum": 30000,
+          "count": 1
+        },
+        "desc:이효진": {
+          "sum": 29900,
+          "count": 1
+        },
+        "desc:Kuohengchi": {
+          "sum": 22851,
+          "count": 1
+        },
+        "desc:유재량": {
+          "sum": 18254,
+          "count": 1
+        },
+        "desc:곽소라": {
+          "sum": 6000,
+          "count": 1
+        }
+      },
+      "costs": {
+        "ad": 78312,
+        "logi": 3651863,
+        "storage": 0,
+        "cogs": 8204595,
+        "fee": 0,
+        "refund": 0
+      }
+    },
+    "3": {
+      "revenue": {
+        "label:매출(카페24)": {
+          "sum": 11587384,
+          "count": 40
+        },
+        "label:쿠팡(로켓)": {
+          "sum": 2715514,
+          "count": 13
+        },
+        "entity:다날": {
+          "sum": 2289075,
+          "count": 12
+        },
+        "entity:네이버파이낸셜": {
+          "sum": 2214264,
+          "count": 17
+        },
+        "label:픽키파크대행": {
+          "sum": 2200000,
+          "count": 1
+        },
+        "entity:롯데쇼핑e커머스사업본부": {
+          "sum": 1410500,
+          "count": 1
+        },
+        "entity:몰리스펫샵 스타필드하남점": {
+          "sum": 1365647,
+          "count": 1
+        },
+        "entity:모이(MOi)": {
+          "sum": 1100000,
+          "count": 1
+        },
+        "desc:오승희": {
+          "sum": 695000,
+          "count": 1
+        },
+        "entity:(주)무신사페이먼츠": {
+          "sum": 659575,
+          "count": 2
+        },
+        "entity:픽키파크": {
+          "sum": 629802,
+          "count": 1
+        },
+        "entity:신한카드": {
+          "sum": 497385,
+          "count": 1
+        },
+        "entity:현대카드(주)": {
+          "sum": 472703,
+          "count": 1
+        },
+        "label:사업자몰(B2B)": {
+          "sum": 390930,
+          "count": 1
+        },
+        "entity:삼성카드(주)": {
+          "sum": 283114,
+          "count": 3
+        },
+        "entity:제이엔씨": {
+          "sum": 278931,
+          "count": 1
+        },
+        "entity:(주)케이비국민카드": {
+          "sum": 236327,
+          "count": 2
+        },
+        "entity:테일릿(TAILIT)": {
+          "sum": 211600,
+          "count": 1
+        },
+        "entity:비씨카드(주)": {
+          "sum": 190980,
+          "count": 1
+        },
+        "desc:최정숙": {
+          "sum": 189000,
+          "count": 1
+        },
+        "desc:김민주": {
+          "sum": 172200,
+          "count": 1
+        },
+        "entity:주식회사 컬리페이": {
+          "sum": 156788,
+          "count": 8
+        },
+        "entity:롯데카드(주)": {
+          "sum": 153218,
+          "count": 1
+        },
+        "entity:두더지식물원": {
+          "sum": 138422,
+          "count": 2
+        },
+        "entity:하나카드(주)": {
+          "sum": 122654,
+          "count": 1
+        },
+        "entity:리드메이트코리아": {
+          "sum": 122250,
+          "count": 1
+        },
+        "desc:정경구": {
+          "sum": 99000,
+          "count": 1
+        },
+        "entity:신세계인터내셔날": {
+          "sum": 96750,
+          "count": 1
+        },
+        "entity:엔에이치엔페이코": {
+          "sum": 96376,
+          "count": 3
+        },
+        "entity:독클래스": {
+          "sum": 95850,
+          "count": 1
+        },
+        "desc:이동호": {
+          "sum": 95000,
+          "count": 1
+        },
+        "entity:반애": {
+          "sum": 93390,
+          "count": 1
+        },
+        "desc:주형순": {
+          "sum": 89700,
+          "count": 1
+        },
+        "desc:Kuohengchi": {
+          "sum": 57800,
+          "count": 1
+        },
+        "desc:장은숙": {
+          "sum": 48000,
+          "count": 1
+        },
+        "desc:임동희": {
+          "sum": 39500,
+          "count": 1
+        },
+        "desc:Jessie": {
+          "sum": 35502,
+          "count": 1
+        },
+        "entity:쿠팡페이": {
+          "sum": 34102,
+          "count": 1
+        },
+        "desc:JIN GUOHUA": {
+          "sum": 31000,
+          "count": 1
+        },
+        "entity:농협은행(주)": {
+          "sum": 9910,
+          "count": 1
+        },
+        "desc:유수진": {
+          "sum": 8000,
+          "count": 1
+        },
+        "desc:양선희": {
+          "sum": 6000,
+          "count": 1
+        },
+        "desc:김예빈": {
+          "sum": 5000,
+          "count": 1
+        },
+        "desc:김경희": {
+          "sum": 3500,
+          "count": 1
+        }
+      },
+      "costs": {
+        "ad": 103133,
+        "logi": 1545627,
+        "storage": 0,
+        "cogs": 14927648,
+        "fee": 1015573,
+        "refund": 750602
+      }
+    },
+    "4": {
+      "revenue": {
+        "label:매출(카페24)": {
+          "sum": 41865879,
+          "count": 52
+        },
+        "entity:네이버파이낸셜": {
+          "sum": 15641542,
+          "count": 17
+        },
+        "label:쿠팡(로켓)": {
+          "sum": 2952398,
+          "count": 16
+        },
+        "label:서비스/외주용역": {
+          "sum": 2200000,
+          "count": 1
+        },
+        "label:픽키파크대행": {
+          "sum": 2200000,
+          "count": 1
+        },
+        "label:매출(스마트스토어)": {
+          "sum": 1645332,
+          "count": 1
+        },
+        "label:현대M몰": {
+          "sum": 1260070,
+          "count": 1
+        },
+        "label:사업자몰(B2B)": {
+          "sum": 1245485,
+          "count": 6
+        },
+        "entity:모이(MOi)": {
+          "sum": 1100000,
+          "count": 1
+        },
+        "entity:몰리스펫샵 스타필드하남점": {
+          "sum": 1059991,
+          "count": 1
+        },
+        "entity:(주)무신사페이먼츠": {
+          "sum": 820140,
+          "count": 2
+        },
+        "entity:엔에이치엔페이코": {
+          "sum": 775187,
+          "count": 6
+        },
+        "entity:주식회사 컬리페이": {
+          "sum": 353096,
+          "count": 7
+        },
+        "desc:정지인(선흘 정류장": {
+          "sum": 270000,
+          "count": 1
+        },
+        "label:BMW하모니": {
+          "sum": 193500,
+          "count": 1
+        },
+        "desc:이동호": {
+          "sum": 104000,
+          "count": 2
+        },
+        "desc:전선희": {
+          "sum": 86600,
+          "count": 1
+        },
+        "entity:리드메이트코리아": {
+          "sum": 84000,
+          "count": 1
+        },
+        "entity:제제(ZEZE)": {
+          "sum": 69600,
+          "count": 1
+        },
+        "desc:임지수": {
+          "sum": 59500,
+          "count": 1
+        },
+        "desc:이효린": {
+          "sum": 52800,
+          "count": 1
+        },
+        "desc:유재량": {
+          "sum": 49300,
+          "count": 1
+        },
+        "desc:이창훈": {
+          "sum": 45000,
+          "count": 1
+        },
+        "entity:몽슈슈(MONCHOUCHOU Co.,Ltd.)": {
+          "sum": 30000,
+          "count": 1
+        },
+        "desc:신세계인터내셔": {
+          "sum": 27600,
+          "count": 1
+        },
+        "entity:카카오": {
+          "sum": 27200,
+          "count": 1
+        },
+        "desc:김혜련": {
+          "sum": 20000,
+          "count": 1
+        },
+        "desc:오지윤(아이 엠 올": {
+          "sum": 18750,
+          "count": 1
+        },
+        "desc:엄지민": {
+          "sum": 16500,
+          "count": 1
+        },
+        "entity:버킷플레이스": {
+          "sum": 14053,
+          "count": 1
+        },
+        "entity:오버더센스": {
+          "sum": 13869,
+          "count": 1
+        },
+        "entity:펫프렌즈": {
+          "sum": 7110,
+          "count": 1
+        },
+        "desc:백선영": {
+          "sum": 6000,
+          "count": 1
+        },
+        "desc:나지혜": {
+          "sum": 6000,
+          "count": 1
+        },
+        "desc:유수정": {
+          "sum": 6000,
+          "count": 1
+        },
+        "entity:제이엔씨": {
+          "sum": 3000,
+          "count": 1
+        },
+        "entity:(주)더즌": {
+          "sum": 130,
+          "count": 1
+        }
+      },
+      "costs": {
+        "ad": 237417,
+        "logi": 5704568,
+        "storage": 0,
+        "cogs": 23560296,
+        "fee": 851433,
+        "refund": 96000
+      }
+    },
+    "5": {
+      "revenue": {
+        "label:매출(스마트스토어)": {
+          "sum": 30382969,
+          "count": 10
+        },
+        "label:매출(카페24)": {
+          "sum": 12245235,
+          "count": 46
+        },
+        "entity:네이버파이낸셜": {
+          "sum": 10887642,
+          "count": 15
+        },
+        "label:픽키파크대행": {
+          "sum": 2200000,
+          "count": 1
+        },
+        "label:쿠팡(로켓)": {
+          "sum": 2003720,
+          "count": 13
+        },
+        "label:몰리스펫샵(이마트)": {
+          "sum": 1505382,
+          "count": 1
+        },
+        "label:현대M몰": {
+          "sum": 1486900,
+          "count": 2
+        },
+        "label:29cm": {
+          "sum": 1276250,
+          "count": 2
+        },
+        "label:대리점/벤더매출": {
+          "sum": 1240720,
+          "count": 4
+        },
+        "entity:모이(MOi)": {
+          "sum": 1100000,
+          "count": 1
+        },
+        "entity:쿠팡": {
+          "sum": 1010852,
+          "count": 3
+        },
+        "label:마켓/행사 매출": {
+          "sum": 629365,
+          "count": 8
+        },
+        "label:오늘의집": {
+          "sum": 626542,
+          "count": 2
+        },
+        "entity:엔에이치엔페이코": {
+          "sum": 565804,
+          "count": 8
+        },
+        "entity:몽슈슈(MONCHOUCHOU Co.,Ltd.)": {
+          "sum": 493128,
+          "count": 1
+        },
+        "label:사업자몰(B2B)": {
+          "sum": 470160,
+          "count": 3
+        },
+        "label:컬리": {
+          "sum": 226668,
+          "count": 8
+        },
+        "label:W컨셉샵": {
+          "sum": 188340,
+          "count": 1
+        },
+        "entity:펫프렌즈": {
+          "sum": 150170,
+          "count": 1
+        },
+        "entity:제이엔씨": {
+          "sum": 144542,
+          "count": 1
+        },
+        "entity:신세계인터내셔날": {
+          "sum": 142200,
+          "count": 1
+        },
+        "entity:생강이네(Ginger's": {
+          "sum": 141900,
+          "count": 1
+        },
+        "entity:리드메이트코리아": {
+          "sum": 105000,
+          "count": 1
+        },
+        "label:오버더센스": {
+          "sum": 100902,
+          "count": 1
+        },
+        "desc:이현숙": {
+          "sum": 81600,
+          "count": 1
+        },
+        "desc:박서현": {
+          "sum": 70950,
+          "count": 1
+        },
+        "desc:주혜미": {
+          "sum": 63000,
+          "count": 1
+        },
+        "desc:하지영": {
+          "sum": 59118,
+          "count": 1
+        },
+        "label:펀엔씨(강아지대통령)": {
+          "sum": 45540,
+          "count": 1
+        },
+        "desc:노채원": {
+          "sum": 44900,
+          "count": 1
+        },
+        "desc:반예림": {
+          "sum": 29000,
+          "count": 1
+        },
+        "entity:쿠팡페이": {
+          "sum": 24710,
+          "count": 4
+        },
+        "entity:(주)텐바이텐": {
+          "sum": 24375,
+          "count": 1
+        },
+        "label:카카오선물하기": {
+          "sum": 8330,
+          "count": 1
+        },
+        "desc:노주리": {
+          "sum": 8000,
+          "count": 1
+        },
+        "label:딱펫": {
+          "sum": 3000,
+          "count": 1
+        },
+        "entity:(주)더즌": {
+          "sum": 666,
+          "count": 2
+        },
+        "desc:쿠팡페이주식회": {
+          "sum": 483,
+          "count": 1
+        }
+      },
+      "costs": {
+        "ad": 1420519,
+        "logi": 13857455,
+        "storage": 0,
+        "cogs": 37007203,
+        "fee": 1666988,
+        "refund": 175818
+      }
+    },
+    "6": {
+      "revenue": {
+        "entity:네이버파이낸셜": {
+          "sum": 17563775,
+          "count": 39
+        },
+        "label:매출(카페24)": {
+          "sum": 12888822,
+          "count": 35
+        },
+        "label:현대M몰": {
+          "sum": 2367400,
+          "count": 1
+        },
+        "label:픽키파크대행": {
+          "sum": 2200000,
+          "count": 1
+        },
+        "entity:쿠팡": {
+          "sum": 2043050,
+          "count": 22
+        },
+        "label:29cm": {
+          "sum": 1960020,
+          "count": 2
+        },
+        "entity:주식회사 컬리페이": {
+          "sum": 1935930,
+          "count": 7
+        },
+        "label:몰리스펫샵(이마트)": {
+          "sum": 1226754,
+          "count": 1
+        },
+        "label:대리점/벤더매출": {
+          "sum": 966000,
+          "count": 2
+        },
+        "desc:김예빈": {
+          "sum": 500000,
+          "count": 1
+        },
+        "entity:엔에이치엔페이코": {
+          "sum": 360642,
+          "count": 9
+        },
+        "entity:펫프렌즈": {
+          "sum": 293130,
+          "count": 1
+        },
+        "entity:더블유컨셉코리아": {
+          "sum": 282510,
+          "count": 1
+        },
+        "label:사업자몰(B2B)": {
+          "sum": 178160,
+          "count": 2
+        },
+        "entity:제이엔씨": {
+          "sum": 177770,
+          "count": 1
+        },
+        "desc:주혜미": {
+          "sum": 139500,
+          "count": 1
+        },
+        "desc:쿠팡페이001": {
+          "sum": 125554,
+          "count": 3
+        },
+        "entity:리드메이트코리아": {
+          "sum": 110250,
+          "count": 1
+        },
+        "desc:지은이": {
+          "sum": 94300,
+          "count": 1
+        },
+        "desc:박은진": {
+          "sum": 85500,
+          "count": 1
+        },
+        "desc:정지애": {
+          "sum": 75800,
+          "count": 1
+        },
+        "entity:몽슈슈(MONCHOUCHOU Co.,Ltd.)": {
+          "sum": 75360,
+          "count": 1
+        },
+        "label:카카오선물하기": {
+          "sum": 72930,
+          "count": 1
+        },
+        "entity:쿠팡페이": {
+          "sum": 70662,
+          "count": 4
+        },
+        "desc:이은지": {
+          "sum": 55600,
+          "count": 1
+        },
+        "desc:신세계인터내셔": {
+          "sum": 47550,
+          "count": 1
+        },
+        "label:컬리": {
+          "sum": 42354,
+          "count": 2
+        },
+        "entity:오버더센스": {
+          "sum": 39195,
+          "count": 1
+        },
+        "desc:심재열": {
+          "sum": 32874,
+          "count": 1
+        },
+        "desc:유재량": {
+          "sum": 25865,
+          "count": 1
+        },
+        "desc:김슬기": {
+          "sum": 22350,
+          "count": 1
+        },
+        "entity:엘피네트웍스": {
+          "sum": 12100,
+          "count": 1
+        },
+        "desc:황유진": {
+          "sum": 9000,
+          "count": 1
+        },
+        "desc:김현철": {
+          "sum": 6000,
+          "count": 1
+        },
+        "entity:(주)더즌": {
+          "sum": 5742,
+          "count": 2
+        },
+        "label:픽키도기클럽매출": {
+          "sum": 3740,
+          "count": 1
+        },
+        "desc:쿠팡페이주식회": {
+          "sum": 254,
+          "count": 1
+        }
+      },
+      "costs": {
+        "ad": 1202448,
+        "logi": 132700,
+        "storage": 0,
+        "cogs": 25265406,
+        "fee": 268855,
+        "refund": 64100
+      }
+    },
+    "7": {
+      "revenue": {
+        "entity:네이버파이낸셜": {
+          "sum": 12021490,
+          "count": 30
+        },
+        "label:매출(카페24)": {
+          "sum": 3779568,
+          "count": 27
+        },
+        "label:픽키파크대행": {
+          "sum": 2200000,
+          "count": 1
+        },
+        "entity:리드메이트코리아": {
+          "sum": 2163510,
+          "count": 1
+        },
+        "entity:쿠팡": {
+          "sum": 2130537,
+          "count": 17
+        },
+        "label:29cm": {
+          "sum": 1884055,
+          "count": 2
+        },
+        "label:몰리스펫샵(이마트)": {
+          "sum": 1682890,
+          "count": 1
+        },
+        "entity:소일베이커": {
+          "sum": 1100000,
+          "count": 1
+        },
+        "entity:꾸순네": {
+          "sum": 621600,
+          "count": 1
+        },
+        "entity:펫프렌즈": {
+          "sum": 569430,
+          "count": 1
+        },
+        "label:대리점/벤더매출": {
+          "sum": 491440,
+          "count": 1
+        },
+        "entity:주식회사 컬리페이": {
+          "sum": 419454,
+          "count": 7
+        },
+        "desc:이소영": {
+          "sum": 259000,
+          "count": 1
+        },
+        "desc:오로라": {
+          "sum": 231375,
+          "count": 1
+        },
+        "desc:문영주(오독오독)": {
+          "sum": 222000,
+          "count": 2
+        },
+        "entity:독클래스": {
+          "sum": 201600,
+          "count": 1
+        },
+        "entity:댕버랜드": {
+          "sum": 161250,
+          "count": 2
+        },
+        "entity:복댕이들의옷장": {
+          "sum": 121390,
+          "count": 1
+        },
+        "entity:오버더센스": {
+          "sum": 102778,
+          "count": 1
+        },
+        "entity:더블유컨셉코리아": {
+          "sum": 94170,
+          "count": 1
+        },
+        "entity:쿠팡페이": {
+          "sum": 76875,
+          "count": 1
+        },
+        "desc:스텔라": {
+          "sum": 54550,
+          "count": 1
+        },
+        "entity:엔에이치엔페이코": {
+          "sum": 54078,
+          "count": 2
+        },
+        "desc:신세계인터내셔": {
+          "sum": 41100,
+          "count": 1
+        },
+        "desc:쿠팡페이001": {
+          "sum": 40378,
+          "count": 2
+        },
+        "label:오늘의집": {
+          "sum": 11101,
+          "count": 1
+        },
+        "entity:제이엔씨": {
+          "sum": 8000,
+          "count": 1
+        },
+        "desc:정지원": {
+          "sum": 6000,
+          "count": 1
+        },
+        "entity:(주)더즌": {
+          "sum": 1681,
+          "count": 1
+        },
+        "desc:쿠팡페이주식회": {
+          "sum": 125,
+          "count": 1
+        }
+      },
+      "costs": {
+        "ad": 1010410,
+        "logi": 7513774,
+        "storage": 0,
+        "cogs": 15025326,
+        "fee": 278887,
+        "refund": 3740
+      }
+    }
+  },
+  "revenueTotalCheck": {
+    "1": 37230358,
+    "2": 37790012,
+    "3": 31427643,
+    "4": 74329632,
+    "5": 69788063,
+    "6": 46096443,
+    "7": 30751425
+  }
+}
