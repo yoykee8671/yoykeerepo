@@ -6721,9 +6721,18 @@ async function routeApi(req, res, url) {
               // 기준가 초기값: 파일이 알려준 매출을 수량으로 나눈 실제 단가.
               // 수량이 없는 자료(네이버)는 정가를 그대로 둔다.
               const qty = number(line.qty);
-              const unit = qty > 0 && line.saleAmount != null
+              let unit = qty > 0 && line.saleAmount != null
                 ? Math.round(number(line.saleAmount) / qty)
                 : number(line.listPrice);
+              // 묶음인데 파일의 단가가 낱개 값인 경우가 있다 — 카페24 B2B 는
+              // "수량=100개" 옵션에도 판매가 칸에 낱개 공급가를 적어 보낸다.
+              // 낱개 정가와 비슷한 값이면 묶음 단가로 환산한다.
+              const multiplier = Math.max(1, number(line.multiplier, 1));
+              if (multiplier > 1 && unit > 0) {
+                const base = number(line.listPrice) / multiplier;
+                const ratio = base > 0 ? unit / base : 0;
+                if (ratio >= 0.3 && ratio <= 1.5) unit *= multiplier;
+              }
               return { ...line, unitPrice: unit };
             });
           settlement.uploads[channelCode] = {
