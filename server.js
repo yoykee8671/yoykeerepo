@@ -3024,6 +3024,10 @@ function npbApplyMoney(enriched, line, channel) {
 // 45g 1개 6,800 / 3개 20,400 / 5개 34,000. 예전에는 도톤 정가 22,000 이
 // 기본값이라 다른 브랜드 정가가 통째로 틀어졌다.
 function npbListPrice(line, products) {
+  // 사람이 고친 기준가가 가장 우선한다. 파일 추출이 기준금액을 빠뜨리고 오는
+  // 일이 잦아, 화면에서 고친 값이 살아남지 않으면 고칠 방법이 없다.
+  const manual = Array.isArray(line.manualFields) && line.manualFields.includes("listPrice");
+  if (manual && line.listPrice != null) return number(line.listPrice);
   if (line.category) return 0;
   // 상품표를 먼저 본다. 저장된 line.listPrice 를 믿으면 안 된다 — 워크시트가
   // 한동안 도톤 정가(22,000)를 모든 줄에 박아 저장했고, 그 값을 다시 입력으로
@@ -3300,15 +3304,6 @@ function npbUploadWarnings(parsed, channel, excluded) {
   if (excluded?.length) {
     const names = [...new Set(excluded)].slice(0, 3).join(", ");
     out.push(`이 채널에서 빼기로 한 품목 ${excluded.length}행을 제외했습니다: ${names}`);
-  }
-  // 집계기준일로 잘라야 하는데 파일에 날짜가 없으면 다음 달 건이 섞여 들어온다.
-  const basis = channel?.dateBasis || "";
-  const columns = parsed?.meta?.chosenBlock?.columns || {};
-  if (basis && !columns.date && /일$/.test(basis)) {
-    out.push(
-      `이 채널은 '${basis}' 기준인데 파일에 날짜 열이 없어 기간을 자르지 못했습니다. ` +
-      `내보낼 때 ${basis}를 포함해 주세요.`
-    );
   }
   return out;
 }
@@ -6491,10 +6486,10 @@ async function routeApi(req, res, url) {
             return;
           }
           const uploadChannel = npbFindChannel(brandChannels, channelCode);
-          const parsed = await runNpbParse(body.fileBase64, body.fileName, channelCode, body.block, {
-            period: settlement.periodMonth,
-            dateBasis: uploadChannel?.dateBasis || ""
-          });
+          // 기간으로 자르지 않는다. 어느 기준(배송완료일·구매확정일…)으로 뽑을지는
+          // 내려받는 쪽에서 이미 정해서 오므로, 올라온 파일을 그대로 다 쓴다.
+          // dateBasis 는 정산서에 표기만 한다.
+          const parsed = await runNpbParse(body.fileBase64, body.fileName, channelCode, body.block);
           // 이 채널에서 사람이 고쳐 둔 열 매핑을 먼저 씌운다. 없으면 채널이
           // 들고 있는 기본 매핑을 쓴다 (쿠팡의 '총단가' 처럼 이름만으로는
           // 무슨 금액인지 알 수 없는 열).
@@ -6537,13 +6532,10 @@ async function routeApi(req, res, url) {
             columnMap,
             uploadedAt: now()
           };
-          // Accumulate parsed lines into the editable grid: drop any prior lines
-          // for this channel (idempotent re-upload) and append the fresh ones.
-          settlement.lines = (settlement.lines || [])
-            .filter((line) => line.channel !== channelCode)
-            .concat(parsedLines);
-          // 업로드 즉시 집계까지 끝낸다. 사람이 워크시트로 건너가 [저장(계산)]
-          // 을 눌러야 숫자가 맞는 구조가 병목이었다.
+          // 파일은 초안까지만 만든다. 파일이 기준금액을 빠뜨리고 오는 일이
+          // 잦아, 사람이 행별로 보고 고친 뒤 [확정/반영] 을 눌러야 워크시트에
+          // 들어간다. 확정 전까지 기존 워크시트 숫자는 건드리지 않는다.
+          settlement.uploads[channelCode].confirmed = false;
           const computed = npbRecompute(db, settlement);
           await writeDb(db);
           sendJson(res, 200, {
@@ -6607,6 +6599,40 @@ async function routeApi(req, res, url) {
       } catch (error) {
         sendJson(res, 400, { error: `파일 파싱 실패: ${error.message}` });
       }
+      return;
+    }
+
+    // 검수한 행을 워크시트에 반영한다. 업로드는 초안이고 여기서 확정된다.
+    if (action === "confirm" && method === "POST") {
+      const body = await readBody(req);
+      const channelCode = String(body.channel || "").trim();
+      if (!channelCode) { sendJson(res, 400, { error: "채널을 지정해 주세요." }); return; }
+      if (!Array.isArray(body.rows)) { sendJson(res, 400, { error: "rows 배열이 필요합니다." }); return; }
+      const rows = body.rows
+        .filter((row) => row && !row.dropped)
+        .map((row) => ({
+          ...row,
+          channel: channelCode,
+          qty: number(row.qty),
+          qtyEa: number(row.qty),
+          manualFields: Array.isArray(row.manualFields) ? row.manualFields : []
+        }));
+      settlement.lines = (settlement.lines || [])
+        .filter((line) => line.channel !== channelCode)
+        .concat(rows);
+      if (settlement.uploads?.[channelCode]) {
+        settlement.uploads[channelCode].lines = rows;
+        settlement.uploads[channelCode].confirmed = true;
+        settlement.uploads[channelCode].confirmedAt = now();
+      }
+      const computed = npbRecompute(db, settlement);
+      await writeDb(db);
+      sendJson(res, 200, {
+        channel: channelCode,
+        rows: settlement.lines.filter((line) => line.channel === channelCode),
+        rollup: computed.rollup,
+        settlement
+      });
       return;
     }
 
