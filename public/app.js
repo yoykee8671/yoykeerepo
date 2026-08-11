@@ -5383,7 +5383,16 @@ const NPB_MULTIPLIERS = [1, 2, 3, 4, 5, 6, 10, 12, 20, 24, 50, 100];
 function npbAliasDraftFor(i) {
   const n = state.npb;
   if (!n.aliasDraft) n.aliasDraft = {};
-  if (!n.aliasDraft[i]) n.aliasDraft[i] = { targets: [{ productId: "", multiplier: 1 }] };
+  if (!n.aliasDraft[i]) {
+    // 이름으로 짐작한 값을 기본 선택으로 깔아 둔다. 조용히 적용하지는 않고,
+    // 사람이 보고 [매칭 저장] 을 눌러야 규칙이 된다.
+    const guess = (n.unresolved || [])[i]?.suggestion;
+    n.aliasDraft[i] = {
+      targets: [guess
+        ? { productId: guess.productId, multiplier: Number(guess.multiplier || 1) }
+        : { productId: "", multiplier: 1 }]
+    };
+  }
   const draft = n.aliasDraft[i];
   if (!Array.isArray(draft.targets)) draft.targets = [{ productId: "", multiplier: 1 }];
   return draft;
@@ -5413,7 +5422,10 @@ function renderNpbUnresolved() {
       </div>`).join("");
     return `
       <tr>
-        <td class="wrap">${h(u.sourceName)}</td>
+        <td class="wrap">${h(u.sourceName)}
+          ${u.sourceCode ? `<div class="muted">코드 ${h(u.sourceCode)}</div>` : ""}
+          ${u.option ? `<div class="muted">옵션 ${h(u.option)}</div>` : ""}
+          ${u.suggestion ? `<span class="badge">추정</span>` : ""}</td>
         <td class="num">${money.format(u.qty || 0)}</td>
         <td>
           ${targetRows}
@@ -5426,7 +5438,8 @@ function renderNpbUnresolved() {
     <div class="npb-pending-wrap">
       <h3 style="color:var(--red)">상품을 알 수 없는 이름 ${list.length}건</h3>
       <p class="muted">
-        판매처마다 상품명이 다릅니다. <b>어느 상품</b>인지 고르고, 그 한 건이
+        판매처가 상품코드를 주면 그 코드로 기억합니다 — 이름이 바뀌어도 계속 인식됩니다.
+        <b>어느 상품</b>인지 고르고, 그 한 건이
         <b>재고에서 몇 개 빠지는지</b> 배수를 정하세요. 3팩이면 <b>주문수량 × 3</b> 입니다.
         치킨2+고구마1 처럼 섞인 묶음은 <b>[+ 상품 추가]</b> 로 여러 개를 걸면 됩니다.
         한 번 지정하면 <b>다음부터 자동으로 인식</b>됩니다.
@@ -6128,12 +6141,15 @@ function bindNpbUpload() {
         const draft = n.aliasDraft?.[i];
         const targets = (draft?.targets || []).filter((t) => t.productId);
         if (!targets.length) return null;
+        const channel = n.review?.channel || "";
         if (targets[0].productId === "__ignore") {
-          return { brandId: npbBrand(), sourceName: u.sourceName, ignore: true };
+          return { brandId: npbBrand(), channel, sourceName: u.sourceName, sourceCode: u.sourceCode || "", ignore: true };
         }
         return {
           brandId: npbBrand(),
+          channel,
           sourceName: u.sourceName,
+          sourceCode: u.sourceCode || "",
           targets: targets.map((t) => ({
             productId: t.productId,
             multiplier: Math.max(1, Number(t.multiplier || 1))

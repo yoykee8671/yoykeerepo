@@ -2963,11 +2963,39 @@ function npbLineFromTarget(line, target, product, share, sourceName) {
   };
 }
 
-function npbResolveLines(lines, products, aliases) {
-  const aliasByName = new Map(
-    (aliases || []).map((a) => [npbNormalizeName(a.sourceName), a])
-  );
+// 매칭 규칙을 찾는 열쇠. 판매처가 상품코드를 주면 그게 가장 안정적이다 —
+// 이름은 판매처가 언제든 바꾸지만 코드는 그대로다. 코드가 없는 자료(오프라인
+// 행사 등)만 이름+옵션으로 잡는다.
+function npbAliasKeys(line, channelCode) {
+  const ch = String(channelCode || "").toLowerCase();
+  const code = String(line.raw?.code || "").trim().toLowerCase();
+  const name = npbNormalizeName(line.raw?.sourceName || line.label || "");
+  const keys = [];
+  if (code) keys.push(`${ch}::code::${code}`);
+  if (name) keys.push(`${ch}::name::${name}`);
+  // 채널을 안 가리던 시절에 저장된 규칙도 계속 읽는다.
+  if (name) keys.push(`::name::${name}`);
+  return keys;
+}
+
+function npbAliasIndex(aliases) {
+  const map = new Map();
+  for (const alias of aliases || []) {
+    const ch = String(alias.channel || "").toLowerCase();
+    const code = String(alias.sourceCode || "").trim().toLowerCase();
+    const name = npbNormalizeName(alias.sourceName);
+    if (code) map.set(`${ch}::code::${code}`, alias);
+    if (name) map.set(`${ch}::name::${name}`, alias);
+  }
+  return map;
+}
+
+function npbResolveLines(lines, products, aliases, channelCode = "") {
+  const index = npbAliasIndex(aliases);
   const productById = new Map((products || []).map((p) => [p.id, p]));
+  const byBarcode = new Map(
+    (products || []).filter((p) => p.barcode).map((p) => [String(p.barcode).trim(), p])
+  );
   const resolved = [];
   const unresolved = new Map();
 
@@ -2994,21 +3022,40 @@ function npbResolveLines(lines, products, aliases) {
       resolved.push({ ...line, productKey: "", category: cost.category, label: cost.label, tier: "" });
       continue;
     }
-    const alias = aliasByName.get(npbNormalizeName(sourceName));
+
+    // 1) 우리 바코드가 그대로 실려 오면 규칙이 필요 없다.
+    const barcode = String(line.raw?.barcode || "").trim().split(".")[0];
+    const byCode = barcode ? byBarcode.get(barcode) : null;
+    if (byCode) {
+      emit(line, [{ productId: byCode.id, multiplier: 1 }], sourceName);
+      continue;
+    }
+
+    // 2) 저장된 규칙. 같은 판매처에서 코드나 이름이 같으면 그대로 넘어간다.
+    let alias = null;
+    for (const key of npbAliasKeys(line, channelCode)) {
+      alias = index.get(key);
+      if (alias) break;
+    }
     if (alias?.ignore) continue;
     if (alias) {
       const targets = npbAliasTargets(alias);
       if (targets.length) { emit(line, targets, sourceName); continue; }
     }
-    // 사람이 지정한 규칙이 없으면 이름으로 한 번 맞춰 본다. 상품이 하나로
-    // 좁혀질 때만 채택하고, 배수는 이름에 적힌 묶음 수를 쓴다.
-    const product = npbMatchProduct(sourceName, products);
-    if (product) {
-      emit(line, [{ productId: product.id, multiplier: npbTierMultiplier(npbGuessTier(sourceName, product)) }], sourceName);
-      continue;
-    }
-    const key = npbNormalizeName(sourceName);
-    const cur = unresolved.get(key) || { sourceName, qty: 0 };
+
+    // 3) 규칙이 없으면 사람에게 넘긴다. 이름 키워드로 짐작한 값은 화면의
+    //    기본 선택으로만 쓴다 — 조용히 적용하면 틀려도 알아챌 수가 없다.
+    const guess = npbMatchProduct(sourceName, products);
+    const key = npbNormalizeName(sourceName) + "::" + String(line.raw?.code || "");
+    const cur = unresolved.get(key) || {
+      sourceName,
+      sourceCode: String(line.raw?.code || "").trim(),
+      option: line.raw?.option || "",
+      qty: 0,
+      suggestion: guess
+        ? { productId: guess.id, multiplier: npbTierMultiplier(npbGuessTier(sourceName, guess)) }
+        : null
+    };
     cur.qty += number(line.qtyEa ?? line.qty);
     unresolved.set(key, cur);
   }
@@ -6393,9 +6440,17 @@ async function routeApi(req, res, url) {
         }));
       if (!sourceName || (!targets.length && !ignore)) continue;
       const brandId = String(item.brandId || "doteon");
+      // 규칙은 판매처별로 기억한다. 같은 이름이라도 판매처가 다르면 다른
+      // 상품일 수 있다.
+      const channel = String(item.channel || "").trim();
+      const sourceCode = String(item.sourceCode || "").trim();
       const key = npbNormalizeName(sourceName);
       const existing = db.npb.productAliases.find(
-        (a) => a.brandId === brandId && npbNormalizeName(a.sourceName) === key
+        (a) => a.brandId === brandId
+          && String(a.channel || "") === channel
+          && (sourceCode
+            ? String(a.sourceCode || "") === sourceCode
+            : npbNormalizeName(a.sourceName) === key)
       );
       const describe = (t) => {
         const product = (db.npb.products || []).find((p) => p.id === t.productId);
@@ -6403,6 +6458,8 @@ async function routeApi(req, res, url) {
       };
       const label = ignore ? "(이 브랜드 상품 아님)" : targets.map(describe).join(" + ");
       const record = {
+        channel,
+        sourceCode,
         targets,
         label,
         ignore,
@@ -6650,7 +6707,8 @@ async function routeApi(req, res, url) {
           const resolvedOut = npbResolveLines(
             mappedLines,
             uploadProducts,
-            (db.npb.productAliases || []).filter((a) => npbSameBrand(a.brandId, settlement.brand))
+            (db.npb.productAliases || []).filter((a) => npbSameBrand(a.brandId, settlement.brand)),
+            channelCode
           );
           // 화면에 넘기기 전에 채널 규칙을 먹인다. 파서가 준 줄은 money 만 들고
           // 있어서, 그대로 검수표에 뿌리면 기준가·수량·금액이 전부 0 으로 보인다
