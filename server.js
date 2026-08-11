@@ -717,15 +717,13 @@ export function buildNpbNamespace() {
       // 이름만으로는 알 수 없어 기본 매핑을 채널에 박아 둔다.
       columnMap: { settle: "총단가" },
       note: "쿠팡 수수료만 공제 / 우프마진 없이 그대로 정산" },
+    // 픽키도기클럽 스토어와 픽키파크 스토어는 정산상 같은 채널로 본다.
+    // 스토어가 둘이라 마감자료가 두 개 오지만 합쳐서 한 줄로 정산한다.
     { code: "picky_smartstore", name: "smartstore", feeRate: 0, settleBy: "픽키파크",
-      filenameKeywords: ["smartstore", "스마트스토어", "픽키도기클럽"], feeNote: "네이버기준",
+      filenameKeywords: ["smartstore", "스마트스토어", "픽키도기클럽", "픽키파크스토어"],
+      feeNote: "네이버기준",
       dateBasis: "네이버 계산서발행 일자", saleBasis: "file", feeBasis: "fee",
-      note: "직접발행 (정산서 전달)" },
-    { code: "picky_smartstore_park", name: "smartstore(픽키파크)", feeRate: 0, settleBy: "픽키파크",
-      filenameKeywords: ["픽키파크스토어", "smartstore_park"], feeNote: "네이버기준",
-      dateBasis: "네이버 계산서발행 일자", saleBasis: "file", feeBasis: "fee",
-      // 26년 7월 신규 개설. 사업자 상호와 동명의 스토어라 마감자료가 따로 나온다.
-      note: "26.7 신규개설 / 직접발행 (정산서 전달)" },
+      note: "직접발행 (정산서 전달) / 픽키도기클럽·픽키파크 스토어 합산" },
     { code: "picky_kurly", name: "kurly", feeRate: 0.35, settleBy: "픽키파크",
       filenameKeywords: ["컬리", "kurly"], dateBasis: "컬리 계산서 발행 일자",
       shippingNote: "컬리배송", note: "직접발행 (정산서 전달)" },
@@ -1274,6 +1272,26 @@ function migrateDb(db) {
       if (referenced.has(product.id) || product.active === false) continue;
       product.active = false;
       product.retiredNote = "45g/180g 구분 SKU로 대체됨";
+      changed = true;
+    }
+
+    // 픽키파크 스토어는 별도 채널로 뒀다가 같은 채널로 정리했다. 이미 만들어진
+    // 채널과 거기 붙은 줄·업로드 기록을 smartstore 로 옮긴 뒤 채널을 지운다.
+    const mergedChannels = { picky_smartstore_park: "picky_smartstore" };
+    for (const [from, to] of Object.entries(mergedChannels)) {
+      if (!(db.npb.channels || []).some((c) => c.code === from)) continue;
+      for (const settlement of db.npb.settlements || []) {
+        for (const line of settlement.lines || []) {
+          if (line.channel === from) { line.channel = to; changed = true; }
+        }
+        const upload = settlement.uploads?.[from];
+        if (upload) {
+          if (!settlement.uploads[to]) settlement.uploads[to] = { ...upload, channel: to };
+          delete settlement.uploads[from];
+          changed = true;
+        }
+      }
+      db.npb.channels = (db.npb.channels || []).filter((c) => c.code !== from);
       changed = true;
     }
 
