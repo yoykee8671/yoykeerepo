@@ -5460,11 +5460,16 @@ function renderNpbUnresolved() {
 function npbReviewMath(row) {
   const qty = Number(row.qty || 0);
   const listTotal = Number(row.listPrice || 0) * qty;
+  // 기준가 = 그 판매처에서 실제로 팔린 단가. 정가는 상품표 값이라 고정이고,
+  // 할인·계약가가 반영된 실제 단가는 여기에 적는다.
+  const unit = row.unitPrice != null && row.unitPrice !== ""
+    ? Number(row.unitPrice)
+    : Number(row.listPrice || 0);
   const discount = Number(row.discountAmount || 0);
   const shipping = Number(row.shippingAmount || 0);
   const sale = row.saleAmount != null && row.saleAmount !== ""
     ? Number(row.saleAmount)
-    : listTotal - discount + shipping;
+    : unit * qty - discount + shipping;
   // 정산금이 확정된 채널(쿠팡)은 공제를 역산한다 — 서버 계산과 같은 규칙이다.
   if (row.settleAmount != null && row.settleAmount !== "") {
     const settle = Number(row.settleAmount);
@@ -5498,8 +5503,9 @@ function renderNpbReview() {
         <td class="num">${i + 1}</td>
         <td class="wrap">${h(row.label || row.productKey || "")}
           ${fromFile ? `<span class="badge">${fromFile}</span>` : ""}</td>
-        <td><input class="num" type="number" data-npb-rv="${i}" data-npb-rf="listPrice"
-          value="${h(row.listPrice ?? 0)}"></td>
+        <td class="num">${money.format(row.listPrice ?? 0)}</td>
+        <td><input class="num" type="number" data-npb-rv="${i}" data-npb-rf="unitPrice"
+          value="${h(row.unitPrice ?? row.listPrice ?? 0)}"></td>
         <td><input class="num" type="number" data-npb-rv="${i}" data-npb-rf="qty"
           value="${h(row.qty ?? 0)}"></td>
         <td><input class="num" type="number" data-npb-rv="${i}" data-npb-rf="discountAmount"
@@ -5531,12 +5537,12 @@ function renderNpbReview() {
       </div>
       <div class="table-wrap" style="max-height:420px"><table>
         <thead><tr>
-          <th>순번</th><th>품목</th><th>기준가</th><th>수량</th><th>할인(원)</th>
+          <th>순번</th><th>품목</th><th>정가</th><th>기준가</th><th>수량</th><th>할인(원)</th>
           <th>배송비</th><th>최종결제</th><th>수수료(%)</th><th>수수료(원)</th><th>정산</th><th></th>
         </tr></thead>
         <tbody>${rows}</tbody>
         <tfoot><tr>
-          <th></th><th>합계</th><th></th><th class="num">${money.format(total.qty)}</th>
+          <th></th><th>합계</th><th></th><th></th><th class="num">${money.format(total.qty)}</th>
           <th></th><th></th><th class="num">${money.format(total.sale)}</th><th></th>
           <th class="num">${money.format(total.fee)}</th><th class="num">${money.format(total.settle)}</th><th></th>
         </tr></tfoot>
@@ -5658,8 +5664,7 @@ function renderNpbWsBlock(block, bi) {
           <td>${h(row.label)}${m.fromFile
             ? ` <span class="badge" title="업로드한 파일의 금액을 씁니다">파일</span>`
             : ""}${row.extra ? ` <span class="badge">추가</span>` : ""}</td>
-          <td><input class="num" type="number" data-npb-ws="${bi}" data-npb-wr="${ri}"
-            data-npb-wf="listPrice" value="${h(row.listPrice)}"></td>
+          <td class="num">${money.format(row.listPrice)}</td>
           <td><input class="num" type="number" data-npb-ws="${bi}" data-npb-wr="${ri}"
             data-npb-wf="salePrice" value="${h(row.salePrice)}"></td>
           <td><input class="num npb-pct" type="number" step="0.01" data-npb-ws="${bi}"
@@ -6220,7 +6225,7 @@ function bindNpbUpload() {
       // 빠뜨리고 오는 경우가 있어, 고친 값이 이기지 않으면 고칠 방법이 없다.
       const manual = new Set(row.manualFields || []);
       manual.add("listPrice");
-      if (["listPrice", "qty", "discountAmount", "shippingAmount"].includes(field)) {
+      if (["unitPrice", "qty", "discountAmount", "shippingAmount"].includes(field)) {
         delete row.saleAmount;
         delete row.settleAmount;
         manual.add("saleAmount");
@@ -6532,18 +6537,18 @@ function npbRepaintReview() {
     if (!row) return;
     const m = npbReviewMath(row);
     const tds = tr.querySelectorAll("td");
-    if (tds[6]) tds[6].textContent = money.format(m.sale);
-    if (tds[8]) tds[8].textContent = money.format(m.fee);
-    if (tds[9]) tds[9].textContent = money.format(m.settle);
+    if (tds[7]) tds[7].textContent = money.format(m.sale);
+    if (tds[9]) tds[9].textContent = money.format(m.fee);
+    if (tds[10]) tds[10].textContent = money.format(m.settle);
     if (row.dropped) return;
     total.qty += Number(row.qty || 0);
     total.sale += m.sale; total.fee += m.fee; total.settle += m.settle;
   });
   const foot = table.querySelectorAll("tfoot th");
-  if (foot[3]) foot[3].textContent = money.format(total.qty);
-  if (foot[6]) foot[6].textContent = money.format(total.sale);
-  if (foot[8]) foot[8].textContent = money.format(total.fee);
-  if (foot[9]) foot[9].textContent = money.format(total.settle);
+  if (foot[4]) foot[4].textContent = money.format(total.qty);
+  if (foot[7]) foot[7].textContent = money.format(total.sale);
+  if (foot[9]) foot[9].textContent = money.format(total.fee);
+  if (foot[10]) foot[10].textContent = money.format(total.settle);
 }
 
 function renderNpbWorksheetLive() {

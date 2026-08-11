@@ -6716,7 +6716,16 @@ async function routeApi(req, res, url) {
           // 쓰는 값과 같은 값을 보여줘야 고칠 수 있다.
           const parsedLines = resolvedOut.resolved
             .map((line) => ({ ...line, channel: channelCode }))
-            .map((line) => npbEnrichLine(line, brandChannels, uploadProducts));
+            .map((line) => npbEnrichLine(line, brandChannels, uploadProducts))
+            .map((line) => {
+              // 기준가 초기값: 파일이 알려준 매출을 수량으로 나눈 실제 단가.
+              // 수량이 없는 자료(네이버)는 정가를 그대로 둔다.
+              const qty = number(line.qty);
+              const unit = qty > 0 && line.saleAmount != null
+                ? Math.round(number(line.saleAmount) / qty)
+                : number(line.listPrice);
+              return { ...line, unitPrice: unit };
+            });
           settlement.uploads[channelCode] = {
             kind,
             channel: channelCode,
@@ -6822,13 +6831,18 @@ async function routeApi(req, res, url) {
       if (!Array.isArray(body.rows)) { sendJson(res, 400, { error: "rows 배열이 필요합니다." }); return; }
       const rows = body.rows
         .filter((row) => row && !row.dropped)
-        .map((row) => ({
-          ...row,
-          channel: channelCode,
-          qty: number(row.qty),
-          qtyEa: number(row.qty),
-          manualFields: Array.isArray(row.manualFields) ? row.manualFields : []
-        }));
+        .map((row) => {
+          const manual = new Set(Array.isArray(row.manualFields) ? row.manualFields : []);
+          const line = { ...row, channel: channelCode, qty: number(row.qty), qtyEa: number(row.qty) };
+          // 검수표의 '기준가' 는 그 판매처에서 실제로 팔린 단가다. 정가(상품표)와
+          // 달라질 수 있고, 적어 넣으면 매출은 이 값으로 계산한다.
+          if (row.unitPrice !== undefined && row.unitPrice !== "") {
+            line.salePrice = number(row.unitPrice);
+            line.unitPrice = number(row.unitPrice);
+          }
+          line.manualFields = [...manual];
+          return line;
+        });
       settlement.lines = (settlement.lines || [])
         .filter((line) => line.channel !== channelCode)
         .concat(rows);
