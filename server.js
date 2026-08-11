@@ -6516,10 +6516,13 @@ async function routeApi(req, res, url) {
             uploadProducts,
             (db.npb.productAliases || []).filter((a) => npbSameBrand(a.brandId, settlement.brand))
           );
-          const parsedLines = resolvedOut.resolved.map((line) => ({
-            ...line,
-            channel: channelCode
-          }));
+          // 화면에 넘기기 전에 채널 규칙을 먹인다. 파서가 준 줄은 money 만 들고
+          // 있어서, 그대로 검수표에 뿌리면 기준가·수량·금액이 전부 0 으로 보인다
+          // (네이버 결제정산 파일은 수량·정가 열이 아예 없다). 서버가 정산에
+          // 쓰는 값과 같은 값을 보여줘야 고칠 수 있다.
+          const parsedLines = resolvedOut.resolved
+            .map((line) => ({ ...line, channel: channelCode }))
+            .map((line) => npbEnrichLine(line, brandChannels, uploadProducts));
           settlement.uploads[channelCode] = {
             kind,
             channel: channelCode,

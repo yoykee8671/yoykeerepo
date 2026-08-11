@@ -5486,6 +5486,11 @@ function npbReviewMath(row) {
   const sale = row.saleAmount != null && row.saleAmount !== ""
     ? Number(row.saleAmount)
     : listTotal - discount + shipping;
+  // 정산금이 확정된 채널(쿠팡)은 공제를 역산한다 — 서버 계산과 같은 규칙이다.
+  if (row.settleAmount != null && row.settleAmount !== "") {
+    const settle = Number(row.settleAmount);
+    return { listTotal, discount, shipping, sale, fee: sale - settle, settle };
+  }
   const fee = row.feeAmount != null && row.feeAmount !== ""
     ? Number(row.feeAmount)
     : Math.round(sale * Number(row.feeRate || 0));
