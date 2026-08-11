@@ -2275,8 +2275,6 @@ export function npbComputeRollup(lines, logisticsCost, carryOver = 0) {
   let realSaleTotal = 0;
   let feeTotal = 0;
   let shippingTotal = 0;
-  let fileDiscountTotal = 0;
-  let hasFileDiscount = false;
   for (const line of lines) {
     const computed = npbComputeLine(line);
     qtyTotal += number(line.qty) * (number(line.eaPerUnit, 1) || 1);
@@ -2284,10 +2282,6 @@ export function npbComputeRollup(lines, logisticsCost, carryOver = 0) {
     realSaleTotal += computed.saleTotal;
     feeTotal += computed.feeTotal;
     shippingTotal += number(line.shippingAmount);
-    if (line.discountAmount != null) {
-      fileDiscountTotal += number(line.discountAmount);
-      hasFileDiscount = true;
-    }
   }
   const revenueTotal = realSaleTotal - feeTotal;
   const cost = number(logisticsCost);
@@ -2296,9 +2290,9 @@ export function npbComputeRollup(lines, logisticsCost, carryOver = 0) {
     qtyTotal,
     listTotal,
     shippingTotal,
-    // 정가 - 할인 + 배송비 = 최종결제. 파일이 할인액을 직접 주면 그 값을 믿고,
-    // 아니면 나머지에서 되짚는다.
-    discountTotal: hasFileDiscount ? fileDiscountTotal : listTotal + shippingTotal - realSaleTotal,
+    // 정가 - 할인 + 배송비 = 최종결제. 할인은 나머지에서 되짚는다 — 파일의
+    // 할인 열을 그대로 쓰면 그 열이 없는 채널과 섞여 총계가 어긋난다.
+    discountTotal: listTotal + shippingTotal - realSaleTotal,
     realSaleTotal,
     feeTotal,
     revenueTotal,
@@ -2773,6 +2767,7 @@ function npbResolveLines(lines, products, aliases) {
       continue;
     }
     const alias = aliasByName.get(npbNormalizeName(sourceName));
+    if (alias?.ignore) continue;
     if (alias) {
       resolved.push({ ...line, productKey: alias.productId, tier: alias.tier || "", label: alias.label || sourceName });
       continue;
@@ -2910,7 +2905,9 @@ function npbApplyMoney(enriched, line, channel) {
   if (feeBasis === "fee" && has(money.fee)) enriched.feeAmount = number(money.fee);
   if (feeBasis === "settle" && has(money.settle)) enriched.settleAmount = number(money.settle);
   if (has(money.discount)) enriched.discountAmount = number(money.discount);
-  if (has(money.shipping)) enriched.shippingAmount = number(money.shipping);
+  // 배송비를 판매처가 가져가는 채널은 배송비합계로도 잡지 않는다 — 매출에
+  // 안 들어간 금액이 배송비 칸에만 남으면 할인이 그만큼 잘못 계산된다.
+  if (includeShipping && has(money.shipping)) enriched.shippingAmount = number(money.shipping);
   return enriched;
 }
 
@@ -6132,20 +6129,26 @@ async function routeApi(req, res, url) {
     for (const item of items) {
       const sourceName = String(item.sourceName || "").trim();
       const productId = String(item.productId || "").trim();
-      if (!sourceName || !productId) continue;
+      // 이 브랜드 상품이 아닌 이름(한 스토어에서 여러 브랜드를 파는 경우)은
+      // 무시로 기억한다. 매달 같은 이름을 다시 확인하지 않아도 되게.
+      const ignore = item.ignore === true || productId === "__ignore";
+      if (!sourceName || (!productId && !ignore)) continue;
       const brandId = String(item.brandId || "doteon");
       const key = npbNormalizeName(sourceName);
       const existing = db.npb.productAliases.find(
         (a) => a.brandId === brandId && npbNormalizeName(a.sourceName) === key
       );
       const product = (db.npb.products || []).find((p) => p.id === productId);
-      const tier = String(item.tier || "");
-      const label = product ? `${product.name}${tier ? ` ${tier}` : ""}` : sourceName;
+      const tier = ignore ? "" : String(item.tier || "");
+      const label = ignore
+        ? "(이 브랜드 상품 아님)"
+        : (product ? `${product.name}${tier ? ` ${tier}` : ""}` : sourceName);
       if (existing) {
-        Object.assign(existing, { productId, tier, label, updatedAt: now() });
+        Object.assign(existing, { productId: ignore ? "" : productId, tier, label, ignore, updatedAt: now() });
       } else {
         db.npb.productAliases.push({
-          id: id("npbalias"), brandId, sourceName, productId, tier, label, createdAt: now()
+          id: id("npbalias"), brandId, sourceName,
+          productId: ignore ? "" : productId, tier, label, ignore, createdAt: now()
         });
       }
       saved += 1;
