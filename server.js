@@ -686,6 +686,14 @@ export function buildNpbNamespace() {
   //
   // 집계기준(dateBasis)은 채널마다 달라 정산서에 그대로 적는다 — 파일 자체가
   // 이미 그 기준으로 뽑혀 오므로 계산에는 쓰지 않는다.
+  // 채널마다 자료 사정이 달라 한 규칙으로 묶을 수 없다. 업로드한 파일을 어디까지
+  // 믿고 어디서 손볼지를 채널이 정한다.
+  //   direct    파일 그대로 반영 (검수 없이 확정)
+  //   review    파싱 검수표에서 행별로 고친 뒤 확정  (기본)
+  //   worksheet 일단 반영하고 워크시트에서 고친다
+  //   summary   품목 내역 없이 채널 합계만 워크시트에 적는다
+  //             — 우프를 거치지 않고 그쪽 사업자로 직접 계산서가 나가는 거래처.
+  //               내역을 한 줄씩 맞출 실익이 없다.
   const pickyChannels = [
     { code: "picky_b2c", name: "wooof-cafe24", feeRate: 0.1, settleBy: "우프",
       // shopbetters 는 카페24 쇼핑몰 ID — 자사몰 내보내기 파일명이 이걸로 시작한다.
@@ -723,6 +731,7 @@ export function buildNpbNamespace() {
       filenameKeywords: ["smartstore", "스마트스토어", "픽키도기클럽", "픽키파크스토어"],
       feeNote: "네이버기준",
       dateBasis: "네이버 계산서발행 일자", saleBasis: "file", feeBasis: "fee",
+      entryMode: "summary",
       note: "직접발행 (정산서 전달) / 픽키도기클럽·픽키파크 스토어 합산" },
     { code: "picky_kurly", name: "kurly", feeRate: 0.35, settleBy: "픽키파크",
       filenameKeywords: ["컬리", "kurly"], dateBasis: "컬리 계산서 발행 일자",
@@ -744,6 +753,7 @@ export function buildNpbNamespace() {
     ...c, brandId: "pickydog", category: "온라인", archetype: "consignment",
     calcType: "rate_on_sale", salePrice: 6800, supplyPrice: null,
     saleBasis: c.saleBasis || "file", feeBasis: c.feeBasis || "rate",
+    entryMode: c.entryMode || "review",
     includeShipping: c.includeShipping !== false,
     manualEntry: c.manualEntry === true,
     vatIncluded: true, active: true, sortOrder: 100 + i
@@ -1321,7 +1331,7 @@ function migrateDb(db) {
       if (!seeded) continue;
       for (const key of ["saleBasis", "feeBasis", "includeShipping", "manualEntry",
         "dateBasis", "shippingNote", "note", "columnMap", "excludeKeywords",
-        "productIds"]) {
+        "productIds", "entryMode"]) {
         if (channel[key] === undefined && seeded[key] !== undefined) {
           channel[key] = seeded[key];
           changed = true;
@@ -2537,7 +2547,15 @@ function npbRecompute(db, settlement, opts = {}) {
   const npbProducts = (db.npb?.products || []).filter(
     (p) => !brand || npbSameBrand(p.brandId, brand.id)
   );
-  const lines = (settlement.lines || []).map((line) => npbEnrichLine(line, npbChannels, npbProducts));
+  // 합계만 적는 채널은 줄이 하나여야 한다. 품목 방식으로 쓰다가 합계 방식으로
+  // 바꾸면 예전 품목 줄이 그대로 남아, 합계와 함께 두 번 더해진다.
+  const summaryOnly = new Set(
+    npbChannels.filter((c) => (c.entryMode || "review") === "summary").map((c) => c.code)
+  );
+  const kept = (settlement.lines || []).filter(
+    (line) => !summaryOnly.has(line.channel) || line.summary === true
+  );
+  const lines = kept.map((line) => npbEnrichLine(line, npbChannels, npbProducts));
   settlement.lines = lines;
   // 출고 건수는 유형별로 받는다. 예전 정산은 소형/대형 두 값만 갖고 있으므로
   // 그대로 옮겨 담아 결과가 달라지지 않게 한다.
@@ -6535,10 +6553,24 @@ async function routeApi(req, res, url) {
             columnMap,
             uploadedAt: now()
           };
-          // 파일은 초안까지만 만든다. 파일이 기준금액을 빠뜨리고 오는 일이
-          // 잦아, 사람이 행별로 보고 고친 뒤 [확정/반영] 을 눌러야 워크시트에
-          // 들어간다. 확정 전까지 기존 워크시트 숫자는 건드리지 않는다.
-          settlement.uploads[channelCode].confirmed = false;
+          // 어디까지 자동으로 반영할지는 채널이 정한다.
+          const entryMode = uploadChannel?.entryMode || "review";
+          if (entryMode === "direct" || entryMode === "worksheet") {
+            settlement.lines = (settlement.lines || [])
+              .filter((line) => line.channel !== channelCode)
+              .concat(parsedLines);
+            settlement.uploads[channelCode].confirmed = true;
+            settlement.uploads[channelCode].confirmedAt = now();
+          } else if (entryMode === "summary") {
+            // 품목 줄은 만들지 않는다. 합계는 워크시트에서 직접 적는다.
+            // 파일은 근거로 남기고, 이미 적어 둔 합계 줄은 건드리지 않는다.
+            settlement.uploads[channelCode].confirmed = true;
+            settlement.uploads[channelCode].confirmedAt = now();
+          } else {
+            // 파일이 기준금액을 빠뜨리고 오는 일이 잦아, 사람이 행별로 보고
+            // 고친 뒤 [확정/반영] 을 눌러야 워크시트에 들어간다.
+            settlement.uploads[channelCode].confirmed = false;
+          }
           const computed = npbRecompute(db, settlement);
           await writeDb(db);
           sendJson(res, 200, {
@@ -6552,6 +6584,7 @@ async function routeApi(req, res, url) {
             layout: parsed.meta?.chosenBlock || null,
             layoutAlternatives: parsed.meta?.blocks || [],
             columnMap,
+            entryMode: uploadChannel?.entryMode || "review",
             rollup: computed.rollup
           });
         } else {
@@ -6636,6 +6669,51 @@ async function routeApi(req, res, url) {
         rollup: computed.rollup,
         settlement
       });
+      return;
+    }
+
+    // 품목 내역 없이 채널 합계만 적는다. 우프를 거치지 않고 그쪽 사업자로 직접
+    // 계산서가 나가는 거래처(스마트스토어)는 한 줄씩 맞출 실익이 없다 —
+    // 정산서에도 "직접발행 (정산서 전달)" 한 줄로 나간다.
+    if (action === "summary" && method === "PUT") {
+      const body = await readBody(req);
+      const channelCode = String(body.channel || "").trim();
+      if (!channelCode) { sendJson(res, 400, { error: "채널을 지정해 주세요." }); return; }
+      const listTotal = number(body.listTotal);
+      const shippingTotal = number(body.shippingTotal);
+      const discountTotal = number(body.discountTotal);
+      // 최종결제를 직접 적지 않으면 정가 - 할인 + 배송비로 채운다.
+      const saleTotal = body.saleTotal !== undefined && body.saleTotal !== ""
+        ? number(body.saleTotal)
+        : listTotal - discountTotal + shippingTotal;
+      const hasSettle = body.settleTotal !== undefined && body.settleTotal !== "";
+      const feeTotal = hasSettle ? saleTotal - number(body.settleTotal) : number(body.feeTotal);
+      const line = {
+        channel: channelCode,
+        summary: true,
+        productKey: "",
+        label: String(body.label || "합계"),
+        note: String(body.note || ""),
+        qty: 0,
+        qtyEa: 0,
+        eaPerUnit: 1,
+        listPrice: 0,
+        feeRate: 0,
+        listAmount: listTotal,
+        shippingAmount: shippingTotal,
+        discountAmount: discountTotal,
+        saleAmount: saleTotal,
+        feeAmount: feeTotal,
+        // 합계 줄은 전부 사람이 적은 값이다. 파일 금액으로 덮어쓰면 안 된다.
+        manualFields: ["listAmount", "saleAmount", "feeAmount"]
+      };
+      const empty = !listTotal && !saleTotal && !feeTotal && !shippingTotal;
+      settlement.lines = (settlement.lines || [])
+        .filter((item) => item.channel !== channelCode)
+        .concat(empty ? [] : [line]);
+      const computed = npbRecompute(db, settlement);
+      await writeDb(db);
+      sendJson(res, 200, { channel: channelCode, line: empty ? null : line, rollup: computed.rollup });
       return;
     }
 

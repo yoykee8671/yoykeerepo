@@ -1283,3 +1283,10 @@ a.button:hover {
 .npb-ship-row input {
   max-width: 130px;
 }
+
+/* 합계만 적는 채널의 워크시트 블록 */
+.npb-sum-grid { display: flex; flex-wrap: wrap; gap: 14px; }
+.npb-sum-cell { display: flex; flex-direction: column; gap: 4px; min-width: 150px; }
+.npb-sum-cell input { width: 100%; }
+.npb-ch-chip select { margin-top: 4px; font-size: 12px; width: 100%; }
+.npb-row-dropped { opacity: .45; text-decoration: line-through; }
