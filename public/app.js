@@ -4351,7 +4351,10 @@ function npbBuildWorksheet(config, lines) {
         salePrice: Number(stLine?.salePrice ?? seed.salePrice ?? 0),
         feeRate: Number(stLine?.feeRate ?? seed.feeRate ?? 0),
         qty: Number(stLine?.qty ?? stLine?.qtyEa ?? 0),
-        eaPerUnit: Number(seed.eaPerUnit ?? 1),
+        // 1 로 고정한다. 정가·기준가가 이미 묶음 단가이고(낱개정가 × 배수),
+        // 낱개 수는 multiplier 가 들고 있다. 여기에 묶음 수를 또 곱하면
+        // 3팩·5팩 줄의 정가가 3배·5배로 부푼다. 서버도 1 로 둔다.
+        eaPerUnit: 1,
         tier: tierLabel,
         // 업로드로 들어온 원본을 그대로 들고 있는다. 저장할 때 이걸 되돌려주지
         // 않으면 파일에서 읽은 금액이 통째로 날아간다.
