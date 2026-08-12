@@ -4417,6 +4417,7 @@ function npbWorksheetRollup() {
   let listTotal = 0;
   let realSaleTotal = 0;
   let feeTotal = 0;
+  let shippingTotal = 0;
   // 합계 방식 채널은 품목 줄이 없고 블록의 totals 가 곧 그 채널의 값이다.
   // 이걸 빼먹어서 스마트스토어·스파크펫·파마스퀘어가 종합정산에도, 정산주체별
   // 소계에도 통째로 안 잡히고 있었다.
@@ -4425,7 +4426,8 @@ function npbWorksheetRollup() {
       const t = block.totals || {};
       const sale = Number(t.saleTotal || 0);
       const fee = Number(t.feeTotal || 0);
-      return { qty: 0, list: Number(t.listTotal || 0), revenue: sale, fee };
+      return { qty: 0, list: Number(t.listTotal || 0), revenue: sale, fee,
+        shipping: Number(t.shippingTotal || 0) };
     }
     return block.rows.reduce((acc, row) => {
       const m = npbRowMath(row);
@@ -4433,8 +4435,9 @@ function npbWorksheetRollup() {
       acc.list += m.list;
       acc.revenue += m.revenue;
       acc.fee += m.fee;
+      acc.shipping += Number(row.source?.shippingAmount || 0);
       return acc;
-    }, { qty: 0, list: 0, revenue: 0, fee: 0 });
+    }, { qty: 0, list: 0, revenue: 0, fee: 0, shipping: 0 });
   };
   for (const block of blocks) {
     const t = blockTotals(block);
@@ -4442,6 +4445,7 @@ function npbWorksheetRollup() {
     listTotal += t.list;
     realSaleTotal += t.revenue;
     feeTotal += t.fee;
+    shippingTotal += t.shipping || 0;
   }
   const revenueTotal = realSaleTotal - feeTotal;
   const cost = npbLogisticsCost();
@@ -4462,7 +4466,9 @@ function npbWorksheetRollup() {
     bySettleBy,
     qtyTotal,
     listTotal,
-    discountTotal: listTotal - realSaleTotal,
+    // 정가 - 할인 + 배송비 = 실판매. 서버 집계와 같은 식이다.
+    discountTotal: listTotal + shippingTotal - realSaleTotal,
+    shippingTotal,
     realSaleTotal,
     feeTotal,
     revenueTotal,
@@ -5723,16 +5729,22 @@ function renderNpbRollupCard() {
     <section class="panel">
       <div class="panel-head"><h2>종합정산 (실시간)</h2></div>
       <div class="panel-body">
-        <div class="npb-rollup-grid">
+        <div class="npb-rollup-grid ${state.npb.config?.profitSplitEnabled === false ? "five" : ""}">
           ${state.npb.config?.profitSplitEnabled === false
-            ? "" : cell("실판매수량", money.format(Math.round(r.qtyTotal)))}
-          ${cell("판매정가계", npbWon(r.listTotal))}
-          ${cell("할인계", npbWon(r.discountTotal))}
-          ${cell("실판매계", npbWon(r.realSaleTotal))}
-          ${cell("공제수수료", npbWon(r.feeTotal))}
-          ${cell("매출계", npbWon(r.revenueTotal))}
-          ${state.npb.config?.profitSplitEnabled === false
-            ? "" : cell("실비", npbWon(r.logisticsCost)) + cell("이익", npbWon(r.profit))}
+            ? // 브랜드에 나가는 종합정산서의 '[판매내역 종합]' 과 같은 항목·같은 이름.
+              cell("소비자정가계", npbWon(r.listTotal))
+              + cell("할인계", npbWon(r.discountTotal))
+              + cell("매출계", npbWon(r.realSaleTotal))
+              + cell("수수료 (공제계)", npbWon(r.feeTotal))
+              + cell("정산합계", npbWon(r.realSaleTotal - r.feeTotal))
+            : cell("실판매수량", money.format(Math.round(r.qtyTotal)))
+              + cell("판매정가계", npbWon(r.listTotal))
+              + cell("할인계", npbWon(r.discountTotal))
+              + cell("실판매계", npbWon(r.realSaleTotal))
+              + cell("공제수수료", npbWon(r.feeTotal))
+              + cell("매출계", npbWon(r.revenueTotal))
+              + cell("실비", npbWon(r.logisticsCost))
+              + cell("이익", npbWon(r.profit))}
         </div>
       </div>
     </section>`;
