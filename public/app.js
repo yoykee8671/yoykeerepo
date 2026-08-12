@@ -5545,7 +5545,8 @@ function renderNpbExpenses() {
       </tr>`;
   }).join("");
 
-  const ad = n.current?.adCost || {};
+  // 핸들러는 n.adCost 에 쓴다. 저장된 값(n.current)은 처음 화면을 열 때만 쓴다.
+  const ad = n.adCost || n.current?.adCost || {};
   const adRows = (ad.items || []).map((item) => `
     <tr><td>${h(item.medium)}</td><td class="muted">${h(item.period || "")}</td>
     <td class="num">${money.format(item.amount)}</td></tr>`).join("")
@@ -5909,7 +5910,6 @@ function renderNpbCostSection() {
         <span class="muted">단가 VAT포함${billSeparately ? " · 정산에서 공제하지 않고 별도 청구" : ""}</span></div>
       <div class="panel-body">
         <div class="field two">${inputs}</div>
-        ${renderNpbAdCost()}
         <p class="muted">
           물류 실비 합계 <strong>${npbWon(total)}</strong>
           ${separate ? ` · 별도 기재 ${npbWon(separate)}` : ""}
@@ -5922,28 +5922,6 @@ function renderNpbCostSection() {
 }
 
 // 광고비는 구글시트에 누적된다. 정산에는 넣지 않고 별도 청구 근거로 보여준다.
-function renderNpbAdCost() {
-  const n = state.npb;
-  const ad = n.adCost;
-  const sheet = n.config?.costConfig?.adCostSheetUrl;
-  if (!sheet) return "";
-  const rows = (ad?.items || [])
-    .map((i) => `<tr><td>${h(i.medium)}</td><td class="num">${npbWon(i.amount)}</td></tr>`)
-    .join("");
-  return `
-    <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
-      <div class="toolbar">
-        <button data-npb-adcost ${n.adCostLoading ? "disabled" : ""}>${n.adCostLoading ? "불러오는 중…" : "광고비 불러오기"}</button>
-        <a class="button" href="${h(sheet)}" target="_blank" rel="noreferrer">광고비 시트 열기 ↗</a>
-        ${ad ? `<span class="muted">${h(n.currentKey)} 기준 합계 <strong>${npbWon(ad.total)}</strong></span>` : ""}
-      </div>
-      ${rows ? `<div class="table-wrap" style="max-height:160px"><table>
-        <thead><tr><th>매체</th><th>집행액</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}
-      ${ad && !rows ? `<p class="muted">이 달 집행 내역이 없습니다.</p>` : ""}
-      <p class="muted">광고비는 정산에서 공제하지 않습니다 — 별도 청구 항목입니다.</p>
-    </div>`;
-}
-
 function renderNpbProfitSection() {
   const n = state.npb;
   const profit = npbWorksheetRollup().profit;
@@ -6691,7 +6669,7 @@ function bindNpbWorksheet() {
     entry[field] = Number(value) || 0;
     n.logisticsCounts[key] = entry;
   };
-  app.querySelector("[data-npb-adcost]")?.addEventListener("click", async () => {
+  app.querySelectorAll("[data-npb-adcost]").forEach((btn) => btn.addEventListener("click", async () => {
     n.adCostLoading = true;
     renderApp();
     try {
@@ -6702,7 +6680,7 @@ function bindNpbWorksheet() {
       n.adCostLoading = false;
       renderApp();
     }
-  });
+  }));
   app.querySelectorAll("[data-npb-ship]").forEach((inp) => {
     inp.addEventListener("input", (e) => {
       setShip(inp.dataset.npbShip, "count", e.target.value);
