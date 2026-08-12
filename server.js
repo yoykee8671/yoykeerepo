@@ -3658,8 +3658,10 @@ const MENU_REGISTRY = [
   { key: "audits", label: "이력", actions: ["view"] },
   { key: "archive", label: "아카이브", actions: ["view", "edit"] },
   { key: "settlement", label: "정산", actions: ["view", "export"] },
-  { key: "pipeline", label: "자동화", actions: ["view", "apply"] },
-  { key: "reconcile", label: "클로브ai", actions: ["view", "apply"] },
+  { key: "pipeline", label: "주문매칭", actions: ["view", "apply"] },
+  // 화면은 주문매칭 하나로 합쳤지만, 클로브 연결·대사 API 는 자기 권한을 그대로
+  // 쓴다. 권한을 없애면 기존에 막아 둔 계정이 갑자기 열린다.
+  { key: "reconcile", label: "주문매칭(클로브)", actions: ["view", "apply"] },
   { key: "npb", label: "npb정산", actions: ["view", "edit"] }
 ];
 

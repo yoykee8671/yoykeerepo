@@ -578,11 +578,12 @@ function renderApp() {
     ["admins", "관리자"],
     ["audits", "이력"],
     ["archive", "아카이브"],
+    // 자동화(카페24 수집)와 클로브ai(입금대사)는 결국 한 흐름이라 한 화면에서
+    // 본다. 권한 키는 pipeline 하나로 묶고, 화면 안에서 두 단계를 이어 보여준다.
+    ["pipeline", "주문매칭"],
     ["settlement", "정산"],
-    ["pipeline", "자동화"],
-    ["reconcile", "클로브ai"],
     ["npb", "npb정산"]
-  ].filter(([key]) => can(key, "view"));
+  ].filter(([key]) => can(key, "view") || (key === "pipeline" && can("reconcile", "view")));
   app.innerHTML = `
     <div class="shell">
       <aside class="sidebar">
@@ -704,8 +705,8 @@ function renderCurrentTab() {
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
   if (state.tab === "settlement") return renderSettlement();
-  if (state.tab === "pipeline") return renderPipeline();
-  if (state.tab === "reconcile") return renderReconcile();
+  if (state.tab === "pipeline") return renderPipeline() + renderReconcile();
+  if (state.tab === "reconcile") return renderPipeline() + renderReconcile();
   if (state.tab === "npb") return renderNpb();
   return renderDashboard();
 }
@@ -2083,8 +2084,10 @@ function bindCurrentTab() {
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
   if (state.tab === "settlement") bindSettlement();
-  if (state.tab === "pipeline") bindPipeline();
-  if (state.tab === "reconcile") bindReconcile();
+  if (state.tab === "pipeline" || state.tab === "reconcile") {
+    bindPipeline();
+    bindReconcile();
+  }
   if (state.tab === "npb") bindNpb();
 }
 
@@ -4559,7 +4562,9 @@ function canUseClobe() {
 // 실제 생성·상태변경은 확인한 뒤 별도 버튼으로만 일어난다.
 function renderPipeline() {
   const p = state.pipeline;
-  const head = pageHead("자동화", "카페24 주문 수집 → 확인 → 입금매칭 → 카페24 반영. 단계마다 눌러서 진행합니다.");
+  const head = pageHead("주문매칭",
+    "카페24 주문 수집 → 확인 → 입금매칭 → 카페24 반영. 단계마다 눌러서 진행합니다. "
+    + "아래에서 클로브ai 은행 거래와 대사합니다.");
   if (!canUseClobe()) {
     return `${head}<section class="panel"><div class="panel-body"><p class="muted">이 메뉴는 오너 또는 매니저만 사용할 수 있습니다.</p></div></section>`;
   }
