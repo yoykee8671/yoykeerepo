@@ -1298,3 +1298,6 @@ a.button:hover {
 
 .npb-ws-title { display: flex; align-items: center; gap: 8px; }
 .npb-ws-title button { padding: 0 6px; min-width: 24px; }
+
+.npb-chip-actions { display: flex; align-items: center; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+.npb-chip-actions button { padding: 2px 8px; font-size: 12px; }

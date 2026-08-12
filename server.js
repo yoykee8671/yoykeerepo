@@ -6764,24 +6764,11 @@ async function routeApi(req, res, url) {
             columnMap,
             uploadedAt: now()
           };
-          // 어디까지 자동으로 반영할지는 채널이 정한다.
-          const entryMode = uploadChannel?.entryMode || "review";
-          if (entryMode === "direct" || entryMode === "worksheet") {
-            settlement.lines = (settlement.lines || [])
-              .filter((line) => line.channel !== channelCode)
-              .concat(parsedLines);
-            settlement.uploads[channelCode].confirmed = true;
-            settlement.uploads[channelCode].confirmedAt = now();
-          } else if (entryMode === "summary") {
-            // 품목 줄은 만들지 않는다. 합계는 워크시트에서 직접 적는다.
-            // 파일은 근거로 남기고, 이미 적어 둔 합계 줄은 건드리지 않는다.
-            settlement.uploads[channelCode].confirmed = true;
-            settlement.uploads[channelCode].confirmedAt = now();
-          } else {
-            // 파일이 기준금액을 빠뜨리고 오는 일이 잦아, 사람이 행별로 보고
-            // 고친 뒤 [확정/반영] 을 눌러야 워크시트에 들어간다.
-            settlement.uploads[channelCode].confirmed = false;
-          }
+          // 업로드는 언제나 초안까지만이다. 올리자마자 워크시트가 바뀌면,
+          // 워크시트에서 손으로 고쳐 둔 값이 파일 기준으로 되돌아간다.
+          // 채널별 [반영] 을 눌러야 그 채널만 들어간다.
+          settlement.uploads[channelCode].confirmed = false;
+          delete settlement.uploads[channelCode].pendingRemove;
           const computed = npbRecompute(db, settlement);
           await writeDb(db);
           sendJson(res, 200, {
@@ -6849,12 +6836,46 @@ async function routeApi(req, res, url) {
       return;
     }
 
+    // 올린 파일을 뺀다. 워크시트에서 실제로 빠지는 건 [반영] 을 눌렀을 때다.
+    if (action === "upload" && method === "DELETE") {
+      const channelCode = decodeURIComponent(url.searchParams.get("channel") || "").trim();
+      const upload = settlement.uploads?.[channelCode];
+      if (!upload) { sendJson(res, 404, { error: "그 채널에 올린 파일이 없습니다." }); return; }
+      upload.pendingRemove = true;
+      upload.confirmed = false;
+      await writeDb(db);
+      sendJson(res, 200, { channel: channelCode, upload });
+      return;
+    }
+
     // 검수한 행을 워크시트에 반영한다. 업로드는 초안이고 여기서 확정된다.
     if (action === "confirm" && method === "POST") {
       const body = await readBody(req);
       const channelCode = String(body.channel || "").trim();
       if (!channelCode) { sendJson(res, 400, { error: "채널을 지정해 주세요." }); return; }
-      if (!Array.isArray(body.rows)) { sendJson(res, 400, { error: "rows 배열이 필요합니다." }); return; }
+      const upload = settlement.uploads?.[channelCode];
+      // 파일을 뺀 채널이면 그 채널 줄을 워크시트에서 걷어낸다.
+      if (upload?.pendingRemove) {
+        settlement.lines = (settlement.lines || []).filter((line) => line.channel !== channelCode);
+        delete settlement.uploads[channelCode];
+        const removed = npbRecompute(db, settlement);
+        await writeDb(db);
+        sendJson(res, 200, { channel: channelCode, removed: true, rows: [], rollup: removed.rollup });
+        return;
+      }
+      // 검수표를 거치지 않는 방식은 올려 둔 초안을 그대로 쓴다.
+      const draftRows = Array.isArray(body.rows) ? body.rows : (upload?.lines || []);
+      // 빈 초안으로 반영하면 그 채널에 이미 있던 줄이 통째로 지워진다. 파일이
+      // 한 줄도 안 읽혔을 때(상품 매칭 전) 실수로 누르는 경우가 그렇다.
+      const hadLines = (settlement.lines || []).some((line) => line.channel === channelCode);
+      if (!draftRows.length && hadLines) {
+        sendJson(res, 400, {
+          error: "이 파일에서 읽힌 품목이 없습니다. 상품 매칭을 먼저 지정해 주세요. "
+            + "(워크시트에 이미 있는 내역을 지우려면 파일 옆 ✕ 로 빼신 뒤 [반영] 하세요.)"
+        });
+        return;
+      }
+      body.rows = draftRows;
       const rows = body.rows
         .filter((row) => row && !row.dropped)
         .map((row) => {

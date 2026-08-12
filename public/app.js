@@ -5306,17 +5306,27 @@ function renderNpbUpload() {
       <span class="muted">${isDone
         ? `${h(up.fileName || "업로드됨")}${up.lines ? ` · ${up.lines.length}개 품목` : ""}`
         : "미업로드"}</span>
-      ${isDone
-        ? (up.confirmed === false
-          ? `<span class="badge" style="color:var(--red)">확정 대기</span>`
-          : `<span class="badge ok">반영됨</span>`)
-        : ""}
+      ${isDone ? `<div class="npb-chip-actions">
+        ${up.pendingRemove
+          ? `<span class="badge" style="color:var(--red)">삭제 대기</span>`
+          : up.confirmed === false
+            ? `<span class="badge" style="color:var(--red)">반영 대기</span>`
+            : `<span class="badge ok">반영됨</span>`}
+        ${up.confirmed === false
+          ? `<button class="primary" data-npb-apply="${h(c.code)}">반영</button>`
+          : ""}
+        ${(c.entryMode || "review") === "review" && !up.pendingRemove
+          ? `<button data-npb-review-open="${h(c.code)}">검수</button>`
+          : ""}
+        <button class="ghost" data-npb-upload-del="${h(c.code)}" title="올린 파일 빼기">✕</button>
+      </div>` : ""}
     </div>`;
   };
 
   // 올렸지만 아직 확정하지 않은 채널. 올려놓고 잊으면 워크시트가 비어 있어
   // 업로드가 안 된 것처럼 보인다.
   const waiting = channels.filter((c) => uploads[c.code] && uploads[c.code].confirmed === false);
+  const applyAll = waiting.length > 1;
 
   const pending = (n.pendingUploads || []).map((f, i) => `
     <div class="npb-pending">
@@ -5344,11 +5354,12 @@ function renderNpbUpload() {
         </div>
         ${waiting.length ? `<div class="npb-pending-wrap">
           <p style="color:var(--red);margin:0">
-            <b>확정 대기 ${waiting.length}개 채널</b> — ${h(waiting.map((c) => c.name).join(", "))}.
-            아래 검수표에서 확인하고 [확정/반영] 을 눌러야 워크시트에 들어갑니다.
+            <b>반영 대기 ${waiting.length}개 채널</b> — ${h(waiting.map((c) => c.name).join(", "))}.
+            채널별 <b>[반영]</b> 을 눌러야 워크시트에 들어갑니다. 누른 채널만 바뀌므로,
+            워크시트에서 손으로 고쳐 둔 다른 채널은 그대로입니다.
           </p>
           <div class="toolbar">
-            ${waiting.map((c) => `<button data-npb-review-open="${h(c.code)}">${h(c.name)} 검수</button>`).join("")}
+            ${waiting.map((c) => `<button class="primary" data-npb-apply="${h(c.code)}">${h(c.name)} 반영</button>`).join("")}
           </div>
         </div>` : ""}
         ${renderNpbUnresolved()}
@@ -6193,6 +6204,38 @@ function bindNpbUpload() {
     } catch (error) {
       showToast(error.message || "매칭 저장 실패", "error");
     }
+  });
+  const npbApplyChannel = async (code) => {
+    try {
+      const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/confirm`, {
+        method: "POST", body: { channel: code }
+      });
+      n.review = null;
+      await npbLoadDetail(n.currentKey);
+      showToast(res.removed
+        ? `${npbChannelName(code)} 내역을 워크시트에서 뺐습니다.`
+        : `${npbChannelName(code)} 반영 완료 — ${res.rows.length}개 품목. 다른 채널은 그대로입니다.`);
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "반영 실패", "error");
+    }
+  };
+  app.querySelectorAll("[data-npb-apply]").forEach((btn) => {
+    btn.addEventListener("click", () => npbApplyChannel(btn.getAttribute("data-npb-apply")));
+  });
+  app.querySelectorAll("[data-npb-upload-del]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const code = btn.getAttribute("data-npb-upload-del");
+      try {
+        await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/upload?channel=${encodeURIComponent(code)}`,
+          { method: "DELETE" });
+        await npbLoadDetail(n.currentKey);
+        showToast(`${npbChannelName(code)} 파일을 뺐습니다. [반영] 을 눌러야 워크시트에서도 빠집니다.`);
+        renderApp();
+      } catch (error) {
+        showToast(error.message || "삭제 실패", "error");
+      }
+    });
   });
   app.querySelectorAll("[data-npb-entry]").forEach((sel) => {
     sel.addEventListener("change", async () => {
