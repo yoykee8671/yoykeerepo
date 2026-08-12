@@ -5245,7 +5245,9 @@ function renderNpbList() {
       return `
         <tr>
           <td>${npbStatusBadge(s.status)}</td>
-          <td>${h(s.periodMonth)}</td>
+          <td>${h(s.periodMonth
+            || (s.period?.year ? `${s.period.year}-${String(s.period.month).padStart(2, "0")}` : "")
+            || String(s.key || "").split("_").pop())}</td>
           <td class="num">${money.format(Math.round(Number(r.qtyTotal || 0)))}</td>
           <td class="num">${npbWon(r.revenueTotal)}</td>
           <td class="num">${npbWon(r.profit)}</td>
@@ -5571,16 +5573,15 @@ function renderNpbWorksheet() {
     <section class="panel">
       <div class="panel-head">
         <h2>채널별 워크시트</h2>
-<span class="muted">채널별 판매데이터 정리 · 기준가·수량·수수료율은 직접 고칠 수 있습니다</span>
+        <span class="muted">채널별 판매데이터 정리 · 정가·기준가·수량·수수료율을 직접 고칠 수 있습니다</span>
+        <button data-npb-reload>새로고침</button>
       </div>
       <div class="panel-body npb-ws">
         ${n.worksheet.map((b, bi) => (b.summary ? renderNpbWsSummaryBlock(b, bi) : renderNpbWsBlock(b, bi))).join("")}
       </div>
     </section>
     ${renderNpbSettleBy()}
-    ${renderNpbCostSection()}
-    ${renderNpbProfitSection()}
-    ${renderNpbInventorySection()}
+    ${n.config?.profitSplitEnabled === false ? "" : renderNpbProfitSection()}
     <section class="panel">
       <div class="panel-body toolbar">
         <button class="primary" data-npb-ws-save>저장 (계산)</button>
@@ -5600,14 +5601,15 @@ function renderNpbRollupCard() {
       <div class="panel-head"><h2>종합정산 (실시간)</h2></div>
       <div class="panel-body">
         <div class="npb-rollup-grid">
-          ${cell("실판매수량", money.format(Math.round(r.qtyTotal)))}
+          ${state.npb.config?.profitSplitEnabled === false
+            ? "" : cell("실판매수량", money.format(Math.round(r.qtyTotal)))}
           ${cell("판매정가계", npbWon(r.listTotal))}
           ${cell("할인계", npbWon(r.discountTotal))}
           ${cell("실판매계", npbWon(r.realSaleTotal))}
           ${cell("공제수수료", npbWon(r.feeTotal))}
           ${cell("매출계", npbWon(r.revenueTotal))}
-          ${cell("실비", npbWon(r.logisticsCost))}
-          ${cell("이익", npbWon(r.profit))}
+          ${state.npb.config?.profitSplitEnabled === false
+            ? "" : cell("실비", npbWon(r.logisticsCost)) + cell("이익", npbWon(r.profit))}
         </div>
       </div>
     </section>`;
@@ -5651,6 +5653,9 @@ function renderNpbWsSummaryBlock(block, bi) {
 }
 
 function renderNpbWsBlock(block, bi) {
+  // 내역이 없는 달은 접어 둔다. 채널이 열둘이라 빈 표가 화면을 가린다.
+  const empty = block.rows.every((row) => !Number(row.qty));
+  const collapsed = state.npb.wsCollapsed?.[block.code] ?? empty;
   let subQty = 0;
   let subRevenue = 0;
   let subFee = 0;
@@ -5670,7 +5675,8 @@ function renderNpbWsBlock(block, bi) {
           <td>${h(row.label)}${m.fromFile
             ? ` <span class="badge" title="업로드한 파일의 금액을 씁니다">파일</span>`
             : ""}${row.extra ? ` <span class="badge">추가</span>` : ""}</td>
-          <td class="num">${money.format(row.listPrice)}</td>
+          <td><input class="num" type="number" data-npb-ws="${bi}" data-npb-wr="${ri}"
+            data-npb-wf="listPrice" value="${h(row.listPrice)}"></td>
           <td><input class="num" type="number" data-npb-ws="${bi}" data-npb-wr="${ri}"
             data-npb-wf="salePrice" value="${h(row.salePrice)}"></td>
           <td><input class="num npb-pct" type="number" step="0.01" data-npb-ws="${bi}"
@@ -5688,8 +5694,12 @@ function renderNpbWsBlock(block, bi) {
     : "";
   return `
     <div class="npb-ws-block">
-      <div class="npb-ws-title"><strong>${h(block.name)}</strong> ${tag}</div>
-      <div class="table-wrap">
+      <div class="npb-ws-title">
+        <button class="ghost" data-npb-ws-toggle="${h(block.code)}">${collapsed ? "▸" : "▾"}</button>
+        <strong>${h(block.name)}</strong> ${tag}
+        ${collapsed ? `<span class="muted">${empty ? "내역 없음" : `수량 ${money.format(subQty)}`}</span>` : ""}
+      </div>
+      <div class="table-wrap" ${collapsed ? 'style="display:none"' : ""}>
         <table class="npb-ws-table">
           <thead>
             <tr>
@@ -5880,19 +5890,23 @@ function renderNpbChannels() {
         <td><input type="text" data-npb-ch="${i}" data-npb-cfield="archetype" value="${h(c.archetype || "")}"></td>
         <td><input type="text" data-npb-ch="${i}" data-npb-cfield="filenameKeywords"
               value="${h((c.filenameKeywords || []).join(", "))}" placeholder="예: bmw, 조이몰"></td>
+        <td><select data-npb-ch="${i}" data-npb-cfield="settleBy">
+          ${["우프", "픽키파크"].map((v) =>
+            `<option value="${v}" ${(c.settleBy || "우프") === v ? "selected" : ""}>${v}</option>`).join("")}
+        </select></td>
         <td><select data-npb-ch="${i}" data-npb-cfield="entryMode">
           ${NPB_ENTRY_MODES.map(([value, label]) =>
             `<option value="${value}" ${(c.entryMode || "review") === value ? "selected" : ""}>${label}</option>`).join("")}
         </select></td>
         <td><button class="danger" data-npb-ch-del="${i}">삭제</button></td>
       </tr>`)
-    .join("") || `<tr><td colspan="10" class="empty">등록된 채널이 없습니다.</td></tr>`;
+    .join("") || `<tr><td colspan="11" class="empty">등록된 채널이 없습니다.</td></tr>`;
   return `
     <section class="panel">
       <div class="panel-head"><h2>채널 설정</h2><span class="muted">${channels.length}개</span></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>코드</th><th>이름</th><th>계산방식</th><th>판매가</th><th>수수료율</th><th>공급가</th><th>아키타입</th><th>파일명 키워드</th><th>업로드 반영</th><th></th></tr></thead>
+          <thead><tr><th>코드</th><th>이름</th><th>계산방식</th><th>판매가</th><th>수수료율</th><th>공급가</th><th>아키타입</th><th>파일명 키워드</th><th>정산주체</th><th>업로드 반영</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
@@ -6444,6 +6458,25 @@ function npbWorksheetLines() {
 function bindNpbWorksheet() {
   const n = state.npb;
   // Worksheet cell edits: salePrice/qty as numbers, feeRate entered as a percent.
+  app.querySelectorAll("[data-npb-ws-toggle]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const code = btn.getAttribute("data-npb-ws-toggle");
+      if (!n.wsCollapsed) n.wsCollapsed = {};
+      const block = (n.worksheet || []).find((b) => b.code === code);
+      const empty = block ? block.rows.every((row) => !Number(row.qty)) : false;
+      n.wsCollapsed[code] = !(n.wsCollapsed[code] ?? empty);
+      renderApp();
+    });
+  });
+  app.querySelector("[data-npb-reload]")?.addEventListener("click", async () => {
+    try {
+      await npbLoadDetail(n.currentKey);
+      showToast("새로 읽었습니다.");
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "새로고침 실패", "error");
+    }
+  });
   app.querySelectorAll("[data-npb-sum]").forEach((inp) => {
     inp.addEventListener("input", () => {
       const block = n.worksheet?.[Number(inp.dataset.npbSum)];

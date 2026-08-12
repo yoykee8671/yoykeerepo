@@ -596,6 +596,9 @@ export function buildNpbNamespace() {
     productLine: "필바이츠",
     // 정산서 양식. 도톤과 표가 달라 생성기가 갈린다.
     settlementLayout: "picky",
+    // 이익분배(3사 분배)는 도톤 운영대행 구조에만 있다. 픽키는 정산주체별
+    // 소계로 갈음한다.
+    profitSplitEnabled: false,
     costConfig: {
       billSeparately: true,
       shipTypes: [
@@ -1379,7 +1382,7 @@ function migrateDb(db) {
       // 값이 비어 있을 때만 채운다 — 화면에서 고친 값을 덮어쓰지 않는다.
       const seeded = (npbSeed.brands || []).find((b) => b.id === npbBrand.id);
       if (seeded) {
-        for (const key of ["businessName", "productLine", "settlementLayout"]) {
+        for (const key of ["businessName", "productLine", "settlementLayout", "profitSplitEnabled"]) {
           if (npbBrand[key] === undefined && seeded[key] !== undefined) {
             npbBrand[key] = seeded[key];
             changed = true;
@@ -6493,8 +6496,11 @@ async function routeApi(req, res, url) {
     sendJson(res, 200, {
       brand: brand.id,
       brands: (db.npb.brands || []).map((b) => ({
-        id: b.id, name: b.name, businessName: b.businessName || "", productLine: b.productLine || ""
+        id: b.id, name: b.name, businessName: b.businessName || "", productLine: b.productLine || "",
+        profitSplitEnabled: b.profitSplitEnabled !== false,
+        settlementLayout: b.settlementLayout || ""
       })),
+      profitSplitEnabled: brand.profitSplitEnabled !== false,
       channels: (db.npb.channels || []).filter(ofBrand),
       costConfig: brand.costConfig || {},
       products: (db.npb.products || []).filter(ofBrand),

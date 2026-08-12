@@ -1295,3 +1295,6 @@ a.button:hover {
 .npb-match-target { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
 .npb-match-target select:first-child { flex: 1 1 auto; min-width: 220px; }
 .npb-match-target select + select { flex: 0 0 140px; }
+
+.npb-ws-title { display: flex; align-items: center; gap: 8px; }
+.npb-ws-title button { padding: 0 6px; min-width: 24px; }
