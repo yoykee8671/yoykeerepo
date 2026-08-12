@@ -5512,6 +5512,100 @@ function npbReviewMath(row) {
   return { listTotal, discount, shipping, sale, fee, settle: sale - fee };
 }
 
+function renderNpbExpenses() {
+  const n = state.npb;
+  if (!n.currentKey) return npbNeedSelect();
+  const log = n.current?.logistics || {};
+  const shipFiles = n.current?.shipFiles || {};
+  const breakdown = log.breakdown || [];
+
+  const shipRows = breakdown.map((row) => {
+    const file = shipFiles[row.key];
+    return `
+      <tr>
+        <td>${h(row.label)}</td>
+        <td>
+          <input type="file" accept=".csv,.xlsx" data-npb-shipfile="${h(row.key)}">
+          ${file
+            ? `<div class="muted">${h(file.fileName)} · ${h(file.basisLabel)} 기준 ${money.format(file.autoCount)}건 (${money.format(file.rowCount)}행)</div>`
+            : `<div class="muted">출고내역 파일을 올리면 건수를 셉니다.</div>`}
+        </td>
+        <td><input class="num" type="number" min="0" data-npb-ship="${h(row.key)}" value="${h(row.count)}"></td>
+        <td class="num">${row.manual ? "-" : money.format(Number(row.freight || 0) + Number(row.handling || 0))}</td>
+        <td class="num">${row.manual
+          ? `<input class="num" type="number" min="0" data-npb-ship-amt="${h(row.key)}" value="${h(row.amount)}">`
+          : money.format(row.amount)}</td>
+        <td class="muted">${row.excludeFromTotal ? "합계 제외 · 개별청구" : ""}</td>
+      </tr>`;
+  }).join("");
+
+  const ad = n.current?.adCost || {};
+  const adRows = (ad.items || []).map((item) => `
+    <tr><td>${h(item.medium)}</td><td class="muted">${h(item.period || "")}</td>
+    <td class="num">${money.format(item.amount)}</td></tr>`).join("")
+    || `<tr><td colspan="3" class="empty">불러온 광고비가 없습니다.</td></tr>`;
+
+  const invoices = (n.invoices || []).filter((inv) => inv.settlementKey === n.currentKey);
+  const invoiceRows = invoices.map((inv) => `
+    <tr>
+      <td>${h(inv.typeLabel)}</td>
+      <td class="num">${money.format(inv.total)}</td>
+      <td>${h(inv.dueDate || "")}</td>
+      <td>${inv.paidAt
+        ? `<span class="badge ok">입금 ${h(String(inv.paidAt).slice(0, 10))}</span>`
+        : `<button data-npb-invoice-paid="${h(inv.id)}">입금 확인</button>`}</td>
+      <td><button data-npb-invoice-dl="${h(inv.id)}">청구서 받기</button></td>
+    </tr>`).join("")
+    || `<tr><td colspan="5" class="empty">발행한 청구서가 없습니다.</td></tr>`;
+
+  return `
+    ${renderNpbCostSection()}
+    ${renderNpbInventorySection()}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>운임/물류 실비</h2>
+        <span class="muted">출고내역을 올리면 송장 기준으로 건수를 셉니다. 숫자는 고칠 수 있습니다.</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>유형</th><th>출고내역 파일</th><th>건수</th><th>건당</th><th>금액</th><th></th></tr></thead>
+        <tbody>${shipRows}</tbody>
+        <tfoot><tr>
+          <th>합계</th><th></th><th class="num">${money.format(log.countTotal || 0)}</th><th></th>
+          <th class="num">${money.format(log.grandTotal || 0)}</th>
+          <th class="muted">${log.separateTotal ? `별도 ${money.format(log.separateTotal)}` : ""}</th>
+        </tr></tfoot>
+      </table></div>
+      <div class="toolbar">
+        <button data-npb-ship-save>건수 저장</button>
+        <button class="primary" data-npb-invoice="logistics">운임 청구서 발행</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>광고홍보 실비</h2><span class="muted">구글시트 누적분</span></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>매체</th><th>기간</th><th>금액</th></tr></thead>
+        <tbody>${adRows}</tbody>
+        <tfoot><tr><th>합계</th><th></th><th class="num">${money.format(ad.total || 0)}</th></tr></tfoot>
+      </table></div>
+      <div class="toolbar">
+        <button data-npb-adcost ${n.adCostLoading ? "disabled" : ""}>${n.adCostLoading ? "불러오는 중…" : "광고비 불러오기"}</button>
+        <button class="primary" data-npb-invoice="ad">광고비 청구서 발행</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>청구서</h2>
+        <span class="muted">정산서와 별도로 발행합니다 — 정산 계산에는 들어가지 않습니다.</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>구분</th><th>금액</th><th>입금 기한</th><th>입금</th><th></th></tr></thead>
+        <tbody>${invoiceRows}</tbody>
+      </table></div>
+    </section>`;
+}
+
 function renderNpbReview() {
   const n = state.npb;
   const review = n.review;
