@@ -2957,7 +2957,9 @@ function npbLineFromTarget(line, target, product, share, sourceName, savedUnitPr
     ...line,
     productKey: target.productId,
     multiplier,
-    tier: multiplier > 1 ? `${multiplier}개` : "",
+    // 배수를 그대로 tier 로 적는다. 1배를 빈 문자열로 두면 워크시트가 이 줄을
+    // "어느 묶음에도 안 맞는 줄" 로 보고 다른 묶음 칸까지 같은 수량을 끌어간다.
+    tier: `${multiplier}개`,
     label,
     sourceName,
     listPrice,
@@ -3232,6 +3234,15 @@ function npbEnrichLine(line, channels, products) {
     if (!manual.has(field)) delete enriched[field];
   }
   npbApplyMoney(enriched, line, channel);
+  // 기준가는 사람이 정한 그 판매처의 실제 단가다. 수량이 있으면 매출은 여기서
+  // 나온다 — 파일 금액이 이기면 "기준가 × 수량" 과 안 맞는 매출이 찍힌다.
+  // 수량이 없는 자료(네이버 결제정산)는 파일 금액을 그대로 둔다.
+  const unitPrice = number(line.unitPrice);
+  if (unitPrice > 0 && qty > 0 && !manual.has("saleAmount")) {
+    enriched.saleAmount = unitPrice * qty;
+    enriched.salePrice = unitPrice;
+    delete enriched.settleAmount;
+  }
   for (const field of ["listAmount", "saleAmount", "feeAmount", "settleAmount"]) {
     if (manual.has(field) && line[field] != null) enriched[field] = number(line[field]);
   }

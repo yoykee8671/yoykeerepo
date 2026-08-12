@@ -106,7 +106,10 @@ function npbRowMath(row) {
   const src = row.source || {};
   const has = (v) => v !== undefined && v !== null && v !== "";
   const list = has(src.listAmount) ? Number(src.listAmount) : Number(row.listPrice || 0) * qty * ea;
-  const revenue = has(src.saleAmount) ? Number(src.saleAmount) : Number(row.salePrice || 0) * qty;
+  // 기준가(=salePrice)가 있고 수량이 있으면 매출은 그 곱이다. 서버와 같은 규칙.
+  const revenue = Number(row.salePrice || 0) > 0 && qty > 0
+    ? Number(row.salePrice) * qty
+    : (has(src.saleAmount) ? Number(src.saleAmount) : Number(row.salePrice || 0) * qty);
   if (has(src.settleAmount)) {
     const settle = Number(src.settleAmount);
     return { revenue, fee: revenue - settle, settle, list, fromFile: true };
@@ -4333,11 +4336,11 @@ function npbBuildWorksheet(config, lines) {
     const seeds = npbChannelSeeds(channel, products, lineConfigs);
     const rows = seeds.map((seed) => {
       const tierLabel = seed.tier || "";
+      // 묶음까지 정확히 같은 줄만 가져온다. 예전에는 못 찾으면 "묶음 없음" 줄을
+      // 대신 집었는데, 그 바람에 45g 1개·3개·5개 칸이 모두 같은 수량을 보였다.
       const key = `${code}|${seed.productId}|${tierLabel}`;
-      const fallbackKey = `${code}|${seed.productId}|`;
-      const stLine = stored.get(key) || stored.get(fallbackKey);
-      if (stored.has(key)) used.add(key);
-      else if (stored.has(fallbackKey)) used.add(fallbackKey);
+      const stLine = stored.get(key);
+      if (stLine) used.add(key);
       return {
         productKey: seed.productId,
         label: seed.lineLabel,
