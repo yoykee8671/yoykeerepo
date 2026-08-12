@@ -4417,14 +4417,31 @@ function npbWorksheetRollup() {
   let listTotal = 0;
   let realSaleTotal = 0;
   let feeTotal = 0;
-  for (const block of blocks) {
-    for (const row of block.rows) {
-      const m = npbRowMath(row);
-      qtyTotal += Number(row.qty || 0) * (Number(row.eaPerUnit || 1) || 1);
-      listTotal += m.list;
-      realSaleTotal += m.revenue;
-      feeTotal += m.fee;
+  // 합계 방식 채널은 품목 줄이 없고 블록의 totals 가 곧 그 채널의 값이다.
+  // 이걸 빼먹어서 스마트스토어·스파크펫·파마스퀘어가 종합정산에도, 정산주체별
+  // 소계에도 통째로 안 잡히고 있었다.
+  const blockTotals = (block) => {
+    if (block.summary) {
+      const t = block.totals || {};
+      const sale = Number(t.saleTotal || 0);
+      const fee = Number(t.feeTotal || 0);
+      return { qty: 0, list: Number(t.listTotal || 0), revenue: sale, fee };
     }
+    return block.rows.reduce((acc, row) => {
+      const m = npbRowMath(row);
+      acc.qty += Number(row.qty || 0) * (Number(row.eaPerUnit || 1) || 1);
+      acc.list += m.list;
+      acc.revenue += m.revenue;
+      acc.fee += m.fee;
+      return acc;
+    }, { qty: 0, list: 0, revenue: 0, fee: 0 });
+  };
+  for (const block of blocks) {
+    const t = blockTotals(block);
+    qtyTotal += t.qty;
+    listTotal += t.list;
+    realSaleTotal += t.revenue;
+    feeTotal += t.fee;
   }
   const revenueTotal = realSaleTotal - feeTotal;
   const cost = npbLogisticsCost();
@@ -4436,12 +4453,10 @@ function npbWorksheetRollup() {
     const who = block.settleBy || "";
     if (!who) continue;
     const acc = bySettleBy[who] || (bySettleBy[who] = { realSaleTotal: 0, feeTotal: 0, revenueTotal: 0 });
-    for (const row of block.rows) {
-      const m = npbRowMath(row);
-      acc.realSaleTotal += m.revenue;
-      acc.feeTotal += m.fee;
-      acc.revenueTotal += m.revenue - m.fee;
-    }
+    const t = blockTotals(block);
+    acc.realSaleTotal += t.revenue;
+    acc.feeTotal += t.fee;
+    acc.revenueTotal += t.revenue - t.fee;
   }
   return {
     bySettleBy,
@@ -5740,8 +5755,8 @@ function renderNpbWsBlock(block, bi) {
 // 정산 주체별 소계 — 누구에게 계산서가 나가는지가 갈린다.
 function renderNpbSettleBy() {
   const by = npbWorksheetRollup().bySettleBy || {};
-  const keys = Object.keys(by);
-  if (keys.length < 2) return "";
+  const keys = Object.keys(by).filter((k) => k);
+  if (!keys.length) return "";
   const rows = keys.map((k) => `
     <tr><td><strong>${h(k)}</strong></td>
       <td class="num">${npbWon(by[k].realSaleTotal)}</td>
