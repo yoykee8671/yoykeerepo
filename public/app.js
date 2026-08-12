@@ -6188,7 +6188,10 @@ function bindNpb() {
   });
   if (n.screen === "list") bindNpbList();
   else if (n.screen === "upload") bindNpbUpload();
-  else if (n.screen === "worksheet") bindNpbWorksheet();
+  // 실비·재고·광고비·청구서를 워크시트에서 실비/청구 화면으로 옮겼는데, 그
+  // 버튼들의 동작은 여전히 여기에 묶여 있다. 두 화면 모두에서 걸어 준다 —
+  // 없는 요소는 그냥 안 걸리므로 서로 방해하지 않는다.
+  else if (n.screen === "worksheet" || n.screen === "expenses") bindNpbWorksheet();
   else if (n.screen === "channels") bindNpbChannels();
   else if (n.screen === "preview") bindNpbPreview();
 }
