@@ -648,6 +648,12 @@ export function buildNpbNamespace() {
   // 조건 없이 매번 덮으면 화면에서 고친 값을 잃고, 한 번만 씌우면 지금처럼
   // 두 번째 수정이 반영되지 않는다.
   const PICKY_KEYWORDS_VERSION = 3;
+  // 바코드·원가의 출처는 "필바이츠 상품 목록 및 SKU 정보 최신.xlsx" 다. 그 표는
+  // SKU 단위라 번들에는 바코드가 없다 — 번들 정가는 위 packTiers 가 출처다.
+  // 원가는 VAT 포함가이고, 정가도 VAT 포함이라 공헌이익(정가−원가)은 같은 기준끼리
+  // 뺀다. 화면에서 원가를 고칠 수 있으므로 파일이 바뀔 때만 다시 씌우도록
+  // 이 번호를 올린다(키워드 버전과 같은 방식).
+  const PICKY_CATALOG_VERSION = 1;
   const pickyProducts = [
     {
       id: "pb45_chicken", brandId: "pickydog", barcode: "8809879544071",
@@ -656,15 +662,14 @@ export function buildNpbNamespace() {
       // 치킨 오리지널로 집계하기로 했다(2026-08 운영 확인).
       nameKeywords: [size45], excludeKeywords: [...veganWords, "180g", "20개입", ...boxWords, "20p"],
       skuCodes: ["P000BLOX"], piecesPerUnit: 5,
-      // 셀메이트 상품정보 기준. 공헌이익 계산의 원가 쪽 입력이다.
       costPrice: 1500, supplyPrice: 0, safetyStock: 0,
       packTiers: pickyPackTiers45
     },
     {
-      id: "pb180_chicken", brandId: "pickydog", barcode: "",
+      id: "pb180_chicken", brandId: "pickydog", barcode: "8809879544255",
       name: "픽키도기클럽 필바이츠 180g (20개입) - 치킨 오리지널", listPrice: 26900,
       nameKeywords: [size180], excludeKeywords: veganWords, skuCodes: [], piecesPerUnit: 20,
-      costPrice: 5060, supplyPrice: 0, safetyStock: 0,
+      costPrice: 5100, supplyPrice: 0, safetyStock: 0,
       packTiers: pickyPackTiers180
     },
     {
@@ -672,17 +677,19 @@ export function buildNpbNamespace() {
       name: "픽키도기클럽 필바이츠 45g (5개입) - 비건 고구마와 피넛버터", listPrice: 6800,
       nameKeywords: [size45, veganWords], excludeKeywords: ["180g", "20개입", ...boxWords, "20p"],
       skuCodes: [], piecesPerUnit: 5,
-      costPrice: 0, supplyPrice: 0, safetyStock: 0,
+      costPrice: 1500, supplyPrice: 0, safetyStock: 0,
       packTiers: pickyPackTiers45
     },
     {
-      id: "pb180_vegan", brandId: "pickydog", barcode: "",
+      id: "pb180_vegan", brandId: "pickydog", barcode: "8809990970025",
       name: "픽키도기클럽 필바이츠 180g (20개입) - 비건 고구마와 피넛버터", listPrice: 26900,
       nameKeywords: [size180, veganWords], skuCodes: [], piecesPerUnit: 20,
-      costPrice: 0, supplyPrice: 0, safetyStock: 0,
+      costPrice: 5100, supplyPrice: 0, safetyStock: 0,
       packTiers: pickyPackTiers180
     }
-  ].map((p) => ({ ...p, keywordsVersion: PICKY_KEYWORDS_VERSION }));
+  ].map((p) => ({
+    ...p, keywordsVersion: PICKY_KEYWORDS_VERSION, catalogVersion: PICKY_CATALOG_VERSION
+  }));
 
   // 정산서의 채널·수수료율을 그대로 옮겼다. 정산형태는 계산서를 누가 발행하는지
   // 구분하는 값이라 계산에는 쓰지 않고 표기용으로 남긴다.
@@ -1246,6 +1253,16 @@ function migrateDb(db) {
           product[key] = number(seeded[key]);
           changed = true;
         }
+      }
+      // 상품표(바코드·원가)가 갱신되면 카탈로그 버전으로 다시 씌운다. 위의
+      // "비어 있으면 채운다" 로는 부족하다 — 값이 0 이나 빈 문자열로 이미 들어가
+      // 있으면 채워진 것으로 보여 새 값이 영영 반영되지 않는다. 화면에서 고친
+      // 원가를 매번 덮지 않도록 버전이 오를 때만 씌운다.
+      if (seeded.catalogVersion && number(product.catalogVersion) < seeded.catalogVersion) {
+        if (seeded.barcode) product.barcode = seeded.barcode;
+        if (seeded.costPrice !== undefined) product.costPrice = number(seeded.costPrice);
+        product.catalogVersion = seeded.catalogVersion;
+        changed = true;
       }
       if (!Array.isArray(seeded.nameKeywords)) continue;
       if (!seeded.keywordsVersion) continue;
