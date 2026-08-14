@@ -609,7 +609,10 @@ export function buildNpbNamespace() {
       ],
       // 청구서에 그대로 실리는 값들이다. 여기서 고치면 발행되는 양식이 바뀐다.
       // 항목을 고치면 이 번호를 올려야 이미 만들어진 DB 에도 반영된다.
-      invoiceFormatVersion: 1,
+      invoiceFormatVersion: 2,
+      invoiceTitle: "운송/물류 내역 확인 & 청구서",
+      issuerName: "(주)우프컴퍼니",
+      paymentTerms: "발행일로부터 14일 이내",
       basisLabel: "운송장번호 발행 기준",
       // 단가표. group 으로 3PL 과 본사출고를 가른다. 범위로 적는 항목
       // (제주도서산간)은 숫자가 아니라 unitPriceLabel 로 적는다.
@@ -631,17 +634,15 @@ export function buildNpbNamespace() {
         { group: "본사출고", item: "", unitPrice: null, unit: "",
           note: "본사출고시 보관료/입고비/물류솔루션비 등 없음" }
       ],
-      // 비용집계 표 아래에 붙는 주석.
+      // 비용집계 표 아래에 붙는 주석. 줄바꿈은 양식 그대로 둔다.
       invoiceFootnotes: [
-        "입고비용 및 보관비용은 현재 입출고 건수가 작아 청구에 포함하지 않으며, 운송실비(당사가 3PL 지불하는 택배사운임비 + 물류사용비) 청구기준만 기재합니다.",
+        "입고비용 및 보관비용은 현재 입출고 건수가 작아 청구에 포함하지 않으며, \n 운송실비(당사가 3PL 지불하는 택배사운임비 + 물류사용비) 청구기준만 그대로 기재합니다.",
         "퀵/용달 등 별도 운송비 발생시에는 개별기재합니다."
       ],
       // [메모/특이사항] 블록.
       invoiceNotes: [
         "재고이동(오프라인 위탁진열/ 판매시 정산)",
         "비매출: 협찬, 진열품, 샘플 등의 무상사용",
-        "세금계산서는 정산 월 기준 익익월 10일에 발행 예정입니다.",
-        "정산금액은 정산 월 기준 익월 15일 이내 입금 예정이며 정산금액 활용안 협의에 따라 변경될 수 있습니다.",
         "불용이슈: 패키지 손상/파손"
       ],
       // 광고비는 이 시트에 누적된다. 정산에는 넣지 않고 별도 청구한다.
@@ -1475,7 +1476,8 @@ function migrateDb(db) {
         // 가른다. 화면에서 고친 값은 버전이 오를 때만 다시 씌워진다.
         const wantVersion = number(seeded.costConfig?.invoiceFormatVersion);
         if (wantVersion && number(cfg.invoiceFormatVersion) < wantVersion) {
-          for (const key of ["basisLabel", "threePlTable", "invoiceFootnotes", "invoiceNotes"]) {
+          for (const key of ["basisLabel", "threePlTable", "invoiceFootnotes", "invoiceNotes",
+            "invoiceTitle", "issuerName", "paymentTerms"]) {
             if (seeded.costConfig?.[key] !== undefined) cfg[key] = seeded.costConfig[key];
           }
           cfg.invoiceFormatVersion = wantVersion;
@@ -2852,10 +2854,15 @@ function npbBuildInvoice(db, settlement, type) {
     // 합계는 3PL·본사만 센다. 용달/퀵은 건마다 사정이 달라 개별기재하고,
     // 마지막 청구액에서 더한다.
     const counted = breakdown.filter((row) => !row.excludeFromTotal);
-    const separate = breakdown.filter((row) => row.excludeFromTotal && number(row.amount));
+    // 금액이 0 이어도 줄은 남긴다. 양식이 달마다 같은 자리에 같은 항목을 갖고
+    // 있어야 지난달과 나란히 놓고 볼 수 있다.
+    const separate = breakdown.filter((row) => row.excludeFromTotal);
     const subtotal = counted.reduce((sum, row) => sum + number(row.amount), 0);
     const separateTotal = separate.reduce((sum, row) => sum + number(row.amount), 0);
     logisticsSheet = {
+      title: cfg.invoiceTitle || "운송/물류 내역 확인 & 청구서",
+      issuerName: cfg.issuerName || "",
+      paymentTerms: cfg.paymentTerms || "",
       basisLabel: cfg.basisLabel || "운송장번호 발행 기준",
       rows: counted.map((row) => ({
         label: row.label,
@@ -2874,17 +2881,21 @@ function npbBuildInvoice(db, settlement, type) {
       priceTable: Array.isArray(cfg.threePlTable) ? cfg.threePlTable : [],
       footnotes: Array.isArray(cfg.invoiceFootnotes) ? cfg.invoiceFootnotes : [],
       memos: Array.isArray(cfg.invoiceNotes) ? cfg.invoiceNotes : [],
-      // 올린 파일 그대로. 유형별로 시트 한 장씩 나간다.
-      sources: Object.values(settlement.shipFiles || {})
-        .filter((file) => Array.isArray(file?.rows) && file.rows.length)
-        .map((file) => ({
-          shipType: file.shipType,
-          label: (breakdown.find((row) => row.key === file.shipType) || {}).label || file.shipType,
+      // 올린 파일 그대로. 출고 유형마다 시트 한 장씩 나간다 — 파일을 안 올린
+      // 유형도 빈 장으로 둔다. 장이 통째로 없으면 안 올린 것인지 0건인지
+      // 구분이 안 된다.
+      sources: breakdown.map((row) => {
+        const file = (settlement.shipFiles || {})[row.key] || {};
+        return {
+          shipType: row.key,
+          // 시트 이름에는 / 를 못 쓴다.
+          label: String(row.label || row.key).replace(/[\\/*?:[\]]/g, " ").trim(),
           fileName: file.fileName || "",
           basisLabel: file.basisLabel || "",
           autoCount: number(file.autoCount),
-          rows: file.rows
-        }))
+          rows: Array.isArray(file.rows) ? file.rows : []
+        };
+      })
     };
   } else {
     for (const item of settlement.adCost?.items || []) {
@@ -6596,7 +6607,11 @@ async function routeApi(req, res, url) {
     if (action === "xlsx" && method === "GET") {
       try {
         const buffer = await generateNpbInvoiceXlsx(invoice);
-        const name = `${invoice.brandName}_${invoice.periodMonth}_${invoice.typeLabel}.xlsx`;
+        // 운임/물류는 파일명도 양식을 따른다.
+        const label = invoice.type === "logistics"
+          ? "운임_물류 실비 사용내역서"
+          : invoice.typeLabel;
+        const name = `${invoice.brandName}_${invoice.periodMonth}_${label}.xlsx`;
         sendBuffer(res, 200, buffer,
           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
           { "content-disposition": contentDisposition(name) });
