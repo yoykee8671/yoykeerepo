@@ -2841,6 +2841,41 @@ export function npbAdCostCsvUrl(sheetUrl) {
 }
 
 // 기간 셀은 첫 행에만 있고 이후 매체 행은 비어 있다 — 마지막 기간을 물려 쓴다.
+// 셀메이트 재고조회(stk_stockList) CSV. 헤더:
+//   공급처 | 바코드번호 | 상품명 | 옵션명 | 대표판매가 | 원가 | 현재재고 | 재고금액 | 박스당수량
+// 바코드가 "8-809990970025" 처럼 첫 자리 뒤에 하이픈이 붙어 나오므로 숫자만
+// 남겨 우리 상품표의 바코드와 맞춘다. 열 순서는 믿지 않고 헤더 이름으로 찾는다.
+export function npbParseStockCsv(csvText) {
+  const rows = parseCsv(String(csvText || "")).filter((r) => r.some((c) => String(c || "").trim()));
+  if (!rows.length) return { items: [], warnings: ["빈 파일입니다."] };
+  const header = rows[0].map((c) => String(c || "").trim());
+  const find = (...names) => header.findIndex(
+    (label) => names.some((want) => label.replace(/\s/g, "") === want)
+  );
+  const ci = {
+    barcode: find("바코드번호", "바코드"),
+    name: find("상품명"),
+    stock: find("현재재고", "재고수량", "재고"),
+    cost: find("원가")
+  };
+  const warnings = [];
+  if (ci.barcode < 0) warnings.push("바코드번호 열을 찾지 못했습니다.");
+  if (ci.stock < 0) warnings.push("현재재고 열을 찾지 못했습니다.");
+  if (ci.barcode < 0 || ci.stock < 0) return { items: [], warnings };
+  const items = [];
+  for (const row of rows.slice(1)) {
+    const barcode = String(row[ci.barcode] ?? "").replace(/\D/g, "");
+    if (!barcode) continue;
+    items.push({
+      barcode,
+      name: ci.name >= 0 ? String(row[ci.name] ?? "").trim() : "",
+      stock: number(String(row[ci.stock] ?? "").replace(/,/g, "")),
+      cost: ci.cost >= 0 ? number(String(row[ci.cost] ?? "").replace(/,/g, "")) : null
+    });
+  }
+  return { items, warnings };
+}
+
 export function npbParseAdCost(csvText, periodMonth) {
   const rows = parseCsv(String(csvText || ""));
   const want = String(periodMonth || "").replace(/-/g, ".");
@@ -7103,6 +7138,75 @@ async function routeApi(req, res, url) {
     // 출고내역 파일을 유형별로 올려 건수를 센다. 자동으로 센 값을 그대로 쓰되
     // 화면에서 고칠 수 있다 — 5월 자료는 송장 152건인데 정산서에는 155건으로
     // 적혀 있었다. 자동값을 강제하면 과거와 어긋난다.
+    // 셀메이트 재고조회 파일로 기초재고를 채운다. 조회기준일은 파일에 적힌
+    // 시각이 아니라 화면에서 사람이 정한다 — 파일을 언제 뽑았는지와 어느 시점
+    // 재고로 볼지는 다르다.
+    if (action === "stock-file" && method === "POST") {
+      const body = await readBody(req);
+      if (!body.fileBase64) { sendJson(res, 400, { error: "업로드할 파일이 없습니다." }); return; }
+      const buffer = Buffer.from(String(body.fileBase64).split(",").pop() || "", "base64");
+      // 셀메이트는 UTF-8 로도 EUC-KR 로도 내보낸다. 깨지면 한 번 더 시도한다.
+      let text = new TextDecoder("utf-8").decode(buffer);
+      if (text.includes("�")) text = new TextDecoder("euc-kr").decode(buffer);
+      const { items, warnings } = npbParseStockCsv(text);
+      if (!items.length) {
+        sendJson(res, 400, { error: warnings[0] || "재고 행을 읽지 못했습니다.", warnings });
+        return;
+      }
+      const brandProducts = (db.npb.products || []).filter(
+        (p) => npbSameBrand(p.brandId, settlement.brand) && p.active !== false
+      );
+      const byBarcode = new Map(
+        brandProducts.filter((p) => p.barcode).map((p) => [String(p.barcode).replace(/\D/g, ""), p])
+      );
+      const stored = new Map(
+        (settlement.inventory || []).map((r) => [String(r.productKey || r.productId || ""), r])
+      );
+      const matched = [];
+      const unmatched = [];
+      for (const item of items) {
+        const product = byBarcode.get(item.barcode);
+        if (!product) { unmatched.push(item); continue; }
+        const row = stored.get(product.id) || { productKey: product.id, name: product.name };
+        row.opening = item.stock;
+        stored.set(product.id, row);
+        matched.push({ productKey: product.id, name: product.name, opening: item.stock });
+      }
+      settlement.inventory = brandProducts
+        .map((p) => stored.get(p.id))
+        .filter(Boolean);
+      settlement.stockFile = {
+        fileName: String(body.fileName || ""),
+        asOf: String(body.asOf || "").slice(0, 10),
+        rowCount: items.length,
+        matched: matched.length,
+        uploadedAt: now()
+      };
+      const computed = npbRecompute(db, settlement);
+      await writeDb(db);
+      sendJson(res, 200, {
+        matched, unmatched, warnings,
+        stockFile: settlement.stockFile,
+        inventory: settlement.inventory,
+        rollup: computed.rollup,
+        settlement
+      });
+      return;
+    }
+
+    // 조회기준일만 고칠 때. 파일을 다시 올릴 필요는 없다.
+    if (action === "stock-asof" && method === "PUT") {
+      const body = await readBody(req);
+      const asOf = String(body.asOf || "").slice(0, 10);
+      if (!settlement.stockFile || typeof settlement.stockFile !== "object") {
+        settlement.stockFile = { fileName: "", rowCount: 0, matched: 0 };
+      }
+      settlement.stockFile.asOf = asOf;
+      await writeDb(db);
+      sendJson(res, 200, { stockFile: settlement.stockFile });
+      return;
+    }
+
     if (action === "shipping-file" && method === "POST") {
       const body = await readBody(req);
       const shipType = String(body.shipType || "").trim();

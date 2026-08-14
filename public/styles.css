@@ -1048,6 +1048,23 @@ input.num {
   font-size: 14px;
 }
 
+/* 재고조회 파일 업로드 줄. */
+.npb-stock-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.npb-stock-bar label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* 실비 세부내역 — 유형 아래 딸린 항목 줄. */
 .npb-ship-detail td {
   background: #fafafa;
