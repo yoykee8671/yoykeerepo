@@ -794,6 +794,10 @@ export function buildNpbNamespace() {
       code: "mongshu", name: "몽슈슈", category: "위탁재고", archetype: "consignment",
       calcType: "rate_on_sale", salePrice: 22000, feeRate: 0.4, supplyPrice: 13200,
       priceLabel: "정가", vatIncluded: true, feeAdjustable: false,
+      // 몽슈슈가 행사를 걸면 그 할인을 우프와 반반 부담한다. 20% 행사면 우프가
+      // 10%. 할인율은 행사마다 달라 채널 상수가 아니라 정산월별 입력값이다
+      // (settlement.promoRates). 계산은 npbEnrichLine 참고.
+      promoSplit: true,
       filenameKeywords: ["몽슈슈"], active: true
     },
     {
@@ -1303,6 +1307,7 @@ function migrateDb(db) {
 
     // periodMonth 를 채운다. 없으면 전월 이월도 광고비 월 필터도 동작하지 않는다.
     for (const settlement of db.npb.settlements || []) {
+      touch(settlement, "promoRates", {});
       const want = npbPeriodMonth(settlement);
       if (want && settlement.periodMonth !== want) {
         settlement.periodMonth = want;
@@ -1369,7 +1374,7 @@ function migrateDb(db) {
       if (!seeded) continue;
       for (const key of ["saleBasis", "feeBasis", "includeShipping", "manualEntry",
         "dateBasis", "shippingNote", "note", "columnMap", "excludeKeywords",
-        "productIds", "entryMode"]) {
+        "productIds", "entryMode", "promoSplit"]) {
         if (channel[key] === undefined && seeded[key] !== undefined) {
           channel[key] = seeded[key];
           changed = true;
@@ -2593,7 +2598,9 @@ function npbRecompute(db, settlement, opts = {}) {
   const kept = (settlement.lines || []).filter(
     (line) => !summaryOnly.has(line.channel) || line.summary === true
   );
-  const lines = kept.map((line) => npbEnrichLine(line, npbChannels, npbProducts));
+  const lines = kept.map(
+    (line) => npbEnrichLine(line, npbChannels, npbProducts, settlement.promoRates)
+  );
   settlement.lines = lines;
   // 출고 건수는 유형별로 받는다. 예전 정산은 소형/대형 두 값만 갖고 있으므로
   // 그대로 옮겨 담아 결과가 달라지지 않게 한다.
@@ -3239,7 +3246,7 @@ function npbListPrice(line, products) {
   return number(product.listPrice) * (count > 1 ? count : 1);
 }
 
-function npbEnrichLine(line, channels, products) {
+export function npbEnrichLine(line, channels, products, promoRates) {
   const channel = npbFindChannel(channels, line.channel);
   const qty = line.qty != null ? number(line.qty) : number(line.qtyEa);
   const enriched = {
@@ -3285,6 +3292,17 @@ function npbEnrichLine(line, channels, products) {
   enriched.supplyPrice = line.supplyPrice != null
     ? number(line.supplyPrice)
     : number(channel.supplyPrice);
+  // 행사 할인을 판매처와 반반 부담하는 채널(몽슈슈). 행사가 있는 달은 정산서가
+  // 표 모양을 바꾼다 — 매출을 공급가 기준으로 적고 수수료 대신 우프 부담분
+  // (할인율의 절반)만 뗀다. 4월 정답지: 13,200 × 27 = 356,400, 차감 35,640,
+  // 정산 320,760. 행사가 없는 달은 여느 위탁과 같다 — 5월 정답지: 22,000 × 2 =
+  // 44,000, 수수료 40% = 17,600, 정산 26,400. 두 모양을 다 내야 해서 여기서
+  // 갈린다. 사람이 줄에 직접 적은 값은 그대로 이긴다.
+  const promoRate = number(promoRates?.[channel.code]);
+  if (channel.promoSplit && promoRate > 0) {
+    if (line.salePrice == null) enriched.salePrice = number(channel.supplyPrice);
+    if (line.feeRate == null) enriched.feeRate = promoRate / 2;
+  }
   return enriched;
 }
 
@@ -6628,6 +6646,8 @@ async function routeApi(req, res, url) {
       status: "draft",
       uploads: {},
       lines: [],
+      // 채널별 그 달의 행사 할인율. 행사를 반반 부담하는 채널만 본다.
+      promoRates: {},
       logistics: {},
       inventory: [],
       rollup: null,
@@ -6759,7 +6779,7 @@ async function routeApi(req, res, url) {
           // 쓰는 값과 같은 값을 보여줘야 고칠 수 있다.
           const parsedLines = resolvedOut.resolved
             .map((line) => ({ ...line, channel: channelCode }))
-            .map((line) => npbEnrichLine(line, brandChannels, uploadProducts))
+            .map((line) => npbEnrichLine(line, brandChannels, uploadProducts, settlement.promoRates))
             .map((line) => {
               // 기준가 초기값: 파일이 알려준 매출을 수량으로 나눈 실제 단가.
               // 수량이 없는 자료(네이버)는 정가를 그대로 둔다.
@@ -7010,6 +7030,33 @@ async function routeApi(req, res, url) {
 
     // 열 매핑을 고친다. 파일을 다시 올릴 필요 없이 이미 읽어 둔 숫자 열에서
     // 되짚어 계산하고, 매핑은 채널에 남아 다음 달부터 자동 적용된다.
+    // 그 달의 행사 할인율. 채널이 아니라 정산에 붙는다 — 행사는 달마다 달라서
+    // 채널에 두면 지난달 정산을 다시 열 때 이번 달 할인율로 계산된다.
+    if (action === "promo" && method === "PUT") {
+      const body = await readBody(req);
+      const channelCode = String(body.channel || "").trim();
+      if (!channelCode) { sendJson(res, 400, { error: "채널을 지정해 주세요." }); return; }
+      // 20 처럼 퍼센트로 적어도 받는다. 1 을 넘으면 퍼센트로 본다.
+      let rate = number(body.rate);
+      if (rate > 1) rate /= 100;
+      if (!(rate >= 0) || rate >= 1) {
+        sendJson(res, 400, { error: "할인율은 0 이상 100% 미만이어야 합니다." });
+        return;
+      }
+      if (!settlement.promoRates || typeof settlement.promoRates !== "object") {
+        settlement.promoRates = {};
+      }
+      if (rate > 0) settlement.promoRates[channelCode] = rate;
+      else delete settlement.promoRates[channelCode];
+      const computed = npbRecompute(db, settlement);
+      await writeDb(db);
+      sendJson(res, 200, {
+        channel: channelCode, rate, promoRates: settlement.promoRates,
+        rollup: computed.rollup, settlement
+      });
+      return;
+    }
+
     if (action === "remap" && method === "PUT") {
       const body = await readBody(req);
       const channelCode = String(body.channel || "").trim();

@@ -4387,6 +4387,8 @@ function npbBuildWorksheet(config, lines) {
       settleBy: channel.settleBy || "",
       category: channel.category || "",
       priceLabel: channel.priceLabel || "기준가",
+      // 행사 할인을 판매처와 반반 부담하는 채널은 그 달의 할인율을 받아야 한다.
+      promoSplit: channel.promoSplit === true,
       rows: [...rows, ...extras]
     });
   }
@@ -5836,12 +5838,28 @@ function renderNpbWsBlock(block, bi) {
   const tag = block.category
     ? `<span class="badge">${h(block.category)}</span>`
     : "";
+  // 행사 할인은 판매처와 반반 부담한다. 20% 행사면 우프가 10% — 그 달에만
+  // 해당하는 값이라 채널 설정이 아니라 이 정산에 붙는다.
+  const promoRate = Number(state.npb.current?.promoRates?.[block.code] || 0);
+  const promoPct = promoRate ? String(Math.round(promoRate * 1000) / 10) : "";
+  const promo = block.promoSplit
+    ? `<span class="npb-promo">
+        행사 할인
+        <input class="num npb-pct" type="number" step="1" min="0" max="99"
+          placeholder="0" data-npb-promo="${h(block.code)}" value="${h(promoPct)}">%
+        <button class="ghost" data-npb-promo-save="${h(block.code)}">적용</button>
+        ${promoRate
+          ? `<span class="muted">우프 부담 ${Math.round(promoRate * 500) / 10}%</span>`
+          : `<span class="muted">행사 없음</span>`}
+      </span>`
+    : "";
   return `
     <div class="npb-ws-block">
       <div class="npb-ws-title">
         <button class="ghost" data-npb-ws-toggle="${h(block.code)}">${collapsed ? "▸" : "▾"}</button>
         <strong>${h(block.name)}</strong> ${tag}
         ${collapsed ? `<span class="muted">${empty ? "내역 없음" : `수량 ${money.format(subQty)}`}</span>` : ""}
+        ${promo}
       </div>
       <div class="table-wrap" ${collapsed ? 'style="display:none"' : ""}>
         <table class="npb-ws-table">
@@ -6622,6 +6640,26 @@ function bindNpbWorksheet() {
       const empty = block ? block.rows.every((row) => !Number(row.qty)) : false;
       n.wsCollapsed[code] = !(n.wsCollapsed[code] ?? empty);
       renderApp();
+    });
+  });
+  // 행사 할인율. 서버가 그 달의 정산을 다시 계산해 돌려주므로 화면은 받은
+  // 값으로 갈아끼우기만 한다.
+  app.querySelectorAll("[data-npb-promo-save]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const code = btn.getAttribute("data-npb-promo-save");
+      const input = app.querySelector(`[data-npb-promo="${code}"]`);
+      try {
+        const res = await api(
+          `/api/npb/settlements/${encodeURIComponent(n.currentKey)}/promo`,
+          { method: "PUT", body: { channel: code, rate: Number(input?.value || 0) } }
+        );
+        // 몽슈슈 줄의 기준가·수수료율이 서버에서 바뀌므로 워크시트를 다시 받는다.
+        await npbLoadDetail(n.currentKey);
+        showToast(res?.rate ? `행사 할인 ${Math.round(res.rate * 100)}% 적용` : "행사 할인 해제");
+        renderApp();
+      } catch (error) {
+        showToast(error.message || "행사 할인 저장 실패", "error");
+      }
     });
   });
   app.querySelector("[data-npb-reload]")?.addEventListener("click", async () => {

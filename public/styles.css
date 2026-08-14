@@ -1048,6 +1048,20 @@ input.num {
   font-size: 14px;
 }
 
+/* 행사 할인율 — 채널 제목 오른쪽 끝에 붙인다. */
+.npb-promo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.npb-promo input {
+  width: 56px;
+}
+
 .npb-ws-table {
   width: 100%;
 }
