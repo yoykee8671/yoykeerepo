@@ -73,42 +73,76 @@ def fee_cell(ws, row, col, value):
 
 
 # ------------------------------------------------------------------ 정산서
+# 확정된 6월 양식과 셀 단위로 같게 그린다. 실비는 이 장에 숫자로 올리지 않는다 —
+# 정산에서 공제하지 않는 값을 표에 함께 세우면 공제한 것처럼 읽힌다. 별도 청구
+# 사실은 메모 한 줄로만 알린다.
+F8 = Font(size=8)
+F8B = Font(size=8, bold=True)
+F9B = Font(size=9, bold=True)
+F10B = Font(size=10, bold=True)
+BLUE_FILL = PatternFill("solid", fgColor="FFCAEDFB")   # 소비자정가계·매출계
+GREEN_FILL = PatternFill("solid", fgColor="FFDAF2D0")  # 수수료·정산합계
+GREY_FILL = PatternFill("solid", fgColor="FFF2F2F2")   # 표 머리
+# 우프 정산 줄. 양식은 테마색(accent2 E97132)의 80% 밝은 값을 쓴다 — 테마 참조
+# 대신 같은 색을 직접 적는다. 파일을 여는 쪽 테마가 달라도 색이 흔들리지 않는다.
+PARTY_FILL = PatternFill("solid", fgColor="FFFBE3D6")
+
+
 def build_summary(ws, spec):
-    widths(ws, {"A": 2, "B": 22, "C": 22, "D": 16, "E": 16, "F": 16, "G": 16, "H": 40})
-    put(ws, 2, 2, spec.get("title") or "월별 세부 판매 현황", font=TITLE, border=False)
+    widths(ws, {"A": 3.7, "B": 14.5, "C": 16.2, "D": 21.7, "F": 17.5,
+                "L": 13.3, "M": 44.5, "N": 8.7, "O": 8.5})
+    for row, height in [(2, 24), (3, 13), (4, 16), (6, 23), (11, 16), (12, 28),
+                        (15, 10), (16, 15.8)]:
+        ws.row_dimensions[row].height = height
 
-    put(ws, 4, 2, "[판매내역 종합]", font=BOLD, border=False)
-    put(ws, 4, 7, "vat포함", font=SMALL, align="right", border=False)
+    put(ws, 2, 2, spec.get("title") or "월별 세부 판매 현황",
+        font=Font(size=11, bold=True), border=False)
 
-    head = ["계산서 발행 (신고)기준", "집계 기준 (채널별 상이)", "소비자정가계",
-            "매출계", "수수료 (공제계)", "정산합계"]
-    for i, label in enumerate(head):
-        put(ws, 5, 2 + i, label, font=BOLD, fill=HEAD_FILL, align="center")
+    put(ws, 4, 2, "[판매내역 종합]", font=F8B, align="left", border=False)
+    put(ws, 4, 7, "vat포함", font=Font(size=9), align="right", border=False)
+
+    for i, (label, font, fill) in enumerate([
+        ("계산서 발행 (신고)기준", F8, None),
+        ("집계 기준 (채널별 상이)", F8B, None),
+        ("소비자정가계", F8B, BLUE_FILL),
+        ("매출계", F8B, BLUE_FILL),
+        ("수수료 (공제계)", F8B, GREEN_FILL),
+        ("정산합계", F8B, GREEN_FILL),
+    ]):
+        put(ws, 5, 2 + i, label, font=font, fill=fill, align="center")
 
     rollup = spec.get("rollup") or {}
-    put(ws, 6, 2, spec.get("issueBasisDate") or "", align="center")
-    put(ws, 6, 3, spec.get("periodRange") or "", align="center")
-    put(ws, 6, 4, rollup.get("listTotal", 0), fmt=MONEY)
-    put(ws, 6, 5, rollup.get("realSaleTotal", 0), fmt=MONEY)
-    put(ws, 6, 6, rollup.get("feeTotal", 0), fmt=MONEY)
-    put(ws, 6, 7, rollup.get("settleTotal", 0), fmt=MONEY)
+    put(ws, 6, 2, spec.get("issueBasisDate") or "", font=F10B, align="center")
+    put(ws, 6, 3, spec.get("periodRange") or "", font=F9B, align="center")
+    for i, key in enumerate(["listTotal", "realSaleTotal", "feeTotal", "settleTotal"]):
+        put(ws, 6, 4 + i, rollup.get(key, 0), font=F9B, fmt=MONEY, align="center")
 
-    put(ws, 8, 2, "매출계산서발행", font=BOLD, border=False)
-    put(ws, 8, 7, "vat포함", font=SMALL, align="right", border=False)
+    put(ws, 8, 2, "매출계산서발행", font=F8B, align="left", border=False)
+    ws.merge_cells("B8:C8")
+    put(ws, 8, 10, "vat포함", font=F8, align="right", border=False)
+
     for i, label in enumerate(["항목", "A 매출", "B 공제계", "C 정산계", "비고"]):
-        put(ws, 9, 2 + i, label, font=BOLD, fill=HEAD_FILL, align="center")
+        put(ws, 9, 2 + i, label, font=F8, fill=GREY_FILL, align="center")
+    ws.merge_cells("F9:J9")
+    for col in range(6, 11):
+        ws.cell(row=9, column=col).fill = GREY_FILL
+        ws.cell(row=9, column=col).border = BOX
 
     row = 10
-    put(ws, row, 2, "정산합계", font=BOLD, fill=TOTAL_FILL)
-    put(ws, row, 3, rollup.get("realSaleTotal", 0), fmt=MONEY, fill=TOTAL_FILL)
-    put(ws, row, 4, rollup.get("feeTotal", 0), fmt=MONEY, fill=TOTAL_FILL)
-    put(ws, row, 5, rollup.get("settleTotal", 0), fmt=MONEY, fill=TOTAL_FILL)
-    put(ws, row, 6, "", fill=TOTAL_FILL)
+    put(ws, row, 2, "정산합계", font=F8, align="center")
+    put(ws, row, 3, rollup.get("realSaleTotal", 0), font=F8B, fmt=MONEY, align="center")
+    put(ws, row, 4, rollup.get("feeTotal", 0), font=F8, fmt=MONEY, align="center")
+    put(ws, row, 5, rollup.get("settleTotal", 0), font=F8B, fmt=MONEY, align="center")
+    put(ws, row, 6, "", border=True)
+    ws.merge_cells("F10:J10")
+    for col in range(6, 11):
+        ws.cell(row=row, column=col).border = BOX
     row += 1
 
     notes = {
-        "픽키파크": "직접 픽키파크로 업체가 발행 후, 해당 업체에서 픽키파크로 정산",
-        "우프": "우프에서 B (공제계) 만큼 수수료 세금계산서를 발행",
+        "픽키파크": "직접 픽키파크로 업체가 발행 후, 해당 업체에서 픽키파크 계좌로 직접 대금 지급되는 건입니다.",
+        "우프": "우프에서 B (공제계) 만큼 수수료 세금계산서를 발행 하고, C 정산계 만큼 대금을 입금해요.  \n"
+                "픽키파크에서 A 매출을 기타매출로 신고 하시면 됩니다.",
     }
     # 픽키파크 → 우프 순으로 적는다 (6월 정산서와 같은 순서).
     parties = sorted(
@@ -117,40 +151,25 @@ def build_summary(ws, spec):
     )
     for party in parties:
         name = party.get("party") or ""
-        put(ws, row, 2, f"{name} 정산")
-        put(ws, row, 3, party.get("sale", 0), fmt=MONEY)
-        put(ws, row, 4, party.get("fee", 0), fmt=MONEY)
-        put(ws, row, 5, party.get("settle", 0), fmt=MONEY)
-        put(ws, row, 6, notes.get(name, ""), align="left")
+        fill = PARTY_FILL if name == "우프" else None
+        put(ws, row, 2, f"{name} 정산", font=F8, fill=fill, align="center")
+        put(ws, row, 3, party.get("sale", 0), font=F8B, fill=fill, fmt=MONEY, align="center")
+        put(ws, row, 4, party.get("fee", 0), font=F8, fill=fill, fmt=MONEY, align="center")
+        put(ws, row, 5, party.get("settle", 0), font=F8B, fill=fill, fmt=MONEY, align="center")
+        cell = put(ws, row, 6, notes.get(name, ""), font=F8)
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+        ws.merge_cells(start_row=row, start_column=6, end_row=row, end_column=10)
+        for col in range(6, 11):
+            ws.cell(row=row, column=col).border = BOX
         row += 1
 
-    row += 1
-    if spec.get("billSeparately"):
-        log = spec.get("logistics") or {}
-        ad = spec.get("adCost") or {}
-        put(ws, row, 2, "[별도 청구 예정 실비]", font=BOLD, border=False)
-        row += 1
-        for label, amount in (
-            ("운임/물류 실비", log.get("grandTotal", 0)),
-            ("용달/퀵 (개별기재)", log.get("separateTotal", 0)),
-            ("광고홍보 실비", ad.get("total", 0)),
-        ):
-            put(ws, row, 2, label, fill=SUB_FILL)
-            put(ws, row, 3, amount or 0, fmt=MONEY)
-            row += 1
-        put(ws, row, 2, "위 실비는 정산 계산에 포함·공제되지 않으며 별도 청구서로 발행됩니다.",
-            font=SMALL, border=False)
-        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=8)
-        row += 2
-
-    put(ws, row, 2, "[메모/특이사항]", font=BOLD, border=False)
+    row += 3
+    put(ws, row, 2, "[메모/특이사항]", font=F8B, align="left", border=False)
+    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=3)
     row += 1
     for line in spec.get("memo") or []:
-        cell = put(ws, row, 2, line, fill=NOTE_FILL, align="left")
-        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=8)
-        for col in range(2, 9):
-            ws.cell(row=row, column=col).fill = NOTE_FILL
-            ws.cell(row=row, column=col).border = BOX
+        put(ws, row, 2, line, font=F8, align="left", border=False)
+        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
         row += 1
 
 
@@ -250,12 +269,43 @@ def build_channel_detail(ws, spec):
         row += 2
 
 
+def build_source_sheet(ws, source):
+    """올린 채널 파일을 그대로 적는다. 파서는 행을 {열이름: 값} 으로 준다."""
+    rows = source.get("rows") or []
+    if not rows:
+        return
+    header, seen = [], set()
+    for row in rows:
+        for key in row.keys():
+            if key not in seen:
+                seen.add(key)
+                header.append(key)
+    for c, key in enumerate(header, start=1):
+        cell = ws.cell(row=1, column=c, value=key)
+        cell.font = BOLD
+        cell.fill = SUB_FILL
+    for r, row in enumerate(rows, start=2):
+        for c, key in enumerate(header, start=1):
+            ws.cell(row=r, column=c, value=row.get(key))
+
+
 def build(spec, path):
     wb = Workbook()
     build_summary(wb.active, spec)
     wb.active.title = "정산서"
     build_channel_totals(wb.create_sheet("채널별 정산 합계"), spec)
     build_channel_detail(wb.create_sheet("채널별 판매데이터 정리"), spec)
+    # 올린 채널 파일을 DB) 시트로 뒤에 붙인다. 시트 이름에 못 쓰는 글자는 뺀다.
+    used = set(wb.sheetnames)
+    for source in spec.get("sources") or []:
+        base = f"DB){source.get('label') or source.get('channel') or ''}"
+        title = "".join(ch for ch in base if ch not in "\\/*?:[]")[:31] or "DB)"
+        name, n = title, 2
+        while name in used:
+            name = f"{title[:28]}({n})"
+            n += 1
+        used.add(name)
+        build_source_sheet(wb.create_sheet(name), source)
     wb.save(path)
 
 

@@ -3654,8 +3654,11 @@ function npbBuildPickySpec(db, settlement) {
     periodMonth: settlement.periodMonth || "",
     // 파일명의 월은 집계 기준이라 신고 월과 한 달 어긋난다. 둘 다 적어 둔다.
     issueBasisDate: npbNextMonthEnd(settlement.periodMonth),
+    // 정산서 표기는 "2026.6.1 - 6.30" 형식이다.
     periodRange: period.range
-      || (period.month ? `${period.year} ${period.month}/1 - ${period.month}/${new Date(Number(period.year), Number(period.month), 0).getDate()}` : ""),
+      || (period.month
+        ? `${period.year}.${Number(period.month)}.1 - ${Number(period.month)}.${new Date(Number(period.year), Number(period.month), 0).getDate()}`
+        : ""),
     rollup: {
       listTotal: number(rollup.listTotal),
       discountTotal: number(rollup.discountTotal),
@@ -3671,12 +3674,17 @@ function npbBuildPickySpec(db, settlement) {
     adCost: settlement.adCost || null,
     memo: settlement.memo && settlement.memo.length
       ? settlement.memo
-      : [
-          "당월부터 실비(물류/운임비/광고홍보비)는 매출에 통합하지 않고 별도 청구합니다.",
-          "정산서에 기재된 월은 판매집계 기준이며, 계산서 발행(신고) 기준일을 함께 적었습니다.",
-          "세금계산서는 정산 월 기준 익익월 10일에 발행합니다.",
-          "정산금액은 정산 월 기준 익월 15일 이내 입금됩니다."
-        ]
+      : ["당월부터 실비는 별도 청구예정입니다. (비용상의 계정과목 분리 목적 - 운송비/광고비 등)"],
+    // 채널 파일을 올린 그대로 뒤에 붙인다. 정산서의 숫자가 어느 자료에서
+    // 나왔는지는 그 자료가 같은 파일에 있어야 확인할 수 있다.
+    sources: Object.values(settlement.uploads || {})
+      .filter((up) => up && up.kind !== "logistics" && Array.isArray(up.rawRows) && up.rawRows.length)
+      .map((up) => ({
+        channel: up.channel,
+        label: (channels.find((c) => c.code === up.channel) || {}).name || up.channel,
+        fileName: up.fileName || "",
+        rows: up.rawRows
+      }))
   };
 }
 
@@ -7006,10 +7014,20 @@ async function routeApi(req, res, url) {
               }
               return { ...line, unitPrice: unit };
             });
+          // 올린 표를 그대로 보관한다. 정산서 뒤에 DB) 시트로 나가야 숫자가
+          // 어느 자료에서 나왔는지 대조할 수 있다. 실패해도 업로드는 계속한다 —
+          // 원본 보관이 안 된다고 정산을 막을 이유는 없다.
+          let rawRows = [];
+          try {
+            rawRows = await parseBankXlsxUpload(body.fileBase64);
+          } catch {
+            rawRows = [];
+          }
           settlement.uploads[channelCode] = {
             kind,
             channel: channelCode,
             fileName: body.fileName || "",
+            rawRows,
             lines: parsedLines,
             warnings: npbUploadWarnings(parsed, uploadChannel, excluded),
             // 열을 다시 고를 수 있도록 파서가 본 표 구조를 남긴다.
