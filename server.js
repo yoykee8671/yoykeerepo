@@ -609,7 +609,7 @@ export function buildNpbNamespace() {
       ],
       // 청구서에 그대로 실리는 값들이다. 여기서 고치면 발행되는 양식이 바뀐다.
       // 항목을 고치면 이 번호를 올려야 이미 만들어진 DB 에도 반영된다.
-      invoiceFormatVersion: 2,
+      invoiceFormatVersion: 3,
       invoiceTitle: "운송/물류 내역 확인 & 청구서",
       issuerName: "(주)우프컴퍼니",
       paymentTerms: "발행일로부터 14일 이내",
@@ -646,7 +646,14 @@ export function buildNpbNamespace() {
         "불용이슈: 패키지 손상/파손"
       ],
       // 광고비는 이 시트에 누적된다. 정산에는 넣지 않고 별도 청구한다.
-      adCostSheetUrl: "https://docs.google.com/spreadsheets/d/1RA45qIvKCGRh5evCtiXMmpypdNb8gxvKWAkwfu-MHz0/edit"
+      adCostSheetUrl: "https://docs.google.com/spreadsheets/d/1RA45qIvKCGRh5evCtiXMmpypdNb8gxvKWAkwfu-MHz0/edit",
+      // 청구서 뒤에 붙일 시트 탭과 그 순서. 여기 적힌 것만 DB_ 를 붙여 싣는다.
+      // (주별 리스트처럼 청구 근거가 아닌 탭은 뺀다.) 비워 두면 전부 싣는다.
+      adSheetTabs: [
+        "월별 네이버 광고비 소진 내역",
+        "월별 메타 광고비 소진 내역",
+        "월별 광고비 소진액 합계"
+      ]
     },
   };
 
@@ -1477,7 +1484,7 @@ function migrateDb(db) {
         const wantVersion = number(seeded.costConfig?.invoiceFormatVersion);
         if (wantVersion && number(cfg.invoiceFormatVersion) < wantVersion) {
           for (const key of ["basisLabel", "threePlTable", "invoiceFootnotes", "invoiceNotes",
-            "invoiceTitle", "issuerName", "paymentTerms"]) {
+            "invoiceTitle", "issuerName", "paymentTerms", "adSheetTabs"]) {
             if (seeded.costConfig?.[key] !== undefined) cfg[key] = seeded.costConfig[key];
           }
           cfg.invoiceFormatVersion = wantVersion;
@@ -2902,6 +2909,7 @@ function npbBuildInvoice(db, settlement, type) {
       items.push({ label: item.medium, count: 0, unit: 0, amount: number(item.amount), note: item.period || "" });
     }
   }
+  const cfg = brand?.costConfig || {};
   const total = items.reduce((sum, item) => sum + number(item.amount), 0);
   return {
     id: crypto.randomBytes(8).toString("hex"),
@@ -2914,6 +2922,10 @@ function npbBuildInvoice(db, settlement, type) {
     typeLabel: meta.label,
     account: meta.account,
     title: `${meta.label} 청구서 (${settlement.periodMonth})`,
+    issuerName: cfg.issuerName || "",
+    paymentTerms: cfg.paymentTerms || "",
+    sheetUrl: type === "ad" ? (settlement.adCost?.sheetUrl || cfg.adCostSheetUrl || "") : "",
+    sheetTabs: type === "ad" && Array.isArray(cfg.adSheetTabs) ? cfg.adSheetTabs : [],
     items,
     // 총액은 3PL·본사 합계, 청구액은 거기에 용달/퀵을 더한 값이다.
     logisticsSheet,
@@ -3756,20 +3768,46 @@ async function generatePickyXlsx(spec) {
   }
 }
 
-async function generateNpbInvoiceXlsx(invoice) {
+// 광고비 청구서는 구글시트 탭을 그대로 뒤에 싣는다. 시트를 통째로 xlsx 로
+// 내려받아 그 위에 청구서 장을 얹는 편이, 셀을 하나씩 옮겨 적어 수식과 서식을
+// 잃는 것보다 원본에 가깝다. 실패해도 청구서 자체는 나가야 하므로 조용히
+// 넘어간다 — 시트가 비공개면 다운로드가 통째로 막히는 편이 더 나쁘다.
+async function fetchAdCostWorkbook(sheetUrl) {
+  const id = String(sheetUrl || "").match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/)?.[1];
+  if (!id) return null;
+  try {
+    const response = await fetch(
+      `https://docs.google.com/spreadsheets/d/${id}/export?format=xlsx`,
+      { redirect: "follow" }
+    );
+    if (!response.ok) return null;
+    const buffer = Buffer.from(await response.arrayBuffer());
+    // 비공개면 로그인 HTML 이 온다.
+    if (buffer.slice(0, 2).toString() !== "PK") return null;
+    return buffer;
+  } catch {
+    return null;
+  }
+}
+
+async function generateNpbInvoiceXlsx(invoice, sourceWorkbook = null) {
   const tmpBase = path.join(os.tmpdir(), `wooofpay-npb-invoice-${crypto.randomBytes(8).toString("hex")}`);
   const inputPath = `${tmpBase}.json`;
   const outputPath = `${tmpBase}.xlsx`;
+  const sourcePath = `${tmpBase}-source.xlsx`;
   try {
     await writeFile(inputPath, JSON.stringify(invoice), "utf8");
-    await execFileAsync("python3", [NPB_INVOICE_SCRIPT, "--input", inputPath, "--output", outputPath], {
-      cwd: __dirname,
-      maxBuffer: 20 * 1024 * 1024
-    });
+    const args = [NPB_INVOICE_SCRIPT, "--input", inputPath, "--output", outputPath];
+    if (sourceWorkbook) {
+      await writeFile(sourcePath, sourceWorkbook);
+      args.push("--source", sourcePath);
+    }
+    await execFileAsync("python3", args, { cwd: __dirname, maxBuffer: 40 * 1024 * 1024 });
     return await readFile(outputPath);
   } finally {
     await safeUnlink(inputPath);
     await safeUnlink(outputPath);
+    await safeUnlink(sourcePath);
   }
 }
 
@@ -6606,11 +6644,14 @@ async function routeApi(req, res, url) {
 
     if (action === "xlsx" && method === "GET") {
       try {
-        const buffer = await generateNpbInvoiceXlsx(invoice);
-        // 운임/물류는 파일명도 양식을 따른다.
+        const source = invoice.type === "ad"
+          ? await fetchAdCostWorkbook(invoice.sheetUrl)
+          : null;
+        const buffer = await generateNpbInvoiceXlsx(invoice, source);
+        // 파일명도 양식을 따른다.
         const label = invoice.type === "logistics"
           ? "운임_물류 실비 사용내역서"
-          : invoice.typeLabel;
+          : "광고홍보 실비 사용내역서";
         const name = `${invoice.brandName}_${invoice.periodMonth}_${label}.xlsx`;
         sendBuffer(res, 200, buffer,
           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

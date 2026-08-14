@@ -17,7 +17,7 @@
 import argparse
 import json
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -267,26 +267,79 @@ def build_logistics(wb, invoice, sheet):
         write_rows(sh, source.get("rows") or [], start=4)
 
 
-def build_simple(wb, invoice):
-    """광고비 등, 항목 목록만 있는 청구서."""
-    ws = wb.active
-    ws.title = "청구서"
-    for i, width in enumerate([2, 34, 10, 12, 14, 40], start=1):
-        ws.column_dimensions[get_column_letter(i)].width = width
+def attach_source_tabs(wb, wanted):
+    """구글시트 탭을 청구서 뒤에 붙일 모양으로 정리한다.
 
+    양식은 탭 이름 앞에 DB_ 를 붙이고 필요한 탭만 순서대로 둔다. 이름을 바꾸면
+    탭끼리 참조하는 수식('월별 네이버…'!C2)이 가리킬 곳을 잃으므로, 이름을
+    바꾼 뒤 수식의 참조도 같이 고쳐 준다.
+    """
+    keep = [name for name in (wanted or []) if name in wb.sheetnames]
+    if keep:
+        for name in wb.sheetnames:
+            if name not in keep:
+                del wb[name]
+    else:
+        keep = list(wb.sheetnames)
+
+    renames = {}
+    for name in keep:
+        new = name if name.startswith("DB_") else f"DB_{name}"
+        renames[name] = new[:31]
+    for old, new in renames.items():
+        wb[old].title = new
+    # 시트 순서를 양식과 같게 둔다.
+    wb._sheets = [wb[renames[name]] for name in keep]
+
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                value = cell.value
+                if not isinstance(value, str) or not value.startswith("="):
+                    continue
+                for old, new in renames.items():
+                    if old == new:
+                        continue
+                    value = value.replace(f"'{old}'!", f"'{new}'!")
+                    value = value.replace(f"{old}!", f"'{new}'!")
+                cell.value = value
+
+
+def build_simple(ws, invoice):
+    """광고비 등, 항목 목록만 있는 청구서. 확정된 양식과 셀 단위로 같게 그린다."""
+    for col, width in [("A", 2.0), ("B", 34.0), ("C", 10.0),
+                       ("D", 12.0), ("E", 14.0), ("F", 40.0)]:
+        ws.column_dimensions[col].width = width
+
+    ws.row_dimensions[1].height = 16
+    ws.row_dimensions[2].height = 34
     title = ws.cell(row=2, column=2, value=invoice.get("title") or "실비 청구서")
-    title.font = Font(size=15, bold=True)
+    title.font = Font(size=16, bold=True)
+    title.alignment = CENTER
+    ws.merge_cells("B2:F2")
+    issuer = ws.cell(row=3, column=6, value=invoice.get("issuerName") or "")
+    issuer.font = Font(size=BASE_FONT)
+    issuer.alignment = RIGHT
+
+    # 사업자명과 브랜드명이 다르면 둘 다 적는다 — 계산서는 사업자로 나가고
+    # 내역은 브랜드로 관리한다.
+    business = invoice.get("businessName") or ""
+    brand = invoice.get("brandName") or ""
+    if business and brand and business != brand:
+        payer = f"{business}({brand})"
+    else:
+        payer = business or brand
 
     row = 4
     for label, value in [
-        ("공급받는 자", invoice.get("businessName") or invoice.get("brandName") or ""),
+        ("공급받는 자", payer),
         ("집계 기간", invoice.get("periodMonth") or ""),
         ("계정 분류", invoice.get("account") or ""),
         ("발행일", str(invoice.get("issuedAt") or "")[:10]),
-        ("입금 기한", invoice.get("dueDate") or ""),
+        ("입금요청", invoice.get("paymentTerms") or invoice.get("dueDate") or ""),
     ]:
-        put(ws, row, 2, label, bold=True, fill=HEAD_FILL)
-        put(ws, row, 3, value)
+        put(ws, row, 2, label, bold=True, fill=HEAD_FILL, align=VCENTER)
+        put(ws, row, 3, value, align=VCENTER)
         ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=6)
         band(ws, row, 3, 6)
         row += 1
@@ -297,22 +350,22 @@ def build_simple(wb, invoice):
     row += 1
 
     for item in invoice.get("items") or []:
-        put(ws, row, 2, item.get("label") or "")
-        put(ws, row, 3, item.get("count") or "", number=True)
-        put(ws, row, 4, item.get("unit") or "", number=True)
+        put(ws, row, 2, item.get("label") or "", align=VCENTER)
+        put(ws, row, 3, item.get("count") or None, number=True)
+        put(ws, row, 4, item.get("unit") or None, number=True)
         put(ws, row, 5, item.get("amount") or 0, number=True)
-        cell = put(ws, row, 6, item.get("note") or "")
-        cell.alignment = WRAP
+        put(ws, row, 6, item.get("note") or None, align=VCENTER)
         row += 1
 
-    put(ws, row, 2, "합계", bold=True, fill=TOTAL_FILL)
+    put(ws, row, 2, "합계", bold=True, fill=TOTAL_FILL, align=VCENTER)
     for col in (3, 4, 6):
-        put(ws, row, col, "", fill=TOTAL_FILL)
+        put(ws, row, col, None, fill=TOTAL_FILL)
     cell = put(ws, row, 5, invoice.get("total") or 0, number=True, fill=TOTAL_FILL)
-    cell.font = Font(bold=True)
+    cell.font = Font(size=BASE_FONT, bold=True)
     row += 2
 
     put(ws, row, 2, "[안내]", bold=True, box=False)
+    ws.row_dimensions[row].height = 16
     row += 1
     notes = [
         "본 청구서는 판매정산서와 별도로 발행되는 실비 청구분입니다.",
@@ -321,19 +374,36 @@ def build_simple(wb, invoice):
     ]
     if invoice.get("note"):
         notes.append(str(invoice["note"]))
-    for text in notes:
-        ws.cell(row=row, column=2, value=text)
+    for i, text in enumerate(notes):
+        cell = ws.cell(row=row, column=2, value=text)
+        cell.font = Font(size=BASE_FONT)
         ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
+        for col in range(2, 7):
+            ws.cell(row=row, column=col).border = Border(
+                left=THIN, right=THIN,
+                bottom=THIN if i == len(notes) - 1 else None)
+        ws.row_dimensions[row].height = 16
         row += 1
 
 
-def build(invoice, path):
-    wb = Workbook()
+def build(invoice, path, source=None):
     sheet = invoice.get("logisticsSheet")
     if sheet:
+        wb = Workbook()
         build_logistics(wb, invoice, sheet)
+        wb.save(path)
+        return
+    # 광고비는 구글시트를 통째로 받아 그 위에 청구서 장을 얹는다. 원본 탭의
+    # 수식·서식이 그대로 남는다.
+    if source:
+        wb = load_workbook(source)
+        attach_source_tabs(wb, invoice.get("sheetTabs") or [])
+        ws = wb.create_sheet(title="청구서", index=0)
     else:
-        build_simple(wb, invoice)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "청구서"
+    build_simple(ws, invoice)
     wb.save(path)
 
 
@@ -341,10 +411,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
+    ap.add_argument("--source", help="뒤에 붙일 원본 워크북(광고비 구글시트)")
     args = ap.parse_args()
     with open(args.input, encoding="utf-8") as fh:
         invoice = json.load(fh)
-    build(invoice, args.output)
+    build(invoice, args.output, args.source)
 
 
 if __name__ == "__main__":
