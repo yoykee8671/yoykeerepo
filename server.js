@@ -6982,20 +6982,27 @@ async function routeApi(req, res, url) {
               // 묶음인데 파일의 단가가 낱개 값인 경우가 있다 — 카페24 B2B 는
               // "수량=100개" 옵션에도 판매가 칸에 낱개 공급가를 적어 보낸다.
               // 낱개 정가와 비슷한 값이면 묶음 단가로 환산한다.
+              //
+              // 파일이 매출 금액을 준 줄은 건드리지 않는다. 그 단가는 이미
+              // 금액 ÷ 수량이라 수량과 아귀가 맞고, 여기서 배수를 또 곱하면
+              // 뒤에서 수량을 한 번 더 곱해 100개 주문이 100배로 부푼다.
               const multiplier = Math.max(1, number(line.multiplier, 1));
-              if (multiplier > 1 && unit > 0) {
+              if (multiplier > 1 && unit > 0 && line.saleAmount == null) {
                 const base = number(line.listPrice) / multiplier;
                 const ratio = base > 0 ? unit / base : 0;
                 if (ratio >= 0.3 && ratio <= 1.5) unit *= multiplier;
               }
+              // 파일이 그 줄의 단가를 적어 왔으면 그것이 진실이다. 지난번에
+              // 정한 기준가는 파일에 단가가 없을 때 쓰는 값이고, 다를 때는
+              // 덮는 대신 알리기만 한다 — B2B 는 같은 상품이라도 100개 주문의
+              // 공급가가 4,080 으로 내려가는 식이라(대량구매 할인) 기억한 값을
+              // 씌우면 그 줄만 조용히 틀린다.
               const saved = line.savedUnitPrice;
               if (saved != null && saved > 0) {
-                // 파일이 말하는 단가와 지난번에 정한 단가가 다르면 알린다 —
-                // 판매처가 말없이 공급가를 바꾸는 걸 여기서 잡는다.
                 const changed = unit > 0 && unit !== saved
                   ? { from: saved, to: unit }
                   : null;
-                return { ...line, unitPrice: saved, priceChanged: changed };
+                return { ...line, unitPrice: unit > 0 ? unit : saved, priceChanged: changed };
               }
               return { ...line, unitPrice: unit };
             });
