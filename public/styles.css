@@ -1048,6 +1048,45 @@ input.num {
   font-size: 14px;
 }
 
+/* 재고조회 파일 업로드 줄. */
+.npb-stock-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.npb-stock-bar label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 실비 세부내역 — 유형 아래 딸린 항목 줄. */
+.npb-ship-detail td {
+  background: #fafafa;
+  font-size: 12px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+/* 행사 할인율 — 채널 제목 오른쪽 끝에 붙인다. */
+.npb-promo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.npb-promo input {
+  width: 56px;
+}
+
 .npb-ws-table {
   width: 100%;
 }
@@ -1272,3 +1311,35 @@ a.button:hover {
   width: auto;
   min-width: 160px;
 }
+
+/* npb 실비 유형별 입력 */
+.npb-ship-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.npb-ship-row input {
+  max-width: 130px;
+}
+
+/* 합계만 적는 채널의 워크시트 블록 */
+.npb-sum-grid { display: flex; flex-wrap: wrap; gap: 14px; }
+.npb-sum-cell { display: flex; flex-direction: column; gap: 4px; min-width: 150px; }
+.npb-sum-cell input { width: 100%; }
+.npb-ch-chip select { margin-top: 4px; font-size: 12px; width: 100%; }
+.npb-row-dropped { opacity: .45; text-decoration: line-through; }
+
+/* 상품명 + 재고 배수 매칭 */
+.npb-match-target { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
+.npb-match-target select:first-child { flex: 1 1 auto; min-width: 220px; }
+.npb-match-target select + select { flex: 0 0 140px; }
+
+.npb-ws-title { display: flex; align-items: center; gap: 8px; }
+.npb-ws-title button { padding: 0 6px; min-width: 24px; }
+
+.npb-chip-actions { display: flex; align-items: center; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+.npb-chip-actions button { padding: 2px 8px; font-size: 12px; }
+
+.npb-rollup-grid.five { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 900px) { .npb-rollup-grid.five { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

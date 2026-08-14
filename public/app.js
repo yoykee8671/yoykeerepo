@@ -62,9 +62,16 @@ const state = {
     current: null,
     currentKey: "",
     periodMonth: `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`,
+    brandId: "doteon",
+    brands: [],
     parsePreview: null,
+    review: null,
     pendingUploads: [],
-    logisticsCounts: { small: 0, large: 0 },
+    logisticsCounts: {},
+    unresolved: [],
+    aliasDraft: {},
+    adCost: null,
+    adCostLoading: false,
     worksheet: null,
     inventory: null,
     profitParties: [
@@ -75,11 +82,14 @@ const state = {
   }
 };
 
-const NPB_BRAND = "DOTEON";
+// 정산 브랜드는 화면에서 고른다. 도톤 외 브랜드도 같은 방식으로 정산한다.
+const NPB_DEFAULT_BRAND = "doteon";
+const npbBrand = () => state.npb.brandId || NPB_DEFAULT_BRAND;
 const NPB_SCREENS = [
   ["list", "월 목록/이력"],
   ["worksheet", "정산 워크시트"],
   ["upload", "업로드"],
+  ["expenses", "실비/청구"],
   ["channels", "채널 설정"],
   ["preview", "미리보기/다운로드"]
 ];
@@ -87,20 +97,39 @@ const NPB_SCREENS = [
 // Client-side line math — MUST mirror server.js npbComputeLine (rate_on_sale):
 // 매출=salePrice*qty, 수수료=round(매출*feeRate), 정산=매출-수수료,
 // 정가=listPrice*qty*eaPerUnit. eaPerUnit stays 1 (qty is already total EA).
+// 서버의 npbComputeLine 과 같은 규칙으로 계산한다. 화면이 단가×수량만 쓰면
+// 파일에서 읽은 금액을 쓰는 채널(네이버·쿠팡)에서 워크시트와 정산서가 서로
+// 다른 숫자를 말하게 된다.
 function npbRowMath(row) {
   const qty = Number(row.qty || 0);
   const ea = Number(row.eaPerUnit || 1) || 1;
-  const revenue = Number(row.salePrice || 0) * qty;
-  const fee = Math.round(revenue * Number(row.feeRate || 0));
-  return {
-    revenue,
-    fee,
-    settle: revenue - fee,
-    list: Number(row.listPrice || 22000) * qty * ea
-  };
+  const src = row.source || {};
+  const has = (v) => v !== undefined && v !== null && v !== "";
+  const list = has(src.listAmount) ? Number(src.listAmount) : Number(row.listPrice || 0) * qty * ea;
+  // 기준가(=salePrice)가 있고 수량이 있으면 매출은 그 곱이다. 서버와 같은 규칙.
+  const revenue = Number(row.salePrice || 0) > 0 && qty > 0
+    ? Number(row.salePrice) * qty
+    : (has(src.saleAmount) ? Number(src.saleAmount) : Number(row.salePrice || 0) * qty);
+  if (has(src.settleAmount)) {
+    const settle = Number(src.settleAmount);
+    return { revenue, fee: revenue - settle, settle, list, fromFile: true };
+  }
+  const fee = has(src.feeAmount)
+    ? Number(src.feeAmount)
+    : Math.round(revenue * Number(row.feeRate || 0));
+  return { revenue, fee, settle: revenue - fee, list, fromFile: has(src.saleAmount) };
 }
 
 // The answer-key channel order for the worksheet blocks.
+// 업로드한 파일을 어디까지 자동으로 반영할지. 채널마다 자료 사정이 달라
+// 한 규칙으로 묶을 수 없다.
+const NPB_ENTRY_MODES = [
+  ["direct", "그대로 반영", "파일을 읽는 즉시 워크시트에 넣습니다."],
+  ["review", "파싱에서 수정", "검수표에서 행별로 고친 뒤 [확정/반영] 을 누릅니다."],
+  ["worksheet", "워크시트에서 수정", "일단 반영하고 워크시트에서 고칩니다."],
+  ["summary", "합계만 기재", "품목 내역 없이 채널 합계만 워크시트에 적습니다. 파일은 근거로만 남습니다."]
+];
+
 const NPB_WS_ORDER = [
   "mongshu", "smartstore", "tailit", "emart", "wooofmall", "gongu",
   "b2b", "kurly", "coupang", "tarimarket", "pharmasquare"
@@ -549,11 +578,12 @@ function renderApp() {
     ["admins", "관리자"],
     ["audits", "이력"],
     ["archive", "아카이브"],
+    // 자동화(카페24 수집)와 클로브ai(입금대사)는 결국 한 흐름이라 한 화면에서
+    // 본다. 권한 키는 pipeline 하나로 묶고, 화면 안에서 두 단계를 이어 보여준다.
+    ["pipeline", "주문매칭"],
     ["settlement", "정산"],
-    ["pipeline", "자동화"],
-    ["reconcile", "클로브ai"],
     ["npb", "npb정산"]
-  ].filter(([key]) => can(key, "view"));
+  ].filter(([key]) => can(key, "view") || (key === "pipeline" && can("reconcile", "view")));
   app.innerHTML = `
     <div class="shell">
       <aside class="sidebar">
@@ -675,8 +705,8 @@ function renderCurrentTab() {
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
   if (state.tab === "settlement") return renderSettlement();
-  if (state.tab === "pipeline") return renderPipeline();
-  if (state.tab === "reconcile") return renderReconcile();
+  if (state.tab === "pipeline") return renderPipeline() + renderReconcile();
+  if (state.tab === "reconcile") return renderPipeline() + renderReconcile();
   if (state.tab === "npb") return renderNpb();
   return renderDashboard();
 }
@@ -2054,8 +2084,10 @@ function bindCurrentTab() {
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
   if (state.tab === "settlement") bindSettlement();
-  if (state.tab === "pipeline") bindPipeline();
-  if (state.tab === "reconcile") bindReconcile();
+  if (state.tab === "pipeline" || state.tab === "reconcile") {
+    bindPipeline();
+    bindReconcile();
+  }
   if (state.tab === "npb") bindNpb();
 }
 
@@ -4094,6 +4126,14 @@ function bindSettlement() {
 // ---------------------------------------------------------------------------
 // npb정산 (DOTEON) — 6-screen settlement workflow.
 // ---------------------------------------------------------------------------
+// 채널 코드 -> 화면에 쓰는 이름. 이 함수가 아예 없어서, 여러 파일을 한 번에
+// 올리는 경로가 업로드 직후 ReferenceError 로 죽었다. 서버에는 저장됐는데
+// 화면은 갱신되지 않아 "올라간 게 없다" 로 보이던 원인이다.
+function npbChannelName(code) {
+  const channel = (state.npb.config?.channels || []).find((c) => c.code === code);
+  return channel?.name || code || "(채널 미상)";
+}
+
 function npbWon(value) {
   return `${money.format(Math.round(Number(value || 0)))}원`;
 }
@@ -4146,7 +4186,7 @@ function npbPrevSettlement() {
 }
 
 async function npbReloadSettlements() {
-  const resp = await api(`/api/npb/settlements?brand=${NPB_BRAND}`);
+  const resp = await api(`/api/npb/settlements?brand=${npbBrand()}`);
   state.npb.settlements = (resp && resp.settlements) || [];
 }
 
@@ -4157,12 +4197,28 @@ async function npbLoadDetail(key) {
   n.current = detail;
   n.currentKey = key;
   n.profitParties = npbSeedParties(detail.profitSplit || detail.parties);
-  n.logisticsCounts = {
+  // 유형별 건수. 예전 정산은 소형/대형만 갖고 있으므로 옮겨 담는다.
+  n.adCost = detail.adCost || null;
+  n.logisticsCounts = detail.logistics?.counts || {
     small: Number(detail.logistics?.smallCount || 0),
     large: Number(detail.logistics?.largeCount || 0)
   };
   n.worksheet = npbBuildWorksheet(n.config, detail.lines || []);
   n.inventory = npbBuildInventory(n.config, detail.inventory || []);
+  // 실비 청구서는 정산과 별개로 살아 있으므로 따로 읽어 온다.
+  try {
+    const list = await api(`/api/npb/invoices?brand=${encodeURIComponent(detail.brand || "")}`);
+    n.invoices = list.invoices || [];
+  } catch {
+    n.invoices = n.invoices || [];
+  }
+  // 월 목록의 합계도 같이 맞춘다. 업로드해 놓고 [월 목록/이력] 으로 가면
+  // 예전 숫자가 그대로 있어, 반영이 안 된 것으로 보인다.
+  try {
+    await npbReloadSettlements();
+  } catch {
+    // 목록 갱신은 실패해도 나머지 화면은 그대로 쓴다.
+  }
 }
 
 // Build the editable worksheet: one block per channel, seeded from
@@ -4180,6 +4236,7 @@ function npbChannelSeeds(channel, products, lineConfigs) {
   const savedFor = (productId, tier) =>
     saved.find((lc) => lc.productId === productId && (!tier || (lc.lineLabel || "").includes(tier)));
 
+  // 채널 단위 티어(도톤 공구의 2개세트·3개세트)
   if (channel.tiers && channel.tiers.length) {
     return channel.tiers.map((t) => {
       const override = savedFor("os", t.tier);
@@ -4192,6 +4249,37 @@ function npbChannelSeeds(channel, products, lineConfigs) {
       };
     });
   }
+
+  // 상품이 자기 번들을 갖는 브랜드(픽키 필바이츠). 45g 은 1·3·5·10개 묶음이
+  // 있고 180g 은 낱개뿐이라, 번들을 브랜드에 두면 없는 조합이 생긴다.
+  // 팔렸든 안 팔렸든 모든 채널에 전 SKU 가 깔려야 한다.
+  if (products.some((p) => (p.packTiers || []).length)) {
+    const rows = [];
+    // 채널이 취급 상품을 한정해 두면 그것만 깐다. 쿠팡은 아직 치킨만 판매등록
+    // 돼 있어, 전 SKU 를 깔면 팔 수 없는 줄이 절반이다. 목록에 없는 상품이라도
+    // 파일에서 실제로 팔려 온 줄은 지우지 않는다 — 여긴 빈 줄 생성만 한다.
+    const allow = Array.isArray(channel.productIds) && channel.productIds.length
+      ? new Set(channel.productIds)
+      : null;
+    for (const p of products) {
+      if (allow && !allow.has(p.id)) continue;
+      const tiers = (p.packTiers || []).length ? p.packTiers : [{ tier: "", ea: 1, listPrice: p.listPrice }];
+      for (const t of tiers) {
+        const override = savedFor(p.id, t.tier);
+        rows.push({
+          productId: p.id,
+          lineLabel: override?.lineLabel || `${p.name}${t.tier ? ` ${t.tier}` : ""}`,
+          tier: t.tier || "",
+          listPrice: t.listPrice ?? p.listPrice ?? 0,
+          eaPerUnit: t.ea ?? 1,
+          salePrice: override?.salePrice ?? t.listPrice ?? 0,
+          feeRate: override?.feeRate ?? channel.feeRate ?? 0
+        });
+      }
+    }
+    return rows;
+  }
+
   return products.map((p) => {
     const override = savedFor(p.id, "");
     return {
@@ -4205,14 +4293,10 @@ function npbChannelSeeds(channel, products, lineConfigs) {
   });
 }
 
-function npbChannelName(code) {
-  return (state.npb.config?.channels || []).find((c) => c.code === code)?.name || code || "";
-}
-
 function npbBuildWorksheet(config, lines) {
   const cfg = config || {};
   const channels = cfg.channels || [];
-  const products = cfg.products || [];
+  const products = (cfg.products || []).filter((p) => p.active !== false);
   const lineConfigs = cfg.channelLineConfigs || [];
   const byChannel = new Map(channels.map((c) => [c.code, c]));
   // Index stored lines by channel|productId|tier for overlay lookup.
@@ -4224,56 +4308,156 @@ function npbBuildWorksheet(config, lines) {
   }
   const order = NPB_WS_ORDER.slice();
   channels.forEach((c) => { if (!order.includes(c.code)) order.push(c.code); });
+  const used = new Set();
   const blocks = [];
   for (const code of order) {
     const channel = byChannel.get(code);
     if (!channel || channel.active === false) continue;
+    // 합계만 적는 채널은 품목 줄을 만들지 않는다.
+    if ((channel.entryMode || "review") === "summary") {
+      const line = (lines || []).find((l) => l.channel === code && l.summary)
+        || (lines || []).find((l) => l.channel === code);
+      (line ? [line] : []).forEach((l) => used.add(`${code}|${npbProductId(l.productKey)}|${l.tier || ""}`));
+      blocks.push({
+        code,
+        name: channel.name,
+        settleBy: channel.settleBy || "",
+        category: channel.category || "",
+        summary: true,
+        note: channel.note || "",
+        totals: {
+          listTotal: Number(line?.listAmount ?? 0),
+          shippingTotal: Number(line?.shippingAmount ?? 0),
+          discountTotal: Number(line?.discountAmount ?? 0),
+          saleTotal: Number(line?.saleAmount ?? 0),
+          feeTotal: Number(line?.feeAmount ?? 0)
+        },
+        rows: []
+      });
+      continue;
+    }
     const seeds = npbChannelSeeds(channel, products, lineConfigs);
-    if (!seeds.length) continue;
     const rows = seeds.map((seed) => {
       const tierLabel = seed.tier || "";
+      // 묶음까지 정확히 같은 줄만 가져온다. 예전에는 못 찾으면 "묶음 없음" 줄을
+      // 대신 집었는데, 그 바람에 45g 1개·3개·5개 칸이 모두 같은 수량을 보였다.
       const key = `${code}|${seed.productId}|${tierLabel}`;
-      const stLine = stored.get(key)
-        || stored.get(`${code}|${seed.productId}|`);
+      const stLine = stored.get(key);
+      if (stLine) used.add(key);
       return {
         productKey: seed.productId,
         label: seed.lineLabel,
-        listPrice: 22000,
+        listPrice: Number(stLine?.listPrice ?? seed.listPrice ?? 0),
         salePrice: Number(stLine?.salePrice ?? seed.salePrice ?? 0),
         feeRate: Number(stLine?.feeRate ?? seed.feeRate ?? 0),
         qty: Number(stLine?.qty ?? stLine?.qtyEa ?? 0),
+        // 1 로 고정한다. 정가·기준가가 이미 묶음 단가이고(낱개정가 × 배수),
+        // 낱개 수는 multiplier 가 들고 있다. 여기에 묶음 수를 또 곱하면
+        // 3팩·5팩 줄의 정가가 3배·5배로 부푼다. 서버도 1 로 둔다.
         eaPerUnit: 1,
-        tier: tierLabel
+        tier: tierLabel,
+        // 업로드로 들어온 원본을 그대로 들고 있는다. 저장할 때 이걸 되돌려주지
+        // 않으면 파일에서 읽은 금액이 통째로 날아간다.
+        source: stLine || null
       };
     });
+    // 상품표에 없는 조합(B2B 의 "수량=100개" 옵션, 네이버 배송비 줄)은 씨앗이
+    // 없어 화면에 안 뜬다. 안 뜬 채로 저장하면 그대로 사라지므로 뒤에 붙인다.
+    const extras = [];
+    for (const [key, line] of stored) {
+      if (used.has(key) || !key.startsWith(`${code}|`)) continue;
+      used.add(key);
+      extras.push({
+        productKey: line.productKey || line.productId || "",
+        label: line.label || line.productKey || "(이름 없음)",
+        listPrice: Number(line.listPrice ?? 0),
+        salePrice: Number(line.salePrice ?? 0),
+        feeRate: Number(line.feeRate ?? channel.feeRate ?? 0),
+        qty: Number(line.qty ?? line.qtyEa ?? 0),
+        eaPerUnit: Number(line.eaPerUnit ?? 1),
+        tier: line.tier || "",
+        extra: true,
+        source: line
+      });
+    }
+    if (!rows.length && !extras.length) continue;
     blocks.push({
       code,
       name: channel.name,
+      settleBy: channel.settleBy || "",
       category: channel.category || "",
       priceLabel: channel.priceLabel || "기준가",
-      rows
+      // 행사 할인을 판매처와 반반 부담하는 채널은 그 달의 할인율을 받아야 한다.
+      promoSplit: channel.promoSplit === true,
+      rows: [...rows, ...extras]
     });
   }
   return blocks;
 }
 
+// 발행한 청구서를 엑셀로 내려받는다.
+async function npbDownloadInvoice(invoice) {
+  if (!invoice?.id) return;
+  const res = await fetch(`/api/npb/invoices/${encodeURIComponent(invoice.id)}/xlsx`, {
+    credentials: "same-origin"
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "청구서를 내려받지 못했습니다.");
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${invoice.brandName || "청구서"}_${invoice.periodMonth || ""}_${invoice.typeLabel || ""}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// 기초재고는 정산월 전월의 마지막 날 기준, 기말은 정산월의 마지막 날 기준이다.
+function npbMonthLastDay(year, month) {
+  if (!year || !month) return "";
+  const last = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return `${year}-${String(month).padStart(2, "0")}-${String(last).padStart(2, "0")}`;
+}
+
+function npbPeriodLastDay() {
+  const p = state.npb.current?.period || {};
+  return npbMonthLastDay(Number(p.year), Number(p.month));
+}
+
+function npbPrevMonthLastDay() {
+  const p = state.npb.current?.period || {};
+  const year = Number(p.year);
+  const month = Number(p.month);
+  if (!year || !month) return "";
+  return month === 1 ? npbMonthLastDay(year - 1, 12) : npbMonthLastDay(year, month - 1);
+}
+
 // Seed the 재고현황 table from config products, overlaying any stored rows.
 function npbBuildInventory(config, stored) {
-  const products = config?.products || [];
+  // 감춘 품목은 재고에도 뜨면 안 된다. 첫 시드의 pb_chicken/pb_vegan 처럼 g 수
+  // 없이 맛으로만 갈랐던 옛 품목이 SKU 목록과 나란히 보여 6줄이 됐다.
+  const products = (config?.products || []).filter((p) => p.active !== false);
   const byKey = new Map(
     (stored || []).map((r) => [npbProductId(r.productKey || r.productId || r.key), r])
   );
   return products.map((p) => {
     const r = byKey.get(p.id) || {};
+    const opening = Number(r.opening || 0);
+    const inbound = Number(r.inbound || 0);
+    const outbound = Number(r.outbound || 0);
     return {
       productKey: p.id,
       name: p.name,
-      opening: Number(r.opening || 0),
-      inbound: Number(r.inbound || 0),
-      outbound: Number(r.outbound || 0),
-      sold: Number(r.sold || 0),
-      nonSale: Number(r.nonSale || 0),
-      closing: Number(r.closing || 0)
+      // 기초(전월 말) + 입고 − 출고 = 기말(정산월 말). 판매/비매출은 출고에서
+      // 갈라낼 방법이 없어 쓰지 않는다.
+      opening,
+      inbound,
+      outbound,
+      closing: opening + inbound - outbound
     };
   });
 }
@@ -4287,21 +4471,58 @@ function npbWorksheetRollup() {
   let listTotal = 0;
   let realSaleTotal = 0;
   let feeTotal = 0;
-  for (const block of blocks) {
-    for (const row of block.rows) {
-      const m = npbRowMath(row);
-      qtyTotal += Number(row.qty || 0) * (Number(row.eaPerUnit || 1) || 1);
-      listTotal += m.list;
-      realSaleTotal += m.revenue;
-      feeTotal += m.fee;
+  let shippingTotal = 0;
+  // 합계 방식 채널은 품목 줄이 없고 블록의 totals 가 곧 그 채널의 값이다.
+  // 이걸 빼먹어서 스마트스토어·스파크펫·파마스퀘어가 종합정산에도, 정산주체별
+  // 소계에도 통째로 안 잡히고 있었다.
+  const blockTotals = (block) => {
+    if (block.summary) {
+      const t = block.totals || {};
+      const sale = Number(t.saleTotal || 0);
+      const fee = Number(t.feeTotal || 0);
+      return { qty: 0, list: Number(t.listTotal || 0), revenue: sale, fee,
+        shipping: Number(t.shippingTotal || 0) };
     }
+    return block.rows.reduce((acc, row) => {
+      const m = npbRowMath(row);
+      acc.qty += Number(row.qty || 0) * (Number(row.eaPerUnit || 1) || 1);
+      acc.list += m.list;
+      acc.revenue += m.revenue;
+      acc.fee += m.fee;
+      acc.shipping += Number(row.source?.shippingAmount || 0);
+      return acc;
+    }, { qty: 0, list: 0, revenue: 0, fee: 0, shipping: 0 });
+  };
+  for (const block of blocks) {
+    const t = blockTotals(block);
+    qtyTotal += t.qty;
+    listTotal += t.list;
+    realSaleTotal += t.revenue;
+    feeTotal += t.fee;
+    shippingTotal += t.shipping || 0;
   }
   const revenueTotal = realSaleTotal - feeTotal;
   const cost = npbLogisticsCost();
+  // 정산 주체별 소계. 거래 주체가 픽키파크인 채널은 그쪽으로 계산서가 나가고,
+  // 우프 채널만 우리가 계산서 발행·수금해 합쳐서 청구한다. 월 총판매를 함께
+  // 집계하되 청구 대상이 얼마인지 바로 보여야 한다.
+  const bySettleBy = {};
+  for (const block of blocks) {
+    const who = block.settleBy || "";
+    if (!who) continue;
+    const acc = bySettleBy[who] || (bySettleBy[who] = { realSaleTotal: 0, feeTotal: 0, revenueTotal: 0 });
+    const t = blockTotals(block);
+    acc.realSaleTotal += t.revenue;
+    acc.feeTotal += t.fee;
+    acc.revenueTotal += t.revenue - t.fee;
+  }
   return {
+    bySettleBy,
     qtyTotal,
     listTotal,
-    discountTotal: listTotal - realSaleTotal,
+    // 정가 - 할인 + 배송비 = 실판매. 서버 집계와 같은 식이다.
+    discountTotal: listTotal + shippingTotal - realSaleTotal,
+    shippingTotal,
     realSaleTotal,
     feeTotal,
     revenueTotal,
@@ -4310,14 +4531,37 @@ function npbWorksheetRollup() {
   };
 }
 
-function npbLogisticsCost() {
-  const n = state.npb;
-  const cc = n.config?.costConfig || {};
+// 서버 npbComputeShipping 과 같은 규칙. 유형 목록이 없는 예전 브랜드는
+// 소형/대형 단가로 자동 구성한다.
+function npbShipTypes() {
+  const cc = state.npb.config?.costConfig || {};
+  if (Array.isArray(cc.shipTypes) && cc.shipTypes.length) return cc.shipTypes;
   const pick = Number(cc.pickPack || 0);
-  const small = Number(n.logisticsCounts?.small || 0);
-  const large = Number(n.logisticsCounts?.large || 0);
-  return small * (Number(cc.smallShip || 0) + pick)
-    + large * (Number(cc.largeShip || 0) + pick);
+  return [
+    { key: "small", label: "소형 출고", freight: Number(cc.smallShip || 0), handling: pick },
+    { key: "large", label: "대형 출고", freight: Number(cc.largeShip || 0), handling: pick }
+  ];
+}
+
+function npbShipRow(type) {
+  const raw = state.npb.logisticsCounts?.[type.key];
+  const entry = raw && typeof raw === "object" ? raw : { count: raw };
+  const count = Number(entry.count || 0);
+  const unit = Number(type.freight || 0) + Number(type.handling || 0);
+  return {
+    ...type,
+    count,
+    unit,
+    amount: type.manual ? Number(entry.amount || 0) : count * unit
+  };
+}
+
+function npbLogisticsCost() {
+  // 용달·퀵처럼 개별 기재하는 유형은 합계에서 뺀다.
+  return npbShipTypes()
+    .map(npbShipRow)
+    .filter((r) => !r.excludeFromTotal)
+    .reduce((sum, r) => sum + r.amount, 0);
 }
 
 async function npbDownloadXlsx(key) {
@@ -4333,7 +4577,7 @@ async function npbDownloadXlsx(key) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `npb_${NPB_BRAND}_${key}.xlsx`;
+    a.download = `npb_${key}.xlsx`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -4369,7 +4613,9 @@ function canUseClobe() {
 // 실제 생성·상태변경은 확인한 뒤 별도 버튼으로만 일어난다.
 function renderPipeline() {
   const p = state.pipeline;
-  const head = pageHead("자동화", "카페24 주문 수집 → 확인 → 입금매칭 → 카페24 반영. 단계마다 눌러서 진행합니다.");
+  const head = pageHead("주문매칭",
+    "카페24 주문 수집 → 확인 → 입금매칭 → 카페24 반영. 단계마다 눌러서 진행합니다. "
+    + "아래에서 클로브ai 은행 거래와 대사합니다.");
   if (!canUseClobe()) {
     return `${head}<section class="panel"><div class="panel-body"><p class="muted">이 메뉴는 오너 또는 매니저만 사용할 수 있습니다.</p></div></section>`;
   }
@@ -5038,7 +5284,7 @@ function renderNpb() {
   const n = state.npb;
   if (n.loading) {
     return `
-      ${pageHead("npb정산", "DOTEON 채널별 매출·수수료·물류비를 집계합니다.")}
+      ${pageHead("npb정산", "채널별 매출·수수료·물류비를 집계합니다.")}
       <section class="panel"><div class="panel-body empty">불러오는 중…</div></section>`;
   }
   const subnav = NPB_SCREENS
@@ -5047,15 +5293,24 @@ function renderNpb() {
     .join("");
   let body = "";
   if (n.screen === "upload") body = renderNpbUpload();
+  else if (n.screen === "expenses") body = renderNpbExpenses();
   else if (n.screen === "worksheet") body = renderNpbWorksheet();
   else if (n.screen === "channels") body = renderNpbChannels();
   else if (n.screen === "preview") body = renderNpbPreview();
   else body = renderNpbList();
-  const ctx = n.currentKey
+  const brand = (n.brands || []).find((b) => b.id === npbBrand());
+  const picker = `
+    <select data-npb-brand>
+      ${(n.brands || []).map((b) => `<option value="${h(b.id)}" ${b.id === npbBrand() ? "selected" : ""}>${h(b.name)}</option>`).join("")}
+    </select>`;
+  const ctx = `${picker}${n.currentKey
     ? `<span class="muted">선택: ${h(n.currentKey)}</span>`
-    : `<span class="muted">정산 미선택</span>`;
+    : `<span class="muted">정산 미선택</span>`}`;
+  const desc = brand
+    ? `${brand.name}${brand.productLine ? ` · ${brand.productLine}` : ""} 채널별 매출·수수료·물류비를 집계하여 월 정산과 이익분배를 계산합니다.`
+    : "채널별 매출·수수료·물류비를 집계하여 월 정산과 이익분배를 계산합니다.";
   return `
-    ${pageHead("npb정산", "DOTEON 채널별 매출·수수료·물류비를 집계하여 월 정산과 이익분배를 계산합니다.", ctx)}
+    ${pageHead("npb정산", desc, ctx)}
     <div class="npb-subnav">${subnav}</div>
     ${body}
   `;
@@ -5070,7 +5325,9 @@ function renderNpbList() {
       return `
         <tr>
           <td>${npbStatusBadge(s.status)}</td>
-          <td>${h(s.periodMonth)}</td>
+          <td>${h(s.periodMonth
+            || (s.period?.year ? `${s.period.year}-${String(s.period.month).padStart(2, "0")}` : "")
+            || String(s.key || "").split("_").pop())}</td>
           <td class="num">${money.format(Math.round(Number(r.qtyTotal || 0)))}</td>
           <td class="num">${npbWon(r.revenueTotal)}</td>
           <td class="num">${npbWon(r.profit)}</td>
@@ -5116,13 +5373,40 @@ function renderNpbUpload() {
   // 보여준다. 파일은 한 곳에 올리고 파일명이 채널을 결정한다.
   const done = channels.filter((c) => uploads[c.code]);
   const todo = channels.filter((c) => !uploads[c.code]);
+  const modeSelect = (c) => `
+    <select data-npb-entry="${h(c.code)}" title="업로드한 파일을 어디까지 자동 반영할지">
+      ${NPB_ENTRY_MODES.map(([value, label]) =>
+        `<option value="${value}" ${(c.entryMode || "review") === value ? "selected" : ""}>${label}</option>`).join("")}
+    </select>`;
   const chip = (c, isDone) => {
     const up = uploads[c.code];
     return `<div class="npb-ch-chip ${isDone ? "on" : ""}">
       <strong>${h(c.name)}</strong>
-      <span class="muted">${isDone ? h(up.fileName || "업로드됨") : "미업로드"}</span>
+      ${modeSelect(c)}
+      <span class="muted">${isDone
+        ? `${h(up.fileName || "업로드됨")}${up.lines ? ` · ${up.lines.length}개 품목` : ""}`
+        : "미업로드"}</span>
+      ${isDone ? `<div class="npb-chip-actions">
+        ${up.pendingRemove
+          ? `<span class="badge" style="color:var(--red)">삭제 대기</span>`
+          : up.confirmed === false
+            ? `<span class="badge" style="color:var(--red)">반영 대기</span>`
+            : `<span class="badge ok">반영됨</span>`}
+        ${up.confirmed === false
+          ? `<button class="primary" data-npb-apply="${h(c.code)}">반영</button>`
+          : ""}
+        ${(c.entryMode || "review") === "review" && !up.pendingRemove
+          ? `<button data-npb-review-open="${h(c.code)}">검수</button>`
+          : ""}
+        <button class="ghost" data-npb-upload-del="${h(c.code)}" title="올린 파일 빼기">✕</button>
+      </div>` : ""}
     </div>`;
   };
+
+  // 올렸지만 아직 확정하지 않은 채널. 올려놓고 잊으면 워크시트가 비어 있어
+  // 업로드가 안 된 것처럼 보인다.
+  const waiting = channels.filter((c) => uploads[c.code] && uploads[c.code].confirmed === false);
+  const applyAll = waiting.length > 1;
 
   const pending = (n.pendingUploads || []).map((f, i) => `
     <div class="npb-pending">
@@ -5148,6 +5432,17 @@ function renderNpbUpload() {
             (채널 설정의 '파일명 키워드' 또는 채널명·코드 기준).
           </span>
         </div>
+        ${waiting.length ? `<div class="npb-pending-wrap">
+          <p style="color:var(--red);margin:0">
+            <b>반영 대기 ${waiting.length}개 채널</b> — ${h(waiting.map((c) => c.name).join(", "))}.
+            채널별 <b>[반영]</b> 을 눌러야 워크시트에 들어갑니다. 누른 채널만 바뀌므로,
+            워크시트에서 손으로 고쳐 둔 다른 채널은 그대로입니다.
+          </p>
+          <div class="toolbar">
+            ${waiting.map((c) => `<button class="primary" data-npb-apply="${h(c.code)}">${h(c.name)} 반영</button>`).join("")}
+          </div>
+        </div>` : ""}
+        ${renderNpbUnresolved()}
         ${pending ? `<div class="npb-pending-wrap">
           <p class="muted" style="color:var(--red)">채널을 알 수 없는 파일이 있습니다. 직접 지정하세요.</p>
           ${pending}</div>` : ""}
@@ -5166,36 +5461,325 @@ function renderNpbUpload() {
         </div>
       </div>
     </section>
-    ${n.parsePreview ? renderNpbParsePreview(n.parsePreview) : ""}
+    ${renderNpbReview()}
   `;
 }
 
-function renderNpbParsePreview(p) {
-  const lines = p.lines || [];
-  const warns = p.warnings || [];
-  const rows = lines
-    .slice(0, 200)
-    .map((l) => `
+// 판매처마다 상품명이 달라 자동으로 못 맞춘 것들. 한 번 지정하면 별칭으로
+// 저장돼 다음 업로드부터는 그대로 인식된다.
+// 판매처 상품명 매칭. 셀메이트의 두 단계를 그대로 따른다.
+//   1. 상품명매칭 — 어느 기본 SKU 인가
+//   2. 재고매칭   — 한 건이 그 SKU 를 몇 개 빼는가 (주문수량 × 배수)
+// 조합형(치킨2+고구마1)을 위해 한 이름에 SKU 를 여럿 걸 수 있다.
+const NPB_MULTIPLIERS = [1, 2, 3, 4, 5, 6, 10, 12, 20, 24, 50, 100];
+
+function npbAliasDraftFor(i) {
+  const n = state.npb;
+  if (!n.aliasDraft) n.aliasDraft = {};
+  if (!n.aliasDraft[i]) {
+    // 이름으로 짐작한 값을 기본 선택으로 깔아 둔다. 조용히 적용하지는 않고,
+    // 사람이 보고 [매칭 저장] 을 눌러야 규칙이 된다.
+    const guess = (n.unresolved || [])[i]?.suggestion;
+    n.aliasDraft[i] = {
+      targets: [guess
+        ? { productId: guess.productId, multiplier: Number(guess.multiplier || 1) }
+        : { productId: "", multiplier: 1 }]
+    };
+  }
+  const draft = n.aliasDraft[i];
+  if (!Array.isArray(draft.targets)) draft.targets = [{ productId: "", multiplier: 1 }];
+  return draft;
+}
+
+function renderNpbUnresolved() {
+  const n = state.npb;
+  const list = n.unresolved || [];
+  if (!list.length) return "";
+  const products = (n.config?.products || []).filter((p) => p.active !== false);
+
+  const rows = list.map((u, i) => {
+    const draft = npbAliasDraftFor(i);
+    const targetRows = draft.targets.map((t, ti) => `
+      <div class="npb-match-target">
+        <select data-npb-alias="${i}" data-npb-at="${ti}" data-npb-af="productId">
+          <option value="">상품 선택…</option>
+          ${products.map((p) =>
+            `<option value="${h(p.id)}" ${t.productId === p.id ? "selected" : ""}>${h(p.name)}</option>`).join("")}
+          ${ti === 0 ? `<option value="__ignore" ${t.productId === "__ignore" ? "selected" : ""}>— 이 브랜드 상품 아님 (무시)</option>` : ""}
+        </select>
+        <select data-npb-alias="${i}" data-npb-at="${ti}" data-npb-af="multiplier" title="한 건이 재고에서 몇 개 빠지는가">
+          ${NPB_MULTIPLIERS.map((m) =>
+            `<option value="${m}" ${Number(t.multiplier || 1) === m ? "selected" : ""}>주문수량${m > 1 ? ` × ${m}` : ""}</option>`).join("")}
+        </select>
+        ${ti > 0 ? `<button class="ghost" data-npb-alias-del="${i}:${ti}">−</button>` : ""}
+      </div>`).join("");
+    return `
       <tr>
-        <td>${h(l.channel)}</td>
-        <td>${h(l.label || l.productKey)}</td>
-        <td class="num">${money.format(Number(l.qtyEa || 0))}</td>
-        <td class="num">${h(l.eaPerUnit ?? "")}</td>
-        <td>${h(l.tier ?? "")}</td>
-        <td>${npbWarnBadges(l.warnings)}</td>
-      </tr>`)
-    .join("") || `<tr><td colspan="6" class="empty">파싱된 행이 없습니다.</td></tr>`;
+        <td class="wrap">${h(u.sourceName)}
+          ${u.sourceCode ? `<div class="muted">코드 ${h(u.sourceCode)}</div>` : ""}
+          ${u.option ? `<div class="muted">옵션 ${h(u.option)}</div>` : ""}
+          ${u.suggestion ? `<span class="badge">추정</span>` : ""}</td>
+        <td class="num">${money.format(u.qty || 0)}</td>
+        <td>
+          ${targetRows}
+          <button class="ghost" data-npb-alias-add="${i}">+ 상품 추가 (조합형)</button>
+        </td>
+      </tr>`;
+  }).join("");
+
+  return `
+    <div class="npb-pending-wrap">
+      <h3 style="color:var(--red)">상품을 알 수 없는 이름 ${list.length}건</h3>
+      <p class="muted">
+        판매처가 상품코드를 주면 그 코드로 기억합니다 — 이름이 바뀌어도 계속 인식됩니다.
+        <b>어느 상품</b>인지 고르고, 그 한 건이
+        <b>재고에서 몇 개 빠지는지</b> 배수를 정하세요. 3팩이면 <b>주문수량 × 3</b> 입니다.
+        치킨2+고구마1 처럼 섞인 묶음은 <b>[+ 상품 추가]</b> 로 여러 개를 걸면 됩니다.
+        한 번 지정하면 <b>다음부터 자동으로 인식</b>됩니다.
+      </p>
+      <div class="table-wrap" style="max-height:340px"><table>
+        <thead><tr><th>판매처 상품명</th><th>수량</th><th>매칭 상품 · 재고 배수</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+      <div class="toolbar">
+        <button class="primary" data-npb-alias-save>매칭 저장</button>
+        <button class="ghost" data-npb-alias-clear>목록 비우기</button>
+      </div>
+    </div>`;
+}
+
+// 파싱 결과 검수. 파일이 기준금액을 빼먹고 오는 일이 잦아, 워크시트로 바로
+// 밀어 넣지 않고 여기서 행별로 고친 뒤 [확정/반영] 을 눌러 반영한다.
+// 열 구성은 브랜드가 쓰던 '채널별 판매데이터 정리' 시트와 맞췄다.
+function npbReviewMath(row) {
+  const qty = Number(row.qty || 0);
+  const listTotal = Number(row.listPrice || 0) * qty;
+  // 기준가 = 그 판매처에서 실제로 팔린 단가. 정가는 상품표 값이라 고정이고,
+  // 할인·계약가가 반영된 실제 단가는 여기에 적는다.
+  const unit = row.unitPrice != null && row.unitPrice !== ""
+    ? Number(row.unitPrice)
+    : Number(row.listPrice || 0);
+  const discount = Number(row.discountAmount || 0);
+  const shipping = Number(row.shippingAmount || 0);
+  const sale = row.saleAmount != null && row.saleAmount !== ""
+    ? Number(row.saleAmount)
+    : unit * qty - discount + shipping;
+  // 정산금이 확정된 채널(쿠팡)은 공제를 역산한다 — 서버 계산과 같은 규칙이다.
+  if (row.settleAmount != null && row.settleAmount !== "") {
+    const settle = Number(row.settleAmount);
+    return { listTotal, discount, shipping, sale, fee: sale - settle, settle };
+  }
+  const fee = row.feeAmount != null && row.feeAmount !== ""
+    ? Number(row.feeAmount)
+    : Math.round(sale * Number(row.feeRate || 0));
+  return { listTotal, discount, shipping, sale, fee, settle: sale - fee };
+}
+
+function renderNpbExpenses() {
+  const n = state.npb;
+  if (!n.currentKey) return npbNeedSelect();
+  const log = n.current?.logistics || {};
+  const shipFiles = n.current?.shipFiles || {};
+  const breakdown = log.breakdown || [];
+
+  // 청구서에는 운임과 물류사용비를 따로 적어야 한다. 계산은 이미 둘을 나눠
+  // 갖고 있으므로 화면에서만 풀어 준다 — 합쳐 놓으면 무엇으로 얼마가 나갔는지
+  // 확인할 방법이 없다.
+  const shipParts = (row) => (row.manual ? [] : [
+    ["택배운임비", Number(row.freight || 0)],
+    ["물류사용비", Number(row.handling || 0)]
+  ].filter(([, price]) => price > 0));
+
+  const shipRows = breakdown.map((row) => {
+    const file = shipFiles[row.key];
+    const detail = shipParts(row).map(([label, price]) => `
+      <tr class="npb-ship-detail">
+        <td class="muted">└ ${label}</td>
+        <td></td>
+        <td class="num muted">${money.format(row.count)}건</td>
+        <td class="num muted">${money.format(price)}</td>
+        <td class="num muted">${money.format(price * Number(row.count || 0))}</td>
+        <td></td>
+      </tr>`).join("");
+    return `
+      <tr>
+        <td>${h(row.label)}</td>
+        <td>
+          <input type="file" accept=".csv,.xlsx" data-npb-shipfile="${h(row.key)}">
+          ${file
+            ? `<div class="muted">${h(file.fileName)} · ${h(file.basisLabel)} 기준 ${money.format(file.autoCount)}건 (${money.format(file.rowCount)}행)</div>`
+            : `<div class="muted">출고내역 파일을 올리면 건수를 셉니다.</div>`}
+        </td>
+        <td><input class="num" type="number" min="0" data-npb-ship="${h(row.key)}" value="${h(row.count)}"></td>
+        <td class="num">${row.manual ? "-" : money.format(Number(row.freight || 0) + Number(row.handling || 0))}</td>
+        <td class="num">${row.manual
+          ? `<input class="num" type="number" min="0" data-npb-ship-amt="${h(row.key)}" value="${h(row.amount)}">`
+          : money.format(row.amount)}</td>
+        <td class="muted">${row.excludeFromTotal ? "합계 제외 · 개별청구" : ""}</td>
+      </tr>${detail}`;
+  }).join("");
+
+  // 항목별 합계. 합계에서 뺀 유형(용달·퀵)은 여기서도 뺀다.
+  const counted = breakdown.filter((row) => !row.excludeFromTotal);
+  const partTotal = (field) => counted.reduce(
+    (sum, row) => sum + (row.manual ? 0 : Number(row[field] || 0) * Number(row.count || 0)), 0
+  );
+  const freightTotal = partTotal("freight");
+  const handlingTotal = partTotal("handling");
+
+  // 핸들러는 n.adCost 에 쓴다. 저장된 값(n.current)은 처음 화면을 열 때만 쓴다.
+  const ad = n.adCost || n.current?.adCost || {};
+  const adRows = (ad.items || []).map((item) => `
+    <tr><td>${h(item.medium)}</td><td class="muted">${h(item.period || "")}</td>
+    <td class="num">${money.format(item.amount)}</td></tr>`).join("")
+    || `<tr><td colspan="3" class="empty">불러온 광고비가 없습니다.</td></tr>`;
+
+  const invoices = (n.invoices || []).filter((inv) => inv.settlementKey === n.currentKey);
+  const invoiceRows = invoices.map((inv) => `
+    <tr>
+      <td>${h(inv.typeLabel)}</td>
+      <td class="num">${money.format(inv.total)}</td>
+      <td>${h(inv.dueDate || "")}</td>
+      <td>${inv.paidAt
+        ? `<span class="badge ok">입금 ${h(String(inv.paidAt).slice(0, 10))}</span>`
+        : `<button data-npb-invoice-paid="${h(inv.id)}">입금 확인</button>`}</td>
+      <td><button data-npb-invoice-dl="${h(inv.id)}">청구서 받기</button></td>
+    </tr>`).join("")
+    || `<tr><td colspan="5" class="empty">발행한 청구서가 없습니다.</td></tr>`;
+
+  return `
+    ${renderNpbCostSection()}
+    ${renderNpbInventorySection()}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>운임/물류 실비</h2>
+        <span class="muted">출고내역을 올리면 송장 기준으로 건수를 셉니다. 숫자는 고칠 수 있습니다.</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>유형</th><th>출고내역 파일</th><th>건수</th><th>건당</th><th>금액</th><th></th></tr></thead>
+        <tbody>${shipRows}</tbody>
+        <tfoot>
+          <tr class="npb-ship-detail">
+            <td class="muted">택배운임비 계</td><td></td><td></td><td></td>
+            <td class="num muted">${money.format(freightTotal)}</td><td></td>
+          </tr>
+          <tr class="npb-ship-detail">
+            <td class="muted">물류사용비 계</td><td></td><td></td><td></td>
+            <td class="num muted">${money.format(handlingTotal)}</td><td></td>
+          </tr>
+          <tr>
+            <th>합계</th><th></th><th class="num">${money.format(log.countTotal || 0)}</th><th></th>
+            <th class="num">${money.format(log.grandTotal || 0)}</th>
+            <th class="muted">${log.separateTotal ? `별도 ${money.format(log.separateTotal)}` : ""}</th>
+          </tr>
+        </tfoot>
+      </table></div>
+      <div class="toolbar">
+        <button data-npb-ship-save>건수 저장</button>
+        <button class="primary" data-npb-invoice="logistics">운임 청구서 발행</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>광고홍보 실비</h2><span class="muted">구글시트 누적분</span></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>매체</th><th>기간</th><th>금액</th></tr></thead>
+        <tbody>${adRows}</tbody>
+        <tfoot><tr><th>합계</th><th></th><th class="num">${money.format(ad.total || 0)}</th></tr></tfoot>
+      </table></div>
+      <div class="toolbar">
+        <button data-npb-adcost ${n.adCostLoading ? "disabled" : ""}>${n.adCostLoading ? "불러오는 중…" : "광고비 불러오기"}</button>
+        <button class="primary" data-npb-invoice="ad">광고비 청구서 발행</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>청구서</h2>
+        <span class="muted">정산서와 별도로 발행합니다 — 정산 계산에는 들어가지 않습니다.</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>구분</th><th>금액</th><th>입금 기한</th><th>입금</th><th></th></tr></thead>
+        <tbody>${invoiceRows}</tbody>
+      </table></div>
+    </section>`;
+}
+
+function renderNpbReview() {
+  const n = state.npb;
+  const review = n.review;
+  if (!review || !review.rows) return "";
+  const name = npbChannelName(review.channel);
+  const total = review.rows.reduce((acc, row) => {
+    if (row.dropped) return acc;
+    const m = npbReviewMath(row);
+    acc.qty += Number(row.qty || 0);
+    acc.list += m.listTotal; acc.sale += m.sale; acc.fee += m.fee; acc.settle += m.settle;
+    return acc;
+  }, { qty: 0, list: 0, sale: 0, fee: 0, settle: 0 });
+
+  const rows = review.rows.map((row, i) => {
+    const m = npbReviewMath(row);
+    const feePct = (Number(row.feeRate || 0) * 100).toFixed(2).replace(/\.?0+$/, "");
+    const fromFile = row.money && Object.keys(row.money).length ? "파일" : "";
+    return `
+      <tr class="${row.dropped ? "npb-row-dropped" : ""}">
+        <td class="num">${i + 1}</td>
+        <td class="wrap">${h(row.label || row.productKey || "")}
+          ${fromFile ? `<span class="badge">${fromFile}</span>` : ""}</td>
+        <td class="num">${money.format(row.listPrice ?? 0)}</td>
+        <td><input class="num" type="number" data-npb-rv="${i}" data-npb-rf="unitPrice"
+          value="${h(row.unitPrice ?? row.listPrice ?? 0)}">
+          ${row.priceChanged
+            ? `<div class="muted" style="color:var(--red)">파일은 ${money.format(row.priceChanged.to)}
+               (지난번 ${money.format(row.priceChanged.from)})</div>`
+            : ""}</td>
+        <td><input class="num" type="number" data-npb-rv="${i}" data-npb-rf="qty"
+          value="${h(row.qty ?? 0)}"></td>
+        <td><input class="num" type="number" data-npb-rv="${i}" data-npb-rf="discountAmount"
+          value="${h(row.discountAmount ?? 0)}"></td>
+        <td><input class="num" type="number" data-npb-rv="${i}" data-npb-rf="shippingAmount"
+          value="${h(row.shippingAmount ?? 0)}"></td>
+        <td class="num">${money.format(m.sale)}</td>
+        <td><input class="num npb-pct" type="number" step="0.01" data-npb-rv="${i}"
+          data-npb-rf="feeRate" value="${h(feePct)}"></td>
+        <td class="num">${money.format(m.fee)}</td>
+        <td class="num">${money.format(m.settle)}</td>
+        <td><button class="ghost" data-npb-rv-drop="${i}">${row.dropped ? "되살리기" : "제외"}</button></td>
+      </tr>`;
+  }).join("");
+
+  const warns = (review.warnings || []).map((w) => `<p class="muted">⚠ ${h(w)}</p>`).join("");
   return `
     <section class="panel">
-      <div class="panel-head"><h2>파싱 미리보기</h2><span class="muted">${lines.length}행</span></div>
-      ${warns.length
-        ? `<div class="panel-body">${warns.map((w) => `<p class="muted">⚠ ${h(w)}</p>`).join("")}</div>`
-        : ""}
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>채널</th><th>품목</th><th>수량(ea)</th><th>ea/단위</th><th>tier</th><th>경고</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
+      <div class="panel-head">
+        <h2>파싱 검수 — ${h(name)}</h2>
+        <span class="muted">${review.rows.length}행 · 확정 전</span>
+      </div>
+      ${warns ? `<div class="panel-body">${warns}</div>` : ""}
+      <div class="panel-body">
+        <p class="muted">
+          <b>기준가</b>는 그 판매처에서 실제로 팔린 단가입니다 — 확정하면 기억해 두었다가
+          다음 달 같은 코드에 자동으로 채웁니다. 파일이 다른 단가를 말하면 빨간 글씨로 알려드립니다.
+          기준가·수량·할인·수수료율을 여기서 고칠 수 있습니다. 고치면 그 행은 <b>파일 금액 대신
+          계산식</b>을 씁니다. <b>[확정/반영]</b> 을 눌러야 워크시트와 정산서에 들어갑니다.
+        </p>
+      </div>
+      <div class="table-wrap" style="max-height:420px"><table>
+        <thead><tr>
+          <th>순번</th><th>품목</th><th>정가</th><th>기준가</th><th>수량</th><th>할인(원)</th>
+          <th>배송비</th><th>최종결제</th><th>수수료(%)</th><th>수수료(원)</th><th>정산</th><th></th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+        <tfoot><tr>
+          <th></th><th>합계</th><th></th><th></th><th class="num">${money.format(total.qty)}</th>
+          <th></th><th></th><th class="num">${money.format(total.sale)}</th><th></th>
+          <th class="num">${money.format(total.fee)}</th><th class="num">${money.format(total.settle)}</th><th></th>
+        </tr></tfoot>
+      </table></div>
+      <div class="panel-body toolbar">
+        <button class="primary" data-npb-confirm>확정 / 반영</button>
+        <button class="ghost" data-npb-review-cancel>닫기</button>
+        <span class="muted">확정하면 워크시트·정산서·월 목록에 함께 반영됩니다.</span>
       </div>
     </section>`;
 }
@@ -5210,15 +5794,15 @@ function renderNpbWorksheet() {
     <section class="panel">
       <div class="panel-head">
         <h2>채널별 워크시트</h2>
-        <span class="muted">채널별 판매데이터 정리 · 정가 22,000원 기준</span>
+        <span class="muted">채널별 판매데이터 정리 · 정가·기준가·수량·수수료율을 직접 고칠 수 있습니다</span>
+        <button data-npb-reload>새로고침</button>
       </div>
       <div class="panel-body npb-ws">
-        ${n.worksheet.map((b, bi) => renderNpbWsBlock(b, bi)).join("")}
+        ${n.worksheet.map((b, bi) => (b.summary ? renderNpbWsSummaryBlock(b, bi) : renderNpbWsBlock(b, bi))).join("")}
       </div>
     </section>
-    ${renderNpbCostSection()}
-    ${renderNpbProfitSection()}
-    ${renderNpbInventorySection()}
+    ${renderNpbSettleBy()}
+    ${n.config?.profitSplitEnabled === false ? "" : renderNpbProfitSection()}
     <section class="panel">
       <div class="panel-body toolbar">
         <button class="primary" data-npb-ws-save>저장 (계산)</button>
@@ -5237,21 +5821,68 @@ function renderNpbRollupCard() {
     <section class="panel">
       <div class="panel-head"><h2>종합정산 (실시간)</h2></div>
       <div class="panel-body">
-        <div class="npb-rollup-grid">
-          ${cell("실판매수량", money.format(Math.round(r.qtyTotal)))}
-          ${cell("판매정가계", npbWon(r.listTotal))}
-          ${cell("할인계", npbWon(r.discountTotal))}
-          ${cell("실판매계", npbWon(r.realSaleTotal))}
-          ${cell("공제수수료", npbWon(r.feeTotal))}
-          ${cell("매출계", npbWon(r.revenueTotal))}
-          ${cell("실비", npbWon(r.logisticsCost))}
-          ${cell("이익", npbWon(r.profit))}
+        <div class="npb-rollup-grid ${state.npb.config?.profitSplitEnabled === false ? "five" : ""}">
+          ${state.npb.config?.profitSplitEnabled === false
+            ? // 브랜드에 나가는 종합정산서의 '[판매내역 종합]' 과 같은 항목·같은 이름.
+              cell("소비자정가계", npbWon(r.listTotal))
+              + cell("할인계", npbWon(r.discountTotal))
+              + cell("매출계", npbWon(r.realSaleTotal))
+              + cell("수수료 (공제계)", npbWon(r.feeTotal))
+              + cell("정산합계", npbWon(r.realSaleTotal - r.feeTotal))
+            : cell("실판매수량", money.format(Math.round(r.qtyTotal)))
+              + cell("판매정가계", npbWon(r.listTotal))
+              + cell("할인계", npbWon(r.discountTotal))
+              + cell("실판매계", npbWon(r.realSaleTotal))
+              + cell("공제수수료", npbWon(r.feeTotal))
+              + cell("매출계", npbWon(r.revenueTotal))
+              + cell("실비", npbWon(r.logisticsCost))
+              + cell("이익", npbWon(r.profit))}
         </div>
       </div>
     </section>`;
 }
 
+// 합계만 적는 채널. 품목 표 대신 여섯 칸이다 — 종합정산서의 '채널별 정산 합계'
+// 한 줄과 같은 구성.
+function renderNpbWsSummaryBlock(block, bi) {
+  const t = block.totals || {};
+  const settle = Number(t.saleTotal || 0) - Number(t.feeTotal || 0);
+  const cell = (field, label) => `
+    <label class="npb-sum-cell">
+      <span class="muted">${label}</span>
+      <input class="num" type="number" data-npb-sum="${bi}" data-npb-sf="${field}"
+        value="${h(t[field] ?? 0)}">
+    </label>`;
+  return `
+    <section class="panel npb-ws-block" data-npb-summary-block="${bi}">
+      <div class="panel-head">
+        <h2>${h(block.name)} <span class="badge">합계 입력</span></h2>
+        <span class="muted">${h(block.note || "정산서 별도 전달")}</span>
+      </div>
+      <div class="panel-body npb-sum-grid">
+        ${cell("listTotal", "기준가합계(정가)")}
+        ${cell("shippingTotal", "배송비합계")}
+        ${cell("discountTotal", "할인합계")}
+        ${cell("saleTotal", "판매가합계(최종결제)")}
+        ${cell("feeTotal", "수수료합계(공제)")}
+        <div class="npb-sum-cell">
+          <span class="muted">정산합계</span>
+          <strong>${money.format(settle)}</strong>
+        </div>
+      </div>
+      <div class="panel-body">
+        <p class="muted">
+          품목 내역을 맞추지 않고 총계만 적습니다. 파일은 업로드해 두면 근거로 남습니다.
+          판매가합계를 비워 두면 <b>기준가합계 − 할인 + 배송비</b>로 채웁니다.
+        </p>
+      </div>
+    </section>`;
+}
+
 function renderNpbWsBlock(block, bi) {
+  // 내역이 없는 달은 접어 둔다. 채널이 열둘이라 빈 표가 화면을 가린다.
+  const empty = block.rows.every((row) => !Number(row.qty));
+  const collapsed = state.npb.wsCollapsed?.[block.code] ?? empty;
   let subQty = 0;
   let subRevenue = 0;
   let subFee = 0;
@@ -5268,8 +5899,11 @@ function renderNpbWsBlock(block, bi) {
       const feePct = (Number(row.feeRate || 0) * 100).toFixed(2).replace(/\.?0+$/, "");
       return `
         <tr>
-          <td>${h(row.label)}</td>
-          <td class="num">${money.format(row.listPrice)}</td>
+          <td>${h(row.label)}${m.fromFile
+            ? ` <span class="badge" title="업로드한 파일의 금액을 씁니다">파일</span>`
+            : ""}${row.extra ? ` <span class="badge">추가</span>` : ""}</td>
+          <td><input class="num" type="number" data-npb-ws="${bi}" data-npb-wr="${ri}"
+            data-npb-wf="listPrice" value="${h(row.listPrice)}"></td>
           <td><input class="num" type="number" data-npb-ws="${bi}" data-npb-wr="${ri}"
             data-npb-wf="salePrice" value="${h(row.salePrice)}"></td>
           <td><input class="num npb-pct" type="number" step="0.01" data-npb-ws="${bi}"
@@ -5285,10 +5919,30 @@ function renderNpbWsBlock(block, bi) {
   const tag = block.category
     ? `<span class="badge">${h(block.category)}</span>`
     : "";
+  // 행사 할인은 판매처와 반반 부담한다. 20% 행사면 우프가 10% — 그 달에만
+  // 해당하는 값이라 채널 설정이 아니라 이 정산에 붙는다.
+  const promoRate = Number(state.npb.current?.promoRates?.[block.code] || 0);
+  const promoPct = promoRate ? String(Math.round(promoRate * 1000) / 10) : "";
+  const promo = block.promoSplit
+    ? `<span class="npb-promo">
+        행사 할인
+        <input class="num npb-pct" type="number" step="1" min="0" max="99"
+          placeholder="0" data-npb-promo="${h(block.code)}" value="${h(promoPct)}">%
+        <button class="ghost" data-npb-promo-save="${h(block.code)}">적용</button>
+        ${promoRate
+          ? `<span class="muted">우프 부담 ${Math.round(promoRate * 500) / 10}%</span>`
+          : `<span class="muted">행사 없음</span>`}
+      </span>`
+    : "";
   return `
     <div class="npb-ws-block">
-      <div class="npb-ws-title"><strong>${h(block.name)}</strong> ${tag}</div>
-      <div class="table-wrap">
+      <div class="npb-ws-title">
+        <button class="ghost" data-npb-ws-toggle="${h(block.code)}">${collapsed ? "▸" : "▾"}</button>
+        <strong>${h(block.name)}</strong> ${tag}
+        ${collapsed ? `<span class="muted">${empty ? "내역 없음" : `수량 ${money.format(subQty)}`}</span>` : ""}
+        ${promo}
+      </div>
+      <div class="table-wrap" ${collapsed ? 'style="display:none"' : ""}>
         <table class="npb-ws-table">
           <thead>
             <tr>
@@ -5312,36 +5966,69 @@ function renderNpbWsBlock(block, bi) {
     </div>`;
 }
 
-function renderNpbCostSection() {
-  const n = state.npb;
-  const cc = n.config?.costConfig || {};
-  const small = Number(n.logisticsCounts?.small || 0);
-  const large = Number(n.logisticsCounts?.large || 0);
-  const pick = Number(cc.pickPack || 0);
-  const smallUnit = Number(cc.smallShip || 0) + pick;
-  const largeUnit = Number(cc.largeShip || 0) + pick;
+// 정산 주체별 소계 — 누구에게 계산서가 나가는지가 갈린다.
+function renderNpbSettleBy() {
+  const by = npbWorksheetRollup().bySettleBy || {};
+  const keys = Object.keys(by).filter((k) => k);
+  if (!keys.length) return "";
+  const rows = keys.map((k) => `
+    <tr><td><strong>${h(k)}</strong></td>
+      <td class="num">${npbWon(by[k].realSaleTotal)}</td>
+      <td class="num">${npbWon(by[k].feeTotal)}</td>
+      <td class="num"><strong>${npbWon(by[k].revenueTotal)}</strong></td></tr>`).join("");
   return `
     <section class="panel">
-      <div class="panel-head"><h2>실비 (운임/물류)</h2>
-        <span class="muted">단가 VAT포함 · 피킹/패킹 ${money.format(pick)}원</span></div>
+      <div class="panel-head"><h2>정산 주체별 소계</h2>
+        <span class="muted">계산서를 누가 발행하는지에 따라 나뉩니다</span></div>
       <div class="panel-body">
-        <div class="field two">
-          <div>
-            <label>소형 출고건수 (단가 ${money.format(smallUnit)}원)</label>
-            <input class="num" type="number" data-npb-ship="small" value="${h(small)}">
-          </div>
-          <div>
-            <label>중대형 출고건수 (단가 ${money.format(largeUnit)}원)</label>
-            <input class="num" type="number" data-npb-ship="large" value="${h(large)}">
-          </div>
-        </div>
-        <p class="muted">실비 = 소형 ${money.format(small)} × ${money.format(smallUnit)}
-          + 중대형 ${money.format(large)} × ${money.format(largeUnit)}
-          = <strong>${npbWon(npbLogisticsCost())}</strong></p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>주체</th><th>매출</th><th>공제</th><th>정산계</th></tr></thead>
+          <tbody>${rows}</tbody></table></div>
+        <p class="muted">
+          우프 건은 우리가 계산서 발행·수금 후 우프 판매건과 합쳐 청구하고,
+          픽키파크 건은 해당 업체가 직접 발행합니다. 월 총판매 집계를 위해 함께 표시합니다.
+        </p>
       </div>
     </section>`;
 }
 
+function renderNpbCostSection() {
+  const n = state.npb;
+  const billSeparately = n.config?.costConfig?.billSeparately === true;
+  const rows = npbShipTypes().map(npbShipRow);
+  const total = rows.filter((r) => !r.excludeFromTotal).reduce((s, r) => s + r.amount, 0);
+  const separate = rows.filter((r) => r.excludeFromTotal).reduce((s, r) => s + r.amount, 0);
+
+  const inputs = rows.map((r) => `
+    <div>
+      <label>${h(r.label)} ${r.manual ? "(실비 직접 입력)" : `(단가 ${money.format(r.unit)}원)`}</label>
+      <div class="npb-ship-row">
+        <input class="num" type="number" min="0" data-npb-ship="${h(r.key)}" value="${h(r.count)}" placeholder="건수">
+        ${r.manual
+          ? `<input class="num" type="number" min="0" data-npb-ship-amt="${h(r.key)}" value="${h(r.amount)}" placeholder="금액">`
+          : `<span class="muted">= ${money.format(r.amount)}원</span>`}
+      </div>
+      ${r.excludeFromTotal ? `<span class="muted">합계에 넣지 않고 개별 기재합니다.</span>` : ""}
+    </div>`).join("");
+
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>실비 (운임/물류)</h2>
+        <span class="muted">단가 VAT포함${billSeparately ? " · 정산에서 공제하지 않고 별도 청구" : ""}</span></div>
+      <div class="panel-body">
+        <div class="field two">${inputs}</div>
+        <p class="muted">
+          물류 실비 합계 <strong>${npbWon(total)}</strong>
+          ${separate ? ` · 별도 기재 ${npbWon(separate)}` : ""}
+          ${billSeparately
+            ? " — 이 금액은 정산 이익에서 차감하지 않습니다. 별도 청구하세요."
+            : " — 정산 이익에서 차감됩니다."}
+        </p>
+      </div>
+    </section>`;
+}
+
+// 광고비는 구글시트에 누적된다. 정산에는 넣지 않고 별도 청구 근거로 보여준다.
 function renderNpbProfitSection() {
   const n = state.npb;
   const profit = npbWorksheetRollup().profit;
@@ -5385,25 +6072,51 @@ function renderNpbProfitSection() {
 function renderNpbInventorySection() {
   const n = state.npb;
   const inv = n.inventory || [];
-  const cols = [
-    ["opening", "기초"], ["inbound", "입고"], ["outbound", "출고"],
-    ["sold", "판매"], ["nonSale", "비매출"], ["closing", "기말"]
-  ];
+  // 기말은 기초 + 입고 − 출고 라 손으로 적을 값이 아니다.
+  const cols = [["opening", "기초"], ["inbound", "입고"], ["outbound", "출고"]];
   const rows = inv
     .map((r, i) => `
       <tr>
         <td>${h(r.name)}</td>
         ${cols.map(([f]) => `<td><input class="num" type="number" data-npb-inv="${i}" data-npb-ifield="${f}" value="${h(r[f] ?? 0)}"></td>`).join("")}
+        <td class="num"><strong>${money.format(Number(r.closing || 0))}</strong></td>
       </tr>`)
-    .join("") || `<tr><td colspan="7" class="empty">제품이 없습니다.</td></tr>`;
+    .join("") || `<tr><td colspan="5" class="empty">제품이 없습니다.</td></tr>`;
+  // 조회기준일은 파일에서 읽지 않는다 — 파일을 뽑은 시각과 어느 시점 재고로
+  // 볼지는 다르므로 사람이 정한다.
+  const stock = n.current?.stockFile || {};
   return `
     <section class="panel">
-      <div class="panel-head"><h2>재고현황</h2><span class="muted">자사물류센터 입출고 기준</span></div>
+      <div class="panel-head">
+        <h2>재고현황</h2>
+        <span class="muted">기초(전월 말) + 입고 − 출고 = 기말(${h(npbPeriodLastDay())})</span>
+      </div>
+      <div class="npb-stock-bar">
+        <label>기초재고 기준일
+          <input type="date" data-npb-stock-asof value="${h(stock.asOf || npbPrevMonthLastDay())}">
+        </label>
+        <label>기초재고 파일
+          <input type="file" accept=".csv" data-npb-stockfile>
+        </label>
+        <button data-npb-stock-save>저장</button>
+        <span class="muted">${stock.fileName
+          ? `${h(stock.fileName)} · ${money.format(stock.matched || 0)}/${money.format(stock.rowCount || 0)}건 반영`
+          : "셀메이트 재고조회 CSV 를 고른 뒤 저장을 누르면 기초재고로 들어갑니다."}</span>
+      </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>품목</th>${cols.map(([, l]) => `<th>${l}</th>`).join("")}</tr></thead>
+          <thead><tr><th>품목</th>${cols.map(([, l]) => `<th>${l}</th>`).join("")}<th>기말</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
+      </div>
+      <div class="panel-body">
+        <div class="toolbar">
+          <button data-npb-inv-save>재고 저장</button>
+          <button class="primary" data-npb-inv-confirm>재고 확정</button>
+          ${n.current?.inventoryConfirmedAt
+            ? `<span class="muted">확정됨 · ${h(String(n.current.inventoryConfirmedAt).slice(0, 10))}</span>`
+            : ""}
+        </div>
       </div>
     </section>`;
 }
@@ -5423,15 +6136,23 @@ function renderNpbChannels() {
         <td><input type="text" data-npb-ch="${i}" data-npb-cfield="archetype" value="${h(c.archetype || "")}"></td>
         <td><input type="text" data-npb-ch="${i}" data-npb-cfield="filenameKeywords"
               value="${h((c.filenameKeywords || []).join(", "))}" placeholder="예: bmw, 조이몰"></td>
+        <td><select data-npb-ch="${i}" data-npb-cfield="settleBy">
+          ${["우프", "픽키파크"].map((v) =>
+            `<option value="${v}" ${(c.settleBy || "우프") === v ? "selected" : ""}>${v}</option>`).join("")}
+        </select></td>
+        <td><select data-npb-ch="${i}" data-npb-cfield="entryMode">
+          ${NPB_ENTRY_MODES.map(([value, label]) =>
+            `<option value="${value}" ${(c.entryMode || "review") === value ? "selected" : ""}>${label}</option>`).join("")}
+        </select></td>
         <td><button class="danger" data-npb-ch-del="${i}">삭제</button></td>
       </tr>`)
-    .join("") || `<tr><td colspan="9" class="empty">등록된 채널이 없습니다.</td></tr>`;
+    .join("") || `<tr><td colspan="11" class="empty">등록된 채널이 없습니다.</td></tr>`;
   return `
     <section class="panel">
       <div class="panel-head"><h2>채널 설정</h2><span class="muted">${channels.length}개</span></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>코드</th><th>이름</th><th>계산방식</th><th>판매가</th><th>수수료율</th><th>공급가</th><th>아키타입</th><th>파일명 키워드</th><th></th></tr></thead>
+          <thead><tr><th>코드</th><th>이름</th><th>계산방식</th><th>판매가</th><th>수수료율</th><th>공급가</th><th>아키타입</th><th>파일명 키워드</th><th>정산주체</th><th>업로드 반영</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
@@ -5441,8 +6162,46 @@ function renderNpbChannels() {
         <span class="muted">파일명 키워드를 등록하면 업로드할 때 채널이 자동으로 인식됩니다. 쉼표로 여러 개.</span>
       </div>
     </section>
+    ${renderNpbProductEditor()}
     ${renderNpbCostEditor()}
   `;
+}
+
+// 상품 원장. 셀메이트 상품정보의 값들을 그대로 들고 있어야 공헌이익을 낼 때
+// 원가 쪽 입력이 생긴다. 판매가는 정산의 정가 기준이기도 하다.
+function renderNpbProductEditor() {
+  const n = state.npb;
+  const products = (n.config?.products || []).filter((p) => p.active !== false);
+  const rows = products.map((p, i) => `
+    <tr>
+      <td class="wrap">${h(p.name)}</td>
+      <td>${h(p.barcode || "")}</td>
+      <td><input class="num" type="number" data-npb-pr="${i}" data-npb-pf="listPrice" value="${h(p.listPrice ?? 0)}"></td>
+      <td><input class="num" type="number" data-npb-pr="${i}" data-npb-pf="costPrice" value="${h(p.costPrice ?? 0)}"></td>
+      <td><input class="num" type="number" data-npb-pr="${i}" data-npb-pf="supplyPrice" value="${h(p.supplyPrice ?? 0)}"></td>
+      <td class="num">${money.format(Number(p.listPrice || 0) - Number(p.costPrice || 0))}</td>
+      <td><input class="num" type="number" data-npb-pr="${i}" data-npb-pf="safetyStock" value="${h(p.safetyStock ?? 0)}"></td>
+      <td class="num">${h(p.piecesPerUnit ?? "")}</td>
+    </tr>`).join("") || `<tr><td colspan="8" class="empty">등록된 상품이 없습니다.</td></tr>`;
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <h2>상품 원장</h2>
+        <span class="muted">기본 SKU 단위 — 재고매칭의 배수가 이 단위로 환산됩니다</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr>
+          <th>상품명</th><th>바코드</th><th>판매가(정가)</th><th>원가</th><th>공급가</th>
+          <th>마진</th><th>안전재고</th><th>낱개/단위</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+      <div class="panel-body">
+        <p class="muted">
+          원가는 공헌이익을 낼 때 쓰입니다. 고친 뒤 아래 <b>[설정 저장]</b> 을 눌러주세요.
+        </p>
+      </div>
+    </section>`;
 }
 
 function renderNpbCostEditor() {
@@ -5521,15 +6280,27 @@ function renderNpbPreview() {
 }
 
 function bindNpb() {
+  app.querySelector("[data-npb-brand]")?.addEventListener("change", async (e) => {
+    const n = state.npb;
+    n.brandId = e.target.value;
+    // 브랜드가 바뀌면 이전 브랜드의 정산·워크시트가 남아 있으면 안 된다.
+    Object.assign(n, {
+      loaded: false, current: null, currentKey: "", worksheet: null,
+      inventory: null, parsePreview: null, review: null, pendingUploads: [], screen: "list"
+    });
+    // 로딩은 아래 인라인 블록이 loaded=false 를 보고 다시 돈다.
+    renderApp();
+  });
   const n = state.npb;
   if (!n.loaded && !n.loading) {
     n.loading = true;
     Promise.all([
-      api(`/api/npb/config?brand=${NPB_BRAND}`),
-      api(`/api/npb/settlements?brand=${NPB_BRAND}`)
+      api(`/api/npb/config?brand=${npbBrand()}`),
+      api(`/api/npb/settlements?brand=${npbBrand()}`)
     ])
       .then(([config, settlements]) => {
         n.config = config || {};
+        n.brands = config?.brands || n.brands || [];
         n.settlements = (settlements && settlements.settlements) || [];
         n.loaded = true;
         n.loading = false;
@@ -5550,7 +6321,10 @@ function bindNpb() {
   });
   if (n.screen === "list") bindNpbList();
   else if (n.screen === "upload") bindNpbUpload();
-  else if (n.screen === "worksheet") bindNpbWorksheet();
+  // 실비·재고·광고비·청구서를 워크시트에서 실비/청구 화면으로 옮겼는데, 그
+  // 버튼들의 동작은 여전히 여기에 묶여 있다. 두 화면 모두에서 걸어 준다 —
+  // 없는 요소는 그냥 안 걸리므로 서로 방해하지 않는다.
+  else if (n.screen === "worksheet" || n.screen === "expenses") bindNpbWorksheet();
   else if (n.screen === "channels") bindNpbChannels();
   else if (n.screen === "preview") bindNpbPreview();
 }
@@ -5565,7 +6339,7 @@ function bindNpbList() {
     try {
       await api("/api/npb/settlements", {
         method: "POST",
-        body: { brand: NPB_BRAND, periodMonth: n.periodMonth }
+        body: { brand: npbBrand(), periodMonth: n.periodMonth }
       });
       await npbReloadSettlements();
       showToast("정산을 생성했습니다.");
@@ -5579,6 +6353,7 @@ function bindNpbList() {
       try {
         await npbLoadDetail(btn.dataset.npbView);
         n.parsePreview = null;
+        n.review = null;
         n.screen = "worksheet";
         renderApp();
       } catch (error) {
@@ -5606,6 +6381,200 @@ function bindNpbList() {
 
 function bindNpbUpload() {
   const n = state.npb;
+  app.querySelectorAll("[data-npb-alias]").forEach((sel) => {
+    sel.addEventListener("change", () => {
+      n.aliasDraft = { ...(n.aliasDraft || {}), [sel.dataset.npbAlias]: sel.value };
+    });
+  });
+  app.querySelectorAll("[data-npb-alias]").forEach((sel) => {
+    sel.addEventListener("change", () => {
+      const draft = npbAliasDraftFor(Number(sel.getAttribute("data-npb-alias")));
+      const target = draft.targets[Number(sel.getAttribute("data-npb-at"))];
+      if (!target) return;
+      const field = sel.getAttribute("data-npb-af");
+      target[field] = field === "multiplier" ? Number(sel.value || 1) : sel.value;
+    });
+  });
+  app.querySelectorAll("[data-npb-alias-add]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      npbAliasDraftFor(Number(btn.getAttribute("data-npb-alias-add")))
+        .targets.push({ productId: "", multiplier: 1 });
+      renderApp();
+    });
+  });
+  app.querySelectorAll("[data-npb-alias-del]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const [i, ti] = btn.getAttribute("data-npb-alias-del").split(":").map(Number);
+      npbAliasDraftFor(i).targets.splice(ti, 1);
+      renderApp();
+    });
+  });
+  app.querySelector("[data-npb-alias-save]")?.addEventListener("click", async () => {
+    const aliases = (n.unresolved || [])
+      .map((u, i) => {
+        const draft = n.aliasDraft?.[i];
+        const targets = (draft?.targets || []).filter((t) => t.productId);
+        if (!targets.length) return null;
+        const channel = n.review?.channel || "";
+        if (targets[0].productId === "__ignore") {
+          return { brandId: npbBrand(), channel, sourceName: u.sourceName, sourceCode: u.sourceCode || "", ignore: true };
+        }
+        return {
+          brandId: npbBrand(),
+          channel,
+          sourceName: u.sourceName,
+          sourceCode: u.sourceCode || "",
+          targets: targets.map((t) => ({
+            productId: t.productId,
+            multiplier: Math.max(1, Number(t.multiplier || 1))
+          }))
+        };
+      })
+      .filter(Boolean);
+    if (!aliases.length) return showToast("지정할 상품을 선택하세요.", "error");
+    try {
+      const res = await api("/api/npb/aliases", { method: "POST", body: { aliases } });
+      showToast(`${res.saved}건 저장했습니다. 같은 이름은 다음부터 자동으로 인식됩니다.`);
+      const done = new Set(aliases.map((a) => a.sourceName));
+      n.unresolved = (n.unresolved || []).filter((u) => !done.has(u.sourceName));
+      n.aliasDraft = {};
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "매칭 저장 실패", "error");
+    }
+  });
+  const npbApplyChannel = async (code) => {
+    try {
+      const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/confirm`, {
+        method: "POST", body: { channel: code }
+      });
+      n.review = null;
+      await npbLoadDetail(n.currentKey);
+      showToast(res.removed
+        ? `${npbChannelName(code)} 내역을 워크시트에서 뺐습니다.`
+        : `${npbChannelName(code)} 반영 완료 — ${res.rows.length}개 품목. 다른 채널은 그대로입니다.`);
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "반영 실패", "error");
+    }
+  };
+  app.querySelectorAll("[data-npb-apply]").forEach((btn) => {
+    btn.addEventListener("click", () => npbApplyChannel(btn.getAttribute("data-npb-apply")));
+  });
+  app.querySelectorAll("[data-npb-upload-del]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const code = btn.getAttribute("data-npb-upload-del");
+      try {
+        await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/upload?channel=${encodeURIComponent(code)}`,
+          { method: "DELETE" });
+        await npbLoadDetail(n.currentKey);
+        showToast(`${npbChannelName(code)} 파일을 뺐습니다. [반영] 을 눌러야 워크시트에서도 빠집니다.`);
+        renderApp();
+      } catch (error) {
+        showToast(error.message || "삭제 실패", "error");
+      }
+    });
+  });
+  app.querySelectorAll("[data-npb-entry]").forEach((sel) => {
+    sel.addEventListener("change", async () => {
+      const code = sel.getAttribute("data-npb-entry");
+      const channel = (n.config?.channels || []).find((c) => c.code === code);
+      if (!channel) return;
+      channel.entryMode = sel.value;
+      try {
+        await api("/api/npb/config", {
+          method: "PUT",
+          body: {
+            brand: npbBrand(),
+            channels: n.config.channels,
+            costConfig: n.config?.costConfig || {},
+            products: n.config?.products || []
+          }
+        });
+        const mode = NPB_ENTRY_MODES.find(([v]) => v === sel.value);
+        showToast(`${channel.name} — ${mode?.[1] || sel.value}. ${mode?.[2] || ""}`);
+        // 합계 방식으로 바꾸면 워크시트 모양이 달라진다.
+        n.worksheet = npbBuildWorksheet(n.config, n.current?.lines || []);
+        renderApp();
+      } catch (error) {
+        showToast(error.message || "저장 실패", "error");
+      }
+    });
+  });
+  app.querySelectorAll("[data-npb-review-open]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const code = btn.getAttribute("data-npb-review-open");
+      const up = n.current?.uploads?.[code];
+      if (!up) return;
+      n.review = {
+        channel: code,
+        rows: (up.lines || []).map((row) => ({ ...row, qty: Number(row.qty ?? row.qtyEa ?? 0) })),
+        warnings: up.warnings || []
+      };
+      renderApp();
+    });
+  });
+  app.querySelectorAll("[data-npb-rv]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const i = Number(input.getAttribute("data-npb-rv"));
+      const field = input.getAttribute("data-npb-rf");
+      const row = n.review?.rows?.[i];
+      if (!row) return;
+      const value = Number(input.value || 0);
+      row[field] = field === "feeRate" ? value / 100 : value;
+      // 손대는 순간 그 행은 파일 금액 대신 계산식을 쓴다. 파일 추출이 기준금액을
+      // 빠뜨리고 오는 경우가 있어, 고친 값이 이기지 않으면 고칠 방법이 없다.
+      const manual = new Set(row.manualFields || []);
+      manual.add("listPrice");
+      if (["unitPrice", "qty", "discountAmount", "shippingAmount"].includes(field)) {
+        delete row.saleAmount;
+        delete row.settleAmount;
+        manual.add("saleAmount");
+      }
+      if (field === "feeRate") {
+        delete row.feeAmount;
+        delete row.settleAmount;
+      }
+      row.manualFields = [...manual];
+      npbRepaintReview();
+    });
+  });
+  app.querySelectorAll("[data-npb-rv-drop]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const row = n.review?.rows?.[Number(btn.getAttribute("data-npb-rv-drop"))];
+      if (!row) return;
+      row.dropped = !row.dropped;
+      renderApp();
+    });
+  });
+  app.querySelector("[data-npb-review-cancel]")?.addEventListener("click", () => {
+    n.review = null;
+    renderApp();
+  });
+  app.querySelector("[data-npb-confirm]")?.addEventListener("click", async () => {
+    const review = n.review;
+    if (!review) return;
+    try {
+      const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/confirm`, {
+        method: "POST",
+        body: { channel: review.channel, rows: review.rows }
+      });
+      n.review = null;
+      await npbLoadDetail(n.currentKey);
+      showToast(
+        `${npbChannelName(review.channel)} 반영 완료 — ${res.rows.length}개 품목, ` +
+        `매출 ${npbWon(res.rollup?.realSaleTotal)}. 워크시트·정산서에 함께 들어갔습니다.`
+      );
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "확정 실패", "error");
+    }
+  });
+  app.querySelector("[data-npb-alias-clear]")?.addEventListener("click", () => {
+    n.unresolved = [];
+    n.aliasDraft = {};
+    renderApp();
+  });
   app.querySelector("[data-npb-upload-any]")?.addEventListener("change", async (e) => {
     const files = [...(e.target.files || [])];
     if (!files.length) return;
@@ -5627,9 +6596,17 @@ function bindNpbUpload() {
       }
     }
     n.pendingUploads = [...(n.pendingUploads || []), ...unknown];
-    if (ok.length) showToast(`업로드 완료 — ${ok.join(", ")}`);
+    if (ok.length) {
+      showToast(
+        `파일을 읽었습니다 — ${ok.join(", ")}. 검수표에서 확인 후 [확정/반영] 을 눌러주세요.`
+      );
+    }
     if (unknown.length) showToast(`채널을 알 수 없는 파일 ${unknown.length}건 — 직접 지정하세요.`, "error");
-    await npbLoadDetail(n.currentKey);
+    try {
+      await npbLoadDetail(n.currentKey);
+    } catch (error) {
+      showToast(`업로드는 됐지만 화면을 새로 읽지 못했습니다: ${error.message}`, "error");
+    }
     renderApp();
   });
 
@@ -5670,10 +6647,39 @@ async function npbDoUpload({ kind, channel, file, preread, quiet = false }) {
       body
     });
     const parsedRows = res.rows || res.lines || [];
-    n.parsePreview = { lines: parsedRows, warnings: res.warnings || [] };
+    // 워크시트로 바로 밀어 넣지 않고 검수표로 띄운다.
+    n.review = {
+      channel: res.channel || channel,
+      rows: parsedRows.map((row) => ({ ...row, qty: Number(row.qty ?? row.qtyEa ?? 0) })),
+      warnings: res.warnings || []
+    };
+    // 응답으로 바로 반영한다. 다시 읽어오는 데 기대면 그 호출이 실패하거나
+    // 늦을 때 화면이 '미업로드' 인 채로 남아, 올린 사람은 실패한 줄 안다.
+    if (n.current) {
+      const code = res.channel || channel;
+      if (kind === "channel" && code) {
+        n.current.uploads = { ...(n.current.uploads || {}),
+          [code]: { channel: code, fileName, lines: parsedRows, uploadedAt: new Date().toISOString() } };
+      } else if (kind === "logistics") {
+        n.current.uploads = { ...(n.current.uploads || {}),
+          logistics: { fileName, uploadedAt: new Date().toISOString() } };
+      }
+    }
+    if (res.unresolved?.length) {
+      // 이름이 겹치면 한 번만 남긴다 — 같은 이름을 여러 번 지정할 이유가 없다.
+      const seen = new Set(n.unresolved.map((u) => u.sourceName));
+      n.unresolved = [...n.unresolved, ...res.unresolved.filter((u) => !seen.has(u.sourceName))];
+    }
     if (!quiet) {
-      await npbLoadDetail(n.currentKey);
-      showToast(`업로드 완료 (${parsedRows.length}행)`);
+      try {
+        await npbLoadDetail(n.currentKey);
+      } catch (error) {
+        showToast(`업로드는 됐지만 화면을 새로 읽지 못했습니다: ${error.message}`, "error");
+      }
+      showToast(
+        `${npbChannelName(res.channel || channel)} 파일을 읽었습니다 — ${parsedRows.length}개 품목. ` +
+        `아래 검수표에서 확인하고 [확정/반영] 을 눌러주세요.`
+      );
       renderApp();
     }
     return {
@@ -5705,17 +6711,25 @@ function npbWorksheetLines() {
   const n = state.npb;
   const lines = [];
   for (const block of n.worksheet || []) {
+    if (block.summary) continue;
     for (const row of block.rows) {
+      // 업로드 원본 위에 화면에서 고친 값만 얹는다. 예전에는 화면에 보이는
+      // 필드만 새로 만들어 보냈기 때문에, 저장 한 번에 파일에서 읽은 금액
+      // (money/amounts/saleAmount)과 정가가 전부 사라졌다.
+      const source = row.source || {};
       lines.push({
+        ...source,
         channel: block.code,
         productKey: row.productKey,
         label: row.label,
-        listPrice: 22000,
+        listPrice: Number(row.listPrice || 0),
         salePrice: Number(row.salePrice || 0),
         feeRate: Number(row.feeRate || 0),
         qty: Number(row.qty || 0),
-        eaPerUnit: 1,
-        tier: row.tier || ""
+        qtyEa: Number(row.qty || 0),
+        eaPerUnit: Number(row.eaPerUnit || 1),
+        tier: row.tier || "",
+        manualFields: row.manualFields || source.manualFields || []
       });
     }
   }
@@ -5725,6 +6739,58 @@ function npbWorksheetLines() {
 function bindNpbWorksheet() {
   const n = state.npb;
   // Worksheet cell edits: salePrice/qty as numbers, feeRate entered as a percent.
+  app.querySelectorAll("[data-npb-ws-toggle]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const code = btn.getAttribute("data-npb-ws-toggle");
+      if (!n.wsCollapsed) n.wsCollapsed = {};
+      const block = (n.worksheet || []).find((b) => b.code === code);
+      const empty = block ? block.rows.every((row) => !Number(row.qty)) : false;
+      n.wsCollapsed[code] = !(n.wsCollapsed[code] ?? empty);
+      renderApp();
+    });
+  });
+  // 행사 할인율. 서버가 그 달의 정산을 다시 계산해 돌려주므로 화면은 받은
+  // 값으로 갈아끼우기만 한다.
+  app.querySelectorAll("[data-npb-promo-save]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const code = btn.getAttribute("data-npb-promo-save");
+      const input = app.querySelector(`[data-npb-promo="${code}"]`);
+      try {
+        const res = await api(
+          `/api/npb/settlements/${encodeURIComponent(n.currentKey)}/promo`,
+          { method: "PUT", body: { channel: code, rate: Number(input?.value || 0) } }
+        );
+        // 몽슈슈 줄의 기준가·수수료율이 서버에서 바뀌므로 워크시트를 다시 받는다.
+        await npbLoadDetail(n.currentKey);
+        showToast(res?.rate ? `행사 할인 ${Math.round(res.rate * 100)}% 적용` : "행사 할인 해제");
+        renderApp();
+      } catch (error) {
+        showToast(error.message || "행사 할인 저장 실패", "error");
+      }
+    });
+  });
+  app.querySelector("[data-npb-reload]")?.addEventListener("click", async () => {
+    try {
+      await npbLoadDetail(n.currentKey);
+      showToast("새로 읽었습니다.");
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "새로고침 실패", "error");
+    }
+  });
+  app.querySelectorAll("[data-npb-sum]").forEach((inp) => {
+    inp.addEventListener("input", () => {
+      const block = n.worksheet?.[Number(inp.dataset.npbSum)];
+      if (!block?.totals) return;
+      block.totals[inp.dataset.npbSf] = Number(inp.value || 0);
+      const el = inp.closest(".npb-sum-grid")?.querySelector(".npb-sum-cell strong");
+      if (el) {
+        el.textContent = money.format(
+          Number(block.totals.saleTotal || 0) - Number(block.totals.feeTotal || 0)
+        );
+      }
+    });
+  });
   app.querySelectorAll("[data-npb-ws]").forEach((inp) => {
     inp.addEventListener("input", (e) => {
       const bi = Number(inp.dataset.npbWs);
@@ -5734,12 +6800,157 @@ function bindNpbWorksheet() {
       if (!row) return;
       const raw = Number(e.target.value);
       row[f] = f === "feeRate" ? (Number.isFinite(raw) ? raw / 100 : 0) : raw;
+      // 손댄 행은 파일 금액 대신 화면 값을 쓴다. 파일이 기준금액을 빠뜨리고
+      // 오는 일이 있어, 고친 값이 이기지 않으면 고칠 방법이 없다.
+      const manual = new Set(row.manualFields || []);
+      manual.add("listPrice");
+      if (row.source) {
+        row.source = { ...row.source };
+        if (f === "feeRate") {
+          delete row.source.feeAmount;
+          delete row.source.settleAmount;
+        } else {
+          delete row.source.saleAmount;
+          delete row.source.settleAmount;
+          delete row.source.listAmount;
+        }
+      }
+      row.manualFields = [...manual];
       renderNpbWorksheetLive();
+    });
+  });
+  const setShip = (key, field, value) => {
+    const cur = n.logisticsCounts[key];
+    const entry = cur && typeof cur === "object" ? { ...cur } : { count: Number(cur) || 0 };
+    entry[field] = Number(value) || 0;
+    n.logisticsCounts[key] = entry;
+  };
+  app.querySelectorAll("[data-npb-adcost]").forEach((btn) => btn.addEventListener("click", async () => {
+    n.adCostLoading = true;
+    renderApp();
+    try {
+      n.adCost = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/adcost`);
+    } catch (error) {
+      showToast(error.message || "광고비를 불러오지 못했습니다.", "error");
+    } finally {
+      n.adCostLoading = false;
+      renderApp();
+    }
+  }));
+  // 기초재고: 파일과 기준일을 고른 뒤 저장을 눌러야 반영된다. 파일을 고르는
+  // 즉시 덮어쓰면 기준일을 잘못 둔 채로 들어간다.
+  app.querySelector("[data-npb-stock-save]")?.addEventListener("click", async () => {
+    const input = app.querySelector("[data-npb-stockfile]");
+    const file = input?.files?.[0];
+    const asOf = app.querySelector("[data-npb-stock-asof]")?.value || "";
+    try {
+      if (!file) {
+        await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/stock-asof`, {
+          method: "PUT", body: { asOf }
+        });
+        if (n.current) n.current.stockFile = { ...(n.current.stockFile || {}), asOf };
+        showToast("기초재고 기준일을 저장했습니다.");
+        renderApp();
+        return;
+      }
+      const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/stock-file`, {
+        method: "POST",
+        body: { fileBase64: await readFileAsBase64(file), fileName: file.name, asOf }
+      });
+      await npbLoadDetail(n.currentKey);
+      const missed = (res.unmatched || []).length;
+      showToast(missed
+        ? `기초재고 ${res.matched.length}건 반영 · 매칭 실패 ${missed}건`
+        : `기초재고 ${res.matched.length}건 반영`, missed ? "error" : undefined);
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "기초재고를 저장하지 못했습니다.", "error");
+    }
+  });
+  app.querySelector("[data-npb-inv-save]")?.addEventListener("click", async () => {
+    try {
+      await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/inventory`, {
+        method: "PUT", body: { inventory: n.inventory || [] }
+      });
+      await npbLoadDetail(n.currentKey);
+      showToast("재고를 저장했습니다.");
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "재고 저장 실패", "error");
+    }
+  });
+  app.querySelector("[data-npb-inv-confirm]")?.addEventListener("click", async () => {
+    try {
+      await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/inventory`, {
+        method: "PUT", body: { inventory: n.inventory || [], confirm: true }
+      });
+      await npbLoadDetail(n.currentKey);
+      showToast("재고를 확정했습니다.");
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "재고 확정 실패", "error");
+    }
+  });
+  // 실비 건수 저장 = 확정. 버튼이 연결돼 있지 않아 눌러도 아무 일이 없었다.
+  app.querySelector("[data-npb-ship-save]")?.addEventListener("click", async () => {
+    try {
+      await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/logistics`, {
+        method: "PUT",
+        body: { counts: n.logisticsCounts || {}, confirm: true }
+      });
+      await npbLoadDetail(n.currentKey);
+      showToast("운임/물류를 확정했습니다.");
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "저장 실패", "error");
+    }
+  });
+  // 청구서 발행 → 그 자리에서 엑셀로 내려받는다. 발행만 하고 파일이 안 나오면
+  // 어디서 받는지 알 길이 없다.
+  app.querySelectorAll("[data-npb-invoice]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const type = btn.getAttribute("data-npb-invoice");
+      try {
+        const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/invoice`, {
+          method: "POST", body: { type }
+        });
+        await npbDownloadInvoice(res.invoice);
+        await npbLoadDetail(n.currentKey);
+        showToast("청구서를 발행했습니다.");
+        renderApp();
+      } catch (error) {
+        showToast(error.message || "청구서 발행 실패", "error");
+      }
+    });
+  });
+  // 출고내역 파일. 입력칸만 있고 아무 데도 연결돼 있지 않아 올려도 반응이 없었다.
+  app.querySelectorAll("[data-npb-shipfile]").forEach((inp) => {
+    inp.addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const shipType = inp.getAttribute("data-npb-shipfile");
+      try {
+        await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/shipping-file`, {
+          method: "POST",
+          body: { shipType, fileBase64: await readFileAsBase64(file), fileName: file.name }
+        });
+        await npbLoadDetail(n.currentKey);
+        showToast("출고내역을 반영했습니다.");
+        renderApp();
+      } catch (error) {
+        showToast(error.message || "출고내역을 읽지 못했습니다.", "error");
+      }
     });
   });
   app.querySelectorAll("[data-npb-ship]").forEach((inp) => {
     inp.addEventListener("input", (e) => {
-      n.logisticsCounts[inp.dataset.npbShip] = Number(e.target.value) || 0;
+      setShip(inp.dataset.npbShip, "count", e.target.value);
+      renderNpbWorksheetLive();
+    });
+  });
+  app.querySelectorAll("[data-npb-ship-amt]").forEach((inp) => {
+    inp.addEventListener("input", (e) => {
+      setShip(inp.dataset.npbShipAmt, "amount", e.target.value);
       renderNpbWorksheetLive();
     });
   });
@@ -5759,6 +6970,32 @@ function bindNpbWorksheet() {
 
 // Re-render only the worksheet screen in place for instant feedback (avoids a
 // full renderApp so focus/caret stay in the edited input).
+// 검수표의 계산 칸만 다시 그린다. 통째로 렌더하면 입력 중이던 칸에서
+// 커서가 튕겨 나가 숫자를 이어서 못 친다.
+function npbRepaintReview() {
+  const rows = state.npb.review?.rows || [];
+  const table = app.querySelector("[data-npb-rv]")?.closest("table");
+  if (!table) return;
+  const total = { qty: 0, sale: 0, fee: 0, settle: 0 };
+  table.querySelectorAll("tbody tr").forEach((tr, i) => {
+    const row = rows[i];
+    if (!row) return;
+    const m = npbReviewMath(row);
+    const tds = tr.querySelectorAll("td");
+    if (tds[7]) tds[7].textContent = money.format(m.sale);
+    if (tds[9]) tds[9].textContent = money.format(m.fee);
+    if (tds[10]) tds[10].textContent = money.format(m.settle);
+    if (row.dropped) return;
+    total.qty += Number(row.qty || 0);
+    total.sale += m.sale; total.fee += m.fee; total.settle += m.settle;
+  });
+  const foot = table.querySelectorAll("tfoot th");
+  if (foot[4]) foot[4].textContent = money.format(total.qty);
+  if (foot[7]) foot[7].textContent = money.format(total.sale);
+  if (foot[9]) foot[9].textContent = money.format(total.fee);
+  if (foot[10]) foot[10].textContent = money.format(total.settle);
+}
+
 function renderNpbWorksheetLive() {
   const container = app.querySelector(".npb-rollup-grid");
   if (!container) return;
@@ -5801,14 +7038,22 @@ async function npbSaveWorksheet() {
       method: "PUT",
       body: { lines: npbWorksheetLines() }
     });
+    // 합계만 적는 채널은 품목 줄이 없으므로 따로 보낸다. lines 저장이 그 채널을
+    // 비워 놓고 지나가므로 순서가 중요하다.
+    for (const block of n.worksheet || []) {
+      if (!block.summary) continue;
+      await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/summary`, {
+        method: "PUT",
+        body: { channel: block.code, ...block.totals }
+      });
+    }
     const computed = await api(
       `/api/npb/settlements/${encodeURIComponent(n.currentKey)}/compute`,
       {
         method: "POST",
         body: {
           logistics: {
-            smallCount: n.logisticsCounts?.small || 0,
-            largeCount: n.logisticsCounts?.large || 0
+            counts: n.logisticsCounts || {}
           },
           inventory: n.inventory || []
         }
@@ -5875,6 +7120,16 @@ function bindNpbProfitInline() {
 function bindNpbChannels() {
   const n = state.npb;
   const channels = n.config?.channels || [];
+  app.querySelectorAll("[data-npb-pr]").forEach((inp) => {
+    inp.addEventListener("input", () => {
+      const products = (n.config?.products || []).filter((p) => p.active !== false);
+      const product = products[Number(inp.dataset.npbPr)];
+      if (!product) return;
+      product[inp.dataset.npbPf] = Number(inp.value || 0);
+      const cell = inp.closest("tr")?.querySelectorAll("td")[5];
+      if (cell) cell.textContent = money.format(Number(product.listPrice || 0) - Number(product.costPrice || 0));
+    });
+  });
   app.querySelectorAll("[data-npb-ch]").forEach((inp) => {
     inp.addEventListener("input", (e) => {
       const i = Number(inp.dataset.npbCh);
@@ -5916,7 +7171,7 @@ function bindNpbChannels() {
       await api("/api/npb/config", {
         method: "PUT",
         body: {
-          brand: NPB_BRAND,
+          brand: npbBrand(),
           channels: n.config?.channels || [],
           costConfig: n.config?.costConfig || {},
           products: n.config?.products || []

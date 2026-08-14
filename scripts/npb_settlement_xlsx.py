@@ -288,71 +288,86 @@ def build_summary(ws, spec):
         c.font = BOLD
         c.fill = LIGHT_FILL
         c.alignment = CENTER
-    small_count = log.get("smallCount", 0)
-    large_count = log.get("largeCount", 0)
-    ws["B24"] = "택배(소형)"
-    ws["B24"].alignment = CENTER_NW
-    ws["C24"] = small_count or None
-    ws["D24"] = log.get("smallShip")
-    ws["E24"] = log.get("pickPack")
-    ws["F24"] = log.get("smallTotal")
-    ws["B25"] = "택배(중대형)"
-    ws["B25"].alignment = CENTER_NW
-    ws["C25"] = large_count or None
-    ws["D25"] = log.get("largeShip")
-    ws["E25"] = log.get("pickPack")
-    ws["F25"] = log.get("largeTotal", 0)
-    ws["B26"] = "합계"
-    ws["B26"].alignment = CENTER_NW
-    ws["B26"].font = BOLD
-    ws["C26"] = _num(small_count) + _num(large_count)
-    ws["F26"] = log.get("grandTotal", roll.get("logisticsCost"))
-    for coord in ("C24", "D24", "E24", "F24", "C25", "D25", "E25", "F25", "C26", "F26"):
-        cell = ws[coord]
+    # 실비 행은 출고 유형 수만큼 그린다. 브랜드마다 유형이 다르다 — 도톤은
+    # 소형/대형, 픽키는 3PL/본사/용달. 유형이 둘이면 예전과 같은 자리에 찍힌다.
+    breakdown = log.get("breakdown") or [
+        {"label": "택배(소형)", "count": log.get("smallCount", 0),
+         "freight": log.get("smallShip"), "handling": log.get("pickPack"),
+         "amount": log.get("smallTotal")},
+        {"label": "택배(중대형)", "count": log.get("largeCount", 0),
+         "freight": log.get("largeShip"), "handling": log.get("pickPack"),
+         "amount": log.get("largeTotal", 0)},
+    ]
+    money_cells = []
+    row_i = 24
+    for b in breakdown:
+        ws.cell(row=row_i, column=2, value=b.get("label")).alignment = CENTER_NW
+        ws.cell(row=row_i, column=3, value=b.get("count") or None)
+        # 용달·퀵은 건당 단가가 없고 실비만 있다.
+        ws.cell(row=row_i, column=4, value=b.get("freight") or None)
+        ws.cell(row=row_i, column=5, value=b.get("handling") or None)
+        ws.cell(row=row_i, column=6, value=b.get("amount"))
+        money_cells += [("C", row_i, True), ("D", row_i, False),
+                        ("E", row_i, False), ("F", row_i, True)]
+        row_i += 1
+    sum_r = row_i
+    ws.cell(row=sum_r, column=2, value="합계").alignment = CENTER_NW
+    ws.cell(row=sum_r, column=2).font = BOLD
+    # 합계에서 뺀 유형(용달/퀵)은 아래 주석대로 개별 기재만 한다.
+    counted = [b for b in breakdown if not b.get("excludeFromTotal")]
+    ws.cell(row=sum_r, column=3, value=sum(_num(b.get("count")) for b in counted))
+    ws.cell(row=sum_r, column=6, value=log.get("grandTotal", roll.get("logisticsCost")))
+    money_cells += [("C", sum_r, True), ("F", sum_r, True)]
+    for col, rr, bold in money_cells:
+        cell = ws["{}{}".format(col, rr)]
         cell.number_format = WON
         cell.alignment = CENTER_NW
-        if coord in ("C24", "F24", "C26", "F26"):
+        if bold:
             cell.font = BOLD11
-    box(ws, "B22:F26")
-    ws["B27"] = ("*입고비용 및 보관비용은 한시적 청구제외 하였으며, 운송실비(당사가 3PL 지불하는 "
-                 "택배운임비 +물류비) 청구기준만 기재되었습니다.")
-    ws["B27"].font = FONT9
-    ws["B28"] = "*퀵/용달 등 별도 운송비 발생시에는 개별기재합니다."
-    ws["B28"].font = FONT9
+    box(ws, "B22:F{}".format(sum_r))
+    # 유형이 둘일 때와 같은 자리에 오도록 아래 내용을 밀어낸다.
+    shift = sum_r - 26
+    note_r = 27 + shift
+    ws.cell(row=note_r, column=2,
+            value=("*입고비용 및 보관비용은 한시적 청구제외 하였으며, 운송실비(당사가 3PL 지불하는 "
+                   "택배운임비 +물류비) 청구기준만 기재되었습니다.")).font = FONT9
+    ws.cell(row=note_r + 1, column=2,
+            value="*퀵/용달 등 별도 운송비 발생시에는 개별기재합니다.").font = FONT9
 
     # --- 3PL 단가표 (B30:F35) ---
-    ws["F29"] = "vat별도"
-    ws["F29"].font = FONT
-    ws["F29"].alignment = RIGHT
+    vat_r = 29 + shift
+    ws.cell(row=vat_r, column=6, value="vat별도").font = FONT
+    ws.cell(row=vat_r, column=6).alignment = RIGHT
     for i, h in enumerate(["항목", "항목", "견적(원)", "단위", "비고"]):
-        c = ws.cell(row=30, column=2 + i, value=h)
+        c = ws.cell(row=30 + shift, column=2 + i, value=h)
         c.font = FONT11
         c.fill = BLUE_FILL
         c.alignment = CENTER_NW
-    tpl = spec.get("threePLTable") or [
+    tpl = spec.get("threePLTable") or spec.get("threePlTable") or [
         {"item": "보관료", "unitPrice": None, "unit": "월/평당 ", "note": "청구제외"},
         {"item": "입고비용", "unitPrice": 0, "unit": "건", "note": "청구제외"},
         {"item": "택배운임비", "unitPrice": 2500, "unit": "건", "note": "로젠택배(소형)"},
         {"item": "택배운임비", "unitPrice": 4000, "unit": "건", "note": "로젠택배(중대형)"},
         {"item": "물류비", "unitPrice": 1300, "unit": "건", "note": "부자재 /피킹/패킹"},
     ]
-    ws.merge_cells("B31:B35")
-    ws["B31"] = "3PL \n단가표"
-    ws["B31"].font = FONT11
-    ws["B31"].alignment = CENTER
+    tpl_top = 31 + shift
+    tpl_bottom = tpl_top + max(len(tpl), 1) - 1
+    ws.merge_cells("B{}:B{}".format(tpl_top, tpl_bottom))
+    ws.cell(row=tpl_top, column=2, value="3PL \n단가표").font = FONT11
+    ws.cell(row=tpl_top, column=2).alignment = CENTER
     for i, row in enumerate(tpl):
-        rr = 31 + i
+        rr = tpl_top + i
         ws.cell(row=rr, column=3, value=row.get("item")).font = FONT11
         pc = ws.cell(row=rr, column=4, value=row.get("unitPrice"))
         pc.number_format = WON
         pc.alignment = CENTER_NW
         ws.cell(row=rr, column=5, value=row.get("unit")).alignment = CENTER_NW
         ws.cell(row=rr, column=6, value=row.get("note")).font = FONT11
-    box(ws, "B30:F35")
+    box(ws, "B{}:F{}".format(30 + shift, tpl_bottom))
 
     # --- 메모 (B38:B43) ---
-    ws["B38"] = "[메모/특이사항]"
-    ws["B38"].font = BOLD
+    memo_top = tpl_bottom + 3
+    ws.cell(row=memo_top, column=2, value="[메모/특이사항]").font = BOLD
     memo = spec.get("memo") or [
         "재고이동(오프라인 위탁진열/ 판매시 정산)",
         "비매출: 협찬, 진열품, 샘플 등의 무상사용",
@@ -361,7 +376,7 @@ def build_summary(ws, spec):
         "불용이슈: 패키지 손상/파손",
     ]
     for i, line in enumerate(memo):
-        c = ws.cell(row=39 + i, column=2, value=line)
+        c = ws.cell(row=memo_top + 1 + i, column=2, value=line)
         c.font = FONT9
 
     # widths

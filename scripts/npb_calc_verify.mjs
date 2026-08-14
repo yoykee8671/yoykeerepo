@@ -12,7 +12,10 @@
 import {
   npbComputeRollup,
   npbComputeLogistics,
-  npbComputeProfitSplit
+  npbComputeProfitSplit,
+  npbComputeLine,
+  npbEnrichLine,
+  buildNpbNamespace
 } from '../server.js';
 
 const costConfig = { smallShip: 2650, largeShip: 4400, pickPack: 1430 };
@@ -151,8 +154,59 @@ for (const month of months) {
   }
 }
 
+// --- 몽슈슈 프로모션 게이트 -------------------------------------------------
+// 몽슈슈가 행사를 걸면 그 할인을 우프와 반반 부담한다. 정산서는 행사가 있는 달과
+// 없는 달의 표 모양이 아예 다르므로 두 달을 다 재현해야 한다.
+//
+//   4월 (20% 행사) 매출=공급가×수량, 차감=매출×10%, 수수료칸 비움
+//   5월 (행사 없음) 매출=정가×수량,   수수료=40%,    차감칸 비움
+const ns = buildNpbNamespace();
+const doteonChannels = ns.channels.filter((c) => c.brandId === 'doteon');
+const doteonProducts = ns.products.filter((p) => p.brandId === 'doteon');
+const mongshuLine = (productKey, qty) => ({ channel: 'mongshu', productKey, qty });
+const totalOf = (lines, promoRates) => lines
+  .map((line) => npbComputeLine(
+    npbEnrichLine(line, doteonChannels, doteonProducts, promoRates)
+  ))
+  .reduce((sum, t) => ({
+    saleTotal: sum.saleTotal + t.saleTotal,
+    feeTotal: sum.feeTotal + t.feeTotal,
+    settleTotal: sum.settleTotal + t.settleTotal,
+    listTotal: sum.listTotal + t.listTotal
+  }), { saleTotal: 0, feeTotal: 0, settleTotal: 0, listTotal: 0 });
+
+const promoCases = [
+  {
+    label: '몽슈슈 4월 (20% 행사)',
+    lines: [mongshuLine('fc', 13), mongshuLine('os', 14)],
+    promoRates: { mongshu: 0.2 },
+    expect: { listTotal: 594000, saleTotal: 356400, feeTotal: 35640, settleTotal: 320760 }
+  },
+  {
+    label: '몽슈슈 5월 (행사 없음)',
+    lines: [mongshuLine('os', 2)],
+    promoRates: {},
+    expect: { listTotal: 44000, saleTotal: 44000, feeTotal: 17600, settleTotal: 26400 }
+  }
+];
+
+for (const item of promoCases) {
+  const got = totalOf(item.lines, item.promoRates);
+  const bad = Object.entries(item.expect)
+    .filter(([key, want]) => Math.abs(got[key] - want) > 1e-6)
+    .map(([key, want]) => `${key}: ${fmt(got[key])} !== ${fmt(want)}`);
+  if (bad.length === 0) {
+    console.log(`PASS ${item.label}  정가계=${fmt(got.listTotal)} 매출=${fmt(got.saleTotal)} ` +
+      `공제=${fmt(got.feeTotal)} 정산=${fmt(got.settleTotal)}`);
+  } else {
+    allPass = false;
+    console.log(`FAIL ${item.label}`);
+    for (const line of bad) console.log(`  - ${line}`);
+  }
+}
+
 console.log('');
 console.log(allPass
-  ? 'MASTER GATE: PASS — 2/3/4월 all reproduce EXACTLY.'
+  ? 'MASTER GATE: PASS — 2/3/4월 정산 + 몽슈슈 프로모션 all reproduce EXACTLY.'
   : 'MASTER GATE: FAIL — see discrepancies above.');
 process.exit(allPass ? 0 : 1);
