@@ -2657,11 +2657,20 @@ function npbRecompute(db, settlement, opts = {}) {
   );
   // 합계만 적는 채널은 줄이 하나여야 한다. 품목 방식으로 쓰다가 합계 방식으로
   // 바꾸면 예전 품목 줄이 그대로 남아, 합계와 함께 두 번 더해진다.
+  //
+  // 단, 합계 줄이 실제로 있을 때만 품목 줄을 걷어낸다. 합계 방식으로 지정만
+  // 해 두고 합계를 아직 안 적은 채널에서 품목 줄까지 버리면 그 채널이 통째로
+  // 사라져, 화면의 실시간 합계와 저장된 정산이 조용히 갈린다.
   const summaryOnly = new Set(
     npbChannels.filter((c) => (c.entryMode || "review") === "summary").map((c) => c.code)
   );
+  const hasSummaryLine = new Set(
+    (settlement.lines || []).filter((line) => line.summary === true).map((line) => line.channel)
+  );
   const kept = (settlement.lines || []).filter(
-    (line) => !summaryOnly.has(line.channel) || line.summary === true
+    (line) => !summaryOnly.has(line.channel)
+      || !hasSummaryLine.has(line.channel)
+      || line.summary === true
   );
   const lines = kept.map(
     (line) => npbEnrichLine(line, npbChannels, npbProducts, settlement.promoRates)
