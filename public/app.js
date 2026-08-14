@@ -4397,7 +4397,9 @@ function npbBuildWorksheet(config, lines) {
 
 // Seed the 재고현황 table from config products, overlaying any stored rows.
 function npbBuildInventory(config, stored) {
-  const products = config?.products || [];
+  // 감춘 품목은 재고에도 뜨면 안 된다. 첫 시드의 pb_chicken/pb_vegan 처럼 g 수
+  // 없이 맛으로만 갈랐던 옛 품목이 SKU 목록과 나란히 보여 6줄이 됐다.
+  const products = (config?.products || []).filter((p) => p.active !== false);
   const byKey = new Map(
     (stored || []).map((r) => [npbProductId(r.productKey || r.productId || r.key), r])
   );
@@ -5535,8 +5537,25 @@ function renderNpbExpenses() {
   const shipFiles = n.current?.shipFiles || {};
   const breakdown = log.breakdown || [];
 
+  // 청구서에는 운임과 물류사용비를 따로 적어야 한다. 계산은 이미 둘을 나눠
+  // 갖고 있으므로 화면에서만 풀어 준다 — 합쳐 놓으면 무엇으로 얼마가 나갔는지
+  // 확인할 방법이 없다.
+  const shipParts = (row) => (row.manual ? [] : [
+    ["택배운임비", Number(row.freight || 0)],
+    ["물류사용비", Number(row.handling || 0)]
+  ].filter(([, price]) => price > 0));
+
   const shipRows = breakdown.map((row) => {
     const file = shipFiles[row.key];
+    const detail = shipParts(row).map(([label, price]) => `
+      <tr class="npb-ship-detail">
+        <td class="muted">└ ${label}</td>
+        <td></td>
+        <td class="num muted">${money.format(row.count)}건</td>
+        <td class="num muted">${money.format(price)}</td>
+        <td class="num muted">${money.format(price * Number(row.count || 0))}</td>
+        <td></td>
+      </tr>`).join("");
     return `
       <tr>
         <td>${h(row.label)}</td>
@@ -5552,8 +5571,16 @@ function renderNpbExpenses() {
           ? `<input class="num" type="number" min="0" data-npb-ship-amt="${h(row.key)}" value="${h(row.amount)}">`
           : money.format(row.amount)}</td>
         <td class="muted">${row.excludeFromTotal ? "합계 제외 · 개별청구" : ""}</td>
-      </tr>`;
+      </tr>${detail}`;
   }).join("");
+
+  // 항목별 합계. 합계에서 뺀 유형(용달·퀵)은 여기서도 뺀다.
+  const counted = breakdown.filter((row) => !row.excludeFromTotal);
+  const partTotal = (field) => counted.reduce(
+    (sum, row) => sum + (row.manual ? 0 : Number(row[field] || 0) * Number(row.count || 0)), 0
+  );
+  const freightTotal = partTotal("freight");
+  const handlingTotal = partTotal("handling");
 
   // 핸들러는 n.adCost 에 쓴다. 저장된 값(n.current)은 처음 화면을 열 때만 쓴다.
   const ad = n.adCost || n.current?.adCost || {};
@@ -5586,11 +5613,21 @@ function renderNpbExpenses() {
       <div class="table-wrap"><table>
         <thead><tr><th>유형</th><th>출고내역 파일</th><th>건수</th><th>건당</th><th>금액</th><th></th></tr></thead>
         <tbody>${shipRows}</tbody>
-        <tfoot><tr>
-          <th>합계</th><th></th><th class="num">${money.format(log.countTotal || 0)}</th><th></th>
-          <th class="num">${money.format(log.grandTotal || 0)}</th>
-          <th class="muted">${log.separateTotal ? `별도 ${money.format(log.separateTotal)}` : ""}</th>
-        </tr></tfoot>
+        <tfoot>
+          <tr class="npb-ship-detail">
+            <td class="muted">택배운임비 계</td><td></td><td></td><td></td>
+            <td class="num muted">${money.format(freightTotal)}</td><td></td>
+          </tr>
+          <tr class="npb-ship-detail">
+            <td class="muted">물류사용비 계</td><td></td><td></td><td></td>
+            <td class="num muted">${money.format(handlingTotal)}</td><td></td>
+          </tr>
+          <tr>
+            <th>합계</th><th></th><th class="num">${money.format(log.countTotal || 0)}</th><th></th>
+            <th class="num">${money.format(log.grandTotal || 0)}</th>
+            <th class="muted">${log.separateTotal ? `별도 ${money.format(log.separateTotal)}` : ""}</th>
+          </tr>
+        </tfoot>
       </table></div>
       <div class="toolbar">
         <button data-npb-ship-save>건수 저장</button>

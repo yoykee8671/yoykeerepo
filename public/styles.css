@@ -1048,6 +1048,14 @@ input.num {
   font-size: 14px;
 }
 
+/* 실비 세부내역 — 유형 아래 딸린 항목 줄. */
+.npb-ship-detail td {
+  background: #fafafa;
+  font-size: 12px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
 /* 행사 할인율 — 채널 제목 오른쪽 끝에 붙인다. */
 .npb-promo {
   display: flex;

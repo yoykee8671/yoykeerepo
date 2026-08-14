@@ -1305,9 +1305,27 @@ function migrateDb(db) {
       }
     }
 
+    // 감춘 품목의 재고 줄을 걷어낸다. 화면은 이제 활성 품목만 그리므로 저장된
+    // 줄만 남아 다음 저장 때 되살아난다. 값이 남아 있으면 손대지 않는다 —
+    // 지울 수 있는 건 처음부터 0 이었던 껍데기뿐이다.
+    const hiddenProducts = new Set(
+      (db.npb.products || []).filter((p) => p.active === false).map((p) => p.id)
+    );
     // periodMonth 를 채운다. 없으면 전월 이월도 광고비 월 필터도 동작하지 않는다.
     for (const settlement of db.npb.settlements || []) {
       touch(settlement, "promoRates", {});
+      if (hiddenProducts.size && Array.isArray(settlement.inventory)) {
+        const kept = settlement.inventory.filter((row) => {
+          const key = String(row?.productKey || row?.productId || "");
+          if (!hiddenProducts.has(key)) return true;
+          return ["opening", "inbound", "outbound", "sold", "nonSale", "closing"]
+            .some((field) => number(row?.[field]) !== 0);
+        });
+        if (kept.length !== settlement.inventory.length) {
+          settlement.inventory = kept;
+          changed = true;
+        }
+      }
       const want = npbPeriodMonth(settlement);
       if (want && settlement.periodMonth !== want) {
         settlement.periodMonth = want;
