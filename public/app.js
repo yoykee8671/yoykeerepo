@@ -4395,6 +4395,47 @@ function npbBuildWorksheet(config, lines) {
   return blocks;
 }
 
+// 발행한 청구서를 엑셀로 내려받는다.
+async function npbDownloadInvoice(invoice) {
+  if (!invoice?.id) return;
+  const res = await fetch(`/api/npb/invoices/${encodeURIComponent(invoice.id)}/xlsx`, {
+    credentials: "same-origin"
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "청구서를 내려받지 못했습니다.");
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${invoice.brandName || "청구서"}_${invoice.periodMonth || ""}_${invoice.typeLabel || ""}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// 기초재고는 정산월 전월의 마지막 날 기준, 기말은 정산월의 마지막 날 기준이다.
+function npbMonthLastDay(year, month) {
+  if (!year || !month) return "";
+  const last = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return `${year}-${String(month).padStart(2, "0")}-${String(last).padStart(2, "0")}`;
+}
+
+function npbPeriodLastDay() {
+  const p = state.npb.current?.period || {};
+  return npbMonthLastDay(Number(p.year), Number(p.month));
+}
+
+function npbPrevMonthLastDay() {
+  const p = state.npb.current?.period || {};
+  const year = Number(p.year);
+  const month = Number(p.month);
+  if (!year || !month) return "";
+  return month === 1 ? npbMonthLastDay(year - 1, 12) : npbMonthLastDay(year, month - 1);
+}
+
 // Seed the 재고현황 table from config products, overlaying any stored rows.
 function npbBuildInventory(config, stored) {
   // 감춘 품목은 재고에도 뜨면 안 된다. 첫 시드의 pb_chicken/pb_vegan 처럼 g 수
@@ -4405,15 +4446,18 @@ function npbBuildInventory(config, stored) {
   );
   return products.map((p) => {
     const r = byKey.get(p.id) || {};
+    const opening = Number(r.opening || 0);
+    const inbound = Number(r.inbound || 0);
+    const outbound = Number(r.outbound || 0);
     return {
       productKey: p.id,
       name: p.name,
-      opening: Number(r.opening || 0),
-      inbound: Number(r.inbound || 0),
-      outbound: Number(r.outbound || 0),
-      sold: Number(r.sold || 0),
-      nonSale: Number(r.nonSale || 0),
-      closing: Number(r.closing || 0)
+      // 기초(전월 말) + 입고 − 출고 = 기말(정산월 말). 판매/비매출은 출고에서
+      // 갈라낼 방법이 없어 쓰지 않는다.
+      opening,
+      inbound,
+      outbound,
+      closing: opening + inbound - outbound
     };
   });
 }
@@ -6028,39 +6072,51 @@ function renderNpbProfitSection() {
 function renderNpbInventorySection() {
   const n = state.npb;
   const inv = n.inventory || [];
-  const cols = [
-    ["opening", "기초"], ["inbound", "입고"], ["outbound", "출고"],
-    ["sold", "판매"], ["nonSale", "비매출"], ["closing", "기말"]
-  ];
+  // 기말은 기초 + 입고 − 출고 라 손으로 적을 값이 아니다.
+  const cols = [["opening", "기초"], ["inbound", "입고"], ["outbound", "출고"]];
   const rows = inv
     .map((r, i) => `
       <tr>
         <td>${h(r.name)}</td>
         ${cols.map(([f]) => `<td><input class="num" type="number" data-npb-inv="${i}" data-npb-ifield="${f}" value="${h(r[f] ?? 0)}"></td>`).join("")}
+        <td class="num"><strong>${money.format(Number(r.closing || 0))}</strong></td>
       </tr>`)
-    .join("") || `<tr><td colspan="7" class="empty">제품이 없습니다.</td></tr>`;
+    .join("") || `<tr><td colspan="5" class="empty">제품이 없습니다.</td></tr>`;
   // 조회기준일은 파일에서 읽지 않는다 — 파일을 뽑은 시각과 어느 시점 재고로
   // 볼지는 다르므로 사람이 정한다.
   const stock = n.current?.stockFile || {};
   return `
     <section class="panel">
-      <div class="panel-head"><h2>재고현황</h2><span class="muted">자사물류센터 입출고 기준</span></div>
+      <div class="panel-head">
+        <h2>재고현황</h2>
+        <span class="muted">기초(전월 말) + 입고 − 출고 = 기말(${h(npbPeriodLastDay())})</span>
+      </div>
       <div class="npb-stock-bar">
-        <label>조회기준일
-          <input type="date" data-npb-stock-asof value="${h(stock.asOf || "")}">
+        <label>기초재고 기준일
+          <input type="date" data-npb-stock-asof value="${h(stock.asOf || npbPrevMonthLastDay())}">
         </label>
-        <label>재고조회 파일
+        <label>기초재고 파일
           <input type="file" accept=".csv" data-npb-stockfile>
         </label>
+        <button data-npb-stock-save>저장</button>
         <span class="muted">${stock.fileName
-          ? `${h(stock.fileName)} · ${money.format(stock.matched || 0)}/${money.format(stock.rowCount || 0)}건 기초재고 반영`
-          : "셀메이트 재고조회 CSV 를 올리면 현재재고가 기초재고로 들어갑니다."}</span>
+          ? `${h(stock.fileName)} · ${money.format(stock.matched || 0)}/${money.format(stock.rowCount || 0)}건 반영`
+          : "셀메이트 재고조회 CSV 를 고른 뒤 저장을 누르면 기초재고로 들어갑니다."}</span>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>품목</th>${cols.map(([, l]) => `<th>${l}</th>`).join("")}</tr></thead>
+          <thead><tr><th>품목</th>${cols.map(([, l]) => `<th>${l}</th>`).join("")}<th>기말</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
+      </div>
+      <div class="panel-body">
+        <div class="toolbar">
+          <button data-npb-inv-save>재고 저장</button>
+          <button class="primary" data-npb-inv-confirm>재고 확정</button>
+          ${n.current?.inventoryConfirmedAt
+            ? `<span class="muted">확정됨 · ${h(String(n.current.inventoryConfirmedAt).slice(0, 10))}</span>`
+            : ""}
+        </div>
       </div>
     </section>`;
 }
@@ -6781,12 +6837,22 @@ function bindNpbWorksheet() {
       renderApp();
     }
   }));
-  // 셀메이트 재고조회 CSV → 기초재고. 조회기준일은 옆 칸에서 사람이 정한다.
-  app.querySelector("[data-npb-stockfile]")?.addEventListener("change", async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // 기초재고: 파일과 기준일을 고른 뒤 저장을 눌러야 반영된다. 파일을 고르는
+  // 즉시 덮어쓰면 기준일을 잘못 둔 채로 들어간다.
+  app.querySelector("[data-npb-stock-save]")?.addEventListener("click", async () => {
+    const input = app.querySelector("[data-npb-stockfile]");
+    const file = input?.files?.[0];
     const asOf = app.querySelector("[data-npb-stock-asof]")?.value || "";
     try {
+      if (!file) {
+        await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/stock-asof`, {
+          method: "PUT", body: { asOf }
+        });
+        if (n.current) n.current.stockFile = { ...(n.current.stockFile || {}), asOf };
+        showToast("기초재고 기준일을 저장했습니다.");
+        renderApp();
+        return;
+      }
       const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/stock-file`, {
         method: "POST",
         body: { fileBase64: await readFileAsBase64(file), fileName: file.name, asOf }
@@ -6798,20 +6864,64 @@ function bindNpbWorksheet() {
         : `기초재고 ${res.matched.length}건 반영`, missed ? "error" : undefined);
       renderApp();
     } catch (error) {
-      showToast(error.message || "재고 파일을 읽지 못했습니다.", "error");
+      showToast(error.message || "기초재고를 저장하지 못했습니다.", "error");
     }
   });
-  app.querySelector("[data-npb-stock-asof]")?.addEventListener("change", async (e) => {
+  app.querySelector("[data-npb-inv-save]")?.addEventListener("click", async () => {
     try {
-      await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/stock-asof`, {
-        method: "PUT",
-        body: { asOf: e.target.value }
+      await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/inventory`, {
+        method: "PUT", body: { inventory: n.inventory || [] }
       });
-      if (n.current) n.current.stockFile = { ...(n.current.stockFile || {}), asOf: e.target.value };
-      showToast("조회기준일을 저장했습니다.");
+      await npbLoadDetail(n.currentKey);
+      showToast("재고를 저장했습니다.");
+      renderApp();
     } catch (error) {
-      showToast(error.message || "조회기준일 저장 실패", "error");
+      showToast(error.message || "재고 저장 실패", "error");
     }
+  });
+  app.querySelector("[data-npb-inv-confirm]")?.addEventListener("click", async () => {
+    try {
+      await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/inventory`, {
+        method: "PUT", body: { inventory: n.inventory || [], confirm: true }
+      });
+      await npbLoadDetail(n.currentKey);
+      showToast("재고를 확정했습니다.");
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "재고 확정 실패", "error");
+    }
+  });
+  // 실비 건수 저장 = 확정. 버튼이 연결돼 있지 않아 눌러도 아무 일이 없었다.
+  app.querySelector("[data-npb-ship-save]")?.addEventListener("click", async () => {
+    try {
+      await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/logistics`, {
+        method: "PUT",
+        body: { counts: n.logisticsCounts || {}, confirm: true }
+      });
+      await npbLoadDetail(n.currentKey);
+      showToast("운임/물류를 확정했습니다.");
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "저장 실패", "error");
+    }
+  });
+  // 청구서 발행 → 그 자리에서 엑셀로 내려받는다. 발행만 하고 파일이 안 나오면
+  // 어디서 받는지 알 길이 없다.
+  app.querySelectorAll("[data-npb-invoice]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const type = btn.getAttribute("data-npb-invoice");
+      try {
+        const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/invoice`, {
+          method: "POST", body: { type }
+        });
+        await npbDownloadInvoice(res.invoice);
+        await npbLoadDetail(n.currentKey);
+        showToast("청구서를 발행했습니다.");
+        renderApp();
+      } catch (error) {
+        showToast(error.message || "청구서 발행 실패", "error");
+      }
+    });
   });
   // 출고내역 파일. 입력칸만 있고 아무 데도 연결돼 있지 않아 올려도 반응이 없었다.
   app.querySelectorAll("[data-npb-shipfile]").forEach((inp) => {

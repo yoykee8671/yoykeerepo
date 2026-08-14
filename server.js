@@ -7372,6 +7372,51 @@ async function routeApi(req, res, url) {
       return;
     }
 
+    // 재고 저장·확정. 기말은 저장하지 않는다 — 기초+입고−출고 로 언제든 나오고,
+    // 따로 담아 두면 셋과 어긋난 값이 남는다.
+    if (action === "inventory" && method === "PUT") {
+      const body = await readBody(req);
+      if (!Array.isArray(body.inventory)) {
+        sendJson(res, 400, { error: "inventory 배열이 필요합니다." });
+        return;
+      }
+      settlement.inventory = body.inventory
+        .filter((row) => row && (row.productKey || row.productId))
+        .map((row) => ({
+          productKey: String(row.productKey || row.productId),
+          name: String(row.name || ""),
+          opening: number(row.opening),
+          inbound: number(row.inbound),
+          outbound: number(row.outbound)
+        }));
+      if (body.confirm) settlement.inventoryConfirmedAt = now();
+      settlement.updatedAt = now();
+      await writeDb(db);
+      sendJson(res, 200, {
+        inventory: settlement.inventory,
+        inventoryConfirmedAt: settlement.inventoryConfirmedAt || "",
+        settlement
+      });
+      return;
+    }
+
+    // 실비 건수 저장 = 확정. 화면의 "건수 저장" 이 여기로 온다.
+    if (action === "logistics" && method === "PUT") {
+      const body = await readBody(req);
+      const counts = body.counts && typeof body.counts === "object" ? body.counts : {};
+      const computed = npbRecompute(db, settlement, { logistics: { counts } });
+      if (body.confirm) settlement.logisticsConfirmedAt = now();
+      settlement.updatedAt = now();
+      await writeDb(db);
+      sendJson(res, 200, {
+        logistics: settlement.logistics,
+        logisticsConfirmedAt: settlement.logisticsConfirmedAt || "",
+        rollup: computed.rollup,
+        settlement
+      });
+      return;
+    }
+
     if (action === "profit-split" && method === "PUT") {
       const body = await readBody(req);
       const parties = body.parties || body.profitSplit;
