@@ -811,6 +811,11 @@ export function buildNpbNamespace() {
       code: "emart", name: "몰리스(이마트)", category: "위탁재고", archetype: "consignment",
       calcType: "rate_on_sale", salePrice: 22000, feeRate: 0.3, supplyPrice: 15400,
       priceLabel: "정가", vatIncluded: true, feeAdjustable: false,
+      // 파일의 납품금액은 매출이 아니라 VAT 를 뺀 정산액이다 (14,000 × 1.1 =
+      // 15,400 = 공급가). 그대로 매출로 쓰면 22,000 짜리가 14,000 에 팔린 것이
+      // 되고 거기서 수수료까지 또 떼여 정산이 두 번 깎인다. 매출은 정가표로
+      // 잡는다 — 정답지도 그렇게 계산한다(5월 4개 = 88,000 / 26,400 / 61,600).
+      saleBasis: "list",
       filenameKeywords: ["emart", "몰리스"], active: true
     },
     {
