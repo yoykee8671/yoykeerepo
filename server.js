@@ -3654,8 +3654,11 @@ function npbBuildPickySpec(db, settlement) {
     periodMonth: settlement.periodMonth || "",
     // 파일명의 월은 집계 기준이라 신고 월과 한 달 어긋난다. 둘 다 적어 둔다.
     issueBasisDate: npbNextMonthEnd(settlement.periodMonth),
+    // 정산서 표기는 "2026.6.1 - 6.30" 형식이다.
     periodRange: period.range
-      || (period.month ? `${period.year} ${period.month}/1 - ${period.month}/${new Date(Number(period.year), Number(period.month), 0).getDate()}` : ""),
+      || (period.month
+        ? `${period.year}.${Number(period.month)}.1 - ${Number(period.month)}.${new Date(Number(period.year), Number(period.month), 0).getDate()}`
+        : ""),
     rollup: {
       listTotal: number(rollup.listTotal),
       discountTotal: number(rollup.discountTotal),
@@ -3671,12 +3674,17 @@ function npbBuildPickySpec(db, settlement) {
     adCost: settlement.adCost || null,
     memo: settlement.memo && settlement.memo.length
       ? settlement.memo
-      : [
-          "당월부터 실비(물류/운임비/광고홍보비)는 매출에 통합하지 않고 별도 청구합니다.",
-          "정산서에 기재된 월은 판매집계 기준이며, 계산서 발행(신고) 기준일을 함께 적었습니다.",
-          "세금계산서는 정산 월 기준 익익월 10일에 발행합니다.",
-          "정산금액은 정산 월 기준 익월 15일 이내 입금됩니다."
-        ]
+      : ["당월부터 실비는 별도 청구예정입니다. (비용상의 계정과목 분리 목적 - 운송비/광고비 등)"],
+    // 채널 파일을 올린 그대로 뒤에 붙인다. 정산서의 숫자가 어느 자료에서
+    // 나왔는지는 그 자료가 같은 파일에 있어야 확인할 수 있다.
+    sources: Object.values(settlement.uploads || {})
+      .filter((up) => up && up.kind !== "logistics" && Array.isArray(up.rawRows) && up.rawRows.length)
+      .map((up) => ({
+        channel: up.channel,
+        label: (channels.find((c) => c.code === up.channel) || {}).name || up.channel,
+        fileName: up.fileName || "",
+        rows: up.rawRows
+      }))
   };
 }
 
@@ -6982,27 +6990,44 @@ async function routeApi(req, res, url) {
               // 묶음인데 파일의 단가가 낱개 값인 경우가 있다 — 카페24 B2B 는
               // "수량=100개" 옵션에도 판매가 칸에 낱개 공급가를 적어 보낸다.
               // 낱개 정가와 비슷한 값이면 묶음 단가로 환산한다.
+              //
+              // 파일이 매출 금액을 준 줄은 건드리지 않는다. 그 단가는 이미
+              // 금액 ÷ 수량이라 수량과 아귀가 맞고, 여기서 배수를 또 곱하면
+              // 뒤에서 수량을 한 번 더 곱해 100개 주문이 100배로 부푼다.
               const multiplier = Math.max(1, number(line.multiplier, 1));
-              if (multiplier > 1 && unit > 0) {
+              if (multiplier > 1 && unit > 0 && line.saleAmount == null) {
                 const base = number(line.listPrice) / multiplier;
                 const ratio = base > 0 ? unit / base : 0;
                 if (ratio >= 0.3 && ratio <= 1.5) unit *= multiplier;
               }
+              // 파일이 그 줄의 단가를 적어 왔으면 그것이 진실이다. 지난번에
+              // 정한 기준가는 파일에 단가가 없을 때 쓰는 값이고, 다를 때는
+              // 덮는 대신 알리기만 한다 — B2B 는 같은 상품이라도 100개 주문의
+              // 공급가가 4,080 으로 내려가는 식이라(대량구매 할인) 기억한 값을
+              // 씌우면 그 줄만 조용히 틀린다.
               const saved = line.savedUnitPrice;
               if (saved != null && saved > 0) {
-                // 파일이 말하는 단가와 지난번에 정한 단가가 다르면 알린다 —
-                // 판매처가 말없이 공급가를 바꾸는 걸 여기서 잡는다.
                 const changed = unit > 0 && unit !== saved
                   ? { from: saved, to: unit }
                   : null;
-                return { ...line, unitPrice: saved, priceChanged: changed };
+                return { ...line, unitPrice: unit > 0 ? unit : saved, priceChanged: changed };
               }
               return { ...line, unitPrice: unit };
             });
+          // 올린 표를 그대로 보관한다. 정산서 뒤에 DB) 시트로 나가야 숫자가
+          // 어느 자료에서 나왔는지 대조할 수 있다. 실패해도 업로드는 계속한다 —
+          // 원본 보관이 안 된다고 정산을 막을 이유는 없다.
+          let rawRows = [];
+          try {
+            rawRows = await parseBankXlsxUpload(body.fileBase64);
+          } catch {
+            rawRows = [];
+          }
           settlement.uploads[channelCode] = {
             kind,
             channel: channelCode,
             fileName: body.fileName || "",
+            rawRows,
             lines: parsedLines,
             warnings: npbUploadWarnings(parsed, uploadChannel, excluded),
             // 열을 다시 고를 수 있도록 파서가 본 표 구조를 남긴다.
