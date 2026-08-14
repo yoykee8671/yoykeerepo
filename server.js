@@ -607,15 +607,42 @@ export function buildNpbNamespace() {
         // 용달·퀵은 건마다 금액이 달라 실비를 직접 적는다.
         { key: "quick", label: "용달/퀵", freight: 0, handling: 0, manual: true, excludeFromTotal: true }
       ],
+      // 청구서에 그대로 실리는 값들이다. 여기서 고치면 발행되는 양식이 바뀐다.
+      // 항목을 고치면 이 번호를 올려야 이미 만들어진 DB 에도 반영된다.
+      invoiceFormatVersion: 1,
+      basisLabel: "운송장번호 발행 기준",
+      // 단가표. group 으로 3PL 과 본사출고를 가른다. 범위로 적는 항목
+      // (제주도서산간)은 숫자가 아니라 unitPriceLabel 로 적는다.
       threePlTable: [
-        { item: "보관료", unitPrice: 4000, unit: "월/평당", note: "청구제외 / 한시적 무상제공" },
-        { item: "입고비용", unitPrice: null, unit: "건", note: "청구제외 / 한시적 무상제공" },
-        { item: "물류솔루션", unitPrice: 300000, unit: "월별", note: "청구제외 / 한시적 무상제공" },
-        { item: "택배운임비", unitPrice: 2500, unit: "건", note: "로젠택배(소형)" },
-        { item: "택배운임비", unitPrice: 4000, unit: "건", note: "로젠택배(중형이상)" },
-        { item: "물류사용비", unitPrice: 1300, unit: "건", note: "박스·부자재 / 피킹 / 패킹" },
-        { item: "본사 택배운임비", unitPrice: 3000, unit: "건", note: "로젠택배(소형)" },
-        { item: "본사 부자재(박스)", unitPrice: 500, unit: "건", note: "" }
+        { group: "3PL 단가표", item: "보관료", unitPrice: 4000, unit: "월/평당", note: "청구제외 / 한시적 무상제공" },
+        { group: "3PL 단가표", item: "입고비용", unitPrice: null, unit: "건", note: "청구제외 / 한시적 무상제공" },
+        { group: "3PL 단가표", item: "물류솔루션", unitPrice: 300000, unit: "월별", note: "청구제외 / 한시적 무상제공" },
+        { group: "3PL 단가표", item: "택배운임비", unitPrice: 2500, unit: "건", note: "로젠택배(소형)" },
+        { group: "3PL 단가표", item: "택배운임비", unitPrice: 4000, unit: "건", note: "로젠택배(중형이상)" },
+        { group: "3PL 단가표", item: "추가운임(제주도서산간)", unitPrice: null,
+          unitPriceLabel: "3,000~4,000", unit: "건", note: "지역HUB별 상이" },
+        { group: "3PL 단가표", item: "물류사용비", unitPrice: 1300, unit: "건",
+          note: "박스 및 물류 부자재 / 피킹작업 / 건별 패킹작업 / 반품회수 및 양품화 / 송장처리 / 쿠팡 등 송장부착 / 명세서 및 쉬핑라벨 문서처리" },
+        { group: "본사출고", item: "택배운임비", unitPrice: 3000, unit: "건", note: "로젠택배(소형)" },
+        { group: "본사출고", item: "택배운임비", unitPrice: 4000, unit: "건", note: "로젠택배(중형이상)" },
+        { group: "본사출고", item: "추가운임(제주도서산간)", unitPrice: null,
+          unitPriceLabel: "3,000~4,000", unit: "건", note: "지역HUB별 상이" },
+        { group: "본사출고", item: "부자재(박스)", unitPrice: 500, unit: "건", note: "" },
+        { group: "본사출고", item: "", unitPrice: null, unit: "",
+          note: "본사출고시 보관료/입고비/물류솔루션비 등 없음" }
+      ],
+      // 비용집계 표 아래에 붙는 주석.
+      invoiceFootnotes: [
+        "입고비용 및 보관비용은 현재 입출고 건수가 작아 청구에 포함하지 않으며, 운송실비(당사가 3PL 지불하는 택배사운임비 + 물류사용비) 청구기준만 기재합니다.",
+        "퀵/용달 등 별도 운송비 발생시에는 개별기재합니다."
+      ],
+      // [메모/특이사항] 블록.
+      invoiceNotes: [
+        "재고이동(오프라인 위탁진열/ 판매시 정산)",
+        "비매출: 협찬, 진열품, 샘플 등의 무상사용",
+        "세금계산서는 정산 월 기준 익익월 10일에 발행 예정입니다.",
+        "정산금액은 정산 월 기준 익월 15일 이내 입금 예정이며 정산금액 활용안 협의에 따라 변경될 수 있습니다.",
+        "불용이슈: 패키지 손상/파손"
       ],
       // 광고비는 이 시트에 누적된다. 정산에는 넣지 않고 별도 청구한다.
       adCostSheetUrl: "https://docs.google.com/spreadsheets/d/1RA45qIvKCGRh5evCtiXMmpypdNb8gxvKWAkwfu-MHz0/edit"
@@ -1442,6 +1469,17 @@ function migrateDb(db) {
             cfg.threePlTable = seeded.costConfig.threePlTable;
             changed = true;
           }
+        }
+        // 청구서 양식에 실리는 값(단가표·집계기준·주석). "비어 있으면 채운다"
+        // 로는 이미 옛 표를 들고 있는 DB 에 새 항목이 닿지 않으므로 버전으로
+        // 가른다. 화면에서 고친 값은 버전이 오를 때만 다시 씌워진다.
+        const wantVersion = number(seeded.costConfig?.invoiceFormatVersion);
+        if (wantVersion && number(cfg.invoiceFormatVersion) < wantVersion) {
+          for (const key of ["basisLabel", "threePlTable", "invoiceFootnotes", "invoiceNotes"]) {
+            if (seeded.costConfig?.[key] !== undefined) cfg[key] = seeded.costConfig[key];
+          }
+          cfg.invoiceFormatVersion = wantVersion;
+          changed = true;
         }
       }
     }
@@ -2795,8 +2833,13 @@ function npbBuildInvoice(db, settlement, type) {
   const meta = NPB_INVOICE_TYPES[type];
   if (!meta) throw new Error("알 수 없는 청구 유형입니다.");
   const items = [];
+  // 운임/물류는 청구서 양식이 따로 있다 — 비용집계 표, 3PL 단가표, 메모, 그리고
+  // 올린 출고내역 원본까지 한 파일에 담는다. 값은 전부 브랜드 설정에서 온다.
+  let logisticsSheet = null;
   if (type === "logistics") {
-    for (const row of settlement.logistics?.breakdown || []) {
+    const cfg = brand?.costConfig || {};
+    const breakdown = settlement.logistics?.breakdown || [];
+    for (const row of breakdown) {
       if (!number(row.count) && !number(row.amount)) continue;
       items.push({
         label: row.label,
@@ -2806,6 +2849,43 @@ function npbBuildInvoice(db, settlement, type) {
         note: row.manual ? "건별 실비" : `운임 ${number(row.freight).toLocaleString()} + 부자재/피킹 ${number(row.handling).toLocaleString()}`
       });
     }
+    // 합계는 3PL·본사만 센다. 용달/퀵은 건마다 사정이 달라 개별기재하고,
+    // 마지막 청구액에서 더한다.
+    const counted = breakdown.filter((row) => !row.excludeFromTotal);
+    const separate = breakdown.filter((row) => row.excludeFromTotal && number(row.amount));
+    const subtotal = counted.reduce((sum, row) => sum + number(row.amount), 0);
+    const separateTotal = separate.reduce((sum, row) => sum + number(row.amount), 0);
+    logisticsSheet = {
+      basisLabel: cfg.basisLabel || "운송장번호 발행 기준",
+      rows: counted.map((row) => ({
+        label: row.label,
+        count: number(row.count),
+        freight: number(row.freight),
+        handling: number(row.handling),
+        amount: number(row.amount)
+      })),
+      separateRows: separate.map((row) => ({
+        label: row.label, count: number(row.count), amount: number(row.amount)
+      })),
+      countTotal: counted.reduce((sum, row) => sum + number(row.count), 0),
+      subtotal,
+      separateTotal,
+      billed: subtotal + separateTotal,
+      priceTable: Array.isArray(cfg.threePlTable) ? cfg.threePlTable : [],
+      footnotes: Array.isArray(cfg.invoiceFootnotes) ? cfg.invoiceFootnotes : [],
+      memos: Array.isArray(cfg.invoiceNotes) ? cfg.invoiceNotes : [],
+      // 올린 파일 그대로. 유형별로 시트 한 장씩 나간다.
+      sources: Object.values(settlement.shipFiles || {})
+        .filter((file) => Array.isArray(file?.rows) && file.rows.length)
+        .map((file) => ({
+          shipType: file.shipType,
+          label: (breakdown.find((row) => row.key === file.shipType) || {}).label || file.shipType,
+          fileName: file.fileName || "",
+          basisLabel: file.basisLabel || "",
+          autoCount: number(file.autoCount),
+          rows: file.rows
+        }))
+    };
   } else {
     for (const item of settlement.adCost?.items || []) {
       items.push({ label: item.medium, count: 0, unit: 0, amount: number(item.amount), note: item.period || "" });
@@ -2824,7 +2904,10 @@ function npbBuildInvoice(db, settlement, type) {
     account: meta.account,
     title: `${meta.label} 청구서 (${settlement.periodMonth})`,
     items,
-    total,
+    // 총액은 3PL·본사 합계, 청구액은 거기에 용달/퀵을 더한 값이다.
+    logisticsSheet,
+    total: logisticsSheet ? logisticsSheet.billed : total,
+    subtotal: logisticsSheet ? logisticsSheet.subtotal : total,
     issuedAt: now(),
     dueDate: npbNextMonthEnd(settlement.periodMonth),
     paidAt: "",
@@ -7223,6 +7306,9 @@ async function routeApi(req, res, url) {
           autoCount: counted.count,
           basis: counted.basis,
           basisLabel: counted.basisLabel,
+          // 청구서 뒷장에 올린 파일을 그대로 싣는다. 건수만 남기면 무엇을 세서
+          // 그 숫자가 나왔는지 확인할 방법이 없다.
+          rows: Array.isArray(rows) ? rows : [],
           uploadedAt: now()
         };
         const counts = { ...(settlement.logistics?.counts || {}) };

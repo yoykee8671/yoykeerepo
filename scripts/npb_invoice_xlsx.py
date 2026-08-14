@@ -5,6 +5,12 @@
 공헌이익을 볼 때 계정별로 갈라 보기 위해서다. 그래서 정산서와 같은 파일에
 붙이지 않고 청구서 한 장으로 독립시킨다.
 
+운임/물류는 시트가 여러 장이다.
+    시트1  운임비용내역서 — 비용집계, 3PL 단가표, 메모/특이사항
+    시트2~ 올린 출고내역 파일 원본 (유형별 한 장씩)
+단가표와 문구는 브랜드 설정에서 내려온 값을 그대로 쓴다 — 여기에 값을 적어
+두면 설정을 고쳐도 청구서가 안 바뀐다.
+
     python3 npb_invoice_xlsx.py --input <invoice.json> --output <out.xlsx>
 """
 
@@ -19,104 +25,262 @@ THIN = Side(style="thin", color="D0D0D0")
 BOX = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 HEAD_FILL = PatternFill("solid", fgColor="F2F2F2")
 TOTAL_FILL = PatternFill("solid", fgColor="FFF6E5")
+BILL_FILL = PatternFill("solid", fgColor="FDE9D9")
 MONEY = "#,##0"
 
-COLUMNS = [
-    ("항목", 34),
-    ("건수", 10),
-    ("단가", 12),
-    ("금액", 14),
-    ("비고", 40),
-]
+WRAP = Alignment(wrap_text=True, vertical="center")
+RIGHT = Alignment(horizontal="right")
+CENTER = Alignment(horizontal="center", vertical="center")
 
 
-def money(cell, value):
-    cell.value = value
-    cell.number_format = MONEY
-    cell.alignment = Alignment(horizontal="right")
+def put(ws, row, col, value, *, bold=False, fill=None, box=True,
+        number=False, align=None):
+    cell = ws.cell(row=row, column=col, value=value)
+    if bold:
+        cell.font = Font(bold=True)
+    if fill:
+        cell.fill = fill
+    if box:
+        cell.border = BOX
+    if number:
+        cell.number_format = MONEY
+        cell.alignment = RIGHT
+    if align:
+        cell.alignment = align
+    return cell
 
 
-def build(invoice, path):
-    wb = Workbook()
+def write_rows(ws, rows, start=1):
+    """업로드 원본을 그대로 적는다.
+
+    파서는 행을 {열이름: 값} 으로 준다. 열 순서는 첫 행 기준으로 잡되, 뒤쪽
+    행에만 있는 열도 빠뜨리지 않도록 나오는 순서대로 이어 붙인다.
+    """
+    if not rows:
+        return
+    if isinstance(rows[0], dict):
+        header = []
+        seen = set()
+        for row in rows:
+            for key in row.keys():
+                if key not in seen:
+                    seen.add(key)
+                    header.append(key)
+        for c, key in enumerate(header, start=1):
+            cell = ws.cell(row=start, column=c, value=key)
+            cell.font = Font(bold=True)
+            cell.fill = HEAD_FILL
+        for r, row in enumerate(rows, start=start + 1):
+            for c, key in enumerate(header, start=1):
+                ws.cell(row=r, column=c, value=row.get(key))
+        return
+    for r, row in enumerate(rows, start=start):
+        for c, value in enumerate(row or [], start=1):
+            ws.cell(row=r, column=c, value=value)
+
+
+def band(ws, row, first, last, fill=None):
+    """한 줄 전체에 테두리(있으면 배경)를 입힌다."""
+    for col in range(first, last + 1):
+        cell = ws.cell(row=row, column=col)
+        cell.border = BOX
+        if fill:
+            cell.fill = fill
+
+
+def build_logistics(wb, invoice, sheet):
+    ws = wb.active
+    ws.title = "운임비용내역서"
+    widths = [2, 26, 14, 14, 20, 16, 34]
+    for i, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = width
+
+    row = 2
+    title = ws.cell(row=row, column=2, value="운임/물류 청구서")
+    title.font = Font(size=16, bold=True)
+    row += 2
+
+    for label, value in [
+        ("집계기간", invoice.get("periodMonth") or ""),
+        ("집계기준", sheet.get("basisLabel") or ""),
+        ("브랜드", invoice.get("brandName") or ""),
+        ("발행일", str(invoice.get("issuedAt") or "")[:10]),
+        ("입금기한", invoice.get("dueDate") or ""),
+    ]:
+        put(ws, row, 2, label, bold=True, fill=HEAD_FILL)
+        put(ws, row, 3, value)
+        ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=7)
+        band(ws, row, 3, 7)
+        row += 1
+    row += 1
+
+    # --- 비용집계 (vat 포함) ---
+    put(ws, row, 2, "[실비 : 운임/물류]", bold=True, box=False)
+    put(ws, row, 6, "vat포함", box=False, align=RIGHT)
+    row += 1
+    put(ws, row, 2, "정산 월", bold=True, fill=HEAD_FILL)
+    put(ws, row, 3, "물류 실비 산정", bold=True, fill=HEAD_FILL)
+    ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=6)
+    band(ws, row, 3, 6, HEAD_FILL)
+    row += 1
+
+    for col, label in [
+        (2, ""), (3, "수량(출고건수)"), (4, "운임비"),
+        (5, "피킹/패킹/부자재"), (6, "총계"),
+    ]:
+        put(ws, row, col, label, bold=True, fill=HEAD_FILL, align=CENTER)
+    row += 1
+
+    for item in sheet.get("rows") or []:
+        put(ws, row, 2, item.get("label") or "")
+        put(ws, row, 3, item.get("count") or 0, number=True)
+        put(ws, row, 4, item.get("freight") or 0, number=True)
+        put(ws, row, 5, item.get("handling") or 0, number=True)
+        put(ws, row, 6, item.get("amount") or 0, number=True)
+        row += 1
+
+    # 용달·퀵은 건마다 사정이 달라 합계에 넣지 않고 개별기재한다.
+    for item in sheet.get("separateRows") or []:
+        put(ws, row, 2, item.get("label") or "")
+        put(ws, row, 3, item.get("count") or 0, number=True)
+        put(ws, row, 4, item.get("amount") or 0, number=True)
+        put(ws, row, 5, "")
+        put(ws, row, 6, item.get("amount") or 0, number=True)
+        row += 1
+
+    put(ws, row, 2, "합계", bold=True, fill=TOTAL_FILL)
+    put(ws, row, 3, sheet.get("countTotal") or 0, number=True, fill=TOTAL_FILL)
+    put(ws, row, 4, "", fill=TOTAL_FILL)
+    put(ws, row, 5, "", fill=TOTAL_FILL)
+    cell = put(ws, row, 6, sheet.get("subtotal") or 0, number=True, fill=TOTAL_FILL)
+    cell.font = Font(bold=True)
+    row += 2
+
+    for text in sheet.get("footnotes") or []:
+        cell = ws.cell(row=row, column=2, value=f"*{text}")
+        cell.alignment = WRAP
+        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=7)
+        ws.row_dimensions[row].height = 28
+        row += 1
+    row += 1
+
+    # --- 단가표 (vat 별도) ---
+    put(ws, row, 6, "vat별도", box=False, align=RIGHT)
+    row += 1
+    for col, label in [
+        (2, "구분"), (3, "항목"), (4, "견적(원)"), (5, "단위"), (6, "비고"),
+    ]:
+        put(ws, row, col, label, bold=True, fill=HEAD_FILL, align=CENTER)
+    ws.merge_cells(start_row=row, start_column=6, end_row=row, end_column=7)
+    band(ws, row, 6, 7, HEAD_FILL)
+    row += 1
+
+    seen_group = None
+    for entry in sheet.get("priceTable") or []:
+        group = entry.get("group") or ""
+        put(ws, row, 2, "" if group == seen_group else group, bold=True)
+        seen_group = group
+        put(ws, row, 3, entry.get("item") or "")
+        # 범위로 적는 항목(제주도서산간)은 숫자가 아니라 표기값을 그대로 쓴다.
+        label = entry.get("unitPriceLabel")
+        if label:
+            put(ws, row, 4, label, align=RIGHT)
+        elif entry.get("unitPrice") is None:
+            put(ws, row, 4, "-", align=RIGHT)
+        else:
+            put(ws, row, 4, entry.get("unitPrice"), number=True)
+        put(ws, row, 5, entry.get("unit") or "", align=CENTER)
+        cell = put(ws, row, 6, entry.get("note") or "")
+        cell.alignment = WRAP
+        ws.merge_cells(start_row=row, start_column=6, end_row=row, end_column=7)
+        band(ws, row, 6, 7)
+        row += 1
+    row += 1
+
+    # --- 메모/특이사항 ---
+    put(ws, row, 2, "[메모/특이사항]", bold=True, box=False)
+    row += 1
+    for text in sheet.get("memos") or []:
+        cell = ws.cell(row=row, column=2, value=text)
+        cell.alignment = WRAP
+        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=7)
+        row += 1
+    row += 1
+
+    # --- 총액 / 청구액 ---
+    put(ws, row, 2, "총액 (3PL·본사출고)", bold=True, fill=HEAD_FILL)
+    put(ws, row, 3, sheet.get("subtotal") or 0, number=True)
+    ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=4)
+    band(ws, row, 3, 4)
+    row += 1
+    if sheet.get("separateTotal"):
+        put(ws, row, 2, "개별기재 (용달/퀵)", bold=True, fill=HEAD_FILL)
+        put(ws, row, 3, sheet.get("separateTotal") or 0, number=True)
+        ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=4)
+        band(ws, row, 3, 4)
+        row += 1
+    put(ws, row, 2, "청구액 (부가세포함)", bold=True, fill=BILL_FILL)
+    cell = put(ws, row, 3, sheet.get("billed") or 0, number=True, fill=BILL_FILL)
+    cell.font = Font(bold=True, size=12)
+    ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=4)
+    band(ws, row, 3, 4, BILL_FILL)
+
+    # --- 올린 출고내역 원본을 유형별로 한 장씩 ---
+    for source in sheet.get("sources") or []:
+        title = str(source.get("label") or source.get("shipType") or "출고내역")[:28]
+        sh = wb.create_sheet(title=title)
+        sh.cell(row=1, column=1, value=source.get("fileName") or "").font = Font(bold=True)
+        sh.cell(row=2, column=1,
+                value=f"{source.get('basisLabel') or ''} 기준 {source.get('autoCount') or 0}건")
+        write_rows(sh, source.get("rows") or [], start=4)
+
+
+def build_simple(wb, invoice):
+    """광고비 등, 항목 목록만 있는 청구서."""
     ws = wb.active
     ws.title = "청구서"
-
-    for i, (_, width) in enumerate(COLUMNS, start=2):
+    for i, width in enumerate([2, 34, 10, 12, 14, 40], start=1):
         ws.column_dimensions[get_column_letter(i)].width = width
-    ws.column_dimensions["A"].width = 2
 
     title = ws.cell(row=2, column=2, value=invoice.get("title") or "실비 청구서")
     title.font = Font(size=15, bold=True)
 
-    supplier = invoice.get("businessName") or invoice.get("brandName") or ""
-    meta = [
-        ("공급받는 자", supplier),
+    row = 4
+    for label, value in [
+        ("공급받는 자", invoice.get("businessName") or invoice.get("brandName") or ""),
         ("집계 기간", invoice.get("periodMonth") or ""),
         ("계정 분류", invoice.get("account") or ""),
         ("발행일", str(invoice.get("issuedAt") or "")[:10]),
         ("입금 기한", invoice.get("dueDate") or ""),
-    ]
-    row = 4
-    for label, value in meta:
-        key = ws.cell(row=row, column=2, value=label)
-        key.font = Font(bold=True)
-        key.fill = HEAD_FILL
-        key.border = BOX
-        cell = ws.cell(row=row, column=3, value=value)
-        cell.border = BOX
+    ]:
+        put(ws, row, 2, label, bold=True, fill=HEAD_FILL)
+        put(ws, row, 3, value)
         ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=6)
-        for col in range(3, 7):
-            ws.cell(row=row, column=col).border = BOX
+        band(ws, row, 3, 6)
         row += 1
-
     row += 1
-    header_row = row
-    for i, (label, _) in enumerate(COLUMNS, start=2):
-        cell = ws.cell(row=header_row, column=i, value=label)
-        cell.font = Font(bold=True)
-        cell.fill = HEAD_FILL
-        cell.border = BOX
-        cell.alignment = Alignment(horizontal="center")
+
+    for i, label in enumerate(["항목", "건수", "단가", "금액", "비고"], start=2):
+        put(ws, row, i, label, bold=True, fill=HEAD_FILL, align=CENTER)
     row += 1
 
     for item in invoice.get("items") or []:
-        ws.cell(row=row, column=2, value=item.get("label") or "").border = BOX
-        count = item.get("count") or 0
-        cell = ws.cell(row=row, column=3)
-        cell.value = count if count else ""
-        cell.number_format = MONEY
-        cell.alignment = Alignment(horizontal="right")
-        cell.border = BOX
-        unit = item.get("unit") or 0
-        cell = ws.cell(row=row, column=4)
-        cell.value = unit if unit else ""
-        cell.number_format = MONEY
-        cell.alignment = Alignment(horizontal="right")
-        cell.border = BOX
-        cell = ws.cell(row=row, column=5)
-        money(cell, item.get("amount") or 0)
-        cell.border = BOX
-        note = ws.cell(row=row, column=6, value=item.get("note") or "")
-        note.border = BOX
-        note.alignment = Alignment(wrap_text=True, vertical="center")
+        put(ws, row, 2, item.get("label") or "")
+        put(ws, row, 3, item.get("count") or "", number=True)
+        put(ws, row, 4, item.get("unit") or "", number=True)
+        put(ws, row, 5, item.get("amount") or 0, number=True)
+        cell = put(ws, row, 6, item.get("note") or "")
+        cell.alignment = WRAP
         row += 1
 
-    total_cell = ws.cell(row=row, column=2, value="합계")
-    total_cell.font = Font(bold=True)
-    total_cell.fill = TOTAL_FILL
-    total_cell.border = BOX
+    put(ws, row, 2, "합계", bold=True, fill=TOTAL_FILL)
     for col in (3, 4, 6):
-        cell = ws.cell(row=row, column=col)
-        cell.fill = TOTAL_FILL
-        cell.border = BOX
-    cell = ws.cell(row=row, column=5)
-    money(cell, invoice.get("total") or 0)
+        put(ws, row, col, "", fill=TOTAL_FILL)
+    cell = put(ws, row, 5, invoice.get("total") or 0, number=True, fill=TOTAL_FILL)
     cell.font = Font(bold=True)
-    cell.fill = TOTAL_FILL
-    cell.border = BOX
     row += 2
 
-    ws.cell(row=row, column=2, value="[안내]").font = Font(bold=True)
+    put(ws, row, 2, "[안내]", bold=True, box=False)
     row += 1
     notes = [
         "본 청구서는 판매정산서와 별도로 발행되는 실비 청구분입니다.",
@@ -130,6 +294,14 @@ def build(invoice, path):
         ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
         row += 1
 
+
+def build(invoice, path):
+    wb = Workbook()
+    sheet = invoice.get("logisticsSheet")
+    if sheet:
+        build_logistics(wb, invoice, sheet)
+    else:
+        build_simple(wb, invoice)
     wb.save(path)
 
 
