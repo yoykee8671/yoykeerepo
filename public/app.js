@@ -6247,11 +6247,25 @@ function renderNpbPreview() {
   const r = n.current?.rollup || {};
   const ps = n.current?.profitSplit;
   const profit = Number(r.profit || 0);
+  // 정산서에 실리는 항목만 세운다. 판매수량은 뺐다 — 합계금액으로 넣는 채널이
+  // 있어(스마트스토어) 수량을 더한 값에 뜻이 없다.
+  //
+  // "매출계"에 정산합계를 담고 그 옆에 "이익"을 또 세우면, 실비를 빼지 않는
+  // 브랜드에서는 두 칸이 같은 숫자가 되어 어느 쪽이 무엇인지 알 수 없다.
+  const items = [
+    ["소비자정가계", r.listTotal],
+    ["매출계", r.realSaleTotal],
+    ["수수료 (공제계)", r.feeTotal],
+    ["정산합계", r.revenueTotal]
+  ];
+  // 실비를 정산에서 공제하는 브랜드만 이익이 정산합계와 갈린다.
+  if (n.config?.costConfig?.billSeparately !== true) {
+    items.push(["실비", r.logisticsCost], ["이익", profit]);
+  }
   const cards = `
     <div class="fixed-summary-grid">
-      <div class="fixed-card"><span>총수량</span><strong>${money.format(Math.round(Number(r.qtyTotal || 0)))}</strong></div>
-      <div class="fixed-card"><span>매출계</span><strong>${npbWon(r.revenueTotal)}</strong></div>
-      <div class="fixed-card"><span>이익</span><strong>${npbWon(profit)}</strong></div>
+      ${items.map(([label, value]) =>
+        `<div class="fixed-card"><span>${label}</span><strong>${npbWon(value)}</strong></div>`).join("")}
     </div>`;
   const splitRows = (ps?.parties || [])
     .map((p) => `
@@ -6262,21 +6276,25 @@ function renderNpbPreview() {
         <td>${p.excluded ? "제외" : h(p.note || "")}</td>
       </tr>`)
     .join("") || `<tr><td colspan="4" class="empty">이익분배 정보가 없습니다.</td></tr>`;
+  // 이익분배가 없는 브랜드(픽키)의 정산서는 그 자리에 정산주체별 소계를 싣는다.
+  const splitEnabled = n.config?.profitSplitEnabled !== false;
   return `
     <section class="panel">
       <div class="panel-head"><h2>미리보기</h2>${npbStatusBadge(n.current?.status)}</div>
       <div class="panel-body">${cards}</div>
+      ${splitEnabled ? `
       <div class="table-wrap">
         <table>
           <thead><tr><th>파티</th><th>비율</th><th>배분액</th><th>비고</th></tr></thead>
           <tbody>${splitRows}</tbody>
         </table>
-      </div>
+      </div>` : ""}
       <div class="panel-body toolbar">
         <button class="primary" data-npb-download="${h(n.currentKey)}">엑셀 다운로드</button>
         <button data-npb-finalize>정산 확정</button>
       </div>
-    </section>`;
+    </section>
+    ${splitEnabled ? "" : renderNpbSettleBy()}`;
 }
 
 function bindNpb() {
