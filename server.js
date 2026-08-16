@@ -3434,13 +3434,26 @@ export function npbEnrichLine(line, channels, products, promoRates) {
   // 기준가는 사람이 정한 그 판매처의 실제 단가다. 수량이 있으면 매출은 여기서
   // 나온다 — 파일 금액이 이기면 "기준가 × 수량" 과 안 맞는 매출이 찍힌다.
   // 수량이 없는 자료(네이버 결제정산)는 파일 금액을 그대로 둔다.
+  //
+  // 파일이 함께 준 금액(money.sale)에 기대면 안 된다. 묶음 줄에서는 그 금액이
+  // 낱개가 × 주문건수로 와서 기준가와 아귀가 안 맞는다 — 10개 묶음 4건이
+  // 176,800 이 아니라 17,680 으로 저장되던 자리다. 화면(npbRowMath)도 기준가
+  // × 수량을 쓰므로, 여기서 갈리면 워크시트와 저장된 정산이 서로 다른 숫자를
+  // 내놓는다.
   const unitPrice = number(line.unitPrice);
-  if (unitPrice > 0 && qty > 0 && !manual.has("saleAmount")) {
+  const fromUnitPrice = unitPrice > 0 && qty > 0;
+  if (fromUnitPrice) {
     enriched.saleAmount = unitPrice * qty;
     enriched.salePrice = unitPrice;
     delete enriched.settleAmount;
   }
   for (const field of ["listAmount", "saleAmount", "feeAmount", "settleAmount"]) {
+    // 검수표에서 기준가·수량을 고치면 화면은 saleAmount 를 지우고 이 표시를
+    // 남긴다 — "파일 금액 말고 계산해라" 라는 뜻이다. 그런데 계산해서 저장한
+    // 값이 다음 재계산 때 line.saleAmount 로 돌아오므로, 그대로 되씌우면
+    // 서버가 스스로 만든 값을 사람이 박은 값처럼 굳혀 버린다. 기준가로 낸
+    // 매출은 그래서 되씌우지 않는다.
+    if (field === "saleAmount" && fromUnitPrice) continue;
     if (manual.has(field) && line[field] != null) enriched[field] = number(line[field]);
   }
   if (!channel) return enriched;
@@ -6997,29 +7010,25 @@ async function routeApi(req, res, url) {
                 ? Math.round(number(line.saleAmount) / qty)
                 : number(line.listPrice);
               // 묶음인데 파일의 단가가 낱개 값인 경우가 있다 — 카페24 B2B 는
-              // "수량=100개" 옵션에도 판매가 칸에 낱개 공급가를 적어 보낸다.
-              // 낱개 정가와 비슷한 값이면 묶음 단가로 환산한다.
-              //
-              // 파일이 매출 금액을 준 줄은 건드리지 않는다. 그 단가는 이미
-              // 금액 ÷ 수량이라 수량과 아귀가 맞고, 여기서 배수를 또 곱하면
-              // 뒤에서 수량을 한 번 더 곱해 100개 주문이 100배로 부푼다.
+              // "수량=100개" 옵션에도 판매가 칸에 낱개 공급가를 적어 보내고
+              // 수량 칸에는 주문 건수를 적는다. 낱개 정가와 비슷한 값이면
+              // 묶음 단가로 환산한다.
               const multiplier = Math.max(1, number(line.multiplier, 1));
-              if (multiplier > 1 && unit > 0 && line.saleAmount == null) {
+              if (multiplier > 1 && unit > 0) {
                 const base = number(line.listPrice) / multiplier;
                 const ratio = base > 0 ? unit / base : 0;
                 if (ratio >= 0.3 && ratio <= 1.5) unit *= multiplier;
               }
-              // 파일이 그 줄의 단가를 적어 왔으면 그것이 진실이다. 지난번에
-              // 정한 기준가는 파일에 단가가 없을 때 쓰는 값이고, 다를 때는
-              // 덮는 대신 알리기만 한다 — B2B 는 같은 상품이라도 100개 주문의
-              // 공급가가 4,080 으로 내려가는 식이라(대량구매 할인) 기억한 값을
-              // 씌우면 그 줄만 조용히 틀린다.
+              // 지난번에 정한 기준가가 있으면 그것을 쓴다. 파일의 판매가 칸은
+              // 묶음 줄에서 낱개 값으로 오는 일이 잦아 그대로 믿을 수 없다.
+              // 값이 다르면 덮되 무엇이 달라졌는지는 남긴다 — 판매처가 말없이
+              // 공급가를 바꾼 것인지 사람이 봐야 한다.
               const saved = line.savedUnitPrice;
               if (saved != null && saved > 0) {
                 const changed = unit > 0 && unit !== saved
                   ? { from: saved, to: unit }
                   : null;
-                return { ...line, unitPrice: unit > 0 ? unit : saved, priceChanged: changed };
+                return { ...line, unitPrice: saved, priceChanged: changed };
               }
               return { ...line, unitPrice: unit };
             });
