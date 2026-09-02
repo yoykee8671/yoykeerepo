@@ -1113,6 +1113,8 @@ function buildInitialDb() {
   };
 }
 
+const MIGRATION_WRITE_ATTEMPTS = 5;
+
 let ensureDbPromise = null;
 async function ensureDb() {
   if (!ensureDbPromise) ensureDbPromise = doEnsureDb();
@@ -1143,21 +1145,36 @@ async function ensurePostgresDb() {
     )
   `);
 
-  const current = await pgPool.query("select state from app_state where id = $1", [POSTGRES_STATE_ROW_ID]);
-  if (current.rowCount) {
-    const { db: migrated, changed } = migrateDb(current.rows[0].state || {});
-    if (changed) await writePostgresDb(migrated);
-    return;
+  // 배포는 롤링이라, 새 인스턴스가 마이그레이션을 쓰는 동안 구버전 인스턴스가
+  // 아직 살아서 같은 행에 쓴다. 낙관적 잠금이 409 로 거절하는 건 정상 동작이고,
+  // 여기서 그대로 던지면 새 인스턴스가 부팅 중에 죽어 배포 전체가 실패한다
+  // (실제로 #23 배포가 이렇게 넘어갔다). 최신 상태를 다시 읽어 얹는다.
+  for (let attempt = 0; attempt < MIGRATION_WRITE_ATTEMPTS; attempt += 1) {
+    const current = await pgPool.query("select state from app_state where id = $1", [POSTGRES_STATE_ROW_ID]);
+    let next;
+    if (current.rowCount) {
+      const { db: migrated, changed } = migrateDb(current.rows[0].state || {});
+      if (!changed) return;
+      next = migrated;
+    } else {
+      try {
+        next = migrateDb(JSON.parse(await readFile(DB_PATH, "utf8"))).db;
+      } catch {
+        next = buildInitialDb();
+      }
+    }
+    try {
+      await writePostgresDb(next);
+      return;
+    } catch (error) {
+      if (error.status !== 409) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
+    }
   }
-
-  let seed = null;
-  try {
-    const local = JSON.parse(await readFile(DB_PATH, "utf8"));
-    seed = migrateDb(local).db;
-  } catch {
-    seed = buildInitialDb();
-  }
-  await writePostgresDb(seed);
+  // 계속 밀렸다면 다른 인스턴스가 쉬지 않고 쓰고 있다는 뜻이다. 서비스를 세우는
+  // 것보다는 뜨는 편이 낫다 — 빠진 키는 없는 값으로 읽히고, 다음 재기동 때 다시
+  // 시도한다.
+  console.error("[db] 스키마 마이그레이션 쓰기가 계속 충돌해 이번 기동에서는 건너뜁니다.");
 }
 
 function migrateDb(db) {
@@ -5039,6 +5056,7 @@ function cafe24PublicState(db) {
 // 않아도 주기적으로 한 번씩 갱신해 수명을 이어 둔다 — 카페24는 갱신할 때마다
 // 새 갱신 토큰을 2주 뒤로 다시 끊어 준다.
 const INTEGRATION_KEEPALIVE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const KEEPALIVE_START_DELAY_MS = 2 * 60 * 1000;
 const CAFE24_KEEPALIVE_MARGIN_MS = 5 * 24 * 60 * 60 * 1000;
 
 async function cafe24KeepAlive() {
@@ -7808,8 +7826,16 @@ if (isMainModule) {
   server.listen(PORT, HOST, () => {
     console.log(`WooofPay running at http://${HOST}:${PORT}`);
   });
-  cafe24KeepAlive();
-  setInterval(cafe24KeepAlive, INTEGRATION_KEEPALIVE_INTERVAL_MS).unref();
-  clobeKeepAlive();
-  setInterval(clobeKeepAlive, INTEGRATION_KEEPALIVE_INTERVAL_MS).unref();
+  // 기동 직후는 롤링 배포로 구·신 인스턴스가 겹쳐 있는 구간이다. 이때 토큰을
+  // 갱신하면 저장이 낙관적 잠금에 밀릴 수 있는데, 두 서비스 모두 갱신 시점에
+  // 이전 토큰을 폐기하므로 저장에 실패하면 방금 받은 토큰째로 잃는다. 겹침이
+  // 끝난 뒤에 시작한다.
+  const startKeepAlive = (run) => {
+    setTimeout(() => {
+      run();
+      setInterval(run, INTEGRATION_KEEPALIVE_INTERVAL_MS).unref();
+    }, KEEPALIVE_START_DELAY_MS).unref();
+  };
+  startKeepAlive(cafe24KeepAlive);
+  startKeepAlive(clobeKeepAlive);
 }
