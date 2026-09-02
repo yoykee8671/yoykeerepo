@@ -31,7 +31,7 @@ const state = {
   brandFilterQ: "",
   selectedRequestIds: [],
   bulkPaidAt: new Date().toISOString().slice(0, 10),
-  settlement: { year: new Date().getFullYear(), month: new Date().getMonth() + 1, brandId: "", cafe24: null, bank: null, useClobe: true, useCafe24: true, result: null, running: false, comparing: false, compare: null },
+  settlement: { year: new Date().getFullYear(), month: new Date().getMonth() + 1, brandId: "", cafe24: null, bank: null, useClobe: true, useCafe24: true, result: null, running: false, comparing: false, compare: null, scan: null, scanning: false, scanShowEmpty: false },
   clobe: {
     status: null,
     loading: false,
@@ -3824,8 +3824,17 @@ function renderSettlement() {
   if (!canUseClobe()) s.useClobe = false;
   const ym = `${s.year}-${String(s.month).padStart(2, "0")}`;
   const brands = [...state.brands].sort((a, b) => a.name.localeCompare(b.name, "ko"));
+  // 스캔을 돌렸으면 목록에서 바로 "이 달에 내역이 있는 업체"를 알 수 있게 한다.
+  const scanByBrand = new Map(((s.scan && s.scan.targets) || []).map((t) => [t.brandId, t]));
+  const scanSuffix = (brandId) => {
+    const t = scanByBrand.get(brandId);
+    if (!t) return "";
+    if (t.status === "ready") return ` · 주문 ${t.orderCount}건`;
+    if (t.status === "unmapped") return " · 공급사 매핑 없음";
+    return " · 내역 없음";
+  };
   const brandOptions = brands
-    .map((b) => `<option value="${b.id}" ${s.brandId === b.id ? "selected" : ""}>${h(b.name)} · ${h(settlementLabel(b.settlementType))}</option>`)
+    .map((b) => `<option value="${b.id}" ${s.brandId === b.id ? "selected" : ""}>${h(b.name)} · ${h(settlementLabel(b.settlementType))}${h(scanSuffix(b.id))}</option>`)
     .join("");
   return `
     ${pageHead("정산", "카페24 주문내역 · 은행 거래내역 · 입금요청(자동)을 대조하여 월별 정산서를 생성합니다.")}
@@ -3860,6 +3869,7 @@ function renderSettlement() {
         </div>
         <div class="toolbar">
           <button class="primary" data-settlement-run ${s.running ? "disabled" : ""}>${s.running ? "정산 중…" : "정산 시작"}</button>
+          <button data-settlement-scan ${s.scanning ? "disabled" : ""}>${s.scanning ? "스캔 중…" : "이 달 정산 대상 스캔"}</button>
           ${canUseClobe() && s.cafe24 && !s.useCafe24
             ? `<button data-settlement-compare ${s.comparing ? "disabled" : ""}>${s.comparing ? "대조 중…" : "카페24 API와 대조"}</button>`
             : ""}
@@ -3868,7 +3878,56 @@ function renderSettlement() {
         ${renderCafe24Compare(s.compare)}
       </div>
     </section>
+    ${renderSettlementScan(s)}
     ${renderSettlementResult(s.result)}
+  `;
+}
+
+// 브랜드를 하나씩 돌려 보지 않고 그 달에 정산할 내역이 있는 업체만 골라 준다.
+// 카페24 조회 한 번(기준일이 갈리면 두 번)으로 전 브랜드를 세므로, 정산을
+// 42번 돌리는 것과 비용이 다르다.
+function renderSettlementScan(s) {
+  const scan = s.scan;
+  if (!scan) return "";
+  if (scan.error) return `<section class="panel"><div class="panel-body"><p class="muted" style="color:var(--red)">대상 스캔 실패: ${h(scan.error)}</p></div></section>`;
+  const targets = scan.targets || [];
+  const ready = targets.filter((t) => t.status === "ready");
+  const unmapped = targets.filter((t) => t.status === "unmapped");
+  const empty = targets.filter((t) => t.status === "empty");
+  const shown = s.scanShowEmpty ? [...ready, ...unmapped, ...empty] : [...ready, ...unmapped];
+  const row = (t) => {
+    const isEmpty = t.status === "empty";
+    const isUnmapped = t.status === "unmapped";
+    return `<tr>
+      <td>${h(t.name)}${t.brandId === s.brandId ? ' <span class="muted">(선택됨)</span>' : ""}</td>
+      <td><span class="muted">${h(settlementLabel(t.settlementType))}</span></td>
+      <td class="num">${isUnmapped ? "-" : money.format(t.orderCount)}</td>
+      <td class="num">${isUnmapped ? "-" : money.format(t.itemCount)}</td>
+      <td class="num">${isUnmapped ? "-" : (t.cancelCount ? money.format(t.cancelCount) : "")}</td>
+      <td>${isUnmapped
+        ? '<span style="color:var(--red)">공급사 매핑 없음</span>'
+        : t.missingRequestCount
+          ? `<span style="color:var(--red)">입금요청 없음 ${money.format(t.missingRequestCount)}건</span>`
+          : isEmpty ? '<span class="muted">내역 없음</span>' : '<span style="color:#137333">정산 가능</span>'}</td>
+      <td>${isEmpty || isUnmapped ? "" : `<button data-scan-pick="${t.brandId}">정산 실행</button>`}</td>
+    </tr>`;
+  };
+  const range = (scan.ranges || []).map((r) => `${r.startDate}~${r.endDate} (${r.dateType === "shipend_date" ? "배송완료일" : "주문일"} 기준)`).join(" · ");
+  return `
+    <section class="panel">
+      <div class="panel-head"><h2>${scan.year}년 ${scan.month}월 정산 대상</h2>
+        <span class="muted">${h(scan.source === "cafe24" ? `카페24 API ${range}` : "업로드 CSV 기준")}</span></div>
+      <div class="panel-body">
+        <p class="muted">정산 대상 ${ready.length}곳 · 내역 없음 ${empty.length}곳 · 공급사 매핑 없음 ${unmapped.length}곳</p>
+        <div class="table-wrap" style="max-height:420px"><table>
+          <thead><tr><th>브랜드</th><th>정산유형</th><th class="num">주문</th><th class="num">품목</th><th class="num">취소</th><th>상태</th><th></th></tr></thead>
+          <tbody>${shown.map(row).join("")}</tbody>
+        </table></div>
+        <div class="toolbar">
+          <button data-scan-toggle-empty>${s.scanShowEmpty ? "내역 없는 업체 숨기기" : `내역 없는 업체 ${empty.length}곳 보기`}</button>
+        </div>
+      </div>
+    </section>
   `;
 }
 
@@ -3992,6 +4051,9 @@ function bindSettlement() {
   app.querySelector("[data-settlement-ym]")?.addEventListener("change", (e) => {
     const [y, m] = e.target.value.split("-");
     s.year = Number(y); s.month = Number(m);
+    // 스캔 결과는 그 달의 것이다. 달을 바꾸고 남겨 두면 목록의 건수가 거짓말을 한다.
+    s.scan = null;
+    renderApp();
   });
   app.querySelector("[data-settlement-brand]")?.addEventListener("change", (e) => {
     s.brandId = e.target.value; s.result = null; renderApp();
@@ -4047,7 +4109,7 @@ function bindSettlement() {
     }
   });
 
-  app.querySelector("[data-settlement-run]")?.addEventListener("click", async () => {
+  const runSettlement = async () => {
     if (!s.brandId) return showToast("브랜드를 선택하세요.", "error");
     if (!s.useCafe24 && !s.cafe24) return showToast("카페24 CSV를 업로드하거나 자동 조회를 켜세요.", "error");
     s.running = true; renderApp();
@@ -4067,7 +4129,40 @@ function bindSettlement() {
     } finally {
       s.running = false; renderApp();
     }
+  };
+
+  // 브랜드별로 정산을 돌려 보지 않고 이 달에 내역이 있는 업체를 한 번에 센다.
+  app.querySelector("[data-settlement-scan]")?.addEventListener("click", async () => {
+    if (!s.useCafe24 && !s.cafe24) return showToast("카페24 CSV를 업로드하거나 자동 조회를 켜세요.", "error");
+    s.scanning = true; s.scan = null; renderApp();
+    try {
+      s.scan = await api("/api/settlement/scan", {
+        method: "POST",
+        body: {
+          year: s.year, month: s.month,
+          useCafe24: s.useCafe24,
+          cafe24Csv: s.useCafe24 ? "" : s.cafe24?.base64 || ""
+        }
+      });
+    } catch (error) {
+      s.scan = { error: error.message || "대상 스캔에 실패했습니다." };
+    } finally {
+      s.scanning = false; renderApp();
+    }
   });
+  app.querySelector("[data-scan-toggle-empty]")?.addEventListener("click", () => {
+    s.scanShowEmpty = !s.scanShowEmpty;
+    renderApp();
+  });
+  app.querySelectorAll("[data-scan-pick]").forEach((button) => {
+    button.addEventListener("click", () => {
+      s.brandId = button.dataset.scanPick;
+      s.result = null;
+      runSettlement();
+    });
+  });
+
+  app.querySelector("[data-settlement-run]")?.addEventListener("click", runSettlement);
   app.querySelector("[data-settlement-save-supplier]")?.addEventListener("click", async () => {
     const sel = app.querySelector("[data-settlement-supplier]");
     if (!sel?.value) return;

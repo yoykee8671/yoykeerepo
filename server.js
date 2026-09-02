@@ -2047,13 +2047,41 @@ function explodeOrderRows(rowsOfOrder, billedTotal) {
   }));
 }
 
+// 상품명을 비교 가능한 토큰으로 자른다.
+//
+// 묶음 수량 표기가 자리마다 다르다 — 단가표는 "리필 3P", 카페24는
+// "리필 (3개입) 고양이 스크래쳐". 글자 포함만 보면 둘 다 "캣모나이트"를
+// 물고 있어 3개입 리필(23,000)이 본품(57,000)으로 잡힌다. 수량은 #3 으로
+// 통일해 세고, 나머지는 낱말로 비교한다.
+function catalogTokens(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^0-9a-z가-힣]+/g, " ")
+    .replace(/(\d+)\s*(개입|개|입|팩|포|pcs|pc|ea|p)(?![0-9a-z가-힣])/g, " #$1 ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
 function buildCanonPriceMatcher(db, brand) {
   const strip = (s) => String(s || "").toLowerCase().replace(/\s+/g, "");
-  const entries = getLatestPriceCatalog(db, brand.id).map((entry) => ({
-    key: strip(entry.itemName || entry.itemCode),
-    label: entry.itemName || entry.itemCode,
-    price: number(normalizePriceFields(entry).currentSalePrice)
-  })).filter((e) => e.key && e.price > 0);
+  const byCode = new Map();
+  const entries = [];
+  for (const entry of getLatestPriceCatalog(db, brand.id)) {
+    const priced = normalizePriceFields(entry);
+    const hit = {
+      key: strip(entry.itemName || entry.itemCode),
+      tokens: catalogTokens(entry.itemName || entry.itemCode),
+      label: entry.itemName || entry.itemCode,
+      price: number(priced.currentSalePrice),
+      // 정가(원판매가). 없으면 판매가와 같다고 본다 — 할인율 0.
+      original: number(priced.originalPrice) || number(priced.currentSalePrice)
+    };
+    if (!hit.key || hit.price <= 0) continue;
+    entries.push(hit);
+    // 품번이 있으면 이름 표기가 흔들려도 정확히 집힌다.
+    const code = strip(entry.itemCode);
+    if (code) byCode.set(code, hit);
+  }
   const today = now().slice(0, 10);
   for (const alias of db.priceAliases || []) {
     if (alias.brandId !== brand.id || alias.isActive === false) continue;
@@ -2062,20 +2090,169 @@ function buildCanonPriceMatcher(db, brand) {
     if (today < from || today > to) continue;
     const target = (db.priceEntries || []).find((item) => item.id === alias.priceEntryId);
     if (!target) continue;
-    const price = number(normalizePriceFields(target).currentSalePrice);
-    if (price > 0) entries.push({ key: strip(alias.aliasText), label: alias.aliasText, price });
+    const priced = normalizePriceFields(target);
+    const price = number(priced.currentSalePrice);
+    if (price > 0) {
+      entries.push({
+        key: strip(alias.aliasText),
+        tokens: catalogTokens(alias.aliasText),
+        label: alias.aliasText,
+        price,
+        original: number(priced.originalPrice) || price
+      });
+    }
   }
   return {
     hasCatalog: entries.length > 0,
-    match(productName) {
-      const name = strip(productName);
+    match(productName, itemCode = "") {
+      const code = strip(itemCode);
+      if (code && byCode.has(code)) return byCode.get(code);
+      // ① 낱말 대조: 단가표 품목명의 낱말이 상품명에 모두 있으면 후보다.
+      // 낱말이 많이 겹치는 쪽이 이긴다 — "리필 3P"가 "캣모나이트"를 이긴다.
+      const nameTokens = new Set(catalogTokens(productName));
       let best = null;
+      let bestScore = 0;
+      for (const e of entries) {
+        if (!e.tokens.length || !e.tokens.every((t) => nameTokens.has(t))) continue;
+        const score = e.tokens.length * 1000 + e.tokens.join("").length;
+        if (score > bestScore) { best = e; bestScore = score; }
+      }
+      if (best) return best;
+      // ② 낱말로 못 잡으면 예전처럼 글자 포함으로 본다. 가장 길게 물린 쪽이 이긴다.
+      const name = strip(productName);
       for (const e of entries) {
         if (name.includes(e.key) && (!best || e.key.length > best.key.length)) best = e;
       }
       return best;
     }
   };
+}
+
+// 정가 기준 브랜드의 라인 금액을 단가표로 보정한다.
+//
+// 고공캣처럼 상품별 가격이 고정된 브랜드는 카페24의 고객 결제액(쿠폰·할인이
+// 섞여 건마다 다르다)이 정산 기준이 아니다. 같은 리필 3P 가 어떤 주문에서는
+// 정가 25,500 / 어떤 주문에서는 23,000 으로 찍혀 정산서의 정가·할인율 칸이
+// 건마다 달라지는 것을 막는다. 총액은 위쪽 catalog 검증에서 이미 입금요청과
+// 대조되므로, 여기서 바꾸는 것은 "어느 가격으로 적느냐"뿐이다.
+// 단가표에 없는 품목은 손대지 않는다 — 조용히 0원으로 만드는 것이 최악이다.
+function applyCanonPricesToItems(items, canon) {
+  return items.map((item) => {
+    const hit = canon.match(item.itemName, item.itemCode);
+    if (!hit) return item;
+    const quantity = Math.max(1, number(item.quantity, 1));
+    return {
+      ...item,
+      originalPrice: hit.original,
+      unitSalePrice: hit.price,
+      totalSaleAmount: hit.price * quantity
+    };
+  });
+}
+
+// 브랜드의 카페24 행을 정산월로 가른다.
+//
+// 어느 날짜로 정산월을 가를지는 브랜드 설정(settlementDateBasis)을 따른다.
+//   delivered : [배송완료일]이 정산월인 건 (주문일 무관) — 위탁 기본값
+//   order     : [주문일](주문번호 앞 8자리)이 정산월 + 배송완료된 건 — 그 외 기본값
+// 계약이 브랜드마다 다르므로 정산유형에 묶지 않고 브랜드별로 고르게 둔다.
+//
+// 정산 실행과 목록 스캔이 같은 함수를 봐야 "목록에는 대상이 있다는데 돌리면
+// 0건"이 생기지 않는다. 그래서 판정은 여기 한 곳에만 둔다.
+function splitCafe24RowsByMonth(brand, brandRows, monthPrefix) {
+  const dateBasis = brandSettlementDateBasis(brand);
+  const byDelivered = dateBasis === "delivered";
+  const ymOf = (raw) => String(cafe24DateOnly(raw) || "").replace(/[^0-9]/g, "").slice(0, 6);
+  const cancels = [];
+  const includedByOrder = new Map(); // orderNo -> [정산 포함 cafe24 rows]
+  const allRowsByOrder = new Map(); // orderNo -> [all non-cancelled rows] (부분배송 대조용)
+  let excludedCount = 0;
+  for (const r of brandRows) {
+    const orderNo = String(r["주문번호"] || "").trim();
+    const orderDate = orderNo.slice(0, 8);
+    const deliveredDate = String(r["배송완료일"] || "").trim();
+    const delivered = Boolean(deliveredDate);
+    if (cafe24RowIsCancelled(r)) {
+      cancels.push({
+        itemNo: r["품목별 주문번호"] || orderNo,
+        name: r["주문상품명(기본)"] || "",
+        qty: number(r["수량"]),
+        saleTotal: cafe24RowSaleAmount(r),
+        reason: r["환불상태"] || (r["환불완료일"] ? "환불완료" : "취소/교환"),
+        note: r["환불완료일"] || r["취소처리중[환불완료] 처리일"] || ""
+      });
+      continue;
+    }
+    const included = byDelivered
+      ? (delivered && ymOf(deliveredDate) === monthPrefix)      // 배송완료월 기준
+      : (orderDate.startsWith(monthPrefix) && delivered);       // 주문일 기준 + 배송완료
+    const inScope = byDelivered ? included : orderDate.startsWith(monthPrefix);
+    if (inScope) {
+      if (!allRowsByOrder.has(orderNo)) allRowsByOrder.set(orderNo, []);
+      allRowsByOrder.get(orderNo).push(r);
+    }
+    if (included) {
+      if (!includedByOrder.has(orderNo)) includedByOrder.set(orderNo, []);
+      includedByOrder.get(orderNo).push(r);
+    } else {
+      excludedCount++;
+    }
+  }
+  return { dateBasis, byDelivered, includedByOrder, allRowsByOrder, cancels, excludedCount };
+}
+
+// 정산 목록용 사전 스캔. 브랜드를 하나씩 돌려 보지 않고도 "이 달에 정산할
+// 내역이 있는 업체"를 목록에서 바로 가리기 위한 요약이다.
+//
+// 카페24 조회는 공급사별로 나뉘지 않는다 — 한 달치를 한 번(기준일이 갈리면
+// 두 번) 받아 브랜드별로 나눠 세면 되므로 비용은 정산 한 번과 같다.
+// 판정은 splitCafe24RowsByMonth 를 그대로 쓰므로 실제 정산 결과와 어긋나지 않는다.
+function scanSettlementTargets(db, year, month, rowsForBasis) {
+  const monthPrefix = `${year}${String(month).padStart(2, "0")}`;
+  const requestKeys = new Set();
+  for (const req of db.requests || []) {
+    if (req.status === "deleted") continue;
+    requestKeys.add(`${req.brandId}::${String(req.orderNo || "").trim()}`);
+  }
+  const targets = [];
+  for (const brand of db.brands || []) {
+    if (brand.isActive === false || brand.type === "reference") continue;
+    const base = {
+      brandId: brand.id,
+      name: brand.name || "",
+      settlementType: brand.settlementType || "prepay_fee",
+      dateBasis: brandSettlementDateBasis(brand)
+    };
+    if (!String(brand.cafe24Supplier || "").trim()) {
+      // 공급사 매핑이 없으면 셀 수가 없다. "0건"과 섞이면 매핑을 빠뜨린 채
+      // 넘어가므로 따로 표시한다.
+      targets.push({ ...base, status: "unmapped", orderCount: 0, itemCount: 0, cancelCount: 0, missingRequestCount: 0 });
+      continue;
+    }
+    const rows = rowsForBasis(base.dateBasis).filter((r) => cafe24RowMatchesBrand(r, brand));
+    const split = splitCafe24RowsByMonth(brand, rows, monthPrefix);
+    let itemCount = 0;
+    let missingRequestCount = 0;
+    const isConsignment = base.settlementType === "consignment";
+    for (const [orderNo, list] of split.includedByOrder) {
+      itemCount += list.length;
+      // 위탁은 입금요청 자체가 없는 구조라 누락으로 세면 전건이 빨갛게 된다.
+      if (!isConsignment && !requestKeys.has(`${brand.id}::${orderNo}`)) missingRequestCount++;
+    }
+    targets.push({
+      ...base,
+      status: split.includedByOrder.size ? "ready" : "empty",
+      orderCount: split.includedByOrder.size,
+      itemCount,
+      cancelCount: split.cancels.length,
+      missingRequestCount
+    });
+  }
+  const rank = { ready: 0, unmapped: 1, empty: 2 };
+  return targets.sort((a, b) =>
+    rank[a.status] - rank[b.status] ||
+    b.orderCount - a.orderCount ||
+    a.name.localeCompare(b.name, "ko"));
 }
 
 // Core reconciliation. Returns { needsMapping, suppliers, errors, warnings,
@@ -2120,49 +2297,9 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   // data2: cafe24 rows for this brand
   const brandRows = cafe24Rows.filter((r) => cafe24RowMatchesBrand(r, brand));
 
-  // 어느 날짜로 정산월을 가를지는 브랜드 설정(settlementDateBasis)을 따른다.
-  //   delivered : [배송완료일]이 정산월인 건 (주문일 무관) — 위탁 기본값
-  //   order     : [주문일](주문번호 앞 8자리)이 정산월 + 배송완료된 건 — 그 외 기본값
-  // 계약이 브랜드마다 다르므로 정산유형에 묶지 않고 브랜드별로 고르게 둔다.
-  const dateBasis = brandSettlementDateBasis(brand);
   const isConsignment = settlementType === "consignment";
-  const byDelivered = dateBasis === "delivered";
-  const ymOf = (raw) => String(cafe24DateOnly(raw) || "").replace(/[^0-9]/g, "").slice(0, 6);
-  const cancels = [];
-  const includedByOrder = new Map(); // orderNo -> [정산 포함 cafe24 rows]
-  const allRowsByOrder = new Map(); // orderNo -> [all non-cancelled rows] (부분배송 대조용)
-  let excludedCount = 0;
-  for (const r of brandRows) {
-    const orderNo = String(r["주문번호"] || "").trim();
-    const orderDate = orderNo.slice(0, 8);
-    const deliveredDate = String(r["배송완료일"] || "").trim();
-    const delivered = Boolean(deliveredDate);
-    if (cafe24RowIsCancelled(r)) {
-      cancels.push({
-        itemNo: r["품목별 주문번호"] || orderNo,
-        name: r["주문상품명(기본)"] || "",
-        qty: number(r["수량"]),
-        saleTotal: cafe24RowSaleAmount(r),
-        reason: r["환불상태"] || (r["환불완료일"] ? "환불완료" : "취소/교환"),
-        note: r["환불완료일"] || r["취소처리중[환불완료] 처리일"] || ""
-      });
-      continue;
-    }
-    const included = byDelivered
-      ? (delivered && ymOf(deliveredDate) === monthPrefix)      // 배송완료월 기준
-      : (orderDate.startsWith(monthPrefix) && delivered);       // 주문일 기준 + 배송완료
-    const inScope = byDelivered ? included : orderDate.startsWith(monthPrefix);
-    if (inScope) {
-      if (!allRowsByOrder.has(orderNo)) allRowsByOrder.set(orderNo, []);
-      allRowsByOrder.get(orderNo).push(r);
-    }
-    if (included) {
-      if (!includedByOrder.has(orderNo)) includedByOrder.set(orderNo, []);
-      includedByOrder.get(orderNo).push(r);
-    } else {
-      excludedCount++;
-    }
-  }
+  const { includedByOrder, allRowsByOrder, cancels, excludedCount } =
+    splitCafe24RowsByMonth(brand, brandRows, monthPrefix);
 
   // data1: wooofpay 입금요청 for this brand, keyed by orderNo
   const reqByOrder = new Map();
@@ -2179,6 +2316,10 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   // 단가표 정가로 기대금액을 재계산해 검증한다. 기본은 카페24 결제액 기준.
   const priceBasis = brand.priceBasis === "catalog" ? "catalog" : "cafe24";
   const canon = priceBasis === "catalog" ? buildCanonPriceMatcher(db, brand) : null;
+  const useCanonPrices = Boolean(canon && canon.hasCatalog);
+  // 단가표에 없어서 보정하지 못한 품목. 조용히 카페24 금액으로 남는 자리라
+  // 반드시 드러낸다.
+  const canonMissed = new Set();
   if (canon && !canon.hasCatalog) {
     warnings.push("정가(단가표) 기준 브랜드인데 단가표에 판매가 있는 품목이 없습니다 — 단가표를 먼저 등록하세요.");
   }
@@ -2195,11 +2336,19 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
       rowsOfOrder.forEach((r, idx) => {
         seq++;
         const qty = Math.max(1, number(r["수량"], 1));
-        const original = cafe24UnitPrice(r);               // 소비자가(정가) 단가 = 판매가+옵션
-        const lineDisc = number(r["상품별 추가할인금액"]);  // 라인 총 할인
-        const discountRate = original > 0 && qty > 0 ? Math.max(0, Number((lineDisc / (qty * original)).toFixed(4))) : 0;
-        const unitSale = Math.round(original * (1 - discountRate));
-        const saleTotal = Math.max(0, original * qty - lineDisc);
+        // 정가 기준 브랜드는 카페24 결제액 대신 단가표 가격을 쓴다.
+        const hit = useCanonPrices ? canon.match(r["주문상품명(기본)"]) : null;
+        if (useCanonPrices && !hit) canonMissed.add(String(r["주문상품명(기본)"] || "").trim());
+        const original = hit ? hit.original : cafe24UnitPrice(r);  // 소비자가(정가) 단가 = 판매가+옵션
+        const lineDisc = hit ? 0 : number(r["상품별 추가할인금액"]);  // 라인 총 할인
+        const discRate = original > 0 && qty > 0 ? Math.max(0, Number((lineDisc / (qty * original)).toFixed(4))) : 0;
+        const unitSale = hit ? hit.price : Math.round(original * (1 - discRate));
+        // 단가표로 덮어쓴 줄은 할인율도 정가 대비로 다시 낸다 — 안 그러면
+        // 정가 25,500 / 판매 23,000 인데 할인율만 0 으로 남는다.
+        const discountRate = hit
+          ? (original > 0 ? Math.max(0, Number((1 - unitSale / original).toFixed(4))) : 0)
+          : discRate;
+        const saleTotal = hit ? hit.price * qty : Math.max(0, original * qty - lineDisc);
         const commissionWon = Math.round(saleTotal * (orderRate / 100));
         lines.push({
           itemNo: r["품목별 주문번호"] || `${orderNo}-${String(idx + 1).padStart(2, "0")}`,
@@ -2301,7 +2450,15 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
     // 내역이 없는 건(총액만 입력한 경우)은 예전처럼 카페24 품목으로 펼친다 —
     // 한 줄로 접으면 서로 다른 상품이 수량만 합쳐진 채 사라진다.
     const items = sanitizeLineItems(req.lineItems);
-    const detail = items.length ? items : explodeOrderRows(rowsOfOrder, wooofSales);
+    const rawDetail = items.length ? items : explodeOrderRows(rowsOfOrder, wooofSales);
+    // 정가 기준 브랜드는 단가표 가격으로 덮어쓴다. 카페24 결제액을 비중대로
+    // 쪼갠 값이 아니라 고정 단가가 정산의 진실이다.
+    const detail = useCanonPrices ? applyCanonPricesToItems(rawDetail, canon) : rawDetail;
+    if (useCanonPrices) {
+      for (const it of rawDetail) {
+        if (!canon.match(it.itemName, it.itemCode)) canonMissed.add(String(it.itemName || it.itemCode || "").trim());
+      }
+    }
     const orderShip = number(req.shippingFee);
     detail.forEach((it, idx) => {
       seq++;
@@ -2329,6 +2486,10 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
         note: it.note || ""
       });
     });
+  }
+
+  if (canonMissed.size) {
+    warnings.push(`단가표에 없어 정가 보정을 못 한 품목 ${canonMissed.size}종: ${[...canonMissed].join(", ")} — 카페24 결제액 그대로 계산됐습니다.`);
   }
 
   // 한 정산 안에서 계약 규칙이 갈렸으면 반드시 드러낸다 — 조용히 섞이면
@@ -6187,6 +6348,57 @@ async function routeApi(req, res, url) {
 
   if (pathname === "/api/payment-logs" && method === "GET") {
     sendJson(res, 200, { paymentLogs: db.paymentLogs });
+    return;
+  }
+
+  // 정산 대상 사전 스캔 — 브랜드를 하나씩 돌려 보지 않고 목록에서 유무를 본다.
+  if (pathname === "/api/settlement/scan" && method === "POST") {
+    const body = await readBody(req);
+    if (!body.year || !body.month) { sendJson(res, 400, { error: "정산 연/월을 선택하세요." }); return; }
+    const pad = (n) => String(n).padStart(2, "0");
+    const startDate = `${body.year}-${pad(body.month)}-01`;
+    const endDate = new Date(Date.UTC(Number(body.year), Number(body.month), 0)).toISOString().slice(0, 10);
+    const byDateType = new Map();
+    let source = "upload";
+    const ranges = [];
+    try {
+      if (body.useCafe24) {
+        if (!can(actor, "pipeline", "view")) { sendJson(res, 403, { error: "카페24 주문 조회 권한이 없습니다." }); return; }
+        // 기준일이 갈리는 브랜드가 섞여 있으면 조회도 두 번 해야 한다. 실제로
+        // 쓰이는 기준일만 받아 필요 없는 호출은 하지 않는다.
+        const needed = new Set(
+          (db.brands || [])
+            .filter((b) => b.isActive !== false && b.type !== "reference" && String(b.cafe24Supplier || "").trim())
+            .map((b) => (brandSettlementDateBasis(b) === "delivered" ? "shipend_date" : "order_date"))
+        );
+        for (const dateType of needed) {
+          const orders = await withCafe24Token(db, (token) =>
+            cafe24.fetchOrders(token, { startDate, endDate, dateType }));
+          byDateType.set(dateType, cafe24OrdersToRows(orders));
+          ranges.push({ startDate, endDate, dateType, orderCount: orders.length });
+        }
+        db.cafe24.lastSyncAt = now();
+        await writeDb(db);
+        source = "cafe24";
+      } else {
+        const rows = body.cafe24Csv ? parseCafe24Csv(body.cafe24Csv) : [];
+        if (!rows.length) { sendJson(res, 400, { error: "카페24 주문내역(CSV)을 업로드하세요." }); return; }
+        // 업로드 파일은 한 달 전체가 들어 있으므로 두 기준일이 같은 원본을 본다.
+        byDateType.set("order_date", rows);
+        byDateType.set("shipend_date", rows);
+      }
+    } catch (error) {
+      sendJson(res, error.status || (error.needsReauth ? 401 : 400), { error: settlementSourceError(body, error) });
+      return;
+    }
+    const rowsForBasis = (basis) => byDateType.get(basis === "delivered" ? "shipend_date" : "order_date") || [];
+    sendJson(res, 200, {
+      year: Number(body.year),
+      month: Number(body.month),
+      source,
+      ranges,
+      targets: scanSettlementTargets(db, body.year, body.month, rowsForBasis)
+    });
     return;
   }
 
