@@ -4818,19 +4818,28 @@ function renderCafe24Panel() {
         <div class="toolbar"><button class="primary" data-cafe24-connect>카페24 연결하기</button></div>
       </div></section>`;
   }
+  const expiryText = status.refreshTokenExpiresAt
+    ? h(String(status.refreshTokenExpiresAt).slice(0, 16).replace("T", " "))
+    : "";
   return `<section class="panel">
     <div class="panel-head">
       <h2>카페24 연동</h2>
       <span class="muted">쇼핑몰 ${h(status.mallId)}${status.connectedBy ? ` · ${h(status.connectedBy)} 연결` : ""}</span>
     </div>
     <div class="panel-body">
-      <p class="muted">
-        연결됨. 주문내역을 조회할 수 있습니다.
-        ${status.refreshTokenExpiresAt ? `갱신 토큰 만료 ${h(String(status.refreshTokenExpiresAt).slice(0, 16).replace("T", " "))}` : "갱신 토큰은 2주마다 자동 연장됩니다."}
-      </p>
+      ${status.expired
+        ? `<p class="muted" style="color:var(--red)">
+             갱신 토큰이 ${expiryText} 에 만료됐습니다. 주문 조회와 정산 자동조회가 모두 실패합니다.
+             아래 <strong>다시 연결하기</strong>를 눌러 카페24 관리자로 재승인해 주세요.
+           </p>`
+        : `<p class="muted">
+             연결됨. 주문내역을 조회할 수 있습니다.
+             ${expiryText ? `갱신 토큰 만료 ${expiryText} (만료 전 자동 연장)` : "갱신 토큰은 2주마다 자동 연장됩니다."}
+           </p>`}
       ${state24.sample ? `<pre class="table-wrap" style="max-height:260px;padding:12px;font-size:12px">${h(state24.sample)}</pre>` : ""}
       <div class="toolbar">
-        <button data-cafe24-sample ${state24.sampling ? "disabled" : ""}>${state24.sampling ? "조회 중…" : "주문 응답 샘플 보기"}</button>
+        <button class="${status.expired ? "primary" : "ghost"}" data-cafe24-connect>다시 연결하기</button>
+        <button data-cafe24-sample ${state24.sampling || status.expired ? "disabled" : ""}>${state24.sampling ? "조회 중…" : "주문 응답 샘플 보기"}</button>
         <button class="ghost" data-cafe24-disconnect>연결 해제</button>
       </div>
       ${state24.error ? `<p class="muted" style="color:var(--red)">${h(state24.error)}</p>` : ""}
@@ -5141,6 +5150,8 @@ function bindReconcile() {
       state.cafe24.sample = JSON.stringify(payload, null, 2).slice(0, 20000);
     } catch (error) {
       state.cafe24.error = error.message || "샘플 조회 실패";
+      // 토큰이 죽어서 실패한 거라면 패널이 계속 "연결됨"으로 보이면 안 된다.
+      if (/재연결|만료/.test(state.cafe24.error)) await loadCafe24Status();
     } finally {
       state.cafe24.sampling = false;
       renderApp();
@@ -5269,6 +5280,9 @@ async function loadCafe24Status() {
     state.cafe24.status = await api("/api/cafe24/status");
   } catch (error) {
     state.cafe24.error = error.message || "카페24 상태를 불러오지 못했습니다.";
+    // 상태를 못 받아도 status 는 채워 둔다. null 로 두면 패널이 "불러오는 중…"
+    // 에 멈춘 채 bindReconcile 이 매 렌더마다 다시 부른다.
+    state.cafe24.status = { configured: false, connected: false, expired: false, mallId: "" };
   }
 }
 

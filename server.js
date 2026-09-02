@@ -4924,6 +4924,15 @@ function cafe24IsConnected(db) {
   return Boolean(db.cafe24?.refreshToken);
 }
 
+// 갱신 토큰이 만료됐는지. 만료 시각을 모르면(예전에 연결한 상태) 만료로 보지
+// 않는다 — 실제로 갱신을 시도해 보면 카페24가 알려준다.
+function cafe24RefreshTokenExpired(db) {
+  const raw = String(db.cafe24?.refreshTokenExpiresAt || "").trim();
+  if (!raw) return false;
+  const at = new Date(raw).getTime();
+  return Number.isFinite(at) && at <= Date.now();
+}
+
 // Cafe24's refresh token lives 2 weeks. Once it lapses there is no automated
 // recovery — say so plainly instead of retrying.
 async function cafe24AccessToken(db, { force = false } = {}) {
@@ -4932,6 +4941,15 @@ async function cafe24AccessToken(db, { force = false } = {}) {
   const expiresAt = state.expiresAt ? new Date(state.expiresAt).getTime() : 0;
   if (!force && state.accessToken && expiresAt - Date.now() > 60000) {
     return clobe.openSecret(state.accessToken);
+  }
+  // 이미 지난 갱신 토큰으로 카페24를 두드려 봐야 invalid_grant 만 돌아온다.
+  // 사람이 다시 연결하는 것 말고는 길이 없으니 그 사실만 그대로 전한다.
+  if (cafe24RefreshTokenExpired(db)) {
+    const failure = new Error(
+      `카페24 갱신 토큰이 ${String(state.refreshTokenExpiresAt).slice(0, 10)} 에 만료됐습니다. 다시 연결해 주세요.`
+    );
+    failure.needsReauth = true;
+    throw failure;
   }
   let tokens;
   try {
@@ -4970,12 +4988,38 @@ function cafe24PublicState(db) {
   return {
     configured: cafe24.cafe24Configured(),
     connected: cafe24IsConnected(db),
+    // 토큰이 남아 있다는 것과 그 토큰이 아직 쓸 수 있다는 것은 다른 얘기다.
+    // 둘을 하나로 뭉뚱그리면 화면은 "연결됨"인데 무엇을 눌러도 실패한다.
+    expired: cafe24IsConnected(db) && cafe24RefreshTokenExpired(db),
     mallId: state.mallId || config.mallId || "",
     connectedBy: state.connectedBy || "",
     connectedAt: state.connectedAt || "",
     lastSyncAt: state.lastSyncAt || "",
     refreshTokenExpiresAt: state.refreshTokenExpiresAt || ""
   };
+}
+
+// 갱신 토큰은 2주짜리인데 정산은 한 달에 한 번이다. 쓸 때만 갱신하면 다음 정산
+// 때는 이미 죽어 있어서 매번 사람이 다시 연결해야 한다. 그래서 아무도 쓰지
+// 않아도 주기적으로 한 번씩 갱신해 수명을 이어 둔다 — 카페24는 갱신할 때마다
+// 새 갱신 토큰을 2주 뒤로 다시 끊어 준다.
+const CAFE24_KEEPALIVE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const CAFE24_KEEPALIVE_MARGIN_MS = 5 * 24 * 60 * 60 * 1000;
+
+async function cafe24KeepAlive() {
+  try {
+    if (!cafe24.cafe24Configured()) return;
+    const db = await readDb();
+    if (!cafe24IsConnected(db) || cafe24RefreshTokenExpired(db)) return;
+    const expiresAt = new Date(db.cafe24.refreshTokenExpiresAt || 0).getTime();
+    // 만료 시각을 모르면 판단할 근거가 없으니 그냥 갱신해 둔다.
+    if (Number.isFinite(expiresAt) && expiresAt - Date.now() > CAFE24_KEEPALIVE_MARGIN_MS) return;
+    await cafe24AccessToken(db, { force: true });
+    console.log(`[cafe24] refresh token extended to ${db.cafe24.refreshTokenExpiresAt}`);
+  } catch (error) {
+    // 살아 있어야 할 백그라운드 작업이다. 실패해도 서버를 세우지 않는다.
+    console.error(`[cafe24] keep-alive failed: ${error.message}`);
+  }
 }
 
 async function routeApi(req, res, url) {
@@ -7728,4 +7772,6 @@ if (isMainModule) {
   server.listen(PORT, HOST, () => {
     console.log(`WooofPay running at http://${HOST}:${PORT}`);
   });
+  cafe24KeepAlive();
+  setInterval(cafe24KeepAlive, CAFE24_KEEPALIVE_INTERVAL_MS).unref();
 }
