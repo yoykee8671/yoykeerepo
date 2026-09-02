@@ -1541,7 +1541,10 @@ function buildClobeNamespace() {
     windowDays: 7,
     connectedBy: "",
     connectedAt: "",
-    lastSyncAt: ""
+    lastSyncAt: "",
+    // 갱신이 거부된 시각. 클로브는 카페24와 달리 갱신 토큰 만료 시각을 알려주지
+    // 않아서 미리 알 방법이 없다 — 거부당한 사실을 남겨 두는 것이 최선이다.
+    reauthRequiredAt: ""
   };
 }
 
@@ -4672,6 +4675,11 @@ function clobeIsConnected(db) {
 // Returns a usable access token, refreshing and persisting when the stored one
 // is at or near expiry. clobe has no client_credentials grant, so if the
 // refresh token itself is rejected the only fix is a human re-login.
+// 클로브는 갱신할 때마다 새 갱신 토큰을 내주고 이전 것을 버린다. 두 요청이
+// 동시에 갱신하면 늦게 도착한 쪽이 이미 폐기된 토큰을 쓰게 되고, 그 실패가
+// 저장된 토큰까지 죽은 것으로 만든다. 그래서 갱신은 한 번에 하나만 태운다.
+let clobeRefreshInFlight = null;
+
 async function clobeAccessToken(db) {
   const state = db.clobe;
   if (!clobeIsConnected(db)) throw new Error("클로브가 연결되지 않았습니다. 먼저 연결하세요.");
@@ -4679,22 +4687,32 @@ async function clobeAccessToken(db) {
   if (state.accessToken && expiresAt - Date.now() > 60000) {
     return clobe.openSecret(state.accessToken);
   }
-  let tokens;
-  try {
-    tokens = await clobe.refreshTokens({
-      clientId: state.clientId,
-      refreshToken: clobe.openSecret(state.refreshToken)
-    });
-  } catch (error) {
-    const failure = new Error(`클로브 재인증이 필요합니다: ${error.message}`);
-    failure.needsReauth = true;
-    throw failure;
-  }
-  state.accessToken = clobe.sealSecret(tokens.accessToken);
-  if (tokens.refreshToken) state.refreshToken = clobe.sealSecret(tokens.refreshToken);
-  state.expiresAt = tokens.expiresAt;
-  await writeDb(db);
-  return tokens.accessToken;
+  if (clobeRefreshInFlight) return clobeRefreshInFlight;
+  clobeRefreshInFlight = (async () => {
+    let tokens;
+    try {
+      tokens = await clobe.refreshTokens({
+        clientId: state.clientId,
+        refreshToken: clobe.openSecret(state.refreshToken)
+      });
+    } catch (error) {
+      // 화면이 이 사실을 알아야 "대조를 눌러 봐야 아는" 상태를 벗어난다.
+      state.reauthRequiredAt = now();
+      await writeDb(db);
+      const failure = new Error(`클로브 재인증이 필요합니다: ${error.message}`);
+      failure.needsReauth = true;
+      throw failure;
+    }
+    state.accessToken = clobe.sealSecret(tokens.accessToken);
+    if (tokens.refreshToken) state.refreshToken = clobe.sealSecret(tokens.refreshToken);
+    state.expiresAt = tokens.expiresAt;
+    state.reauthRequiredAt = "";
+    await writeDb(db);
+    return tokens.accessToken;
+  })().finally(() => {
+    clobeRefreshInFlight = null;
+  });
+  return clobeRefreshInFlight;
 }
 
 async function clobeCall(db, tool, input) {
@@ -4830,8 +4848,25 @@ function clobePublicState(db) {
     connectedBy: state.connectedBy || "",
     connectedAt: state.connectedAt || "",
     lastSyncAt: state.lastSyncAt || "",
-    encryptedAtRest: clobe.tokenEncryptionEnabled()
+    encryptedAtRest: clobe.tokenEncryptionEnabled(),
+    needsReauth: clobeIsConnected(db) && Boolean(state.reauthRequiredAt),
+    reauthRequiredAt: state.reauthRequiredAt || ""
   };
+}
+
+// 카페24와 같은 이유다. 대사는 몰아서 며칠씩 안 쓰는 기간이 생기는데, 그동안
+// 아무도 갱신을 부르지 않으면 갱신 토큰이 조용히 상해 있다. 주기적으로 한 번씩
+// 돌려 토큰을 살려 둔다.
+async function clobeKeepAlive() {
+  try {
+    const db = await readDb();
+    if (!clobeIsConnected(db)) return;
+    // 이미 재인증이 필요한 상태면 두드려 봐야 같은 거절만 돌아온다.
+    if (db.clobe.reauthRequiredAt) return;
+    await clobeAccessToken(db);
+  } catch (error) {
+    console.error(`[clobe] keep-alive failed: ${error.message}`);
+  }
 }
 
 // 초안을 브랜드 규칙으로 계산한다. 화면에서 만드는 입금요청과 같은 경로를
@@ -5003,7 +5038,7 @@ function cafe24PublicState(db) {
 // 때는 이미 죽어 있어서 매번 사람이 다시 연결해야 한다. 그래서 아무도 쓰지
 // 않아도 주기적으로 한 번씩 갱신해 수명을 이어 둔다 — 카페24는 갱신할 때마다
 // 새 갱신 토큰을 2주 뒤로 다시 끊어 준다.
-const CAFE24_KEEPALIVE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const INTEGRATION_KEEPALIVE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const CAFE24_KEEPALIVE_MARGIN_MS = 5 * 24 * 60 * 60 * 1000;
 
 async function cafe24KeepAlive() {
@@ -6518,6 +6553,7 @@ async function routeApi(req, res, url) {
       db.clobe.accessToken = clobe.sealSecret(tokens.accessToken);
       db.clobe.refreshToken = clobe.sealSecret(tokens.refreshToken);
       db.clobe.expiresAt = tokens.expiresAt;
+      db.clobe.reauthRequiredAt = "";
       db.clobe.connectedBy = actor.name || actor.email || "";
       db.clobe.connectedAt = now();
 
@@ -7773,5 +7809,7 @@ if (isMainModule) {
     console.log(`WooofPay running at http://${HOST}:${PORT}`);
   });
   cafe24KeepAlive();
-  setInterval(cafe24KeepAlive, CAFE24_KEEPALIVE_INTERVAL_MS).unref();
+  setInterval(cafe24KeepAlive, INTEGRATION_KEEPALIVE_INTERVAL_MS).unref();
+  clobeKeepAlive();
+  setInterval(clobeKeepAlive, INTEGRATION_KEEPALIVE_INTERVAL_MS).unref();
 }

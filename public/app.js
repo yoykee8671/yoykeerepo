@@ -4921,6 +4921,12 @@ function renderReconcileSettings() {
       </div>
       <div class="panel-body">
         ${status.encryptedAtRest ? "" : `<p class="muted" style="color:var(--red)">CLOBE_TOKEN_SECRET 미설정 — 토큰이 암호화되지 않은 채 저장됩니다.</p>`}
+        ${status.needsReauth
+          ? `<p class="muted" style="color:var(--red)">
+               클로브가 ${h(String(status.reauthRequiredAt).slice(0, 16).replace("T", " "))} 에 갱신을 거부했습니다.
+               입금내역 대조가 실패합니다 — 아래 <strong>다시 인증하기</strong>를 눌러 클로브에 재로그인해 주세요.
+             </p>`
+          : ""}
         <div class="field two">
           <div><label>대사 대상 회사</label>
             <input type="text" readonly value="${h(status.companyName || "주식회사 우프컴퍼니")}">
@@ -4934,7 +4940,8 @@ function renderReconcileSettings() {
           <div><label>조회 종료일</label><input type="date" data-clobe-end value="${h(state.clobe.endDate)}"></div>
         </div>
         <div class="toolbar">
-          <button class="primary" data-clobe-run ${state.clobe.running ? "disabled" : ""}>${state.clobe.running ? "대조 중…" : "입금내역 대조"}</button>
+          <button class="${status.needsReauth ? "ghost" : "primary"}" data-clobe-run ${state.clobe.running || status.needsReauth ? "disabled" : ""}>${state.clobe.running ? "대조 중…" : "입금내역 대조"}</button>
+          <button class="${status.needsReauth ? "primary" : "ghost"}" data-clobe-connect>다시 인증하기</button>
           <button class="ghost" data-clobe-disconnect>연결 해제</button>
           <span class="muted">${status.lastSyncAt ? `마지막 대조 ${h(status.lastSyncAt.slice(0, 16).replace("T", " "))}` : "아직 대조하지 않았습니다."}</span>
         </div>
@@ -5220,6 +5227,8 @@ function bindReconcile() {
     } catch (error) {
       state.clobe.error = error.message || "대조에 실패했습니다.";
       showToast(state.clobe.error, "error");
+      // 재인증이 필요해서 실패한 거라면 패널이 그 사실을 바로 보여줘야 한다.
+      if (/재인증/.test(state.clobe.error)) await loadClobeStatus();
     } finally {
       state.clobe.running = false;
       renderApp();
