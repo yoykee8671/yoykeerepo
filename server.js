@@ -1958,12 +1958,18 @@ function cafe24OrderShipping(rows) {
 }
 
 // Normalize a bank party/label for fuzzy comparison: uppercase, drop spaces and
-// any bracketed suffix (지점명·법인격 등), keep hangul/latin/digits only.
-// "온힐 송도점" / "베럴즈（BETTERS）" / "김지연(고공캣)" → 온힐 / 베럴즈 / 고공캣 core.
+// legal-entity suffixes, keep hangul/latin/digits only. Brackets are unwrapped
+// rather than deleted — only the punctuation goes, the content stays — because
+// which side carries the brand differs by row: "베럴즈（BETTERS）" wants the outer
+// text, but "김지연(고공캣)" (개인 예금주 + 브랜드) puts the brand *inside* the
+// brackets. Deleting bracket spans used to erase 고공캣 entirely from rows like
+// that, so bank_missing fired even though the withdrawal was right there.
+// "온힐 송도점" → 온힐송도점 / "베럴즈（BETTERS）" → 베럴즈BETTERS / "김지연(고공캣)" → 김지연고공캣
+// — the substring match in bankRowMatchesBrand finds the brand key in any of these.
 function normalizeBankParty(value) {
   return String(value || "")
-    .replace(/[（(【\[].*?[)）】\]]/g, " ")
     .replace(/주식회사|㈜|\(주\)/g, " ")
+    .replace(/[（(【\[)）】\]]/g, " ")
     .toUpperCase()
     .replace(/[^0-9A-Z가-힣]/g, "");
 }
