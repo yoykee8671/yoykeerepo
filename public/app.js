@@ -18,6 +18,9 @@ const state = {
   filters: { q: "", statusValues: null, brandIds: null, settlementTypes: null, promotionRuleId: "", dateFrom: "", dateTo: "" },
   filtersInitialized: false,
   editingRequest: null,
+  // 입금요청 저장 직전, 정가 기준 브랜드인데 단가표에 없는 품목이 있으면 여기
+  // 채워서 "신규 등록/별칭 연결" 확인 패널을 띄운다. null이면 패널 없음.
+  catalogResolve: null,
   editingBrand: null,
   editingAdmin: null,
   editingPermissions: null,
@@ -567,6 +570,7 @@ function renderApp() {
     app.querySelector("[data-close-popup]")?.addEventListener("click", () => window.close());
     app.querySelector("[data-reset-popup-form]")?.addEventListener("click", () => {
       state.editingRequest = null;
+      state.catalogResolve = null;
       history.replaceState({}, "", "/?request-popup=1");
       renderApp();
       focusRequestForm();
@@ -651,6 +655,7 @@ function renderRequestPopup() {
       <section class="panel">
         <div class="panel-body">${renderRequestForm()}</div>
       </section>
+      ${renderCatalogResolvePanel()}
     </main>
   `;
 }
@@ -2161,6 +2166,159 @@ function bindSearchInput(selector, applyValue) {
   });
 }
 
+// 정가 기준 브랜드의 입금요청을 저장하기 전, 단가표에 없는 품목을 등록하거나
+// 기존 품목의 별칭으로 연결하도록 보여주는 확인 패널. 요청 폼 자체는 건드리지
+// 않는다 — 사용자가 입력하던 값이 패널 때문에 초기화되면 안 된다.
+function renderCatalogResolvePanel() {
+  const cr = state.catalogResolve;
+  if (!cr) return "";
+  const allDone = cr.items.every((it) => it.status !== "pending");
+  const rows = cr.items.map((it, i) => {
+    if (it.status === "registered") {
+      return `<div class="catalog-resolve-item">✅ <b>${h(it.itemName)}</b> — 단가표에 새로 등록했습니다.</div>`;
+    }
+    if (it.status === "aliased") {
+      return `<div class="catalog-resolve-item">✅ <b>${h(it.itemName)}</b> — "${h(it.aliasedToName || "")}" 별칭으로 연결했습니다.</div>`;
+    }
+    if (it.status === "skipped") {
+      return `<div class="catalog-resolve-item"><span class="muted">⏭ <b>${h(it.itemName)}</b> — 이번엔 건너뜁니다.</span></div>`;
+    }
+    const suggestions = (it.suggestions || []).map((s) => `
+      <button type="button" class="ghost" data-catalog-alias="${i}" data-price-entry-id="${h(s.priceEntryId)}"
+        data-price-entry-name="${h(s.itemName || s.itemCode)}">"${h(s.itemName || s.itemCode)}"(${money.format(s.currentSalePrice)}원)와 같은 상품</button>
+    `).join("");
+    return `
+      <div class="catalog-resolve-item">
+        <div><b>${h(it.itemName)}</b> ${it.unitSalePrice ? `<span class="muted">(입력가 ${money.format(it.unitSalePrice)}원)</span>` : ""}</div>
+        ${suggestions
+          ? `<div class="toolbar" style="margin-top:4px">${suggestions}</div>`
+          : `<p class="muted" style="margin:4px 0">비슷한 기존 품목을 찾지 못했습니다.</p>`}
+        <div class="toolbar" style="margin-top:8px">
+          <input type="text" data-catalog-new-name="${i}" value="${h(it.itemName)}" placeholder="단가표에 등록할 품목명">
+          <input type="text" inputmode="numeric" class="money-input" data-catalog-new-price="${i}" value="${h(formatAmount(it.unitSalePrice || 0))}" placeholder="판매가">
+          <button type="button" class="primary" data-catalog-register="${i}">새 품목으로 등록</button>
+          <button type="button" data-catalog-skip="${i}">건너뛰기</button>
+        </div>
+      </div>
+    `;
+  }).join("<hr>");
+  return `
+    <section class="panel" data-catalog-resolve-panel>
+      <div class="panel-head"><h2>단가표 확인 — ${h(cr.brandName)}</h2></div>
+      <div class="panel-body">
+        <p class="muted">이 브랜드는 정가(단가표) 기준으로 정산합니다. 아래 품목을 단가표에 등록하거나 기존 품목의 별칭으로
+          연결한 뒤 저장을 이어가세요. 건너뛰어도 이번 요청 저장에는 영향이 없습니다.</p>
+        ${rows}
+        <div class="toolbar" style="margin-top:12px">
+          <button type="button" class="primary" data-catalog-resolve-continue ${allDone ? "" : "disabled"}>확인 완료 · 저장 계속하기</button>
+          <button type="button" data-catalog-resolve-cancel>패널 닫기</button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function showCatalogResolvePanel() {
+  document.querySelector(".popup-shell")?.insertAdjacentHTML("beforeend", renderCatalogResolvePanel());
+  bindCatalogResolvePanel();
+}
+
+function refreshCatalogResolvePanel() {
+  const existing = document.querySelector("[data-catalog-resolve-panel]");
+  const html = renderCatalogResolvePanel();
+  if (!html) { existing?.remove(); return; }
+  if (existing) existing.outerHTML = html;
+  else document.querySelector(".popup-shell")?.insertAdjacentHTML("beforeend", html);
+  bindCatalogResolvePanel();
+}
+
+function bindCatalogResolvePanel() {
+  const panel = document.querySelector("[data-catalog-resolve-panel]");
+  const cr = state.catalogResolve;
+  if (!panel || !cr) return;
+  panel.querySelectorAll("[data-catalog-alias]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const i = Number(btn.dataset.catalogAlias);
+      const item = cr.items[i];
+      try {
+        await api("/api/price-aliases", {
+          method: "POST",
+          body: { brandId: cr.brandId, priceEntryId: btn.dataset.priceEntryId, aliasText: item.itemName }
+        });
+        item.status = "aliased";
+        item.aliasedToName = btn.dataset.priceEntryName || "";
+        showToast(`"${item.itemName}"를 별칭으로 연결했습니다.`);
+      } catch (error) {
+        showToast(error.message || "별칭 연결에 실패했습니다.", "error");
+      }
+      refreshCatalogResolvePanel();
+    });
+  });
+  panel.querySelectorAll("[data-catalog-register]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const i = Number(btn.dataset.catalogRegister);
+      const item = cr.items[i];
+      const itemName = String(panel.querySelector(`[data-catalog-new-name="${i}"]`)?.value || "").trim();
+      const price = parseAmount(panel.querySelector(`[data-catalog-new-price="${i}"]`)?.value || 0);
+      if (!itemName) return showToast("품목명을 입력하세요.", "error");
+      if (!price) return showToast("판매가를 입력하세요.", "error");
+      try {
+        await api("/api/price-entries", {
+          method: "POST",
+          body: { brandId: cr.brandId, itemName, itemCode: item.itemCode || "", salePrice: price, originalPrice: price }
+        });
+        item.status = "registered";
+        item.itemName = itemName;
+        showToast(`"${itemName}"를 단가표에 등록했습니다.`);
+      } catch (error) {
+        showToast(error.message || "단가표 등록에 실패했습니다.", "error");
+      }
+      refreshCatalogResolvePanel();
+    });
+  });
+  panel.querySelectorAll("[data-catalog-skip]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      cr.items[Number(btn.dataset.catalogSkip)].status = "skipped";
+      refreshCatalogResolvePanel();
+    });
+  });
+  panel.querySelector("[data-catalog-resolve-continue]")?.addEventListener("click", async () => {
+    const form = document.querySelector("[data-request-form]");
+    if (form) await submitRequestPayload(form, cr.pendingBody, cr.wasEditing);
+  });
+  panel.querySelector("[data-catalog-resolve-cancel]")?.addEventListener("click", () => {
+    state.catalogResolve = null;
+    panel.remove();
+    const liveBtn = document.querySelector("[data-request-form] [type='submit']");
+    if (liveBtn) liveBtn.disabled = false;
+  });
+}
+
+// 실제 입금요청 생성/수정 API 호출. 단가표 확인 패널을 거쳤든(저장 계속하기),
+// 애초에 단가표 확인이 필요 없었든(정가 기준 브랜드가 아니거나 다 매칭됐든)
+// 같은 경로로 저장한다.
+async function submitRequestPayload(form, body, wasEditing) {
+  try {
+    if (state.editingRequest?.id) {
+      await api(`/api/requests/${state.editingRequest.id}`, { method: "PUT", body });
+    } else {
+      await api("/api/requests", { method: "POST", body });
+    }
+    state.editingRequest = null;
+    state.catalogResolve = null;
+    if (isRequestPopup) {
+      history.replaceState({}, "", "/?request-popup=1");
+      window.opener?.postMessage({ type: "requestSaved" }, location.origin);
+    }
+    await refreshAndRender();
+    showToast(wasEditing ? "수정되었습니다." : "저장되었습니다.");
+    focusRequestForm();
+  } finally {
+    const liveBtn = form.querySelector('[type="submit"]');
+    if (liveBtn) liveBtn.disabled = false;
+  }
+}
+
 function bindRequests() {
   const syncSelectedRequestIds = () => {
     const validIds = new Set(filteredRequests().filter((item) => item.status !== "deleted").map((item) => item.id));
@@ -2887,27 +3045,37 @@ function bindRequests() {
     delete body.brandSearch;
     delete body.lineItemsJson;
     const wasEditing = Boolean(state.editingRequest?.id);
-    try {
-      if (state.editingRequest?.id) {
-        await api(`/api/requests/${state.editingRequest.id}`, { method: "PUT", body });
-      } else {
-        await api("/api/requests", { method: "POST", body });
+
+    // 정가 기준 브랜드인데 단가표에 없는 품목이 있으면, 저장 전에 등록/별칭
+    // 연결부터 하도록 확인 패널을 띄운다. 확인은 보조 기능이라 실패해도 저장은
+    // 막지 않는다.
+    if (brand?.priceBasis === "catalog") {
+      try {
+        const check = await api("/api/price-entries/match-check", {
+          method: "POST",
+          body: { brandId: brand.id, lineItems: body.lineItems }
+        });
+        if (check.unmatched?.length) {
+          state.catalogResolve = {
+            brandId: brand.id,
+            brandName: brand.name,
+            items: check.unmatched.map((u) => ({ ...u, status: "pending" })),
+            pendingBody: body,
+            wasEditing
+          };
+          showCatalogResolvePanel();
+          if (submitBtn) submitBtn.disabled = false;
+          return;
+        }
+      } catch {
+        // 확인 API 자체가 실패해도 원래 저장 흐름은 그대로 진행한다.
       }
-      state.editingRequest = null;
-      if (isRequestPopup) {
-        history.replaceState({}, "", "/?request-popup=1");
-        window.opener?.postMessage({ type: "requestSaved" }, location.origin);
-      }
-      await refreshAndRender();
-      showToast(wasEditing ? "수정되었습니다." : "저장되었습니다.");
-      focusRequestForm();
-    } finally {
-      const liveBtn = requestForm.querySelector('[type="submit"]');
-      if (liveBtn) liveBtn.disabled = false;
     }
+    await submitRequestPayload(event.currentTarget, body, wasEditing);
   });
   app.querySelector("[data-cancel-edit]")?.addEventListener("click", () => {
     state.editingRequest = null;
+    state.catalogResolve = null;
     if (isRequestPopup) history.replaceState({}, "", "/?request-popup=1");
     renderApp();
     focusRequestForm();

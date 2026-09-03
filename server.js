@@ -2134,6 +2134,39 @@ function buildCanonPriceMatcher(db, brand) {
   };
 }
 
+// 입금요청에 수기로 적은 품목명이 단가표에 없을 때, 사람이 "이거 같은 상품
+// 맞아요?" 고를 수 있게 후보를 골라준다. buildCanonPriceMatcher.match()는 자동
+// 가격보정을 위해 "가장 그럴듯한 하나"만 확정해서 돌려주지만, 여기서는 담당자가
+// 매번 조금씩 다르게 적은 이름(예: "리필 3P" / "리필3p" / "캣모나이트 리필(3개입)")
+// 사이에서 사람이 직접 고르도록 점수순 여러 개를 보여준다 — 잘못 연결하는 것보다
+// 사람이 판단하게 두는 편이 안전하다.
+function suggestPriceCatalogMatches(db, brand, itemName, limit = 5) {
+  const strip = (s) => String(s || "").toLowerCase().replace(/\s+/g, "");
+  const nameTokens = new Set(catalogTokens(itemName));
+  const name = strip(itemName);
+  if (!nameTokens.size && !name) return [];
+  const scored = [];
+  for (const entry of getLatestPriceCatalog(db, brand.id)) {
+    const label = entry.itemName || entry.itemCode || "";
+    if (!label) continue;
+    const tokens = catalogTokens(label);
+    const overlap = tokens.filter((t) => nameTokens.has(t)).length;
+    const key = strip(label);
+    const substringHit = Boolean(key) && Boolean(name) && (name.includes(key) || key.includes(name));
+    if (!overlap && !substringHit) continue;
+    const priced = normalizePriceFields(entry);
+    scored.push({
+      priceEntryId: entry.id,
+      itemName: entry.itemName || "",
+      itemCode: entry.itemCode || "",
+      currentSalePrice: number(priced.currentSalePrice),
+      score: overlap * 1000 + (substringHit ? 500 : 0) + Math.min(key.length, name.length || key.length)
+    });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map(({ score, ...rest }) => rest);
+}
+
 // 정가 기준 브랜드의 라인 금액을 단가표로 보정한다.
 //
 // 고공캣처럼 상품별 가격이 고정된 브랜드는 카페24의 고객 결제액(쿠폰·할인이
@@ -5408,6 +5441,37 @@ async function routeApi(req, res, url) {
         .sort((a, b) => (b.validFrom || "").localeCompare(a.validFrom || "") || b.updatedAt.localeCompare(a.updatedAt))
         .map((rule) => promotionRuleWithRefs(db, rule))
     });
+    return;
+  }
+
+  // 입금요청 창에서 수기로 적은 품목이 단가표에 없을 때 화면이 부른다. 정가
+  // 기준 브랜드가 아니면 애초에 단가표 정확도가 정산에 안 걸리므로 조용히 빈
+  // 결과를 준다 — 담당자가 매번 확인 창을 봐야 할 이유가 없는 브랜드다.
+  if (pathname === "/api/price-entries/match-check" && method === "POST") {
+    const body = await readBody(req);
+    const brand = db.brands.find((item) => item.id === body.brandId);
+    if (!brand || brand.priceBasis !== "catalog") {
+      sendJson(res, 200, { checked: false, unmatched: [] });
+      return;
+    }
+    const canon = buildCanonPriceMatcher(db, brand);
+    const seen = new Set();
+    const unmatched = [];
+    for (const raw of sanitizeLineItems(body.lineItems)) {
+      const itemName = String(raw.itemName || "").trim();
+      if (!itemName) continue;
+      const dedupeKey = `${itemName}::${raw.itemCode || ""}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      if (canon.hasCatalog && canon.match(itemName, raw.itemCode)) continue;
+      unmatched.push({
+        itemName,
+        itemCode: raw.itemCode || "",
+        unitSalePrice: number(raw.unitSalePrice),
+        suggestions: suggestPriceCatalogMatches(db, brand, itemName)
+      });
+    }
+    sendJson(res, 200, { checked: true, unmatched });
     return;
   }
 
