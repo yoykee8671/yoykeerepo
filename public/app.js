@@ -1658,7 +1658,7 @@ function renderBrandForm() {
       <div class="field">
         <label>정산 월 기준일</label>
         <select name="settlementDateBasis">
-          <option value="order" ${(b.settlementDateBasis || (b.settlementType === "consignment" ? "delivered" : "order")) === "order" ? "selected" : ""}>주문일 기준 (주문번호 앞 8자리) · 배송완료 건만</option>
+          <option value="order" ${(b.settlementDateBasis || (b.settlementType === "consignment" ? "delivered" : "order")) === "order" ? "selected" : ""}>주문일 기준 (주문번호 앞 8자리) · 출고완료(배송완료 또는 송장등록) 건만</option>
           <option value="delivered" ${(b.settlementDateBasis || (b.settlementType === "consignment" ? "delivered" : "order")) === "delivered" ? "selected" : ""}>배송완료일 기준 (주문일 무관)</option>
         </select>
         <span class="muted">
