@@ -2150,6 +2150,30 @@ function applyCanonPricesToItems(items, canon) {
   });
 }
 
+// 정가 기준 브랜드의 카페24 자동수집 초안에도 위와 같은 단가표 보정을 적용한다.
+// 정산 때만 대조하면 이미 만들어진 입금요청이 카페24 결제액으로 굳어버리므로,
+// 초안 계산 시점부터 단가표 가격을 쓰고 매칭 실패는 자동선택에서 빼 사람이 보게 한다.
+function applyCatalogBasisToDraft(db, brand, lineItems) {
+  if (brand.priceBasis !== "catalog") {
+    return { lineItems, catalogMismatch: false, catalogUnmatched: [] };
+  }
+  const canon = buildCanonPriceMatcher(db, brand);
+  if (!canon.hasCatalog) {
+    return { lineItems, catalogMismatch: true, catalogUnmatched: [], catalogNote: "단가표에 등록된 품목이 없습니다" };
+  }
+  const catalogUnmatched = [];
+  const priced = lineItems.map((item) => {
+    const hit = canon.match(item.itemName, item.itemCode);
+    if (!hit) {
+      catalogUnmatched.push(item.itemName || item.itemCode);
+      return item;
+    }
+    const quantity = Math.max(1, number(item.quantity, 1));
+    return { ...item, originalPrice: hit.original, unitSalePrice: hit.price, totalSaleAmount: hit.price * quantity };
+  });
+  return { lineItems: priced, catalogMismatch: catalogUnmatched.length > 0, catalogUnmatched };
+}
+
 // 브랜드의 카페24 행을 정산월로 가른다.
 //
 // 어느 날짜로 정산월을 가를지는 브랜드 설정(settlementDateBasis)을 따른다.
@@ -5051,23 +5075,36 @@ async function clobeKeepAlive() {
 // 쓰므로, 자동 수집분과 수기 입력분의 금액 산출이 갈리지 않는다.
 function priceDraft(db, draft) {
   const brand = db.brands.find((item) => item.id === draft.brandId) || {};
-  const promotionContext = buildPromotionContext(db, brand, sanitizeLineItems(draft.lineItems), "");
-  const calc = calculateSettlement({ lineItems: draft.lineItems, _promotionContext: promotionContext }, brand);
+  const catalog = applyCatalogBasisToDraft(db, brand, draft.lineItems);
+  const promotionContext = buildPromotionContext(db, brand, sanitizeLineItems(catalog.lineItems), "");
+  const calc = calculateSettlement({ lineItems: catalog.lineItems, _promotionContext: promotionContext }, brand);
   return {
+    lineItems: calc.lineItems,
+    quantity: (catalog.lineItems || []).reduce((sum, line) => sum + number(line.quantity), 0),
     depositAmount: calc.depositAmount,
     productSalesAmount: calc.productSalesAmount,
     baseShippingFee: calc.baseShippingFee,
     commissionRate: calc.commissionRate,
     commissionAmount: calc.commissionAmount,
+    supplyAmount: calc.supplyAmount,
+    promotionRuleId: calc.promotionRuleId,
+    promotionRuleName: calc.promotionRuleName,
+    appliedPromotionRules: calc.appliedPromotionRules,
+    receivableDeduction: calc.receivableDeduction,
     settlementType: calc.settlementType,
     // 카페24가 청구한 배송비와 브랜드 규칙이 다르면 확인 단계에서 보여준다.
-    shippingMismatch: Math.abs(number(calc.baseShippingFee) - number(draft.cafe24ShippingFee)) > 1
+    shippingMismatch: Math.abs(number(calc.baseShippingFee) - number(draft.cafe24ShippingFee)) > 1,
+    // 정가 기준 브랜드인데 단가표에 없는 품목이 섞이면 자동선택에서 빼고 사람이 보게 한다.
+    catalogMismatch: catalog.catalogMismatch,
+    catalogUnmatched: catalog.catalogUnmatched,
+    catalogNote: catalog.catalogNote || ""
   };
 }
 
 function buildRequestFromDraft(db, brand, draft) {
-  const promotionContext = buildPromotionContext(db, brand, sanitizeLineItems(draft.lineItems), "");
-  const calc = calculateSettlement({ lineItems: draft.lineItems, _promotionContext: promotionContext }, brand);
+  const catalog = applyCatalogBasisToDraft(db, brand, draft.lineItems);
+  const promotionContext = buildPromotionContext(db, brand, sanitizeLineItems(catalog.lineItems), "");
+  const calc = calculateSettlement({ lineItems: catalog.lineItems, _promotionContext: promotionContext }, brand);
   return {
     id: id("req"),
     brandId: brand.id,
