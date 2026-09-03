@@ -164,7 +164,24 @@ const isRequestPopup = uiParams.get("request-popup") === "1";
 const isBrandPopup = uiParams.get("brand-popup") === "1";
 const popupRequestId = uiParams.get("request-id") || "";
 const popupBrandId = uiParams.get("brand-id") || "";
+const popupDraftPrefill = uiParams.get("draft-prefill") === "1";
 const RECENT_BRANDS_KEY = "wooofpay_recent_brands";
+const DRAFT_PREFILL_KEY = "wooofpay_pipeline_draft_prefill";
+
+// 파이프라인 확인 표의 행별 "입금요청 입력" 버튼이 새 창으로 넘기는 초안을 읽는다.
+// 아직 저장 전이라 request-id 로 찾을 수가 없어 localStorage 로 다리를 놓는다 —
+// 한 번 읽으면 지워서 다음에 창을 새로고침해도 같은 초안이 다시 뜨지 않게 한다.
+function readDraftPrefill() {
+  try {
+    const raw = localStorage.getItem(DRAFT_PREFILL_KEY);
+    localStorage.removeItem(DRAFT_PREFILL_KEY);
+    if (!raw) return null;
+    const draft = JSON.parse(raw);
+    return draft && typeof draft === "object" ? { ...draft, id: "" } : null;
+  } catch {
+    return null;
+  }
+}
 
 window.addEventListener("message", async (event) => {
   if (event.origin !== location.origin) return;
@@ -434,7 +451,9 @@ async function init() {
   await loadAll();
   if (isRequestPopup) {
     state.tab = "requests";
-    state.editingRequest = state.requests.find((item) => item.id === popupRequestId) || null;
+    state.editingRequest = popupDraftPrefill
+      ? readDraftPrefill()
+      : state.requests.find((item) => item.id === popupRequestId) || null;
   }
   if (isBrandPopup) {
     state.tab = "brands";
@@ -625,7 +644,7 @@ function renderRequestPopup() {
   return `
     <main class="popup-shell">
       ${pageHead(
-        state.editingRequest ? "입금요청 수정" : "입금요청 입력",
+        state.editingRequest?.id ? "입금요청 수정" : "입금요청 입력",
         "브랜드 기본값은 자동 반영되고, 변동값만 입력합니다.",
         `
           <button type="button" data-reset-popup-form>새 요청</button>
@@ -1184,7 +1203,7 @@ function renderRequestForm() {
         <input name="commissionAmount" type="text" readonly class="money-input" value="${h(formatAmount(item.commissionAmount))}">
       </div>
       <div class="toolbar">
-        <button class="primary" type="submit">${state.editingRequest ? "수정 저장" : "요청 추가"}</button>
+        <button class="primary" type="submit">${state.editingRequest?.id ? "수정 저장" : "요청 추가"}</button>
         ${state.editingRequest ? `<button type="button" data-cancel-edit>취소</button>` : ""}
       </div>
     </form>
@@ -1663,7 +1682,7 @@ function renderBrandForm() {
       <div class="field">
         <label>정산 월 기준일</label>
         <select name="settlementDateBasis">
-          <option value="order" ${(b.settlementDateBasis || (b.settlementType === "consignment" ? "delivered" : "order")) === "order" ? "selected" : ""}>주문일 기준 (주문번호 앞 8자리) · 배송완료 건만</option>
+          <option value="order" ${(b.settlementDateBasis || (b.settlementType === "consignment" ? "delivered" : "order")) === "order" ? "selected" : ""}>주문일 기준 (주문번호 앞 8자리) · 출고완료(배송완료 또는 송장등록) 건만</option>
           <option value="delivered" ${(b.settlementDateBasis || (b.settlementType === "consignment" ? "delivered" : "order")) === "delivered" ? "selected" : ""}>배송완료일 기준 (주문일 무관)</option>
         </select>
         <span class="muted">
@@ -2280,7 +2299,7 @@ function bindCatalogResolvePanel() {
 // 같은 경로로 저장한다.
 async function submitRequestPayload(form, body, wasEditing) {
   try {
-    if (state.editingRequest) {
+    if (state.editingRequest?.id) {
       await api(`/api/requests/${state.editingRequest.id}`, { method: "PUT", body });
     } else {
       await api("/api/requests", { method: "POST", body });
@@ -3025,7 +3044,7 @@ function bindRequests() {
     body.lineItems = body.lineItemsJson || "[]";
     delete body.brandSearch;
     delete body.lineItemsJson;
-    const wasEditing = !!state.editingRequest;
+    const wasEditing = Boolean(state.editingRequest?.id);
 
     // 정가 기준 브랜드인데 단가표에 없는 품목이 있으면, 저장 전에 등록/별칭
     // 연결부터 하도록 확인 패널을 띄운다. 확인은 보조 기능이라 실패해도 저장은
@@ -4978,9 +4997,16 @@ function renderPipelineCollect(collect) {
       <td>${codes}</td>
       <td class="num"><strong>${money.format(d.depositAmount || 0)}원</strong><br>
         <span class="muted">판매 ${money.format(d.productSalesAmount || 0)} · 배송 ${money.format(d.baseShippingFee || 0)}</span></td>
-      <td>${d.shippingMismatch
-        ? `<span class="badge clobe-medium">배송비 확인</span><br><span class="muted">카페24 ${money.format(d.cafe24ShippingFee || 0)}원</span>`
-        : `<span class="muted">-</span>`}</td>
+      <td>
+        ${d.shippingMismatch
+          ? `<span class="badge clobe-medium">배송비 확인</span><br><span class="muted">카페24 ${money.format(d.cafe24ShippingFee || 0)}원</span>`
+          : ""}
+        ${d.catalogMismatch
+          ? `<span class="badge clobe-medium">단가표 확인</span><br><span class="muted">${h(d.catalogNote || `미매칭: ${(d.catalogUnmatched || []).join(", ")}`)}</span>`
+          : ""}
+        ${!d.shippingMismatch && !d.catalogMismatch ? `<span class="muted">-</span>` : ""}
+      </td>
+      <td><button type="button" data-pipe-draft-request="${i}">입금요청 입력</button></td>
     </tr>`;
   }).join("");
   return `
@@ -4995,8 +5021,10 @@ function renderPipelineCollect(collect) {
             ${collect.unmappedSuppliers.slice(0, 5).map((s) => `${h(s.supplierName)}(${h(s.supplierId)}) ${s.orderCount}건`).join(", ")}.
             브랜드 화면에서 카페24 공급사코드를 지정하면 다음 수집부터 포함됩니다.</p>`
         : ""}
+      <p class="muted">행별 <b>입금요청 입력</b>은 그 건의 계산된 초안을 입금요청 창에 채워 보여줍니다. 수동 확인이 필요한 건(룰루키친 등)은
+        이 버튼으로 열어 필요한 값만 고쳐서 바로 등록하세요.</p>
       <div class="table-wrap" style="max-height:420px"><table>
-        <thead><tr><th><input type="checkbox" data-pipe-all></th><th>주문</th><th>브랜드</th><th>품목</th><th>품목번호</th><th>입금액</th><th>비고</th></tr></thead>
+        <thead><tr><th><input type="checkbox" data-pipe-all></th><th>주문</th><th>브랜드</th><th>품목</th><th>품목번호</th><th>입금액</th><th>비고</th><th>동작</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>
       <div class="toolbar">
@@ -5299,8 +5327,10 @@ function bindPipeline() {
     renderApp();
     try {
       p.collect = await api("/api/pipeline/collect", { method: "POST", body: { startDate: p.startDate, endDate: p.endDate } });
-      // 배송비가 어긋나는 건은 사람이 먼저 보게 기본 선택에서 뺀다.
-      p.selected = (p.collect.drafts || []).map((d, i) => (d.shippingMismatch ? null : i)).filter((v) => v !== null);
+      // 배송비가 어긋나거나 단가표 매칭이 안 된 건은 사람이 먼저 보게 기본 선택에서 뺀다.
+      p.selected = (p.collect.drafts || [])
+        .map((d, i) => (d.shippingMismatch || d.catalogMismatch ? null : i))
+        .filter((v) => v !== null);
     } catch (error) {
       p.error = error.message || "수집에 실패했습니다.";
     } finally {
@@ -5318,6 +5348,20 @@ function bindPipeline() {
   app.querySelector("[data-pipe-all]")?.addEventListener("change", (e) => {
     p.selected = e.target.checked ? (p.collect?.drafts || []).map((_, i) => i) : [];
     renderApp();
+  });
+
+  app.querySelectorAll("[data-pipe-draft-request]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const draft = p.collect?.drafts?.[Number(button.dataset.pipeDraftRequest)];
+      if (!draft) return;
+      try {
+        localStorage.setItem(DRAFT_PREFILL_KEY, JSON.stringify(draft));
+      } catch {
+        showToast("초안을 입금요청 창으로 넘기지 못했습니다.", "error");
+        return;
+      }
+      window.open("/?request-popup=1&draft-prefill=1", "wooofpay-request", "width=760,height=940,resizable=yes,scrollbars=yes");
+    });
   });
 
   app.querySelector("[data-pipe-apply]")?.addEventListener("click", async () => {

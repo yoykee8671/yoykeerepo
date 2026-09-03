@@ -1958,12 +1958,18 @@ function cafe24OrderShipping(rows) {
 }
 
 // Normalize a bank party/label for fuzzy comparison: uppercase, drop spaces and
-// any bracketed suffix (지점명·법인격 등), keep hangul/latin/digits only.
-// "온힐 송도점" / "베럴즈（BETTERS）" / "김지연(고공캣)" → 온힐 / 베럴즈 / 고공캣 core.
+// legal-entity suffixes, keep hangul/latin/digits only. Brackets are unwrapped
+// rather than deleted — only the punctuation goes, the content stays — because
+// which side carries the brand differs by row: "베럴즈（BETTERS）" wants the outer
+// text, but "김지연(고공캣)" (개인 예금주 + 브랜드) puts the brand *inside* the
+// brackets. Deleting bracket spans used to erase 고공캣 entirely from rows like
+// that, so bank_missing fired even though the withdrawal was right there.
+// "온힐 송도점" → 온힐송도점 / "베럴즈（BETTERS）" → 베럴즈BETTERS / "김지연(고공캣)" → 김지연고공캣
+// — the substring match in bankRowMatchesBrand finds the brand key in any of these.
 function normalizeBankParty(value) {
   return String(value || "")
-    .replace(/[（(【\[].*?[)）】\]]/g, " ")
     .replace(/주식회사|㈜|\(주\)/g, " ")
+    .replace(/[（(【\[)）】\]]/g, " ")
     .toUpperCase()
     .replace(/[^0-9A-Z가-힣]/g, "");
 }
@@ -2183,12 +2189,41 @@ function applyCanonPricesToItems(items, canon) {
   });
 }
 
+// 정가 기준 브랜드의 카페24 자동수집 초안에도 위와 같은 단가표 보정을 적용한다.
+// 정산 때만 대조하면 이미 만들어진 입금요청이 카페24 결제액으로 굳어버리므로,
+// 초안 계산 시점부터 단가표 가격을 쓰고 매칭 실패는 자동선택에서 빼 사람이 보게 한다.
+function applyCatalogBasisToDraft(db, brand, lineItems) {
+  if (brand.priceBasis !== "catalog") {
+    return { lineItems, catalogMismatch: false, catalogUnmatched: [] };
+  }
+  const canon = buildCanonPriceMatcher(db, brand);
+  if (!canon.hasCatalog) {
+    return { lineItems, catalogMismatch: true, catalogUnmatched: [], catalogNote: "단가표에 등록된 품목이 없습니다" };
+  }
+  const catalogUnmatched = [];
+  const priced = lineItems.map((item) => {
+    const hit = canon.match(item.itemName, item.itemCode);
+    if (!hit) {
+      catalogUnmatched.push(item.itemName || item.itemCode);
+      return item;
+    }
+    const quantity = Math.max(1, number(item.quantity, 1));
+    return { ...item, originalPrice: hit.original, unitSalePrice: hit.price, totalSaleAmount: hit.price * quantity };
+  });
+  return { lineItems: priced, catalogMismatch: catalogUnmatched.length > 0, catalogUnmatched };
+}
+
 // 브랜드의 카페24 행을 정산월로 가른다.
 //
 // 어느 날짜로 정산월을 가를지는 브랜드 설정(settlementDateBasis)을 따른다.
 //   delivered : [배송완료일]이 정산월인 건 (주문일 무관) — 위탁 기본값
-//   order     : [주문일](주문번호 앞 8자리)이 정산월 + 배송완료된 건 — 그 외 기본값
+//   order     : [주문일](주문번호 앞 8자리)이 정산월 + 출고완료된 건 — 그 외 기본값
 // 계약이 브랜드마다 다르므로 정산유형에 묶지 않고 브랜드별로 고르게 둔다.
+//
+// "출고완료"는 배송완료일뿐 아니라 송장(운송장)번호 등록만으로도 인정한다.
+// 송장은 찍혔는데 배송완료 처리가 늦어(배송중/배송대기 단계에 머물러) 정산에서
+// 통째로 누락되는 일이 실제로 있었다 — 예: 복슬강아지 0829 주문. 입금은
+// 이미 끝났는데 시스템 배송완료 마킹만 안 된 것이었다.
 //
 // 정산 실행과 목록 스캔이 같은 함수를 봐야 "목록에는 대상이 있다는데 돌리면
 // 0건"이 생기지 않는다. 그래서 판정은 여기 한 곳에만 둔다.
@@ -2205,6 +2240,7 @@ function splitCafe24RowsByMonth(brand, brandRows, monthPrefix) {
     const orderDate = orderNo.slice(0, 8);
     const deliveredDate = String(r["배송완료일"] || "").trim();
     const delivered = Boolean(deliveredDate);
+    const shipped = delivered || Boolean(String(r["송장번호"] || "").trim());
     if (cafe24RowIsCancelled(r)) {
       cancels.push({
         itemNo: r["품목별 주문번호"] || orderNo,
@@ -2218,7 +2254,7 @@ function splitCafe24RowsByMonth(brand, brandRows, monthPrefix) {
     }
     const included = byDelivered
       ? (delivered && ymOf(deliveredDate) === monthPrefix)      // 배송완료월 기준
-      : (orderDate.startsWith(monthPrefix) && delivered);       // 주문일 기준 + 배송완료
+      : (orderDate.startsWith(monthPrefix) && shipped);         // 주문일 기준 + 출고완료(송장 등록 포함)
     const inScope = byDelivered ? included : orderDate.startsWith(monthPrefix);
     if (inScope) {
       if (!allRowsByOrder.has(orderNo)) allRowsByOrder.set(orderNo, []);
@@ -2627,6 +2663,12 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
   } else {
     warnings.push("은행 파일이 업로드되지 않아 출금 대조를 건너뜁니다.");
   }
+
+  // lines는 includedByOrder(Map) 순서 그대로 쌓인다 — 카페24 API가 주문을 최신순
+  // (역순)으로 주면 정산서 온라인 시트도 그대로 역순이 된다. 품목별 주문번호가
+  // "주문일자-순번-품목순번" 형태라 문자열 오름차순 정렬이 곧 주문일 오름차순 +
+  // 같은 주문 안에서는 품목번호 작은 순이 된다.
+  lines.sort((a, b) => String(a.itemNo).localeCompare(String(b.itemNo)));
 
   return {
     needsMapping: false,
@@ -5084,23 +5126,36 @@ async function clobeKeepAlive() {
 // 쓰므로, 자동 수집분과 수기 입력분의 금액 산출이 갈리지 않는다.
 function priceDraft(db, draft) {
   const brand = db.brands.find((item) => item.id === draft.brandId) || {};
-  const promotionContext = buildPromotionContext(db, brand, sanitizeLineItems(draft.lineItems), "");
-  const calc = calculateSettlement({ lineItems: draft.lineItems, _promotionContext: promotionContext }, brand);
+  const catalog = applyCatalogBasisToDraft(db, brand, draft.lineItems);
+  const promotionContext = buildPromotionContext(db, brand, sanitizeLineItems(catalog.lineItems), "");
+  const calc = calculateSettlement({ lineItems: catalog.lineItems, _promotionContext: promotionContext }, brand);
   return {
+    lineItems: calc.lineItems,
+    quantity: (catalog.lineItems || []).reduce((sum, line) => sum + number(line.quantity), 0),
     depositAmount: calc.depositAmount,
     productSalesAmount: calc.productSalesAmount,
     baseShippingFee: calc.baseShippingFee,
     commissionRate: calc.commissionRate,
     commissionAmount: calc.commissionAmount,
+    supplyAmount: calc.supplyAmount,
+    promotionRuleId: calc.promotionRuleId,
+    promotionRuleName: calc.promotionRuleName,
+    appliedPromotionRules: calc.appliedPromotionRules,
+    receivableDeduction: calc.receivableDeduction,
     settlementType: calc.settlementType,
     // 카페24가 청구한 배송비와 브랜드 규칙이 다르면 확인 단계에서 보여준다.
-    shippingMismatch: Math.abs(number(calc.baseShippingFee) - number(draft.cafe24ShippingFee)) > 1
+    shippingMismatch: Math.abs(number(calc.baseShippingFee) - number(draft.cafe24ShippingFee)) > 1,
+    // 정가 기준 브랜드인데 단가표에 없는 품목이 섞이면 자동선택에서 빼고 사람이 보게 한다.
+    catalogMismatch: catalog.catalogMismatch,
+    catalogUnmatched: catalog.catalogUnmatched,
+    catalogNote: catalog.catalogNote || ""
   };
 }
 
 function buildRequestFromDraft(db, brand, draft) {
-  const promotionContext = buildPromotionContext(db, brand, sanitizeLineItems(draft.lineItems), "");
-  const calc = calculateSettlement({ lineItems: draft.lineItems, _promotionContext: promotionContext }, brand);
+  const catalog = applyCatalogBasisToDraft(db, brand, draft.lineItems);
+  const promotionContext = buildPromotionContext(db, brand, sanitizeLineItems(catalog.lineItems), "");
+  const calc = calculateSettlement({ lineItems: catalog.lineItems, _promotionContext: promotionContext }, brand);
   return {
     id: id("req"),
     brandId: brand.id,
