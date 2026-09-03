@@ -2595,6 +2595,12 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
     warnings.push("은행 파일이 업로드되지 않아 출금 대조를 건너뜁니다.");
   }
 
+  // lines는 includedByOrder(Map) 순서 그대로 쌓인다 — 카페24 API가 주문을 최신순
+  // (역순)으로 주면 정산서 온라인 시트도 그대로 역순이 된다. 품목별 주문번호가
+  // "주문일자-순번-품목순번" 형태라 문자열 오름차순 정렬이 곧 주문일 오름차순 +
+  // 같은 주문 안에서는 품목번호 작은 순이 된다.
+  lines.sort((a, b) => String(a.itemNo).localeCompare(String(b.itemNo)));
+
   return {
     needsMapping: false,
     suppliers,
