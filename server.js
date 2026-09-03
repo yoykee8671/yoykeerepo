@@ -2160,8 +2160,13 @@ function applyCanonPricesToItems(items, canon) {
 //
 // 어느 날짜로 정산월을 가를지는 브랜드 설정(settlementDateBasis)을 따른다.
 //   delivered : [배송완료일]이 정산월인 건 (주문일 무관) — 위탁 기본값
-//   order     : [주문일](주문번호 앞 8자리)이 정산월 + 배송완료된 건 — 그 외 기본값
+//   order     : [주문일](주문번호 앞 8자리)이 정산월 + 출고완료된 건 — 그 외 기본값
 // 계약이 브랜드마다 다르므로 정산유형에 묶지 않고 브랜드별로 고르게 둔다.
+//
+// "출고완료"는 배송완료일뿐 아니라 송장(운송장)번호 등록만으로도 인정한다.
+// 송장은 찍혔는데 배송완료 처리가 늦어(배송중/배송대기 단계에 머물러) 정산에서
+// 통째로 누락되는 일이 실제로 있었다 — 예: 복슬강아지 0829 주문. 입금은
+// 이미 끝났는데 시스템 배송완료 마킹만 안 된 것이었다.
 //
 // 정산 실행과 목록 스캔이 같은 함수를 봐야 "목록에는 대상이 있다는데 돌리면
 // 0건"이 생기지 않는다. 그래서 판정은 여기 한 곳에만 둔다.
@@ -2178,6 +2183,7 @@ function splitCafe24RowsByMonth(brand, brandRows, monthPrefix) {
     const orderDate = orderNo.slice(0, 8);
     const deliveredDate = String(r["배송완료일"] || "").trim();
     const delivered = Boolean(deliveredDate);
+    const shipped = delivered || Boolean(String(r["송장번호"] || "").trim());
     if (cafe24RowIsCancelled(r)) {
       cancels.push({
         itemNo: r["품목별 주문번호"] || orderNo,
@@ -2191,7 +2197,7 @@ function splitCafe24RowsByMonth(brand, brandRows, monthPrefix) {
     }
     const included = byDelivered
       ? (delivered && ymOf(deliveredDate) === monthPrefix)      // 배송완료월 기준
-      : (orderDate.startsWith(monthPrefix) && delivered);       // 주문일 기준 + 배송완료
+      : (orderDate.startsWith(monthPrefix) && shipped);         // 주문일 기준 + 출고완료(송장 등록 포함)
     const inScope = byDelivered ? included : orderDate.startsWith(monthPrefix);
     if (inScope) {
       if (!allRowsByOrder.has(orderNo)) allRowsByOrder.set(orderNo, []);
