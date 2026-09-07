@@ -6731,11 +6731,6 @@ function bindNpbUpload() {
   const n = state.npb;
   app.querySelectorAll("[data-npb-alias]").forEach((sel) => {
     sel.addEventListener("change", () => {
-      n.aliasDraft = { ...(n.aliasDraft || {}), [sel.dataset.npbAlias]: sel.value };
-    });
-  });
-  app.querySelectorAll("[data-npb-alias]").forEach((sel) => {
-    sel.addEventListener("change", () => {
       const draft = npbAliasDraftFor(Number(sel.getAttribute("data-npb-alias")));
       const target = draft.targets[Number(sel.getAttribute("data-npb-at"))];
       if (!target) return;
