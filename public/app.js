@@ -1494,7 +1494,8 @@ function renderRequestLineItems(items, promotionOptions = []) {
   const promotionCell = (item) => {
     if (!promotionOptions.length) return `<span class="muted">규칙 없음</span>`;
     const options = [`<option value="">(자동)</option>`]
-      .concat(promotionOptions.map((rule) => `<option value="${rule.id}" ${item.promotionRuleId === rule.id ? "selected" : ""}>${h(rule.name)}</option>`))
+      .concat(promotionOptions.map((rule) =>
+        `<option value="${rule.id}" ${item.promotionRuleId === rule.id ? "selected" : ""}>${h(rule.name)}${rule.outOfPeriod ? " (기간외)" : ""}</option>`))
       .join("");
     return `<select data-line-promotion="${item.id}" aria-label="프로모션">${options}</select>`;
   };
@@ -2529,16 +2530,22 @@ function bindRequests() {
       });
   // Empty rows stay visible for editing ([+ 행 추가]); the server drops rows
   // without a code/name on save, so they never persist.
+  // Lists every rule for the brand, not just ones active on the deposit date —
+  // a late-filed request needs to pick a promotion whose period already ended.
+  // Out-of-period rules are flagged so the dropdown can mark them, and sorted
+  // after the in-period ones so staff aren't confused about what's current.
   const lineItemPromotionOptions = () => {
     const brand = getSelectedBrand();
     if (!brand) return [];
     const targetDate = getEffectiveDate();
-    return state.promotionRules.filter((rule) => {
-      if (rule.brandId !== brand.id || rule.isActive === false) return false;
-      const from = rule.validFrom || "0000-01-01";
-      const to = rule.validTo || "9999-12-31";
-      return from <= targetDate && targetDate <= to;
-    });
+    return state.promotionRules
+      .filter((rule) => rule.brandId === brand.id && rule.isActive !== false)
+      .map((rule) => {
+        const from = rule.validFrom || "0000-01-01";
+        const to = rule.validTo || "9999-12-31";
+        return { ...rule, outOfPeriod: !(from <= targetDate && targetDate <= to) };
+      })
+      .sort((a, b) => Number(a.outOfPeriod) - Number(b.outOfPeriod));
   };
   const setLineItems = (items) => {
     const normalized = normalizeLineItems(items);
@@ -3405,7 +3412,14 @@ function buildPromotionPreview(brand, lineItems = [], effectiveDate = "") {
       discountValue: Number(allRule.discountValue || 0)
     } : null;
   }
-  const rulesById = new Map(activeRules.map((rule) => [rule.id, rule]));
+  // Explicit per-line picks may name a rule whose period already ended (a late
+  // deposit request being corrected after the fact) — resolve those against all
+  // of the brand's rules, not just activeRules. Auto-matching above stays
+  // restricted to activeRules so an expired rule never re-attaches on its own.
+  const explicitLookupRules = state.promotionRules.filter(
+    (item) => item.brandId === brand.id && item.isActive !== false
+  );
+  const rulesById = new Map(explicitLookupRules.map((rule) => [rule.id, rule]));
   let salesTotal = 0;
   let commissionTotal = 0;
   let discountTotal = 0;
