@@ -461,7 +461,14 @@ function buildPromotionContext(db, brand = {}, lineItems = [], onDate = "") {
       appliedRules: [promotionRuleWithRefs(db, allRule)]
     };
   }
-  const rulesById = new Map(activeRules.map((rule) => [rule.id, rule]));
+  // Explicit per-line picks may name a rule whose period already ended (a late
+  // deposit request being corrected after the fact) — look those up across all
+  // of the brand's rules, not just the ones active on onDate. Auto-matching
+  // above stays restricted to activeRules so an expired rule never re-attaches
+  // itself to unrelated requests on its own.
+  const explicitLookupRules = (db.promotionRules || [])
+    .filter((rule) => (!brand?.id || rule.brandId === brand.id) && rule.isActive !== false);
+  const rulesById = new Map(explicitLookupRules.map((rule) => [rule.id, rule]));
   let salesTotal = 0;
   let commissionTotal = 0;
   let discountTotal = 0;
