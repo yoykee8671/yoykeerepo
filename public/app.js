@@ -1087,7 +1087,22 @@ function renderRequestForm() {
         <div><label>수수료율(%)</label><input name="commissionRate" type="number" min="0" max="100" step="0.1" readonly value="${h(item.commissionRate ?? promotion?.commissionRate ?? selectedBrand?.commissionRate ?? "")}"></div>
         <div data-supply-amount-field style="${settlementType === "prepay_supply" ? "" : "display:none"}"><label>공급가 합</label><input name="supplyAmount" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.supplyAmount))}"></div>
       </div>
-      <div class="field" data-hide-direct="1"><label>적용 프로모션</label><input name="promotionRuleName" readonly value="${h(item.promotionRuleName || promotion?.name || "")}" placeholder="없음"></div>
+      <div class="field" data-hide-direct="1">
+        <label>적용 프로모션</label>
+        <select name="promotionRuleId">
+          <option value="">(자동)</option>
+          ${(selectedBrand ? state.promotionRules.filter((rule) => rule.brandId === selectedBrand.id && rule.isActive !== false) : [])
+            .map((rule) => {
+              const from = rule.validFrom || "0000-01-01";
+              const to = rule.validTo || "9999-12-31";
+              const targetDate = item.expectedDepositDate || new Date().toISOString().slice(0, 10);
+              const outOfPeriod = !(from <= targetDate && targetDate <= to);
+              return `<option value="${rule.id}" ${item.promotionRuleId === rule.id ? "selected" : ""}>${h(rule.name)}${outOfPeriod ? " (기간외)" : ""}</option>`;
+            }).join("")}
+        </select>
+        <span class="muted" data-promotion-preview>${h(item.promotionRuleName || promotion?.name || "없음")}</span>
+        ${lineItems.length ? `<span class="muted">품목별 항목을 쓰는 요청은 여기서 고른 값이 계산에 반영되지 않습니다 — 각 품목 행에서 지정하세요.</span>` : ""}
+      </div>
       <div class="field" data-hide-direct="1">
         <label>품목별 항목 추가</label>
         <input name="lineItemsJson" type="hidden" value='${h(JSON.stringify(lineItems))}'>
@@ -2998,7 +3013,7 @@ function bindRequests() {
     }
   });
   requestForm
-    .querySelectorAll("[name='productSalesAmount'], [name='extraShippingFee'], [name='commissionRate'], [name='supplyAmount'], [name='expectedDepositDate'], [name='overpaidAmount'], [name='creditUsedAmount'], [name='cancelledAmount'], [name='priorPaidAmount']")
+    .querySelectorAll("[name='productSalesAmount'], [name='extraShippingFee'], [name='commissionRate'], [name='supplyAmount'], [name='expectedDepositDate'], [name='overpaidAmount'], [name='creditUsedAmount'], [name='cancelledAmount'], [name='priorPaidAmount'], [name='promotionRuleId']")
     .forEach((input) => input.addEventListener("input", () => updateRequestCalculation(requestForm)));
   requestForm.querySelector("[name='baseShippingFee']")?.addEventListener("input", (event) => {
     event.target.dataset.manual = "1";
@@ -3110,7 +3125,7 @@ function applyBrandDefaults(form, brand) {
   const promotion = findActivePromotionRule(brand.id, form.querySelector("[name='expectedDepositDate']")?.value);
   setValue("settlementType", brand.settlementType || "prepay_fee");
   setValue("commissionRate", promotion?.commissionRate ?? brand.commissionRate ?? "");
-  setValue("promotionRuleName", promotion?.name || "");
+  setValue("promotionRuleId", "");
   setValue("cutoffNote", brand.cutoffNote || "");
   setValue("requiredMemo", brand.requiredMemo || "");
   setValue("sourceSheet", brand.rawSheetName || brand.name || "");
@@ -3147,7 +3162,11 @@ function updateRequestCalculation(form) {
   const baseShippingFee = baseManual ? value("baseShippingFee") : calculateBrandShippingFee(brand, shippingBase);
   const extraShippingFee = value("extraShippingFee");
   const shippingFee = baseShippingFee + extraShippingFee;
-  const promotionContext = buildPromotionPreview(brand, lineItems, form.querySelector("[name='expectedDepositDate']")?.value);
+  const promotionContext = buildPromotionPreview(
+    brand, lineItems,
+    form.querySelector("[name='expectedDepositDate']")?.value,
+    form.querySelector("[name='promotionRuleId']")?.value || ""
+  );
   const promotion = promotionContext?.primaryRule || null;
   const commissionRate = Number(promotionContext?.commissionRate ?? brand?.commissionRate ?? value("commissionRate"));
   const discountAmount = Number.isFinite(promotionContext?.discountAmount)
@@ -3189,7 +3208,7 @@ function updateRequestCalculation(form) {
   const baseShippingInput = form.querySelector("[name='baseShippingFee']");
   const totalShippingInput = form.querySelector("[name='shippingFee']");
   const commissionRateInput = form.querySelector("[name='commissionRate']");
-  const promotionRuleInput = form.querySelector("[name='promotionRuleName']");
+  const promotionPreview = form.querySelector("[data-promotion-preview]");
   const productSalesInput = form.querySelector("[name='productSalesAmount']");
   const receivableField = form.querySelector("[data-receivable-deduction-field]");
   const supplyAmountField = form.querySelector("[data-supply-amount-field]");
@@ -3224,7 +3243,7 @@ function updateRequestCalculation(form) {
         : "(실제 차감액)";
   }
   if (commissionRateInput) commissionRateInput.value = String(commissionRate || "");
-  if (promotionRuleInput) promotionRuleInput.value = promotionContext?.name || "";
+  if (promotionPreview) promotionPreview.textContent = promotionContext?.name || "없음";
   if (productSalesInput && derivedProductSalesAmount > 0) productSalesInput.value = formatAmount(productSalesAmount);
   if (supplyInput && lineItems.length) supplyInput.value = formatAmount(supplyAmount);
   if (baseShippingInput && !baseManual) baseShippingInput.value = formatAmount(baseShippingFee);
@@ -3276,7 +3295,7 @@ function updateRequestCalculation(form) {
   if (isDirect) {
     if (commissionInput) commissionInput.value = "";
     if (commissionRateInput) commissionRateInput.value = "";
-    if (promotionRuleInput) promotionRuleInput.value = "";
+    if (promotionPreview) promotionPreview.textContent = "";
     if (supplyInput) supplyInput.value = "";
     const directInput = form.querySelector("[name='directTotalAmount']");
     const directBreakdown = form.querySelector("[data-direct-breakdown]");
@@ -3385,7 +3404,7 @@ function normalizeItemKey(itemCode, itemName) {
   return `${String(itemCode || "").trim().toLowerCase()}::${String(itemName || "").trim().toLowerCase()}`;
 }
 
-function buildPromotionPreview(brand, lineItems = [], effectiveDate = "") {
+function buildPromotionPreview(brand, lineItems = [], effectiveDate = "", manualRuleId = "") {
   if (!brand?.id) return null;
   const targetDate = effectiveDate || new Date().toISOString().slice(0, 10);
   const activeRules = state.promotionRules.filter((item) => {
@@ -3403,13 +3422,20 @@ function buildPromotionPreview(brand, lineItems = [], effectiveDate = "") {
   const itemRules = autoRules.filter((item) => (item.scopeType || "all") === "items");
   const salesLines = lineItems.filter((item) => Number(item.totalSaleAmount || 0) > 0);
   if (!salesLines.length) {
-    return allRule ? {
-      primaryRule: allRule,
-      name: allRule.name,
-      commissionRate: Number(allRule.commissionRate ?? brand.commissionRate ?? 0),
+    // No per-line breakdown — this is the whole-request "적용 프로모션" picker.
+    // A manual pick overrides the date-active guess regardless of period, as
+    // long as an admin hasn't turned the rule off.
+    const manualRule = manualRuleId
+      ? state.promotionRules.find((item) => item.id === manualRuleId && item.brandId === brand.id && item.isActive !== false)
+      : null;
+    const rule = manualRule || allRule;
+    return rule ? {
+      primaryRule: rule,
+      name: rule.name,
+      commissionRate: Number(rule.commissionRate ?? brand.commissionRate ?? 0),
       commissionAmount: null,
-      discountValueType: allRule.discountValueType || "",
-      discountValue: Number(allRule.discountValue || 0)
+      discountValueType: rule.discountValueType || "",
+      discountValue: Number(rule.discountValue || 0)
     } : null;
   }
   // Explicit per-line picks may name a rule whose period already ended (a late

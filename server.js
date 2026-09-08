@@ -441,7 +441,7 @@ function computeDiscountAmount(rule, productSales) {
   return 0;
 }
 
-function buildPromotionContext(db, brand = {}, lineItems = [], onDate = "") {
+function buildPromotionContext(db, brand = {}, lineItems = [], onDate = "", manualRuleId = "") {
   const activeRules = getActivePromotionRules(db, brand?.id, onDate);
   const brandRate = number(brand?.commissionRate);
   // Price-discount rules apply ONLY when explicitly picked per line; they never
@@ -450,15 +450,23 @@ function buildPromotionContext(db, brand = {}, lineItems = [], onDate = "") {
   const allRule = autoRules.find((rule) => (rule.scopeType || "all") === "all") || null;
   const itemRules = autoRules.filter((rule) => (rule.scopeType || "all") === "items");
   if (!lineItems.length) {
-    if (!allRule) return null;
+    // No per-line breakdown to pick from — this is the whole-request "적용
+    // 프로모션" field. A manual pick (e.g. a promotion whose period already
+    // ended, applied to a late-filed deposit) overrides the date-active guess,
+    // regardless of period, as long as an admin hasn't turned the rule off.
+    const manualRule = manualRuleId
+      ? (db.promotionRules || []).find((rule) => rule.id === manualRuleId && rule.brandId === brand?.id && rule.isActive !== false)
+      : null;
+    const rule = manualRule || allRule;
+    if (!rule) return null;
     return {
-      primaryRuleId: allRule.id,
-      name: allRule.name,
-      commissionRate: effectiveRuleRate(allRule, brandRate),
+      primaryRuleId: rule.id,
+      name: rule.name,
+      commissionRate: effectiveRuleRate(rule, brandRate),
       commissionAmount: null,
-      discountValueType: allRule.discountValueType || "",
-      discountValue: number(allRule.discountValue),
-      appliedRules: [promotionRuleWithRefs(db, allRule)]
+      discountValueType: rule.discountValueType || "",
+      discountValue: number(rule.discountValue),
+      appliedRules: [promotionRuleWithRefs(db, rule)]
     };
   }
   // Explicit per-line picks may name a rule whose period already ended (a late
@@ -6037,7 +6045,7 @@ async function routeApi(req, res, url) {
   if (pathname === "/api/requests" && method === "POST") {
     const body = await readBody(req);
     const brand = db.brands.find((item) => item.id === body.brandId);
-    const promotionContext = brand ? buildPromotionContext(db, brand, sanitizeLineItems(body.lineItems), body.expectedDepositDate) : null;
+    const promotionContext = brand ? buildPromotionContext(db, brand, sanitizeLineItems(body.lineItems), body.expectedDepositDate, body.promotionRuleId) : null;
     const calc = calculateSettlement({ ...body, _promotionContext: promotionContext }, brand);
     const request = {
       id: id("req"),
@@ -6275,7 +6283,12 @@ async function routeApi(req, res, url) {
       }
     }
     const brand = db.brands.find((item) => item.id === request.brandId);
-    const promotionContext = brand ? buildPromotionContext(db, brand, sanitizeLineItems(body.lineItems || request.lineItems), body.expectedDepositDate || request.expectedDepositDate) : null;
+    const promotionContext = brand ? buildPromotionContext(
+      db, brand,
+      sanitizeLineItems(body.lineItems || request.lineItems),
+      body.expectedDepositDate || request.expectedDepositDate,
+      "promotionRuleId" in body ? body.promotionRuleId : request.promotionRuleId
+    ) : null;
     const calc = calculateSettlement({ ...request, ...body, _promotionContext: promotionContext }, brand);
     Object.assign(request, calc);
     if (request.settlementType === "consignment" && request.status === "pending") {
