@@ -62,6 +62,22 @@ button.ghost {
   background: transparent;
 }
 
+/* Square icon-only button used for per-row delete actions (×). */
+button.icon-btn {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  font-size: 16px;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -346,6 +362,7 @@ td.wrap {
 
 .row-actions {
   display: flex;
+  align-items: center;
   gap: 6px;
 }
 
@@ -670,41 +687,61 @@ details.collapsible-summary[open] > summary {
   background: #fff;
 }
 
-/* Pin 작업 / 코드 / 품목명 to the left so the item name stays readable
+/* Pin 작업 / 주문번호 / 코드 / 품목명 to the left so the item name stays readable
    while the low-priority price/date columns scroll horizontally. */
 .line-items-table th:nth-child(1),
 .line-items-table td:nth-child(1),
 .line-items-table th:nth-child(2),
 .line-items-table td:nth-child(2),
 .line-items-table th:nth-child(3),
-.line-items-table td:nth-child(3) {
+.line-items-table td:nth-child(3),
+.line-items-table th:nth-child(4),
+.line-items-table td:nth-child(4) {
   position: sticky;
   z-index: 2;
 }
 .line-items-table td:nth-child(1),
 .line-items-table td:nth-child(2),
-.line-items-table td:nth-child(3) {
+.line-items-table td:nth-child(3),
+.line-items-table td:nth-child(4) {
   background: #fff;
 }
 .line-items-table th:nth-child(1),
 .line-items-table th:nth-child(2),
-.line-items-table th:nth-child(3) {
+.line-items-table th:nth-child(3),
+.line-items-table th:nth-child(4) {
   background: #f3f5f8;
   z-index: 3;
 }
+/* 고정(sticky) 컬럼은 left 오프셋이 실제 렌더 폭과 정확히 일치해야 서로 겹치지
+   않는다. auto 레이아웃이 줄이지 못하도록 width와 min-width를 함께 고정한다. */
 .line-items-table th:nth-child(1),
 .line-items-table td:nth-child(1) {
   left: 0;
-  width: 46px;
+  width: 40px;
+  min-width: 40px;
 }
+/* 주문번호는 20자 고정 포맷(20260917-0000068-01) — 잘리지 않게 폭을 맞춘다. */
 .line-items-table th:nth-child(2),
 .line-items-table td:nth-child(2) {
-  left: 46px;
-  width: 72px;
+  left: 40px;
+  width: 150px;
+  min-width: 150px;
+}
+.line-items-table td:nth-child(2) span {
+  font-size: 12px;
 }
 .line-items-table th:nth-child(3),
 .line-items-table td:nth-child(3) {
-  left: 118px;
+  left: 190px;
+  width: 92px;
+  min-width: 92px;
+}
+.line-items-table th:nth-child(4),
+.line-items-table td:nth-child(4) {
+  left: 282px;
+  width: 210px;
+  min-width: 210px;
   box-shadow: 2px 0 4px rgba(15, 23, 42, 0.08);
 }
 .requests-table th:nth-child(1),
@@ -735,21 +772,57 @@ details.collapsible-summary[open] > summary {
 .line-items-table input[type="date"] {
   width: 130px;
 }
-/* 코드: compact. 품목명: wide & always visible. 수량: plain number. */
-.line-items-table td:nth-child(2) input {
-  width: 60px;
-  min-width: 60px;
-}
+/* 코드: 최대 8자 내외의 고정 포맷. 품목명: wide & always visible. */
 .line-items-table td:nth-child(3) input {
-  width: 190px;
-  min-width: 190px;
+  width: 80px;
+  min-width: 80px;
 }
+.line-items-table td:nth-child(4) input {
+  width: 198px;
+  min-width: 198px;
+}
+/* 수량은 0~999 범위 — 아주 좁게. */
 .line-items-table .qty-input {
-  width: 60px;
+  width: 46px;
+  min-width: 46px;
   text-align: center;
+}
+.line-items-table th:nth-child(5),
+.line-items-table td:nth-child(5) {
+  width: 58px;
+  min-width: 58px;
 }
 .line-items-table input[type="number"]:not(.qty-input) {
   width: 78px;
+}
+/* 금액 컬럼(공급가~현재판매가): 최대 "10,000,000" 기준. */
+.line-items-table th:nth-child(n + 6):nth-child(-n + 9),
+.line-items-table td:nth-child(n + 6):nth-child(-n + 9) {
+  width: 100px;
+  min-width: 100px;
+}
+.line-items-table td:nth-child(n + 6):nth-child(-n + 9) input {
+  width: 88px;
+  min-width: 88px;
+  text-align: right;
+}
+/* 적용시작/적용종료는 input[type=date] 130px에 맞춘다. */
+.line-items-table th:nth-child(10),
+.line-items-table td:nth-child(10),
+.line-items-table th:nth-child(11),
+.line-items-table td:nth-child(11) {
+  width: 142px;
+  min-width: 142px;
+}
+.line-items-table th:nth-child(12),
+.line-items-table td:nth-child(12) {
+  width: 105px;
+  min-width: 105px;
+}
+.line-items-table th:nth-child(13),
+.line-items-table td:nth-child(13) {
+  width: 150px;
+  min-width: 150px;
 }
 
 .autocomplete-menu {
@@ -1343,3 +1416,343 @@ a.button:hover {
 
 .npb-rollup-grid.five { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
 @media (max-width: 900px) { .npb-rollup-grid.five { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* ---------------------------------------------------------------------------
+   Per-table column sizing.
+   Guideline: 수량 ~50px, 사람/브랜드 이름 ~100-110px, 금액(<=10,000,000원) ~105px,
+   날짜 ~100px, 날짜+시간 ~145px, 주문번호(20자) ~155px.
+   Free text (품목명/메모/비고) gets a generous min-width and wraps instead of
+   being clipped by the global `white-space: nowrap` on th/td.
+   --------------------------------------------------------------------------- */
+
+/* Shared: free-text columns opt out of nowrap. */
+.brand-promotions-table td:nth-child(1),
+.promotion-rules-table td:nth-child(2),
+.price-catalog-table td:nth-child(3),
+.price-catalog-table td:nth-child(4),
+.price-revisions-table td:nth-child(3),
+.price-aliases-table td:nth-child(2),
+.price-aliases-table td:nth-child(3),
+.brand-rule-history-table td:nth-child(5),
+.promotion-targets-table td:nth-child(1),
+.sheets-sync-table td:nth-child(3),
+.sheet-preview-table td:nth-child(6),
+.sheet-preview-table td:nth-child(7),
+.collect-diff-table td:nth-child(3),
+.collect-assets-table td:nth-child(4),
+.pipeline-drafts-table td:nth-child(4),
+.pipeline-drafts-table td:nth-child(7),
+.deposit-match-table td:nth-child(4),
+.deposit-match-table td:nth-child(5),
+.npb-skumatch-table td:nth-child(1),
+.npb-ship-table td:nth-child(2),
+.npb-lines-table td:nth-child(2),
+.npb-split-table td:nth-child(5),
+.npb-split-result-table td:nth-child(4),
+.npb-inventory-table td:nth-child(1),
+.npb-channels-table td:nth-child(8),
+.npb-products-table td:nth-child(1),
+.npb-ws-table td:nth-child(1),
+.line-items-table td:nth-child(4) {
+  white-space: normal;
+}
+
+/* 브랜드 상세 — 프로모션 규칙 */
+.brand-promotions-table th:nth-child(1), .brand-promotions-table td:nth-child(1) { min-width: 150px; }
+.brand-promotions-table th:nth-child(2), .brand-promotions-table td:nth-child(2) { width: 100px; min-width: 100px; }
+.brand-promotions-table th:nth-child(3), .brand-promotions-table td:nth-child(3) { width: 80px; min-width: 80px; }
+.brand-promotions-table th:nth-child(4), .brand-promotions-table td:nth-child(4) { width: 95px; min-width: 95px; }
+.brand-promotions-table th:nth-child(5), .brand-promotions-table td:nth-child(5) { width: 190px; min-width: 190px; }
+.brand-promotions-table th:nth-child(6), .brand-promotions-table td:nth-child(6) { width: 70px; min-width: 70px; }
+.brand-promotions-table th:nth-child(7), .brand-promotions-table td:nth-child(7) { width: 110px; min-width: 110px; }
+
+/* 입금요청 목록 — 고정폭 컬럼은 min-width로 잠그고, 남는 가로 여백은 마지막
+   메모 컬럼이 흡수하게 해서 나머지 컬럼이 불필요하게 넓어지지 않게 한다. */
+.requests-table th:nth-child(1), .requests-table td:nth-child(1) { width: 40px; min-width: 40px; }
+.requests-table th:nth-child(2), .requests-table td:nth-child(2) { width: 158px; min-width: 158px; }
+.requests-table th:nth-child(3), .requests-table td:nth-child(3) { width: 108px; min-width: 108px; }
+.requests-table th:nth-child(4), .requests-table td:nth-child(4) { width: 96px; min-width: 96px; }
+.requests-table th:nth-child(5), .requests-table td:nth-child(5) { width: 110px; min-width: 110px; }
+.requests-table th:nth-child(6), .requests-table td:nth-child(6) { width: 156px; min-width: 156px; }
+.requests-table th:nth-child(7), .requests-table td:nth-child(7) { width: 100px; min-width: 100px; }
+.requests-table th:nth-child(8), .requests-table td:nth-child(8) { width: 105px; min-width: 105px; }
+.requests-table th:nth-child(9), .requests-table td:nth-child(9) { width: 95px; min-width: 95px; }
+.requests-table th:nth-child(10), .requests-table td:nth-child(10) { width: 130px; min-width: 130px; }
+.requests-table th:nth-child(11), .requests-table td:nth-child(11) { width: 160px; min-width: 160px; }
+.requests-table th:nth-child(12), .requests-table td:nth-child(12) { width: 100px; min-width: 100px; }
+.requests-table th:nth-child(13), .requests-table td:nth-child(13) { width: 146px; min-width: 146px; }
+.requests-table th:nth-child(14), .requests-table td:nth-child(14) { width: 150px; min-width: 150px; }
+.requests-table th:nth-child(15), .requests-table td:nth-child(15) { width: 100%; min-width: 200px; }
+/* 상태 select must not stretch the column. */
+.requests-table td:nth-child(3) select { width: 100%; }
+
+/* 브랜드 목록 */
+.brands-table th:nth-child(1), .brands-table td:nth-child(1) { width: 130px; min-width: 130px; }
+.brands-table th:nth-child(2), .brands-table td:nth-child(2) { width: 90px; min-width: 90px; }
+.brands-table th:nth-child(3), .brands-table td:nth-child(3) { width: 70px; min-width: 70px; }
+.brands-table th:nth-child(4), .brands-table td:nth-child(4) { width: 130px; min-width: 130px; }
+.brands-table th:nth-child(5), .brands-table td:nth-child(5) { width: 110px; min-width: 110px; }
+.brands-table th:nth-child(6), .brands-table td:nth-child(6) { width: 130px; min-width: 130px; }
+.brands-table th:nth-child(7), .brands-table td:nth-child(7) { width: 120px; min-width: 120px; }
+.brands-table th:nth-child(8), .brands-table td:nth-child(8) { width: 90px; min-width: 90px; }
+.brands-table th:nth-child(9), .brands-table td:nth-child(9) { width: 176px; min-width: 176px; }
+
+/* 프로모션 규칙 목록 */
+.promotion-rules-table th:nth-child(1), .promotion-rules-table td:nth-child(1) { width: 120px; min-width: 120px; }
+.promotion-rules-table th:nth-child(2), .promotion-rules-table td:nth-child(2) { min-width: 150px; }
+.promotion-rules-table th:nth-child(3), .promotion-rules-table td:nth-child(3) { width: 100px; min-width: 100px; }
+.promotion-rules-table th:nth-child(4), .promotion-rules-table td:nth-child(4) { width: 80px; min-width: 80px; }
+.promotion-rules-table th:nth-child(5), .promotion-rules-table td:nth-child(5) { width: 95px; min-width: 95px; }
+.promotion-rules-table th:nth-child(6), .promotion-rules-table td:nth-child(6) { width: 190px; min-width: 190px; }
+.promotion-rules-table th:nth-child(7), .promotion-rules-table td:nth-child(7) { width: 70px; min-width: 70px; }
+.promotion-rules-table th:nth-child(8), .promotion-rules-table td:nth-child(8) { width: 110px; min-width: 110px; }
+
+/* 단가표 */
+.price-catalog-table th:nth-child(1), .price-catalog-table td:nth-child(1) { width: 110px; min-width: 110px; }
+.price-catalog-table th:nth-child(2), .price-catalog-table td:nth-child(2) { width: 92px; min-width: 92px; }
+.price-catalog-table th:nth-child(3), .price-catalog-table td:nth-child(3) { min-width: 200px; }
+.price-catalog-table th:nth-child(4), .price-catalog-table td:nth-child(4) { min-width: 140px; }
+.price-catalog-table th:nth-child(n+5):nth-child(-n+8),
+.price-catalog-table td:nth-child(n+5):nth-child(-n+8) { width: 100px; min-width: 100px; }
+.price-catalog-table th:nth-child(9), .price-catalog-table td:nth-child(9),
+.price-catalog-table th:nth-child(10), .price-catalog-table td:nth-child(10) { width: 100px; min-width: 100px; }
+.price-catalog-table th:nth-child(11), .price-catalog-table td:nth-child(11) { width: 192px; min-width: 192px; }
+
+/* 단가표 개정 이력 */
+.price-revisions-table th:nth-child(1), .price-revisions-table td:nth-child(1) { width: 110px; min-width: 110px; }
+.price-revisions-table th:nth-child(2), .price-revisions-table td:nth-child(2) { width: 92px; min-width: 92px; }
+.price-revisions-table th:nth-child(3), .price-revisions-table td:nth-child(3) { min-width: 200px; }
+.price-revisions-table th:nth-child(n+4):nth-child(-n+9),
+.price-revisions-table td:nth-child(n+4):nth-child(-n+9) { width: 100px; min-width: 100px; }
+.price-revisions-table th:nth-child(10), .price-revisions-table td:nth-child(10) { width: 110px; min-width: 110px; }
+
+/* 단가표 별칭 */
+.price-aliases-table th:nth-child(1), .price-aliases-table td:nth-child(1) { width: 110px; min-width: 110px; }
+.price-aliases-table th:nth-child(2), .price-aliases-table td:nth-child(2) { min-width: 170px; }
+.price-aliases-table th:nth-child(3), .price-aliases-table td:nth-child(3) { min-width: 200px; }
+.price-aliases-table th:nth-child(4), .price-aliases-table td:nth-child(4) { width: 190px; min-width: 190px; }
+.price-aliases-table th:nth-child(5), .price-aliases-table td:nth-child(5) { width: 70px; min-width: 70px; }
+.price-aliases-table th:nth-child(6), .price-aliases-table td:nth-child(6) { width: 110px; min-width: 110px; }
+
+/* 브랜드 계약 이력 */
+.brand-rule-history-table th:nth-child(1), .brand-rule-history-table td:nth-child(1) { width: 70px; min-width: 70px; }
+.brand-rule-history-table th:nth-child(2), .brand-rule-history-table td:nth-child(2) { width: 110px; min-width: 110px; }
+.brand-rule-history-table th:nth-child(3), .brand-rule-history-table td:nth-child(3) { width: 90px; min-width: 90px; }
+.brand-rule-history-table th:nth-child(4), .brand-rule-history-table td:nth-child(4) { width: 100px; min-width: 100px; }
+.brand-rule-history-table th:nth-child(5), .brand-rule-history-table td:nth-child(5) { min-width: 180px; }
+.brand-rule-history-table th:nth-child(6), .brand-rule-history-table td:nth-child(6) { width: 48px; min-width: 48px; }
+
+/* 프로모션 대상 품목 */
+.promotion-targets-table th:nth-child(1), .promotion-targets-table td:nth-child(1) { min-width: 240px; }
+.promotion-targets-table th:nth-child(2), .promotion-targets-table td:nth-child(2) { width: 60px; min-width: 60px; }
+
+/* 관리자 계정 */
+.admins-table th:nth-child(1), .admins-table td:nth-child(1) { width: 110px; min-width: 110px; }
+.admins-table th:nth-child(2), .admins-table td:nth-child(2) { width: 210px; min-width: 210px; }
+.admins-table th:nth-child(3), .admins-table td:nth-child(3) { width: 90px; min-width: 90px; }
+.admins-table th:nth-child(4), .admins-table td:nth-child(4) { width: 70px; min-width: 70px; }
+.admins-table th:nth-child(5), .admins-table td:nth-child(5) { width: 110px; min-width: 110px; }
+.admins-table th:nth-child(6), .admins-table td:nth-child(6) { width: 110px; min-width: 110px; }
+
+/* 권한 매트릭스 */
+.admin-perms-table td:nth-child(2) { white-space: normal; }
+
+/* 시트 동기화 */
+.sheets-sync-table th:nth-child(1), .sheets-sync-table td:nth-child(1) { width: 130px; min-width: 130px; }
+.sheets-sync-table th:nth-child(2), .sheets-sync-table td:nth-child(2) { width: 70px; min-width: 70px; }
+.sheets-sync-table th:nth-child(3), .sheets-sync-table td:nth-child(3) { min-width: 240px; }
+.sheets-sync-table th:nth-child(4), .sheets-sync-table td:nth-child(4) { width: 110px; min-width: 110px; }
+.sheets-sync-table th:nth-child(5), .sheets-sync-table td:nth-child(5) { width: 130px; min-width: 130px; }
+
+/* 시트 미리보기 */
+.sheet-preview-table th:nth-child(1), .sheet-preview-table td:nth-child(1) { width: 70px; min-width: 70px; }
+.sheet-preview-table th:nth-child(2), .sheet-preview-table td:nth-child(2) { width: 156px; min-width: 156px; }
+.sheet-preview-table th:nth-child(3), .sheet-preview-table td:nth-child(3) { width: 100px; min-width: 100px; }
+.sheet-preview-table th:nth-child(4), .sheet-preview-table td:nth-child(4) { width: 105px; min-width: 105px; }
+.sheet-preview-table th:nth-child(5), .sheet-preview-table td:nth-child(5) { width: 100px; min-width: 100px; }
+.sheet-preview-table th:nth-child(6), .sheet-preview-table td:nth-child(6) { min-width: 180px; }
+.sheet-preview-table th:nth-child(7), .sheet-preview-table td:nth-child(7) { min-width: 160px; }
+
+/* 수집 요약 */
+.collect-summary-table th:nth-child(1), .collect-summary-table td:nth-child(1) { width: 130px; min-width: 130px; }
+.collect-summary-table th:nth-child(2), .collect-summary-table td:nth-child(2) { width: 90px; min-width: 90px; }
+.collect-summary-table th:nth-child(n+3):nth-child(-n+5),
+.collect-summary-table td:nth-child(n+3):nth-child(-n+5) { width: 70px; min-width: 70px; }
+.collect-summary-table th:nth-child(6), .collect-summary-table td:nth-child(6) { width: 110px; min-width: 110px; }
+.collect-summary-table th:nth-child(7), .collect-summary-table td:nth-child(7) { width: 90px; min-width: 90px; }
+
+/* 수집 비교 */
+.collect-diff-table th:nth-child(1), .collect-diff-table td:nth-child(1) { width: 130px; min-width: 130px; }
+.collect-diff-table th:nth-child(2), .collect-diff-table td:nth-child(2) { width: 80px; min-width: 80px; }
+.collect-diff-table th:nth-child(3), .collect-diff-table td:nth-child(3) { min-width: 240px; }
+
+/* 수집 자산 상태 */
+.collect-assets-table th:nth-child(1), .collect-assets-table td:nth-child(1) { width: 70px; min-width: 70px; }
+.collect-assets-table th:nth-child(2), .collect-assets-table td:nth-child(2) { width: 150px; min-width: 150px; }
+.collect-assets-table th:nth-child(3), .collect-assets-table td:nth-child(3) { width: 146px; min-width: 146px; }
+.collect-assets-table th:nth-child(4), .collect-assets-table td:nth-child(4) { min-width: 180px; }
+
+/* 파이프라인 — 초안 */
+.pipeline-drafts-table th:nth-child(1), .pipeline-drafts-table td:nth-child(1) { width: 40px; min-width: 40px; }
+.pipeline-drafts-table th:nth-child(2), .pipeline-drafts-table td:nth-child(2) { width: 156px; min-width: 156px; }
+.pipeline-drafts-table th:nth-child(3), .pipeline-drafts-table td:nth-child(3) { width: 110px; min-width: 110px; }
+.pipeline-drafts-table th:nth-child(4), .pipeline-drafts-table td:nth-child(4) { min-width: 200px; }
+.pipeline-drafts-table th:nth-child(5), .pipeline-drafts-table td:nth-child(5) { width: 120px; min-width: 120px; }
+.pipeline-drafts-table th:nth-child(6), .pipeline-drafts-table td:nth-child(6) { width: 110px; min-width: 110px; }
+.pipeline-drafts-table th:nth-child(7), .pipeline-drafts-table td:nth-child(7) { min-width: 160px; }
+.pipeline-drafts-table th:nth-child(8), .pipeline-drafts-table td:nth-child(8) { width: 110px; min-width: 110px; }
+
+/* 파이프라인 — 출고 */
+.pipeline-ship-table th:nth-child(1), .pipeline-ship-table td:nth-child(1) { width: 40px; min-width: 40px; }
+.pipeline-ship-table th:nth-child(2), .pipeline-ship-table td:nth-child(2) { width: 156px; min-width: 156px; }
+.pipeline-ship-table th:nth-child(3), .pipeline-ship-table td:nth-child(3) { width: 110px; min-width: 110px; }
+.pipeline-ship-table th:nth-child(4), .pipeline-ship-table td:nth-child(4) { width: 105px; min-width: 105px; }
+.pipeline-ship-table th:nth-child(5), .pipeline-ship-table td:nth-child(5) { width: 150px; min-width: 150px; }
+
+/* 입금 매칭 */
+.deposit-match-table th:nth-child(1), .deposit-match-table td:nth-child(1) { width: 80px; min-width: 80px; }
+.deposit-match-table th:nth-child(2), .deposit-match-table td:nth-child(2) { width: 146px; min-width: 146px; }
+.deposit-match-table th:nth-child(3), .deposit-match-table td:nth-child(3) { width: 105px; min-width: 105px; }
+.deposit-match-table th:nth-child(4), .deposit-match-table td:nth-child(4) { min-width: 180px; }
+.deposit-match-table th:nth-child(5), .deposit-match-table td:nth-child(5) { min-width: 180px; }
+.deposit-match-table th:nth-child(6), .deposit-match-table td:nth-child(6) { width: 90px; min-width: 90px; }
+
+/* 미매칭 입금 */
+.deposit-unmatched-table th:nth-child(1), .deposit-unmatched-table td:nth-child(1) { width: 146px; min-width: 146px; }
+.deposit-unmatched-table th:nth-child(2), .deposit-unmatched-table td:nth-child(2) { width: 110px; min-width: 110px; }
+.deposit-unmatched-table th:nth-child(3), .deposit-unmatched-table td:nth-child(3) { width: 105px; min-width: 105px; }
+.deposit-unmatched-table th:nth-child(4), .deposit-unmatched-table td:nth-child(4) { width: 110px; min-width: 110px; }
+
+/* npb — 정산월 목록 */
+.npb-months-table th:nth-child(1), .npb-months-table td:nth-child(1) { width: 80px; min-width: 80px; }
+.npb-months-table th:nth-child(2), .npb-months-table td:nth-child(2) { width: 100px; min-width: 100px; }
+.npb-months-table th:nth-child(3), .npb-months-table td:nth-child(3) { width: 80px; min-width: 80px; }
+.npb-months-table th:nth-child(4), .npb-months-table td:nth-child(4) { width: 110px; min-width: 110px; }
+.npb-months-table th:nth-child(5), .npb-months-table td:nth-child(5) { width: 110px; min-width: 110px; }
+.npb-months-table th:nth-child(6), .npb-months-table td:nth-child(6) { width: 150px; min-width: 150px; }
+
+/* npb — 판매처 상품명 매칭 */
+.npb-skumatch-table th:nth-child(1), .npb-skumatch-table td:nth-child(1) { min-width: 240px; }
+.npb-skumatch-table th:nth-child(2), .npb-skumatch-table td:nth-child(2) { width: 60px; min-width: 60px; }
+.npb-skumatch-table th:nth-child(3), .npb-skumatch-table td:nth-child(3) { min-width: 380px; }
+
+/* npb — 출고 실비 */
+.npb-ship-table th:nth-child(1), .npb-ship-table td:nth-child(1) { width: 110px; min-width: 110px; }
+.npb-ship-table th:nth-child(2), .npb-ship-table td:nth-child(2) { min-width: 200px; }
+.npb-ship-table th:nth-child(3), .npb-ship-table td:nth-child(3) { width: 70px; min-width: 70px; }
+.npb-ship-table th:nth-child(4), .npb-ship-table td:nth-child(4) { width: 90px; min-width: 90px; }
+.npb-ship-table th:nth-child(5), .npb-ship-table td:nth-child(5) { width: 110px; min-width: 110px; }
+.npb-ship-table th:nth-child(6), .npb-ship-table td:nth-child(6) { width: 130px; min-width: 130px; }
+
+/* npb — 광고 실비 */
+.npb-ads-table th:nth-child(1), .npb-ads-table td:nth-child(1) { width: 130px; min-width: 130px; }
+.npb-ads-table th:nth-child(2), .npb-ads-table td:nth-child(2) { width: 190px; min-width: 190px; }
+.npb-ads-table th:nth-child(3), .npb-ads-table td:nth-child(3) { width: 110px; min-width: 110px; }
+
+/* npb — 청구 */
+.npb-invoice-table th:nth-child(1), .npb-invoice-table td:nth-child(1) { width: 140px; min-width: 140px; }
+.npb-invoice-table th:nth-child(2), .npb-invoice-table td:nth-child(2) { width: 110px; min-width: 110px; }
+.npb-invoice-table th:nth-child(3), .npb-invoice-table td:nth-child(3) { width: 110px; min-width: 110px; }
+.npb-invoice-table th:nth-child(4), .npb-invoice-table td:nth-child(4) { width: 110px; min-width: 110px; }
+.npb-invoice-table th:nth-child(5), .npb-invoice-table td:nth-child(5) { width: 100px; min-width: 100px; }
+
+/* npb — 품목 라인 */
+.npb-lines-table th:nth-child(1), .npb-lines-table td:nth-child(1) { width: 56px; min-width: 56px; }
+.npb-lines-table th:nth-child(2), .npb-lines-table td:nth-child(2) { min-width: 220px; }
+.npb-lines-table th:nth-child(3), .npb-lines-table td:nth-child(3) { width: 100px; min-width: 100px; }
+.npb-lines-table th:nth-child(4), .npb-lines-table td:nth-child(4) { width: 100px; min-width: 100px; }
+.npb-lines-table th:nth-child(5), .npb-lines-table td:nth-child(5) { width: 56px; min-width: 56px; }
+.npb-lines-table th:nth-child(6), .npb-lines-table td:nth-child(6) { width: 100px; min-width: 100px; }
+.npb-lines-table th:nth-child(7), .npb-lines-table td:nth-child(7) { width: 95px; min-width: 95px; }
+.npb-lines-table th:nth-child(8), .npb-lines-table td:nth-child(8) { width: 110px; min-width: 110px; }
+.npb-lines-table th:nth-child(9), .npb-lines-table td:nth-child(9) { width: 80px; min-width: 80px; }
+.npb-lines-table th:nth-child(10), .npb-lines-table td:nth-child(10) { width: 100px; min-width: 100px; }
+.npb-lines-table th:nth-child(11), .npb-lines-table td:nth-child(11) { width: 110px; min-width: 110px; }
+.npb-lines-table th:nth-child(12), .npb-lines-table td:nth-child(12) { width: 100px; min-width: 100px; }
+
+/* npb — 워크시트 */
+.npb-ws-table th:nth-child(1), .npb-ws-table td:nth-child(1) { min-width: 200px; }
+.npb-ws-table th:nth-child(2), .npb-ws-table td:nth-child(2) { width: 105px; min-width: 105px; }
+.npb-ws-table th:nth-child(3), .npb-ws-table td:nth-child(3) { width: 105px; min-width: 105px; }
+.npb-ws-table th:nth-child(4), .npb-ws-table td:nth-child(4) { width: 95px; min-width: 95px; }
+.npb-ws-table th:nth-child(5), .npb-ws-table td:nth-child(5) { width: 85px; min-width: 85px; }
+.npb-ws-table th:nth-child(n+6), .npb-ws-table td:nth-child(n+6) { width: 110px; min-width: 110px; }
+
+/* npb — 주체별 정산 */
+.npb-party-table th:nth-child(1), .npb-party-table td:nth-child(1) { width: 130px; min-width: 130px; }
+.npb-party-table th:nth-child(n+2), .npb-party-table td:nth-child(n+2) { width: 110px; min-width: 110px; }
+
+/* npb — 분배 */
+.npb-split-table th:nth-child(1), .npb-split-table td:nth-child(1) { width: 130px; min-width: 130px; }
+.npb-split-table th:nth-child(2), .npb-split-table td:nth-child(2) { width: 80px; min-width: 80px; }
+.npb-split-table th:nth-child(3), .npb-split-table td:nth-child(3) { width: 70px; min-width: 70px; }
+.npb-split-table th:nth-child(4), .npb-split-table td:nth-child(4) { width: 110px; min-width: 110px; }
+.npb-split-table th:nth-child(5), .npb-split-table td:nth-child(5) { min-width: 180px; }
+
+.npb-split-result-table th:nth-child(1), .npb-split-result-table td:nth-child(1) { width: 130px; min-width: 130px; }
+.npb-split-result-table th:nth-child(2), .npb-split-result-table td:nth-child(2) { width: 80px; min-width: 80px; }
+.npb-split-result-table th:nth-child(3), .npb-split-result-table td:nth-child(3) { width: 110px; min-width: 110px; }
+.npb-split-result-table th:nth-child(4), .npb-split-result-table td:nth-child(4) { min-width: 180px; }
+
+/* npb — 재고 */
+.npb-inventory-table th:nth-child(1), .npb-inventory-table td:nth-child(1) { min-width: 220px; }
+.npb-inventory-table th:nth-child(n+2), .npb-inventory-table td:nth-child(n+2) { width: 90px; min-width: 90px; }
+
+/* npb — 채널 단가표 */
+.npb-channels-table th:nth-child(1), .npb-channels-table td:nth-child(1) { width: 130px; min-width: 130px; }
+.npb-channels-table th:nth-child(2), .npb-channels-table td:nth-child(2) { width: 150px; min-width: 150px; }
+.npb-channels-table th:nth-child(3), .npb-channels-table td:nth-child(3) { width: 140px; min-width: 140px; }
+.npb-channels-table th:nth-child(4), .npb-channels-table td:nth-child(4) { width: 105px; min-width: 105px; }
+.npb-channels-table th:nth-child(5), .npb-channels-table td:nth-child(5) { width: 90px; min-width: 90px; }
+.npb-channels-table th:nth-child(6), .npb-channels-table td:nth-child(6) { width: 105px; min-width: 105px; }
+.npb-channels-table th:nth-child(7), .npb-channels-table td:nth-child(7) { width: 140px; min-width: 140px; }
+.npb-channels-table th:nth-child(8), .npb-channels-table td:nth-child(8) { min-width: 160px; }
+.npb-channels-table th:nth-child(9), .npb-channels-table td:nth-child(9) { width: 120px; min-width: 120px; }
+.npb-channels-table th:nth-child(10), .npb-channels-table td:nth-child(10) { width: 120px; min-width: 120px; }
+.npb-channels-table th:nth-child(11), .npb-channels-table td:nth-child(11) { width: 48px; min-width: 48px; }
+
+/* npb — 상품 마스터 */
+.npb-products-table th:nth-child(1), .npb-products-table td:nth-child(1) { min-width: 220px; }
+.npb-products-table th:nth-child(2), .npb-products-table td:nth-child(2) { width: 140px; min-width: 140px; }
+.npb-products-table th:nth-child(n+3):nth-child(-n+6),
+.npb-products-table td:nth-child(n+3):nth-child(-n+6) { width: 105px; min-width: 105px; }
+.npb-products-table th:nth-child(7), .npb-products-table td:nth-child(7) { width: 90px; min-width: 90px; }
+.npb-products-table th:nth-child(8), .npb-products-table td:nth-child(8) { width: 100px; min-width: 100px; }
+
+/* npb — 3PL 단가표 (헤더가 동적이라 마지막 삭제 열만 좁힌다) */
+.npb-3pl-table th:last-child, .npb-3pl-table td:last-child { width: 48px; min-width: 48px; }
+
+/* 남는 가로 여백은 테이블마다 지정한 한 컬럼이 흡수한다. 그러지 않으면 여유 폭이
+   모든 컬럼에 고르게 퍼져서 좁아야 할 컬럼까지 불필요하게 넓어진다. */
+.brand-promotions-table th:nth-child(1), .brand-promotions-table td:nth-child(1) { width: 100%; }
+.brands-table th:nth-child(6), .brands-table td:nth-child(6) { width: 100%; }
+.promotion-rules-table th:nth-child(2), .promotion-rules-table td:nth-child(2) { width: 100%; }
+.price-catalog-table th:nth-child(3), .price-catalog-table td:nth-child(3) { width: 100%; }
+.price-revisions-table th:nth-child(3), .price-revisions-table td:nth-child(3) { width: 100%; }
+.price-aliases-table th:nth-child(3), .price-aliases-table td:nth-child(3) { width: 100%; }
+.brand-rule-history-table th:nth-child(5), .brand-rule-history-table td:nth-child(5) { width: 100%; }
+.promotion-targets-table th:nth-child(1), .promotion-targets-table td:nth-child(1) { width: 100%; }
+.admins-table th:nth-child(2), .admins-table td:nth-child(2) { width: 100%; }
+.admin-perms-table th:nth-child(2), .admin-perms-table td:nth-child(2) { width: 100%; }
+.sheets-sync-table th:nth-child(3), .sheets-sync-table td:nth-child(3) { width: 100%; }
+.sheet-preview-table th:nth-child(6), .sheet-preview-table td:nth-child(6) { width: 100%; }
+.collect-summary-table th:nth-child(1), .collect-summary-table td:nth-child(1) { width: 100%; }
+.collect-diff-table th:nth-child(3), .collect-diff-table td:nth-child(3) { width: 100%; }
+.collect-assets-table th:nth-child(4), .collect-assets-table td:nth-child(4) { width: 100%; }
+.pipeline-drafts-table th:nth-child(4), .pipeline-drafts-table td:nth-child(4) { width: 100%; }
+.pipeline-ship-table th:nth-child(5), .pipeline-ship-table td:nth-child(5) { width: 100%; }
+.deposit-match-table th:nth-child(5), .deposit-match-table td:nth-child(5) { width: 100%; }
+.deposit-unmatched-table th:nth-child(4), .deposit-unmatched-table td:nth-child(4) { width: 100%; }
+.npb-months-table th:nth-child(6), .npb-months-table td:nth-child(6) { width: 100%; }
+.npb-skumatch-table th:nth-child(3), .npb-skumatch-table td:nth-child(3) { width: 100%; }
+.npb-ship-table th:nth-child(2), .npb-ship-table td:nth-child(2) { width: 100%; }
+.npb-ads-table th:nth-child(1), .npb-ads-table td:nth-child(1) { width: 100%; }
+.npb-invoice-table th:nth-child(1), .npb-invoice-table td:nth-child(1) { width: 100%; }
+.npb-lines-table th:nth-child(2), .npb-lines-table td:nth-child(2) { width: 100%; }
+.npb-party-table th:nth-child(1), .npb-party-table td:nth-child(1) { width: 100%; }
+.npb-split-table th:nth-child(5), .npb-split-table td:nth-child(5) { width: 100%; }
+.npb-split-result-table th:nth-child(4), .npb-split-result-table td:nth-child(4) { width: 100%; }
+.npb-inventory-table th:nth-child(1), .npb-inventory-table td:nth-child(1) { width: 100%; }
+.npb-channels-table th:nth-child(8), .npb-channels-table td:nth-child(8) { width: 100%; }
+.npb-products-table th:nth-child(1), .npb-products-table td:nth-child(1) { width: 100%; }
+.npb-ws-table th:nth-child(1), .npb-ws-table td:nth-child(1) { width: 100%; }

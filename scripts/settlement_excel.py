@@ -15,7 +15,7 @@ Spec JSON:
   "monthLabel": "5/1-5/31",
   "rate": 0.25,                     # 계약 수수료율 (fraction)
   "lines": [
-    {"itemNo","name","qty","consumer","saleTotal","ship","refundShip",
+    {"itemNo","name","optionName","qty","consumer","saleTotal","ship","refundShip",
      "commissionWon","supplyAmt","payDate","note"}, ...
   ],
   "cancels": [
@@ -99,6 +99,17 @@ def _num(v):
         return 0.0
 
 
+def _item_name(ln):
+    """Product Name cell: 상품명 + 옵션명. 옵션만 다른 두 품목이 정산서에서
+    똑같은 한 줄로 보이면 대조가 안 된다. 비고(note) 열은 시트마다 컬럼
+    개수/수식이 달라 건드리면 밀리므로, 상품명 쪽에 붙인다."""
+    name = str(ln.get("name", "") or "")
+    option = str(ln.get("optionName", "") or "").strip()
+    if not option:
+        return name
+    return f"{name} - 옵션 : {option}" if name else f"- 옵션 : {option}"
+
+
 def _date(v):
     if not v:
         return ""
@@ -124,7 +135,7 @@ def build_online_debt(ws, lines):
         c.border = BORDER
     r = 2
     for i, ln in enumerate(lines, start=1):
-        vals = [i, ln.get("itemNo", ""), ln.get("name", ""), _num(ln.get("qty")),
+        vals = [i, ln.get("itemNo", ""), _item_name(ln), _num(ln.get("qty")),
                 _num(ln.get("consumer")), _num(ln.get("saleTotal")), _num(ln.get("ship")),
                 _num(ln.get("refundShip")), None, _num(ln.get("commissionWon")),
                 _num(ln.get("supplyAmt")), _date(ln.get("payDate")), ln.get("note", "")]
@@ -146,7 +157,7 @@ def build_online_debt(ws, lines):
         cc.font = BOLD
     for ci in range(1, 14):
         ws.cell(row=sr, column=ci).border = BORDER
-    widths = [6, 20, 34, 6, 11, 12, 9, 10, 9, 11, 12, 12, 14]
+    widths = [6, 20, 46, 6, 11, 12, 9, 10, 9, 11, 12, 12, 14]
     for ci, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
     return sr
@@ -164,7 +175,7 @@ def build_online_fee(ws, lines):
         c.border = BORDER
     r = 2
     for i, ln in enumerate(lines, start=1):
-        vals = [i, ln.get("itemNo", ""), ln.get("name", ""), _num(ln.get("qty")),
+        vals = [i, ln.get("itemNo", ""), _item_name(ln), _num(ln.get("qty")),
                 _num(ln.get("consumer")), _num(ln.get("saleTotal")), _num(ln.get("ship")),
                 None, _num(ln.get("commissionWon")), _num(ln.get("supplyAmt")),
                 _date(ln.get("payDate")), ln.get("note", "")]
@@ -185,7 +196,7 @@ def build_online_fee(ws, lines):
         cc.font = BOLD
     for ci in range(1, 13):
         ws.cell(row=sr, column=ci).border = BORDER
-    widths = [6, 20, 34, 6, 11, 12, 9, 9, 11, 12, 12, 14]
+    widths = [6, 20, 46, 6, 11, 12, 9, 9, 11, 12, 12, 14]
     for ci, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
     return sr
@@ -327,7 +338,7 @@ def build_cancels(ws, cancels):
         c.border = BORDER
     r = 3
     for cx in cancels:
-        vals = [cx.get("itemNo", ""), cx.get("name", ""), _num(cx.get("qty")),
+        vals = [cx.get("itemNo", ""), _item_name(cx), _num(cx.get("qty")),
                 _num(cx.get("saleTotal")), cx.get("reason", ""), cx.get("note", "")]
         for ci, v in enumerate(vals, start=1):
             c = ws.cell(row=r, column=ci, value=v)
@@ -335,7 +346,7 @@ def build_cancels(ws, cancels):
             if ci in (3, 4):
                 c.number_format = WON
         r += 1
-    for ci, w in enumerate([20, 34, 6, 12, 16, 20], start=1):
+    for ci, w in enumerate([20, 46, 6, 12, 16, 20], start=1):
         ws.column_dimensions[ws.cell(row=2, column=ci).column_letter].width = w
 
 
@@ -353,7 +364,7 @@ def build_online_consignment(ws, lines):
     for i, ln in enumerate(lines, start=1):
         # E 소비자가(원판매가) / G 할인율 / H 할인가=E-E*G / F 정가합계=D*E
         # I 총판매가=D*H / L 수수료원=I*수수료% / M 납품가=I-L
-        vals = [i, ln.get("itemNo", ""), ln.get("name", ""), _num(ln.get("qty")),
+        vals = [i, ln.get("itemNo", ""), _item_name(ln), _num(ln.get("qty")),
                 _num(ln.get("original")), f"=D{r}*E{r}", round(_num(ln.get("discountRate")), 4),
                 f"=E{r}-E{r}*G{r}", f"=D{r}*H{r}", _num(ln.get("ship")),
                 round(_num(ln.get("ratePct")) / 100, 4), f"=I{r}*K{r}", f"=I{r}-L{r}", ln.get("note", "")]
@@ -375,7 +386,7 @@ def build_online_consignment(ws, lines):
         cc.font = BOLD
     for ci in range(1, 15):
         ws.cell(row=sr, column=ci).border = BORDER
-    widths = [6, 20, 34, 6, 11, 12, 8, 11, 12, 9, 9, 11, 12, 14]
+    widths = [6, 20, 46, 6, 11, 12, 8, 11, 12, 9, 9, 11, 12, 14]
     for ci, w in enumerate(widths, start=1):
         ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
     return sr
