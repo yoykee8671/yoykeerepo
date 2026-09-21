@@ -237,7 +237,8 @@ function h(value) {
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
-    .replaceAll("\"", "&quot;");
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function statusLabel(status) {
@@ -688,7 +689,7 @@ function renderBrandPopup() {
           </div>
           <div class="panel-body">
             <div class="table-wrap" style="max-height:240px;margin-bottom:14px">
-              <table>
+              <table class="brand-promotions-table">
                 <thead><tr><th>프로모션</th><th>범위</th><th>수수료율</th><th>가격 할인</th><th>기간</th><th>상태</th><th>작업</th></tr></thead>
                 <tbody>
                   ${brandRules.map((item) => `
@@ -699,7 +700,7 @@ function renderBrandPopup() {
                       <td class="wrap">${renderPromotionDiscountCell(item)}</td>
                       <td>${h(item.validFrom || "-")}${item.validTo ? ` ~ ${h(item.validTo)}` : " ~ 상시"}</td>
                       <td>${promotionRuleStatusLabel(item)}</td>
-                      <td><div class="row-actions"><button data-edit-promotion-rule="${item.id}">수정</button><button class="danger" data-delete-promotion-rule="${item.id}">삭제</button></div></td>
+                      <td><div class="row-actions"><button data-edit-promotion-rule="${item.id}">수정</button><button class="danger icon-btn" data-delete-promotion-rule="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
                     </tr>`).join("") || `<tr><td colspan="7" class="empty">등록된 프로모션 규칙이 없습니다.</td></tr>`}
                 </tbody>
               </table>
@@ -959,7 +960,7 @@ function renderRequestRow(item) {
   return `
     <tr>
       <td><input type="checkbox" data-select-request="${item.id}" ${state.selectedRequestIds.includes(item.id) ? "checked" : ""}></td>
-      <td><div class="row-actions">${item.status !== "paid" ? `<button data-pay-request="${item.id}">입금완료</button>` : ""}<button data-open-edit-request-popup="${item.id}">수정</button><button class="danger" data-delete-request="${item.id}">삭제</button></div></td>
+      <td><div class="row-actions">${item.status !== "paid" ? `<button data-pay-request="${item.id}">입금완료</button>` : ""}<button data-open-edit-request-popup="${item.id}">수정</button><button class="danger icon-btn" data-delete-request="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
       <td>${renderRowStatusSelect(item)}</td>
       <td>${settlementLabel(item.settlementType)}</td>
       <td>${h(item.brandName)}</td>
@@ -1237,7 +1238,7 @@ function renderBrands() {
           <input data-brand-filter-q placeholder="브랜드명, 사업자명 검색" value="${h(state.brandFilterQ)}">
         </div>
         <div class="table-wrap">
-          <table>
+          <table class="brands-table">
             <thead><tr><th>브랜드</th><th>정산유형</th><th>요청</th><th>금액/채권잔액</th><th>외상잔액</th><th>사업자</th><th>프로모션</th><th>공유</th><th>작업</th></tr></thead>
             <tbody>${brandRows.map(renderBrandRow).join("") || `<tr><td colspan="9" class="empty">표시할 브랜드가 없습니다.</td></tr>`}</tbody>
           </table>
@@ -1245,7 +1246,7 @@ function renderBrands() {
         <div class="panel-body">
           <h3 style="margin-top:0">프로모션 규칙 (수수료 / 가격할인)</h3>
           <div class="table-wrap" style="max-height:280px">
-            <table>
+            <table class="promotion-rules-table">
               <thead><tr><th>브랜드</th><th>프로모션</th><th>범위</th><th>수수료율</th><th>가격 할인</th><th>기간</th><th>상태</th><th>작업</th></tr></thead>
               <tbody>
                 ${rules.map((item) => `
@@ -1257,7 +1258,7 @@ function renderBrands() {
                     <td class="wrap">${renderPromotionDiscountCell(item)}</td>
                     <td>${h(item.validFrom || "-")}${item.validTo ? ` ~ ${h(item.validTo)}` : " ~ 상시"}</td>
                     <td>${promotionRuleStatusLabel(item)}</td>
-                    <td><div class="row-actions"><button data-edit-promotion-rule="${item.id}">수정</button><button class="danger" data-delete-promotion-rule="${item.id}">삭제</button></div></td>
+                    <td><div class="row-actions"><button data-edit-promotion-rule="${item.id}">수정</button><button class="danger icon-btn" data-delete-promotion-rule="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
                   </tr>`).join("") || `<tr><td colspan="8" class="empty">등록된 프로모션 규칙이 없습니다.</td></tr>`}
               </tbody>
             </table>
@@ -1309,7 +1310,7 @@ function renderPrices() {
           ${state.priceImportStatus ? `<div class="${state.priceImportStatus.kind === "error" ? "error-text" : "notice"}">${h(state.priceImportStatus.text)}${state.priceImportStatus.details?.length ? `<br>${state.priceImportStatus.details.map((item) => h(item)).join("<br>")}` : ""}</div>` : ""}
         </div>
         <div class="table-wrap">
-          <table>
+          <table class="price-catalog-table">
             <thead><tr><th>브랜드</th><th>코드</th><th>품목명</th><th>옵션</th><th>공급가</th><th>원판매가</th><th>할인금액</th><th>현재 판매가</th><th>적용 시작</th><th>적용 종료</th><th>작업</th></tr></thead>
             <tbody>
               ${rows.map((item) => `
@@ -1324,7 +1325,7 @@ function renderPrices() {
                   <td>${money.format(Number(item.salePrice || 0))}원</td>
                   <td>${h(item.effectiveFrom)}</td>
                   <td>${h(item.effectiveTo || "상시")}</td>
-                  <td><div class="row-actions"><button data-clone-price-entry="${item.id}">개정 추가</button><button data-edit-price-entry="${item.id}">수정</button><button class="danger" data-delete-price-entry="${item.id}">삭제</button></div></td>
+                  <td><div class="row-actions"><button data-clone-price-entry="${item.id}">개정 추가</button><button data-edit-price-entry="${item.id}">수정</button><button class="danger icon-btn" data-delete-price-entry="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
                 </tr>`).join("") || `<tr><td colspan="11" class="empty">등록된 품목이 없습니다.</td></tr>`}
             </tbody>
           </table>
@@ -1332,7 +1333,7 @@ function renderPrices() {
         <div class="panel-body">
           <h3 style="margin-top:0">개정 이력</h3>
           <div class="table-wrap" style="max-height:280px">
-            <table>
+            <table class="price-revisions-table">
               <thead><tr><th>브랜드</th><th>코드</th><th>품목명</th><th>공급가</th><th>원판매가</th><th>할인금액</th><th>현재 판매가</th><th>적용 시작</th><th>적용 종료</th><th>작업</th></tr></thead>
               <tbody>
                 ${revisions.map((item) => `
@@ -1346,14 +1347,14 @@ function renderPrices() {
                     <td>${money.format(Number(item.salePrice || 0))}원</td>
                     <td>${h(item.effectiveFrom)}</td>
                     <td>${h(item.effectiveTo || "상시")}</td>
-                    <td><div class="row-actions"><button data-edit-price-entry="${item.id}">수정</button><button class="danger" data-delete-price-entry="${item.id}">삭제</button></div></td>
+                    <td><div class="row-actions"><button data-edit-price-entry="${item.id}">수정</button><button class="danger icon-btn" data-delete-price-entry="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
                   </tr>`).join("") || `<tr><td colspan="10" class="empty">개정 이력이 없습니다.</td></tr>`}
               </tbody>
             </table>
           </div>
           <h3>기간별 품목 별칭</h3>
           <div class="table-wrap" style="max-height:280px">
-            <table>
+            <table class="price-aliases-table">
               <thead><tr><th>브랜드</th><th>별칭</th><th>연결 품목</th><th>적용 기간</th><th>상태</th><th>작업</th></tr></thead>
               <tbody>
                 ${aliases.map((item) => `
@@ -1363,7 +1364,7 @@ function renderPrices() {
                     <td>${h(item.targetItemCode ? `${item.targetItemCode} | ` : "")}${h(item.targetItemName)}</td>
                     <td>${h(item.validFrom || "-")}${item.validTo ? ` ~ ${h(item.validTo)}` : " ~ 상시"}</td>
                     <td>${priceAliasStatusLabel(item)}</td>
-                    <td><div class="row-actions"><button data-edit-price-alias="${item.id}">수정</button><button class="danger" data-delete-price-alias="${item.id}">삭제</button></div></td>
+                    <td><div class="row-actions"><button data-edit-price-alias="${item.id}">수정</button><button class="danger icon-btn" data-delete-price-alias="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
                   </tr>`).join("") || `<tr><td colspan="6" class="empty">등록된 별칭이 없습니다.</td></tr>`}
               </tbody>
             </table>
@@ -1517,13 +1518,16 @@ function renderRequestLineItems(items, promotionOptions = []) {
   return `
     <div class="table-wrap line-items-wrap" style="max-height:300px">
       <table class="line-items-table">
-        <thead><tr><th>작업</th><th>코드</th><th>품목명</th><th>수량</th><th>공급가</th><th>원판매가</th><th>할인금액</th><th>현재판매가</th><th>적용시작</th><th>적용종료</th><th>판매합계</th><th>프로모션</th></tr></thead>
+        <thead><tr><th>작업</th><th>주문번호</th><th>코드</th><th>품목명</th><th>수량</th><th>공급가</th><th>원판매가</th><th>할인금액</th><th>현재판매가</th><th>적용시작</th><th>적용종료</th><th>판매합계</th><th>프로모션</th></tr></thead>
         <tbody>
           ${items.map((item) => `
             <tr data-line-row="${item.id}">
-              <td><button type="button" class="danger" data-remove-line-item="${item.id}">삭제</button></td>
+              <td><button type="button" class="danger icon-btn" data-remove-line-item="${item.id}" aria-label="삭제" title="삭제">×</button></td>
+              <td><span class="muted">${h(item.orderItemCode || "")}</span></td>
               <td><input value="${h(item.itemCode || "")}" data-line-code="${item.id}" aria-label="품목코드" placeholder="코드"></td>
-              <td><input value="${h(item.itemName || "")}" data-line-name="${item.id}" aria-label="품목명" placeholder="품목명"></td>
+              <td><input value="${h(item.itemName || "")}" data-line-name="${item.id}" aria-label="품목명" placeholder="품목명">${
+                item.optionName ? `<div class="muted" style="font-size:11px">- 옵션 : ${h(item.optionName)}</div>` : ""
+              }</td>
               <td><input type="number" min="1" value="${h(item.quantity)}" data-line-qty="${item.id}" class="qty-input" aria-label="수량"></td>
               <td><input type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.unitSupplyPrice))}" data-line-supply-price="${item.id}" aria-label="공급가" placeholder="선택"></td>
               <td><input type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.originalPrice))}" data-line-original="${item.id}" aria-label="원판매가" placeholder="선택"></td>
@@ -1605,7 +1609,7 @@ function renderBrandRow(brand) {
       <td class="wrap">${h(brand.businessName || "-")}<br><span class="muted">${h(cutoffLabel(brand))}</span></td>
       <td class="wrap">${h(brand.promotionSummary || "-")}</td>
       <td><a href="${share}" target="_blank" rel="noreferrer">공유 보기</a></td>
-      <td><div class="row-actions"><button data-edit-brand="${brand.id}">수정</button><a href="/api/export/brand/${brand.id}.xls"><button>Excel</button></a><button class="danger" data-delete-brand="${brand.id}">삭제</button></div></td>
+      <td><div class="row-actions"><button data-edit-brand="${brand.id}">수정</button><a href="/api/export/brand/${brand.id}.xls"><button>Excel</button></a><button class="danger icon-btn" data-delete-brand="${brand.id}" aria-label="삭제" title="삭제">×</button></div></td>
     </tr>
   `;
 }
@@ -1643,7 +1647,7 @@ function renderBrandRuleSection(brand) {
         <td>${h(rule.note || "")}</td>
         <td>
           <button type="button" data-edit-brand-rule="${rule.id}">이 버전 수정</button>
-          ${history.length > 1 ? `<button type="button" class="danger" data-remove-brand-rule="${rule.id}">삭제</button>` : ""}
+          ${history.length > 1 ? `<button type="button" class="danger icon-btn" data-remove-brand-rule="${rule.id}" aria-label="삭제" title="삭제">×</button>` : ""}
         </td>
       </tr>`;
     })
@@ -1662,7 +1666,7 @@ function renderBrandRuleSection(brand) {
     <div class="field">
       <label>규칙 이력</label>
       <div class="table-wrap" style="max-height:220px">
-        <table><thead><tr><th>상태</th><th>적용 시작</th><th>수수료</th><th>배송비</th><th>사유</th><th></th></tr></thead>
+        <table class="brand-rule-history-table"><thead><tr><th>상태</th><th>적용 시작</th><th>수수료</th><th>배송비</th><th>사유</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>
       </div>
     </div>
@@ -1888,13 +1892,13 @@ function renderPromotionTargetList(items) {
   if (!items.length) return `<div class="empty">추가된 대상 품목이 없습니다.</div>`;
   return `
     <div class="table-wrap" style="max-height:180px">
-      <table>
+      <table class="promotion-targets-table">
         <thead><tr><th>대상 품목</th><th>작업</th></tr></thead>
         <tbody>
           ${items.map((item, index) => `
             <tr>
               <td>${h(item.label || formatPromotionTargetLabel(item))}</td>
-              <td><button type="button" data-remove-promotion-target="${index}">삭제</button></td>
+              <td><button type="button" data-remove-promotion-target="${index}" class="danger icon-btn" aria-label="삭제" title="삭제">×</button></td>
             </tr>`).join("")}
         </tbody>
       </table>
@@ -1913,7 +1917,7 @@ function renderAdmins() {
       <div class="panel">
         <div class="panel-head"><h2>관리자 계정</h2></div>
         <div class="table-wrap">
-          <table>
+          <table class="admins-table">
             <thead><tr><th>이름</th><th>이메일</th><th>역할</th><th>상태</th><th>생성일</th><th>작업</th></tr></thead>
             <tbody>${state.admins.map(renderAdminRow).join("")}</tbody>
           </table>
@@ -1958,7 +1962,7 @@ function renderPermissionGrid(admin) {
         하위 동작을 주면 접근·읽기는 자동으로 함께 부여됩니다.
       </span>
       <div class="table-wrap" style="max-height:320px;margin-top:6px">
-        <table><thead><tr><th style="width:120px">메뉴</th><th>허용할 동작</th></tr></thead>
+        <table class="admin-perms-table"><thead><tr><th style="width:120px">메뉴</th><th>허용할 동작</th></tr></thead>
         <tbody>${rows}</tbody></table>
       </div>
     </div>
@@ -1973,7 +1977,7 @@ function renderAdminRow(admin) {
       <td><span class="badge">${h(admin.role)}</span></td>
       <td>${admin.isActive ? "Y" : "N"}</td>
       <td>${fmtDate(admin.createdAt)}</td>
-      <td><div class="row-actions"><button data-edit-admin="${admin.id}">수정</button><button class="danger" data-delete-admin="${admin.id}" ${admin.id === state.admin.id ? "disabled" : ""}>삭제</button></div></td>
+      <td><div class="row-actions"><button data-edit-admin="${admin.id}">수정</button><button class="danger icon-btn" data-delete-admin="${admin.id}" ${admin.id === state.admin.id ? "disabled" : ""} aria-label="삭제" title="삭제">×</button></div></td>
     </tr>
   `;
 }
@@ -2025,7 +2029,7 @@ function renderArchive() {
       <div class="panel">
         <div class="panel-head"><h2>브랜드별 아카이브</h2></div>
         <div class="table-wrap">
-          <table>
+          <table class="sheets-sync-table">
             <thead><tr><th>브랜드</th><th>요청</th><th>Google Sheets</th><th>추출</th><th>동기화</th></tr></thead>
             <tbody>
               ${state.brands.filter((b) => b.type === "brand").map((b) => `
@@ -2068,7 +2072,7 @@ async function renderShare(token) {
             <span class="badge">${money.format(data.requests.length)}건</span>
           </div>
           <div class="table-wrap">
-            <table>
+            <table class="sheet-preview-table">
               <thead><tr><th>상태</th><th>주문번호</th><th>주문자</th><th>입금액</th><th>예정일</th><th>메모</th><th>원본</th></tr></thead>
               <tbody>${data.requests.map((item) => `
                 <tr>
@@ -4146,7 +4150,7 @@ function renderSettlementScan(s) {
         <span class="muted">${h(scan.source === "cafe24" ? `카페24 API ${range}` : "업로드 CSV 기준")}</span></div>
       <div class="panel-body">
         <p class="muted">정산 대상 ${ready.length}곳 · 내역 없음 ${empty.length}곳 · 공급사 매핑 없음 ${unmapped.length}곳</p>
-        <div class="table-wrap" style="max-height:420px"><table>
+        <div class="table-wrap" style="max-height:420px"><table class="collect-summary-table">
           <thead><tr><th>브랜드</th><th>정산유형</th><th class="num">주문</th><th class="num">품목</th><th class="num">취소</th><th>상태</th><th></th></tr></thead>
           <tbody>${shown.map(row).join("")}</tbody>
         </table></div>
@@ -4181,7 +4185,7 @@ function renderCafe24Compare(compare) {
       ${compare.onlyInCsvCount ? `<p class="muted">CSV에만 있는 품목 ${compare.onlyInCsvCount}건 — 조회 기간/기준일을 확인하세요.</p>` : ""}
       ${compare.onlyInApiCount ? `<p class="muted">API에만 있는 품목 ${compare.onlyInApiCount}건 (CSV 내려받은 뒤 생긴 주문일 수 있습니다).</p>` : ""}
       ${fields.length
-        ? `<div class="table-wrap" style="max-height:260px"><table>
+        ? `<div class="table-wrap" style="max-height:260px"><table class="collect-diff-table">
             <thead><tr><th>필드</th><th>차이</th><th>예시 (품목 / API / CSV)</th></tr></thead>
             <tbody>${fields.map(([field, count]) => {
               const ex = (compare.diffs || []).find((d) => d.field === field);
@@ -5010,7 +5014,7 @@ function renderClobeFreshness(scraping) {
           최신화(재수집)는 클로브 쪽에서만 실행할 수 있습니다. 우프페이에서 대신 눌러줄 방법이 없어
           (클로브 MCP에 해당 기능이 없습니다), 위 링크로 이동해 실행한 뒤 돌아와서 수집하세요.
         </p>
-        ${rows ? `<div class="table-wrap" style="max-height:220px"><table>
+        ${rows ? `<div class="table-wrap" style="max-height:220px"><table class="collect-assets-table">
             <thead><tr><th>상태</th><th>자산</th><th>마지막 수집</th><th>비고</th></tr></thead>
             <tbody>${rows}</tbody></table></div>` : ""}
       </div>
@@ -5063,7 +5067,7 @@ function renderPipelineCollect(collect) {
         : ""}
       <p class="muted">행별 <b>입금요청 입력</b>은 그 건의 계산된 초안을 입금요청 창에 채워 보여줍니다. 수동 확인이 필요한 건(룰루키친 등)은
         이 버튼으로 열어 필요한 값만 고쳐서 바로 등록하세요.</p>
-      <div class="table-wrap" style="max-height:420px"><table>
+      <div class="table-wrap" style="max-height:420px"><table class="pipeline-drafts-table">
         <thead><tr><th><input type="checkbox" data-pipe-all></th><th>주문</th><th>브랜드</th><th>품목</th><th>품목번호</th><th>입금액</th><th>비고</th><th>동작</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>
@@ -5087,7 +5091,7 @@ function renderPipelineShipped(shipped) {
     <td><span class="muted">송장 ${h(it.trackingNo)}</span></td>
   </tr>`).join("");
   return `
-    <div class="table-wrap" style="max-height:300px"><table>
+    <div class="table-wrap" style="max-height:300px"><table class="pipeline-ship-table">
       <thead><tr><th><input type="checkbox" data-pipe-ship-all></th><th>주문</th><th>브랜드</th><th>금액</th><th>송장</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
@@ -5327,7 +5331,7 @@ function renderReconcileResult(result) {
       </div>
       <div class="panel-body">
         ${matchRows
-          ? `<div class="table-wrap"><table><thead><tr>
+          ? `<div class="table-wrap"><table class="deposit-match-table"><thead><tr>
               <th>신뢰도</th><th>입금</th><th>금액</th><th>대응 요청</th><th>근거</th><th></th>
             </tr></thead><tbody>${matchRows}</tbody></table></div>`
           : `<p class="muted">매칭된 입금이 없습니다. 기간이나 계좌 설정을 확인하세요.</p>`}
@@ -5340,7 +5344,7 @@ function renderReconcileResult(result) {
       </div>
       <div class="panel-body">
         ${unmatchedDeposits
-          ? `<div class="table-wrap"><table><thead><tr><th>일시</th><th>입금자</th><th>금액</th><th>분류</th></tr></thead>
+          ? `<div class="table-wrap"><table class="deposit-unmatched-table"><thead><tr><th>일시</th><th>입금자</th><th>금액</th><th>분류</th></tr></thead>
              <tbody>${unmatchedDeposits}</tbody></table></div>`
           : `<p class="muted">미매칭 입금이 없습니다.</p>`}
       </div>
@@ -5724,7 +5728,7 @@ function renderNpbList() {
     <section class="panel">
       <div class="panel-head"><h2>정산 이력</h2><span class="muted">${list.length}건</span></div>
       <div class="table-wrap">
-        <table>
+        <table class="npb-months-table">
           <thead><tr><th>상태</th><th>정산월</th><th>총수량</th><th>매출계</th><th>이익</th><th>작업</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
@@ -5907,7 +5911,7 @@ function renderNpbUnresolved() {
         치킨2+고구마1 처럼 섞인 묶음은 <b>[+ 상품 추가]</b> 로 여러 개를 걸면 됩니다.
         한 번 지정하면 <b>다음부터 자동으로 인식</b>됩니다.
       </p>
-      <div class="table-wrap" style="max-height:340px"><table>
+      <div class="table-wrap" style="max-height:340px"><table class="npb-skumatch-table">
         <thead><tr><th>판매처 상품명</th><th>수량</th><th>매칭 상품 · 재고 배수</th></tr></thead>
         <tbody>${rows}</tbody></table></div>
       <div class="toolbar">
@@ -6024,7 +6028,7 @@ function renderNpbExpenses() {
         <h2>운임/물류 실비</h2>
         <span class="muted">출고내역을 올리면 송장 기준으로 건수를 셉니다. 숫자는 고칠 수 있습니다.</span>
       </div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="npb-ship-table">
         <thead><tr><th>유형</th><th>출고내역 파일</th><th>건수</th><th>건당</th><th>금액</th><th></th></tr></thead>
         <tbody>${shipRows}</tbody>
         <tfoot>
@@ -6051,7 +6055,7 @@ function renderNpbExpenses() {
 
     <section class="panel">
       <div class="panel-head"><h2>광고홍보 실비</h2><span class="muted">구글시트 누적분</span></div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="npb-ads-table">
         <thead><tr><th>매체</th><th>기간</th><th>금액</th></tr></thead>
         <tbody>${adRows}</tbody>
         <tfoot><tr><th>합계</th><th></th><th class="num">${money.format(ad.total || 0)}</th></tr></tfoot>
@@ -6067,7 +6071,7 @@ function renderNpbExpenses() {
         <h2>청구서</h2>
         <span class="muted">정산서와 별도로 발행합니다 — 정산 계산에는 들어가지 않습니다.</span>
       </div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="npb-invoice-table">
         <thead><tr><th>구분</th><th>금액</th><th>입금 기한</th><th>입금</th><th></th></tr></thead>
         <tbody>${invoiceRows}</tbody>
       </table></div>
@@ -6134,7 +6138,7 @@ function renderNpbReview() {
           계산식</b>을 씁니다. <b>[확정/반영]</b> 을 눌러야 워크시트와 정산서에 들어갑니다.
         </p>
       </div>
-      <div class="table-wrap" style="max-height:420px"><table>
+      <div class="table-wrap" style="max-height:420px"><table class="npb-lines-table">
         <thead><tr>
           <th>순번</th><th>품목</th><th>정가</th><th>기준가</th><th>수량</th><th>할인(원)</th>
           <th>배송비</th><th>최종결제</th><th>수수료(%)</th><th>수수료(원)</th><th>정산</th><th></th>
@@ -6351,7 +6355,7 @@ function renderNpbSettleBy() {
       <div class="panel-head"><h2>정산 주체별 소계</h2>
         <span class="muted">계산서를 누가 발행하는지에 따라 나뉩니다</span></div>
       <div class="panel-body">
-        <div class="table-wrap"><table>
+        <div class="table-wrap"><table class="npb-party-table">
           <thead><tr><th>주체</th><th>매출</th><th>공제</th><th>정산계</th></tr></thead>
           <tbody>${rows}</tbody></table></div>
         <p class="muted">
@@ -6427,7 +6431,7 @@ function renderNpbProfitSection() {
     <section class="panel">
       <div class="panel-head"><h2>이익분배</h2><span class="muted">이익 ${npbWon(profit)}</span></div>
       <div class="table-wrap">
-        <table>
+        <table class="npb-split-table">
           <thead><tr><th>파티</th><th>비율</th><th>제외</th><th>배분액</th><th>비고</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
@@ -6474,7 +6478,7 @@ function renderNpbInventorySection() {
           : "셀메이트 재고조회 CSV 를 고른 뒤 저장을 누르면 기초재고로 들어갑니다."}</span>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="npb-inventory-table">
           <thead><tr><th>품목</th>${cols.map(([, l]) => `<th>${l}</th>`).join("")}<th>기말</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
@@ -6514,14 +6518,14 @@ function renderNpbChannels() {
           ${NPB_ENTRY_MODES.map(([value, label]) =>
             `<option value="${value}" ${(c.entryMode || "review") === value ? "selected" : ""}>${label}</option>`).join("")}
         </select></td>
-        <td><button class="danger" data-npb-ch-del="${i}">삭제</button></td>
+        <td><button class="danger icon-btn" data-npb-ch-del="${i}" aria-label="삭제" title="삭제">×</button></td>
       </tr>`)
     .join("") || `<tr><td colspan="11" class="empty">등록된 채널이 없습니다.</td></tr>`;
   return `
     <section class="panel">
       <div class="panel-head"><h2>채널 설정</h2><span class="muted">${channels.length}개</span></div>
       <div class="table-wrap">
-        <table>
+        <table class="npb-channels-table">
           <thead><tr><th>코드</th><th>이름</th><th>계산방식</th><th>판매가</th><th>수수료율</th><th>공급가</th><th>아키타입</th><th>파일명 키워드</th><th>정산주체</th><th>업로드 반영</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
@@ -6559,7 +6563,7 @@ function renderNpbProductEditor() {
         <h2>상품 원장</h2>
         <span class="muted">기본 SKU 단위 — 재고매칭의 배수가 이 단위로 환산됩니다</span>
       </div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="npb-products-table">
         <thead><tr>
           <th>상품명</th><th>바코드</th><th>판매가(정가)</th><th>원가</th><th>공급가</th>
           <th>마진</th><th>안전재고</th><th>낱개/단위</th>
@@ -6591,12 +6595,12 @@ function renderNpbCostEditor() {
       .map((row, i) => `
         <tr>
           ${cols.map((c) => `<td><input type="text" data-npb-3pl="${i}" data-npb-3col="${h(c)}" value="${h(row[c] ?? "")}"></td>`).join("")}
-          <td><button class="danger" data-npb-3pl-del="${i}">삭제</button></td>
+          <td><button class="danger icon-btn" data-npb-3pl-del="${i}" aria-label="삭제" title="삭제">×</button></td>
         </tr>`)
       .join("") || `<tr><td colspan="${cols.length + 1}" class="empty">단가표가 비어 있습니다.</td></tr>`;
     tpl = `
       <h3>3PL 단가표 (${h(tableKey)})</h3>
-      <div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
+      <div class="table-wrap"><table class="npb-3pl-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
       <div class="toolbar"><button data-npb-3pl-add>단가 행 추가</button></div>`;
   }
   return `
@@ -6654,7 +6658,7 @@ function renderNpbPreview() {
       <div class="panel-body">${cards}</div>
       ${splitEnabled ? `
       <div class="table-wrap">
-        <table>
+        <table class="npb-split-result-table">
           <thead><tr><th>파티</th><th>비율</th><th>배분액</th><th>비고</th></tr></thead>
           <tbody>${splitRows}</tbody>
         </table>

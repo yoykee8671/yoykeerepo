@@ -2036,6 +2036,7 @@ function explodeOrderRows(rowsOfOrder, billedTotal) {
     const unit = cafe24UnitPrice(row);
     return {
       orderItemCode: String(row["품목별 주문번호"] || "").trim(),
+      optionName: String(row["상품옵션(기본)"] || "").trim(),
       itemName: row["주문상품명(기본)"] || "",
       quantity,
       originalPrice: unit,
@@ -2060,6 +2061,7 @@ function explodeOrderRows(rowsOfOrder, billedTotal) {
   }
   return scaled.map((item) => ({
     orderItemCode: item.orderItemCode,
+    optionName: item.optionName,
     itemName: item.itemName,
     quantity: item.quantity,
     originalPrice: item.originalPrice,
@@ -2260,6 +2262,7 @@ function splitCafe24RowsByMonth(brand, brandRows, monthPrefix) {
       cancels.push({
         itemNo: r["품목별 주문번호"] || orderNo,
         name: r["주문상품명(기본)"] || "",
+        optionName: String(r["상품옵션(기본)"] || "").trim(),
         qty: number(r["수량"]),
         saleTotal: cafe24RowSaleAmount(r),
         reason: r["환불상태"] || (r["환불완료일"] ? "환불완료" : "취소/교환"),
@@ -2448,6 +2451,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
           commissionWon,
           supplyAmt: saleTotal - commissionWon,
           payDate: "",
+          optionName: r["상품옵션(기본)"] || "",
           note: r["상품별 추가할인 상세"] || ""
         });
       });
@@ -2567,6 +2571,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
         commissionWon,
         supplyAmt: saleTotal - commissionWon,
         payDate: req.paidAt || "",
+        optionName: it.optionName || "",
         note: it.note || ""
       });
     });
@@ -4347,6 +4352,11 @@ function sanitizeLineItems(raw) {
       return {
         id: item.id || id("line"),
         priceEntryId: item.priceEntryId || "",
+        // 품목별 주문번호(예: 20260917-0000068-01)와 옵션명. 카페24에서 온
+        // 라인만 값이 있고 수기 입력 라인은 빈 값이다. 화이트리스트에서 빠져
+        // 있으면 저장 시점에 통째로 사라져 정산서 품목번호가 순번으로 밀린다.
+        orderItemCode: String(item.orderItemCode || "").trim(),
+        optionName: String(item.optionName || "").trim(),
         itemCode: String(item.itemCode || "").trim(),
         itemName: String(item.itemName || "").trim(),
         spec: String(item.spec || "").trim(),
@@ -4687,7 +4697,7 @@ function requestRows(db, brandId = "") {
         settlementType: item.settlementType,
         orderNo: item.orderNo,
         customerName: item.customerName,
-        lineItemsSummary: sanitizeLineItems(item.lineItems).map((line) => `${line.itemName || line.itemCode} x${line.quantity}`).join(", "),
+        lineItemsSummary: sanitizeLineItems(item.lineItems).map((line) => `${line.itemName || line.itemCode}${line.optionName ? ` - 옵션 : ${line.optionName}` : ""} x${line.quantity}`).join(", "),
         depositAmount: item.depositAmount,
         expectedDepositDate: item.expectedDepositDate,
         cutoffNote: item.cutoffNote,
