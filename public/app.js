@@ -3,6 +3,9 @@ const state = {
   tab: "dashboard",
   brands: [],
   requests: [],
+  partners: [],
+  materials: [],
+  purchaseOrders: [],
   priceEntries: [],
   priceCatalog: [],
   aliasEntries: [],
@@ -742,6 +745,9 @@ function clearEditing() {
   state.editingPriceEntry = null;
   state.editingPriceAlias = null;
   state.editingPromotionRule = null;
+  state.procurement.editingPartner = null;
+  state.procurement.editingMaterial = null;
+  state.procurement.editingPurchaseOrder = null;
 }
 
 function renderCurrentTab() {
@@ -3981,6 +3987,20 @@ function productionPartners() {
   return (state.partners || []).filter((item) => item.category === "production" && item.isActive !== false);
 }
 
+// 현재 선택된 거래처가 사용 안 함으로 전환됐어도 옵션 목록에서 사라지면 안 된다 —
+// 폼을 그대로 저장하면 partnerId가 빈 값으로 날아가 기존 연결이 끊긴다.
+function partnerSelectOptions(selectedPartnerId) {
+  const active = productionPartners();
+  const options = active.map((p) => `<option value="${p.id}" ${selectedPartnerId === p.id ? "selected" : ""}>${h(p.name)}</option>`);
+  if (selectedPartnerId && !active.some((p) => p.id === selectedPartnerId)) {
+    const inactive = (state.partners || []).find((p) => p.id === selectedPartnerId);
+    if (inactive) {
+      options.push(`<option value="${inactive.id}" selected>${h(inactive.name)} (사용 안 함)</option>`);
+    }
+  }
+  return options;
+}
+
 function renderProcurement() {
   const p = state.procurement;
   const subnav = PROCUREMENT_SCREENS
@@ -4082,6 +4102,11 @@ function renderPartnerForm() {
       </div>
       <div class="field"><label>담당자 이메일</label><input name="contactEmail" type="email" value="${h(p.contactEmail)}"></div>
       <div class="field"><label>메모</label><textarea name="note">${h(p.note)}</textarea></div>
+      <div class="field">
+        <label>첨부 링크</label>
+        <div data-attachments-list>${(p.attachments || []).map(renderAttachmentRow).join("")}</div>
+        <button type="button" data-add-attachment style="margin-top:6px">링크 추가</button>
+      </div>
       <div class="field"><label>사용 상태</label><select name="isActive"><option value="true" ${p.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${p.isActive === false ? "selected" : ""}>N</option></select></div>
       <div class="toolbar">
         <button class="primary" type="submit">${p.id ? "수정 저장" : "거래처 추가"}</button>
@@ -4089,6 +4114,14 @@ function renderPartnerForm() {
       </div>
     </form>
   `;
+}
+
+function renderAttachmentRow(url) {
+  return `
+    <div class="attachment-row" data-attachment-row>
+      <input type="text" class="attachment-input" value="${h(url)}" placeholder="https://...">
+      <button type="button" class="danger icon-btn" data-remove-attachment aria-label="삭제" title="삭제">×</button>
+    </div>`;
 }
 
 function bindPartners() {
@@ -4122,10 +4155,27 @@ function bindPartners() {
       await refreshAndRender();
     });
   });
+  const attachmentsList = app.querySelector("[data-attachments-list]");
+  const bindAttachmentRemovers = () => {
+    attachmentsList?.querySelectorAll("[data-remove-attachment]").forEach((button) => {
+      button.addEventListener("click", () => {
+        button.closest("[data-attachment-row]")?.remove();
+      });
+    });
+  };
+  bindAttachmentRemovers();
+  app.querySelector("[data-add-attachment]")?.addEventListener("click", () => {
+    attachmentsList?.insertAdjacentHTML("beforeend", renderAttachmentRow(""));
+    bindAttachmentRemovers();
+  });
+
   app.querySelector("[data-partner-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = formObject(event.currentTarget);
     body.isActive = body.isActive === "true";
+    body.attachments = Array.from(attachmentsList?.querySelectorAll(".attachment-input") || [])
+      .map((input) => input.value.trim())
+      .filter(Boolean);
     const editing = state.procurement.editingPartner;
     if (editing) {
       await api(`/api/partners/${editing.id}`, { method: "PUT", body });
@@ -4183,7 +4233,7 @@ function renderMaterialForm() {
         <label>거래처(생산업체)</label>
         <select name="partnerId">
           <option value="">선택 안 함</option>
-          ${productionPartners().map((p) => `<option value="${p.id}" ${m.partnerId === p.id ? "selected" : ""}>${h(p.name)}</option>`).join("")}
+          ${partnerSelectOptions(m.partnerId).join("")}
         </select>
       </div>
       <div class="field"><label>품목명</label><input name="itemName" value="${h(m.itemName)}" required></div>
@@ -4297,7 +4347,7 @@ function renderPurchaseOrderForm() {
         <label>거래처(생산업체)</label>
         <select name="partnerId" required>
           <option value="">거래처 선택</option>
-          ${productionPartners().map((p) => `<option value="${p.id}" ${po.partnerId === p.id ? "selected" : ""}>${h(p.name)}</option>`).join("")}
+          ${partnerSelectOptions(po.partnerId).join("")}
         </select>
       </div>
       <div class="field two">
@@ -4316,8 +4366,9 @@ function renderPurchaseOrderForm() {
         <datalist id="po-material-options">
           ${(state.materials || []).map((m) => `<option value="${h(m.itemName)}">`).join("")}
         </datalist>
-        <div class="field three">
+        <div class="field four">
           <div><input data-po-item-name list="po-material-options" placeholder="원부자재명 (검색 또는 신규 입력)"></div>
+          <div><input data-po-item-spec placeholder="규격"></div>
           <div><input data-po-item-qty type="number" min="1" value="1" placeholder="수량"></div>
           <div><input data-po-item-price type="number" min="0" placeholder="단가"></div>
         </div>
@@ -4409,6 +4460,7 @@ function bindPurchaseOrders() {
 
   form.querySelector("[data-add-po-line-item]")?.addEventListener("click", async () => {
     const nameInput = form.querySelector("[data-po-item-name]");
+    const specInput = form.querySelector("[data-po-item-spec]");
     const qtyInput = form.querySelector("[data-po-item-qty]");
     const priceInput = form.querySelector("[data-po-item-price]");
     const name = nameInput.value.trim();
@@ -4421,7 +4473,7 @@ function bindPurchaseOrders() {
       id: cryptoRandomId(),
       materialId: material?.id || "",
       itemName: name,
-      spec: "",
+      spec: specInput.value.trim(),
       quantity,
       unit: material?.orderUnit || "",
       unitPrice,
@@ -4429,6 +4481,7 @@ function bindPurchaseOrders() {
     });
     setLineItems(items);
     nameInput.value = "";
+    specInput.value = "";
     qtyInput.value = "1";
     priceInput.value = "";
     nameInput.focus();
@@ -4439,6 +4492,13 @@ function bindPurchaseOrders() {
         body: { itemName: name, orderUnit: "", basePrice: unitPrice, partnerId }
       });
       state.materials.push(created.material);
+      const justAdded = items[items.length - 1];
+      justAdded.materialId = created.material.id;
+      setLineItems(items);
+      const datalist = form.querySelector("#po-material-options");
+      if (datalist) {
+        datalist.innerHTML = (state.materials || []).map((m) => `<option value="${h(m.itemName)}">`).join("");
+      }
     }
   });
 

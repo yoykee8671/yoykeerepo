@@ -4395,8 +4395,8 @@ function sanitizePurchaseOrderLineItems(raw) {
 function nextPurchaseOrderDocNo(db, orderDate) {
   const dateKey = (dateOnly(orderDate) || now().slice(0, 10)).replaceAll("-", "");
   const sameDay = (db.purchaseOrders || []).filter((po) => String(po.docNo || "").startsWith(`PO-${dateKey}-`));
-  const seq = sameDay.length + 1;
-  return `PO-${dateKey}-${String(seq).padStart(3, "0")}`;
+  const maxSeq = sameDay.reduce((max, po) => Math.max(max, Number(String(po.docNo).slice(-3)) || 0), 0);
+  return `PO-${dateKey}-${String(maxSeq + 1).padStart(3, "0")}`;
 }
 
 function sanitizeLineItems(raw) {
@@ -8221,7 +8221,7 @@ async function routeApi(req, res, url) {
       attachments: Array.isArray(body.attachments)
         ? body.attachments.map((item) => String(item || "").trim()).filter(Boolean)
         : [],
-      isActive: body.isActive !== false,
+      isActive: body.isActive !== false && body.isActive !== "false",
       createdAt: now(),
       updatedAt: now()
     };
@@ -8357,7 +8357,7 @@ async function routeApi(req, res, url) {
     const rows = (db.purchaseOrders || [])
       .filter((item) => !partnerId || item.partnerId === partnerId)
       .slice()
-      .sort((a, b) => (b.orderDate || "").localeCompare(a.orderDate || "") || b.updatedAt.localeCompare(a.updatedAt));
+      .sort((a, b) => (b.orderDate || "").localeCompare(a.orderDate || "") || (b.updatedAt || "").localeCompare(a.updatedAt || ""));
     sendJson(res, 200, { purchaseOrders: rows });
     return;
   }
