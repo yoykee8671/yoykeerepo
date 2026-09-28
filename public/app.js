@@ -4223,7 +4223,12 @@ function bindMaterials() {
   app.querySelectorAll("[data-delete-material]").forEach((button) => {
     button.addEventListener("click", async () => {
       if (!confirm("이 원부자재를 삭제할까요?")) return;
-      await api(`/api/materials/${button.dataset.deleteMaterial}`, { method: "DELETE" });
+      try {
+        await api(`/api/materials/${button.dataset.deleteMaterial}`, { method: "DELETE" });
+      } catch (error) {
+        alert(error.message);
+        return;
+      }
       await refreshAndRender();
     });
   });
