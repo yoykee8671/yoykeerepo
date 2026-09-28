@@ -194,6 +194,8 @@ const importedRequests = [
 ];
 
 const settlementTypes = new Set(["prepay_debt", "prepay_fee", "prepay_supply", "consignment", "direct_purchase"]);
+const partnerCategories = new Set(["production", "sales", "purchase"]);
+const purchaseOrderStatuses = new Set(["ordered", "in_production", "received", "cancelled"]);
 const shippingPolicyTypes = new Set(["free", "flat", "threshold"]);
 const requestStatuses = new Set(["pending", "await_deposit", "paid", "hold", "error", "consignment_unpaid", "deleted"]);
 // Statuses that still represent an unpaid, live obligation (counted in 대기금액).
@@ -1102,6 +1104,9 @@ function buildInitialDb() {
     priceEntries: [],
     priceAliases: [],
     promotionRules: [],
+    partners: [],
+    materials: [],
+    purchaseOrders: [],
     requests,
     auditLogs: [
       {
@@ -1280,6 +1285,9 @@ function migrateDb(db) {
   touch(db, "priceEntries", []);
   touch(db, "priceAliases", []);
   touch(db, "promotionRules", []);
+  touch(db, "partners", []);
+  touch(db, "materials", []);
+  touch(db, "purchaseOrders", []);
   for (const rule of db.promotionRules || []) {
     touch(rule, "scopeType", "all");
     touch(rule, "discountKind", "");
@@ -4193,7 +4201,8 @@ const MENU_REGISTRY = [
   // 화면은 주문매칭 하나로 합쳤지만, 클로브 연결·대사 API 는 자기 권한을 그대로
   // 쓴다. 권한을 없애면 기존에 막아 둔 계정이 갑자기 열린다.
   { key: "reconcile", label: "주문매칭(클로브)", actions: ["view", "apply"] },
-  { key: "npb", label: "npb정산", actions: ["view", "edit"] }
+  { key: "npb", label: "npb정산", actions: ["view", "edit"] },
+  { key: "procurement", label: "거래관리", actions: ["view", "create", "edit", "delete"] }
 ];
 
 const ACTION_LABELS = {
