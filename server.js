@@ -4334,6 +4334,43 @@ function dashboard(db) {
   };
 }
 
+function sanitizePurchaseOrderLineItems(raw) {
+  const source =
+    Array.isArray(raw) ? raw : typeof raw === "string" && raw.trim() ? (() => {
+      try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    })() : [];
+  return source
+    .map((item) => {
+      const quantity = Math.max(0, number(item.quantity));
+      const unitPrice = Math.max(0, number(item.unitPrice));
+      return {
+        id: item.id || id("poline"),
+        materialId: String(item.materialId || "").trim(),
+        itemName: String(item.itemName || "").trim(),
+        spec: String(item.spec || "").trim(),
+        quantity,
+        unit: String(item.unit || "").trim(),
+        unitPrice,
+        totalPrice: Math.round(quantity * unitPrice)
+      };
+    })
+    .filter((item) => item.itemName);
+}
+
+// 문서번호는 별도 카운터를 두지 않고, 같은 날짜로 이미 저장된 발주서 개수에서
+// 파생한다 — 저장된 데이터가 곧 진실이라 카운터가 어긋날 일이 없다.
+function nextPurchaseOrderDocNo(db, orderDate) {
+  const dateKey = (dateOnly(orderDate) || now().slice(0, 10)).replaceAll("-", "");
+  const sameDay = (db.purchaseOrders || []).filter((po) => String(po.docNo || "").startsWith(`PO-${dateKey}-`));
+  const seq = sameDay.length + 1;
+  return `PO-${dateKey}-${String(seq).padStart(3, "0")}`;
+}
+
 function sanitizeLineItems(raw) {
   const source =
     Array.isArray(raw) ? raw : typeof raw === "string" && raw.trim() ? (() => {
@@ -8282,6 +8319,96 @@ async function routeApi(req, res, url) {
     }
     const [before] = db.materials.splice(index, 1);
     addAudit(db, actor, "delete", "material", before.id, `${before.itemName} 원부자재 삭제`, before, null);
+    await writeDb(db);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (pathname === "/api/purchase-orders" && method === "GET") {
+    const partnerId = url.searchParams.get("partnerId") || "";
+    const rows = (db.purchaseOrders || [])
+      .filter((item) => !partnerId || item.partnerId === partnerId)
+      .slice()
+      .sort((a, b) => (b.orderDate || "").localeCompare(a.orderDate || "") || b.updatedAt.localeCompare(a.updatedAt));
+    sendJson(res, 200, { purchaseOrders: rows });
+    return;
+  }
+
+  if (pathname === "/api/purchase-orders" && method === "POST") {
+    const body = await readBody(req);
+    const partner = db.partners.find((item) => item.id === body.partnerId);
+    if (!partner) {
+      sendJson(res, 400, { error: "거래처를 선택하세요." });
+      return;
+    }
+    const orderDate = dateOnly(body.orderDate) || now().slice(0, 10);
+    const lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
+    const subtotal = lineItems.reduce((sum, item) => sum + item.totalPrice, 0);
+    const vat = Math.round(subtotal * 0.1);
+    const po = {
+      id: id("po"),
+      docNo: nextPurchaseOrderDocNo(db, orderDate),
+      partnerId: partner.id,
+      orderDate,
+      status: purchaseOrderStatuses.has(body.status) ? body.status : "ordered",
+      lineItems,
+      deliveryPlace: String(body.deliveryPlace || "").trim(),
+      subtotal,
+      vat,
+      total: subtotal + vat,
+      note: String(body.note || "").trim(),
+      createdAt: now(),
+      updatedAt: now()
+    };
+    db.purchaseOrders.unshift(po);
+    addAudit(db, actor, "create", "purchaseOrder", po.id, `${po.docNo} 발주서 생성`, null, po);
+    await writeDb(db);
+    sendJson(res, 201, { purchaseOrder: po });
+    return;
+  }
+
+  const poMatch = pathname.match(/^\/api\/purchase-orders\/([^/]+)$/);
+  if (poMatch && method === "PUT") {
+    const body = await readBody(req);
+    const po = db.purchaseOrders.find((item) => item.id === poMatch[1]);
+    if (!po) {
+      sendJson(res, 404, { error: "발주서를 찾을 수 없습니다." });
+      return;
+    }
+    const before = { ...po };
+    if ("partnerId" in body) {
+      const partner = db.partners.find((item) => item.id === body.partnerId);
+      if (!partner) {
+        sendJson(res, 400, { error: "거래처를 찾을 수 없습니다." });
+        return;
+      }
+      po.partnerId = partner.id;
+    }
+    if ("orderDate" in body) po.orderDate = dateOnly(body.orderDate) || po.orderDate;
+    if ("status" in body && purchaseOrderStatuses.has(body.status)) po.status = body.status;
+    if ("deliveryPlace" in body) po.deliveryPlace = String(body.deliveryPlace || "").trim();
+    if ("note" in body) po.note = String(body.note || "").trim();
+    if ("lineItems" in body) {
+      po.lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
+      po.subtotal = po.lineItems.reduce((sum, item) => sum + item.totalPrice, 0);
+      po.vat = Math.round(po.subtotal * 0.1);
+      po.total = po.subtotal + po.vat;
+    }
+    po.updatedAt = now();
+    addAudit(db, actor, "update", "purchaseOrder", po.id, `${po.docNo} 발주서 수정`, before, po);
+    await writeDb(db);
+    sendJson(res, 200, { purchaseOrder: po });
+    return;
+  }
+
+  if (poMatch && method === "DELETE") {
+    const index = db.purchaseOrders.findIndex((item) => item.id === poMatch[1]);
+    if (index === -1) {
+      sendJson(res, 404, { error: "발주서를 찾을 수 없습니다." });
+      return;
+    }
+    const [before] = db.purchaseOrders.splice(index, 1);
+    addAudit(db, actor, "delete", "purchaseOrder", before.id, `${before.docNo} 발주서 삭제`, before, null);
     await writeDb(db);
     sendJson(res, 200, { ok: true });
     return;
