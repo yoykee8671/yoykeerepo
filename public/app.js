@@ -4247,6 +4247,216 @@ function bindMaterials() {
   });
 }
 
+function renderPurchaseOrders() {
+  const rows = (state.purchaseOrders || []).slice().sort((a, b) => (b.orderDate || "").localeCompare(a.orderDate || ""));
+  return `
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>발주서 목록</h2><span class="muted">${money.format(rows.length)}건</span></div>
+        <div class="panel-body" style="padding-bottom:0">
+          <button class="primary" data-new-purchase-order>새 발주서</button>
+        </div>
+        <div class="table-wrap">
+          <table class="purchase-orders-table">
+            <thead><tr><th>문서번호</th><th>거래처</th><th>발주일</th><th>상태</th><th>합계</th><th>작업</th></tr></thead>
+            <tbody>${rows.map(renderPurchaseOrderRow).join("") || `<tr><td colspan="6" class="empty">등록된 발주서가 없습니다.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>${state.procurement.editingPurchaseOrder ? "발주서 수정" : "발주서 작성"}</h2></div>
+        <div class="panel-body">${renderPurchaseOrderForm()}</div>
+      </div>
+    </section>
+  `;
+}
+
+function renderPurchaseOrderRow(item) {
+  const partner = (state.partners || []).find((p) => p.id === item.partnerId);
+  return `
+    <tr>
+      <td>${h(item.docNo)}</td>
+      <td>${h(partner?.name || "")}</td>
+      <td>${h(item.orderDate)}</td>
+      <td>${PO_STATUS_LABELS[item.status] || item.status}</td>
+      <td>${money.format(item.total)}원</td>
+      <td><div class="row-actions">
+        <button data-edit-purchase-order="${item.id}">수정</button>
+        <a href="/api/purchase-orders/${item.id}/excel"><button type="button">엑셀</button></a>
+        <button class="danger icon-btn" data-delete-purchase-order="${item.id}" aria-label="삭제" title="삭제">×</button>
+      </div></td>
+    </tr>`;
+}
+
+function renderPurchaseOrderForm() {
+  const po = state.procurement.editingPurchaseOrder || {};
+  const lineItems = Array.isArray(po.lineItems) ? po.lineItems : [];
+  return `
+    <form class="form-grid" data-purchase-order-form>
+      <div class="field">
+        <label>거래처(생산업체)</label>
+        <select name="partnerId" required>
+          <option value="">거래처 선택</option>
+          ${productionPartners().map((p) => `<option value="${p.id}" ${po.partnerId === p.id ? "selected" : ""}>${h(p.name)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field two">
+        <div><label>발주일</label><input name="orderDate" type="date" value="${h(po.orderDate || new Date().toISOString().slice(0, 10))}"></div>
+        <div>
+          <label>상태</label>
+          <select name="status">
+            ${Object.entries(PO_STATUS_LABELS).map(([key, label]) => `<option value="${key}" ${(po.status || "ordered") === key ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+      <div class="field"><label>납품장소</label><input name="deliveryPlace" value="${h(po.deliveryPlace)}"></div>
+      <input type="hidden" name="lineItemsJson" value='${h(JSON.stringify(lineItems))}'>
+      <div class="field">
+        <label>품목 추가</label>
+        <datalist id="po-material-options">
+          ${(state.materials || []).map((m) => `<option value="${h(m.itemName)}">`).join("")}
+        </datalist>
+        <div class="field three">
+          <div><input data-po-item-name list="po-material-options" placeholder="원부자재명 (검색 또는 신규 입력)"></div>
+          <div><input data-po-item-qty type="number" min="1" value="1" placeholder="수량"></div>
+          <div><input data-po-item-price type="number" min="0" placeholder="단가"></div>
+        </div>
+        <button type="button" data-add-po-line-item style="margin-top:8px">품목 추가</button>
+      </div>
+      <div data-po-line-items-table>${renderPurchaseOrderLineItems(lineItems)}</div>
+      <div class="field"><label>메모</label><textarea name="note">${h(po.note)}</textarea></div>
+      <div class="toolbar">
+        <button class="primary" type="submit">${po.id ? "수정 저장" : "발주서 생성"}</button>
+        ${state.procurement.editingPurchaseOrder ? `<button type="button" data-cancel-edit-purchase-order>취소</button>` : ""}
+      </div>
+    </form>
+  `;
+}
+
+function renderPurchaseOrderLineItems(items) {
+  if (!items.length) return `<div class="empty">추가된 품목이 없습니다.</div>`;
+  return `
+    <table class="line-items-table">
+      <thead><tr><th>작업</th><th>품목명</th><th>규격</th><th>수량</th><th>단위</th><th>단가</th><th>합계</th></tr></thead>
+      <tbody>
+        ${items.map((item) => `
+          <tr data-po-line-row="${item.id}">
+            <td><button type="button" class="danger icon-btn" data-remove-po-line-item="${item.id}" aria-label="삭제" title="삭제">×</button></td>
+            <td>${h(item.itemName)}</td>
+            <td>${h(item.spec)}</td>
+            <td>${h(item.quantity)}</td>
+            <td>${h(item.unit)}</td>
+            <td>${money.format(item.unitPrice)}</td>
+            <td>${money.format(item.totalPrice)}</td>
+          </tr>`).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function bindPurchaseOrders() {
+  app.querySelector("[data-new-purchase-order]")?.addEventListener("click", () => {
+    state.procurement.editingPurchaseOrder = null;
+    renderApp();
+  });
+  app.querySelectorAll("[data-edit-purchase-order]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.procurement.editingPurchaseOrder = state.purchaseOrders.find((item) => item.id === button.dataset.editPurchaseOrder);
+      renderApp();
+    });
+  });
+  app.querySelector("[data-cancel-edit-purchase-order]")?.addEventListener("click", () => {
+    state.procurement.editingPurchaseOrder = null;
+    renderApp();
+  });
+  app.querySelectorAll("[data-delete-purchase-order]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("이 발주서를 삭제할까요?")) return;
+      try {
+        await api(`/api/purchase-orders/${button.dataset.deletePurchaseOrder}`, { method: "DELETE" });
+      } catch (error) {
+        alert(error.message);
+        return;
+      }
+      await refreshAndRender();
+    });
+  });
+
+  const form = app.querySelector("[data-purchase-order-form]");
+  if (!form) return;
+  const lineItemsInput = form.querySelector("[name=lineItemsJson]");
+  const lineItemsSlot = form.querySelector("[data-po-line-items-table]");
+  const getLineItems = () => {
+    try {
+      return JSON.parse(lineItemsInput.value || "[]");
+    } catch {
+      return [];
+    }
+  };
+  const bindPoLineItemRemovers = () => {
+    lineItemsSlot.querySelectorAll("[data-remove-po-line-item]").forEach((button) => {
+      button.addEventListener("click", () => {
+        setLineItems(getLineItems().filter((item) => item.id !== button.dataset.removePoLineItem));
+      });
+    });
+  };
+  const setLineItems = (items) => {
+    lineItemsInput.value = JSON.stringify(items);
+    lineItemsSlot.innerHTML = renderPurchaseOrderLineItems(items);
+    bindPoLineItemRemovers();
+  };
+  bindPoLineItemRemovers();
+
+  form.querySelector("[data-add-po-line-item]")?.addEventListener("click", async () => {
+    const nameInput = form.querySelector("[data-po-item-name]");
+    const qtyInput = form.querySelector("[data-po-item-qty]");
+    const priceInput = form.querySelector("[data-po-item-price]");
+    const name = nameInput.value.trim();
+    if (!name) return;
+    const material = (state.materials || []).find((m) => m.itemName.trim() === name);
+    const quantity = Math.max(1, Number(qtyInput.value) || 1);
+    const unitPrice = priceInput.value !== "" ? Number(priceInput.value) : Number(material?.basePrice || 0);
+    const items = getLineItems();
+    items.push({
+      id: cryptoRandomId(),
+      materialId: material?.id || "",
+      itemName: name,
+      spec: "",
+      quantity,
+      unit: material?.orderUnit || "",
+      unitPrice,
+      totalPrice: Math.round(quantity * unitPrice)
+    });
+    setLineItems(items);
+    nameInput.value = "";
+    qtyInput.value = "1";
+    priceInput.value = "";
+    nameInput.focus();
+    if (!material && confirm(`"${name}" 품목을 원부자재 카탈로그에 등록할까요?`)) {
+      const partnerId = form.querySelector("[name=partnerId]").value;
+      const created = await api("/api/materials", {
+        method: "POST",
+        body: { itemName: name, orderUnit: "", basePrice: unitPrice, partnerId }
+      });
+      state.materials.push(created.material);
+    }
+  });
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = formObject(event.currentTarget);
+    body.lineItems = getLineItems();
+    const editing = state.procurement.editingPurchaseOrder;
+    if (editing) {
+      await api(`/api/purchase-orders/${editing.id}`, { method: "PUT", body });
+    } else {
+      await api("/api/purchase-orders", { method: "POST", body });
+    }
+    state.procurement.editingPurchaseOrder = null;
+    await refreshAndRender();
+  });
+}
+
 function bindAdmins() {
   app.querySelector("[data-new-admin]").addEventListener("click", () => {
     state.editingAdmin = null;
