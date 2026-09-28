@@ -8215,6 +8215,78 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  if (pathname === "/api/materials" && method === "GET") {
+    const partnerId = url.searchParams.get("partnerId") || "";
+    const rows = (db.materials || [])
+      .filter((item) => !partnerId || item.partnerId === partnerId)
+      .slice()
+      .sort((a, b) => String(a.itemName || "").localeCompare(String(b.itemName || ""), "ko"));
+    sendJson(res, 200, { materials: rows });
+    return;
+  }
+
+  if (pathname === "/api/materials" && method === "POST") {
+    const body = await readBody(req);
+    const itemName = String(body.itemName || "").trim();
+    if (!itemName) {
+      sendJson(res, 400, { error: "품목명은 필수입니다." });
+      return;
+    }
+    const material = {
+      id: id("material"),
+      partnerId: String(body.partnerId || "").trim(),
+      itemName,
+      category: String(body.category || "").trim(),
+      orderUnit: String(body.orderUnit || "").trim(),
+      basePrice: number(body.basePrice),
+      leadTimeDays: number(body.leadTimeDays),
+      note: String(body.note || "").trim(),
+      isActive: body.isActive !== false,
+      createdAt: now(),
+      updatedAt: now()
+    };
+    db.materials.unshift(material);
+    addAudit(db, actor, "create", "material", material.id, `${material.itemName} 원부자재 생성`, null, material);
+    await writeDb(db);
+    sendJson(res, 201, { material });
+    return;
+  }
+
+  const materialMatch = pathname.match(/^\/api\/materials\/([^/]+)$/);
+  if (materialMatch && method === "PUT") {
+    const body = await readBody(req);
+    const material = db.materials.find((item) => item.id === materialMatch[1]);
+    if (!material) {
+      sendJson(res, 404, { error: "원부자재를 찾을 수 없습니다." });
+      return;
+    }
+    const before = { ...material };
+    for (const key of ["partnerId", "itemName", "category", "orderUnit", "note"]) {
+      if (key in body) material[key] = String(body[key] || "").trim();
+    }
+    if ("basePrice" in body) material.basePrice = number(body.basePrice);
+    if ("leadTimeDays" in body) material.leadTimeDays = number(body.leadTimeDays);
+    if ("isActive" in body) material.isActive = body.isActive !== false && body.isActive !== "false";
+    material.updatedAt = now();
+    addAudit(db, actor, "update", "material", material.id, `${material.itemName} 원부자재 수정`, before, material);
+    await writeDb(db);
+    sendJson(res, 200, { material });
+    return;
+  }
+
+  if (materialMatch && method === "DELETE") {
+    const index = db.materials.findIndex((item) => item.id === materialMatch[1]);
+    if (index === -1) {
+      sendJson(res, 404, { error: "원부자재를 찾을 수 없습니다." });
+      return;
+    }
+    const [before] = db.materials.splice(index, 1);
+    addAudit(db, actor, "delete", "material", before.id, `${before.itemName} 원부자재 삭제`, before, null);
+    await writeDb(db);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
   sendJson(res, 404, { error: "API를 찾을 수 없습니다." });
 }
 
