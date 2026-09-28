@@ -8118,6 +8118,103 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  if (pathname === "/api/partners" && method === "GET") {
+    const category = url.searchParams.get("category") || "";
+    const rows = (db.partners || [])
+      .filter((item) => !category || item.category === category)
+      .slice()
+      .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ko"));
+    sendJson(res, 200, { partners: rows });
+    return;
+  }
+
+  if (pathname === "/api/partners" && method === "POST") {
+    const body = await readBody(req);
+    const name = String(body.name || "").trim();
+    if (!name) {
+      sendJson(res, 400, { error: "거래처명은 필수입니다." });
+      return;
+    }
+    const partner = {
+      id: id("partner"),
+      category: partnerCategories.has(body.category) ? body.category : "production",
+      name,
+      businessName: String(body.businessName || "").trim(),
+      businessNumber: String(body.businessNumber || "").trim(),
+      representativeName: String(body.representativeName || "").trim(),
+      address: String(body.address || "").trim(),
+      invoiceEmail: String(body.invoiceEmail || "").trim(),
+      bankName: String(body.bankName || "").trim(),
+      bankAccount: String(body.bankAccount || "").trim(),
+      depositorName: String(body.depositorName || "").trim(),
+      orderMethod: String(body.orderMethod || "").trim(),
+      invoiceTiming: String(body.invoiceTiming || "").trim(),
+      contactName: String(body.contactName || "").trim(),
+      contactPhone: String(body.contactPhone || "").trim(),
+      contactEmail: String(body.contactEmail || "").trim(),
+      note: String(body.note || "").trim(),
+      attachments: Array.isArray(body.attachments)
+        ? body.attachments.map((item) => String(item || "").trim()).filter(Boolean)
+        : [],
+      isActive: body.isActive !== false,
+      createdAt: now(),
+      updatedAt: now()
+    };
+    db.partners.unshift(partner);
+    addAudit(db, actor, "create", "partner", partner.id, `${partner.name} 거래처 생성`, null, partner);
+    await writeDb(db);
+    sendJson(res, 201, { partner });
+    return;
+  }
+
+  const partnerMatch = pathname.match(/^\/api\/partners\/([^/]+)$/);
+  if (partnerMatch && method === "PUT") {
+    const body = await readBody(req);
+    const partner = db.partners.find((item) => item.id === partnerMatch[1]);
+    if (!partner) {
+      sendJson(res, 404, { error: "거래처를 찾을 수 없습니다." });
+      return;
+    }
+    const before = { ...partner };
+    for (const key of [
+      "category", "name", "businessName", "businessNumber", "representativeName",
+      "address", "invoiceEmail", "bankName", "bankAccount", "depositorName",
+      "orderMethod", "invoiceTiming", "contactName", "contactPhone", "contactEmail", "note"
+    ]) {
+      if (key in body) partner[key] = String(body[key] || "").trim();
+    }
+    if (!partnerCategories.has(partner.category)) partner.category = "production";
+    if ("attachments" in body) {
+      partner.attachments = Array.isArray(body.attachments)
+        ? body.attachments.map((item) => String(item || "").trim()).filter(Boolean)
+        : [];
+    }
+    if ("isActive" in body) partner.isActive = body.isActive !== false && body.isActive !== "false";
+    partner.updatedAt = now();
+    addAudit(db, actor, "update", "partner", partner.id, `${partner.name} 거래처 수정`, before, partner);
+    await writeDb(db);
+    sendJson(res, 200, { partner });
+    return;
+  }
+
+  if (partnerMatch && method === "DELETE") {
+    const index = db.partners.findIndex((item) => item.id === partnerMatch[1]);
+    if (index === -1) {
+      sendJson(res, 404, { error: "거래처를 찾을 수 없습니다." });
+      return;
+    }
+    const inUse = (db.purchaseOrders || []).some((po) => po.partnerId === partnerMatch[1]);
+    if (inUse) {
+      sendJson(res, 400, { error: "발주서가 있는 거래처는 삭제할 수 없습니다. 먼저 사용 안 함으로 전환하세요." });
+      return;
+    }
+    const [before] = db.partners.splice(index, 1);
+    addAudit(db, actor, "delete", "partner", before.id, `${before.name} 거래처 삭제`, before, null);
+    await writeDb(db);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
   sendJson(res, 404, { error: "API를 찾을 수 없습니다." });
 }
 
