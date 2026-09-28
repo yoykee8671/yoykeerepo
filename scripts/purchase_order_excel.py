@@ -9,7 +9,7 @@ Spec JSON:
   "partner": {"name","businessName","businessNumber","representativeName","address",
               "contactName","contactEmail"},
   "lineItems": [{"itemName","spec","quantity","unit","unitPrice","totalPrice"}, ...],
-  "deliveryPlace": "...",
+  "deliveryPlace": {"name","address","contactName","contactPhone","note"},  # all optional
   "subtotal": 0, "vat": 0, "total": 0,
   "note": "..."
 }
@@ -35,6 +35,28 @@ def _num(v):
         return float(v)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _delivery_text(delivery):
+    """Join the delivery-place snapshot into one readable cell.
+    Accepts the current object shape; a plain string is passed through as-is
+    for backward compatibility with purchase orders saved before this field
+    became structured."""
+    if isinstance(delivery, str):
+        return delivery
+    if not isinstance(delivery, dict):
+        return ""
+    parts = []
+    if delivery.get("name"):
+        parts.append(delivery["name"])
+    if delivery.get("address"):
+        parts.append(delivery["address"])
+    contact = " ".join(x for x in [delivery.get("contactName"), delivery.get("contactPhone")] if x)
+    if contact:
+        parts.append(f"담당: {contact}")
+    if delivery.get("note"):
+        parts.append(f"메모: {delivery['note']}")
+    return " / ".join(parts)
 
 
 def build_purchase_order(ws, spec):
@@ -105,7 +127,7 @@ def build_purchase_order(ws, spec):
     ws.cell(row=sr + 2, column=7, value=_num(spec.get("total"))).number_format = WON
 
     ws.cell(row=sr, column=1, value="납품장소")
-    ws.cell(row=sr, column=2, value=spec.get("deliveryPlace", ""))
+    ws.cell(row=sr, column=2, value=_delivery_text(spec.get("deliveryPlace")))
     ws.cell(row=sr + 1, column=1, value="비고")
     ws.cell(row=sr + 1, column=2, value=spec.get("note", ""))
 

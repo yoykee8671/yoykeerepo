@@ -6,6 +6,7 @@ const state = {
   partners: [],
   materials: [],
   purchaseOrders: [],
+  deliveryPlaces: [],
   priceEntries: [],
   priceCatalog: [],
   aliasEntries: [],
@@ -98,7 +99,7 @@ const state = {
 // 정산 브랜드는 화면에서 고른다. 도톤 외 브랜드도 같은 방식으로 정산한다.
 const NPB_DEFAULT_BRAND = "doteon";
 const npbBrand = () => state.npb.brandId || NPB_DEFAULT_BRAND;
-const PARTNER_CATEGORY_LABELS = { production: "생산업체", sales: "판매납품처", purchase: "매입공급처" };
+const PARTNER_CATEGORY_LABELS = { production: "생산업체", sales: "판매납품처", purchase: "매입공급처", issuer: "발행자(자사)" };
 const PO_STATUS_LABELS = { ordered: "발주", in_production: "생산중", received: "입고완료", cancelled: "취소" };
 const PROCUREMENT_SCREENS = [
   ["partners", "거래처관리"],
@@ -501,7 +502,7 @@ async function init() {
 async function loadAll() {
   // 이력·아카이브는 화면을 열 때가 아니라 해당 탭을 눌렀을 때 부른다. 감사로그
   // 전체는 2MB가 넘어서, 매번 실어 보내면 나머지 응답까지 같이 밀린다.
-  const [dashboard, brands, requests, priceEntries, priceAliases, promotionRules, paymentLogs, admins, menus, partners, materials, purchaseOrders] = await Promise.all([
+  const [dashboard, brands, requests, priceEntries, priceAliases, promotionRules, paymentLogs, admins, menus, partners, materials, purchaseOrders, deliveryPlaces] = await Promise.all([
     api("/api/dashboard"),
     api("/api/brands"),
     api("/api/requests"),
@@ -513,7 +514,8 @@ async function loadAll() {
     api("/api/menus"),
     api("/api/partners"),
     api("/api/materials"),
-    api("/api/purchase-orders")
+    api("/api/purchase-orders"),
+    api("/api/delivery-places")
   ]);
   state.menus = menus.menus || [];
   state.actionLabels = menus.actionLabels || {};
@@ -529,6 +531,7 @@ async function loadAll() {
   state.partners = partners.partners;
   state.materials = materials.materials;
   state.purchaseOrders = purchaseOrders.purchaseOrders;
+  state.deliveryPlaces = deliveryPlaces.deliveryPlaces;
 
   ensureRequestFilterDefaults();
   state.selectedRequestIds = state.selectedRequestIds.filter((id) =>
@@ -3983,14 +3986,22 @@ function filteredPartners() {
   return (state.partners || []).filter((item) => !cat || item.category === cat);
 }
 
+function partnersByCategory(category) {
+  return (state.partners || []).filter((item) => item.category === category && item.isActive !== false);
+}
+
 function productionPartners() {
-  return (state.partners || []).filter((item) => item.category === "production" && item.isActive !== false);
+  return partnersByCategory("production");
+}
+
+function issuerPartners() {
+  return partnersByCategory("issuer");
 }
 
 // 현재 선택된 거래처가 사용 안 함으로 전환됐어도 옵션 목록에서 사라지면 안 된다 —
 // 폼을 그대로 저장하면 partnerId가 빈 값으로 날아가 기존 연결이 끊긴다.
-function partnerSelectOptions(selectedPartnerId) {
-  const active = productionPartners();
+function partnerSelectOptions(selectedPartnerId, category = "production") {
+  const active = partnersByCategory(category);
   const options = active.map((p) => `<option value="${p.id}" ${selectedPartnerId === p.id ? "selected" : ""}>${h(p.name)}</option>`);
   if (selectedPartnerId && !active.some((p) => p.id === selectedPartnerId)) {
     const inactive = (state.partners || []).find((p) => p.id === selectedPartnerId);
@@ -4329,7 +4340,7 @@ function renderPurchaseOrderRow(item) {
       <td>${h(partner?.name || "")}</td>
       <td>${h(item.orderDate)}</td>
       <td>${PO_STATUS_LABELS[item.status] || item.status}</td>
-      <td>${money.format(item.total)}원</td>
+      <td>${money.format(item.total)}원<br><span class="muted" style="font-size:11px">공급가 ${money.format(item.subtotal)} · 부가세 ${money.format(item.vat)}</span></td>
       <td><div class="row-actions">
         <button data-edit-purchase-order="${item.id}">수정</button>
         <a href="/api/purchase-orders/${item.id}/excel"><button type="button">엑셀</button></a>
@@ -4343,12 +4354,20 @@ function renderPurchaseOrderForm() {
   const lineItems = Array.isArray(po.lineItems) ? po.lineItems : [];
   return `
     <form class="form-grid" data-purchase-order-form>
-      <div class="field">
-        <label>거래처(생산업체)</label>
-        <select name="partnerId" required>
-          <option value="">거래처 선택</option>
-          ${partnerSelectOptions(po.partnerId).join("")}
-        </select>
+      <div class="field two">
+        <div>
+          <label>거래처(생산업체)</label>
+          <select name="partnerId" required>
+            <option value="">거래처 선택</option>
+            ${partnerSelectOptions(po.partnerId).join("")}
+          </select>
+        </div>
+        <div>
+          <label>발행자(우리 회사)</label>
+          <select name="issuerPartnerId">
+            ${partnerSelectOptions(po.issuerPartnerId, "issuer").join("")}
+          </select>
+        </div>
       </div>
       <div class="field two">
         <div><label>발주일</label><input name="orderDate" type="date" value="${h(po.orderDate || new Date().toISOString().slice(0, 10))}"></div>
@@ -4359,7 +4378,22 @@ function renderPurchaseOrderForm() {
           </select>
         </div>
       </div>
-      <div class="field"><label>납품장소</label><input name="deliveryPlace" value="${h(po.deliveryPlace)}"></div>
+      <div class="field">
+        <label>납품장소 <span class="muted" style="font-weight:400">(선택 입력)</span></label>
+        <datalist id="po-delivery-place-options">
+          ${(state.deliveryPlaces || []).map((d) => `<option value="${h(d.name)}">`).join("")}
+        </datalist>
+        <input name="deliveryPlaceName" list="po-delivery-place-options" placeholder="납품장소명 (검색 또는 신규 입력)" value="${h(po.deliveryPlace?.name)}">
+        <div class="field four" style="margin-top:6px">
+          <div><input name="deliveryPlaceAddress" placeholder="주소" value="${h(po.deliveryPlace?.address)}"></div>
+          <div><input name="deliveryPlaceContactName" placeholder="담당자명" value="${h(po.deliveryPlace?.contactName)}"></div>
+          <div><input name="deliveryPlaceContactPhone" placeholder="전화번호" value="${h(po.deliveryPlace?.contactPhone)}"></div>
+          <div><input name="deliveryPlaceNote" placeholder="배송 메모" value="${h(po.deliveryPlace?.note)}"></div>
+        </div>
+        <label class="muted" style="display:flex;align-items:center;gap:6px;margin-top:6px;font-weight:400">
+          <input type="checkbox" name="saveDeliveryPlace"> 이 납품장소 저장 (다음부터 목록에서 선택 가능)
+        </label>
+      </div>
       <input type="hidden" name="lineItemsJson" value='${h(JSON.stringify(lineItems))}'>
       <div class="field">
         <label>품목 추가</label>
@@ -4375,6 +4409,7 @@ function renderPurchaseOrderForm() {
         <button type="button" data-add-po-line-item style="margin-top:8px">품목 추가</button>
       </div>
       <div data-po-line-items-table>${renderPurchaseOrderLineItems(lineItems)}</div>
+      <div data-po-summary>${renderPurchaseOrderSummary(lineItems)}</div>
       <div class="field"><label>메모</label><textarea name="note">${h(po.note)}</textarea></div>
       <div class="toolbar">
         <button class="primary" type="submit">${po.id ? "수정 저장" : "발주서 생성"}</button>
@@ -4402,6 +4437,19 @@ function renderPurchaseOrderLineItems(items) {
           </tr>`).join("")}
       </tbody>
     </table>
+  `;
+}
+
+function renderPurchaseOrderSummary(items) {
+  const subtotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
+  const vat = Math.round(subtotal * 0.1);
+  const total = subtotal + vat;
+  return `
+    <div class="line-items-summary">
+      <span><b>공급가 합계</b> ${money.format(subtotal)}원</span>
+      <span><b>부가세(10%)</b> ${money.format(vat)}원</span>
+      <span><b>최종 합계</b> ${money.format(total)}원</span>
+    </div>
   `;
 }
 
@@ -4437,6 +4485,7 @@ function bindPurchaseOrders() {
   if (!form) return;
   const lineItemsInput = form.querySelector("[name=lineItemsJson]");
   const lineItemsSlot = form.querySelector("[data-po-line-items-table]");
+  const summarySlot = form.querySelector("[data-po-summary]");
   const getLineItems = () => {
     try {
       return JSON.parse(lineItemsInput.value || "[]");
@@ -4454,6 +4503,7 @@ function bindPurchaseOrders() {
   const setLineItems = (items) => {
     lineItemsInput.value = JSON.stringify(items);
     lineItemsSlot.innerHTML = renderPurchaseOrderLineItems(items);
+    if (summarySlot) summarySlot.innerHTML = renderPurchaseOrderSummary(items);
     bindPoLineItemRemovers();
   };
   bindPoLineItemRemovers();
@@ -4468,9 +4518,10 @@ function bindPurchaseOrders() {
     const material = (state.materials || []).find((m) => m.itemName.trim() === name);
     const quantity = Math.max(1, Number(qtyInput.value) || 1);
     const unitPrice = priceInput.value !== "" ? Number(priceInput.value) : Number(material?.basePrice || 0);
+    const newItemId = cryptoRandomId();
     const items = getLineItems();
     items.push({
-      id: cryptoRandomId(),
+      id: newItemId,
       materialId: material?.id || "",
       itemName: name,
       spec: specInput.value.trim(),
@@ -4492,9 +4543,14 @@ function bindPurchaseOrders() {
         body: { itemName: name, orderUnit: "", basePrice: unitPrice, partnerId }
       });
       state.materials.push(created.material);
-      const justAdded = items[items.length - 1];
-      justAdded.materialId = created.material.id;
-      setLineItems(items);
+      // await 뒤에는 items가 stale할 수 있다(그 사이 사용자가 품목을 더
+      // 추가했을 수 있음) — getLineItems()로 현재값을 다시 읽어서, 방금 추가한
+      // 그 줄(newItemId)만 콕 집어 수정한다. 전체 배열을 통째로 덮어쓰면
+      // 동시에 추가된 다른 품목이 조용히 사라진다.
+      const currentItems = getLineItems();
+      const target = currentItems.find((item) => item.id === newItemId);
+      if (target) target.materialId = created.material.id;
+      setLineItems(currentItems);
       const datalist = form.querySelector("#po-material-options");
       if (datalist) {
         datalist.innerHTML = (state.materials || []).map((m) => `<option value="${h(m.itemName)}">`).join("");
@@ -4502,10 +4558,44 @@ function bindPurchaseOrders() {
     }
   });
 
+  const deliveryNameInput = form.querySelector("[name=deliveryPlaceName]");
+  deliveryNameInput?.addEventListener("input", () => {
+    const match = (state.deliveryPlaces || []).find((d) => d.name === deliveryNameInput.value.trim());
+    if (!match) return;
+    form.querySelector("[name=deliveryPlaceAddress]").value = match.address || "";
+    form.querySelector("[name=deliveryPlaceContactName]").value = match.contactName || "";
+    form.querySelector("[name=deliveryPlaceContactPhone]").value = match.contactPhone || "";
+    form.querySelector("[name=deliveryPlaceNote]").value = match.note || "";
+  });
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = formObject(event.currentTarget);
     body.lineItems = getLineItems();
+    body.deliveryPlace = {
+      name: body.deliveryPlaceName || "",
+      address: body.deliveryPlaceAddress || "",
+      contactName: body.deliveryPlaceContactName || "",
+      contactPhone: body.deliveryPlaceContactPhone || "",
+      note: body.deliveryPlaceNote || ""
+    };
+    const saveDeliveryPlace = body.saveDeliveryPlace === "on";
+    delete body.deliveryPlaceName;
+    delete body.deliveryPlaceAddress;
+    delete body.deliveryPlaceContactName;
+    delete body.deliveryPlaceContactPhone;
+    delete body.deliveryPlaceNote;
+    delete body.saveDeliveryPlace;
+    if (saveDeliveryPlace && body.deliveryPlace.name) {
+      try {
+        const created = await api("/api/delivery-places", { method: "POST", body: body.deliveryPlace });
+        if (created.deliveryPlace && !(state.deliveryPlaces || []).some((d) => d.id === created.deliveryPlace.id)) {
+          state.deliveryPlaces.push(created.deliveryPlace);
+        }
+      } catch (error) {
+        alert(`납품장소 저장 실패: ${error.message}`);
+      }
+    }
     const editing = state.procurement.editingPurchaseOrder;
     if (editing) {
       await api(`/api/purchase-orders/${editing.id}`, { method: "PUT", body });

@@ -195,7 +195,7 @@ const importedRequests = [
 ];
 
 const settlementTypes = new Set(["prepay_debt", "prepay_fee", "prepay_supply", "consignment", "direct_purchase"]);
-const partnerCategories = new Set(["production", "sales", "purchase"]);
+const partnerCategories = new Set(["production", "sales", "purchase", "issuer"]);
 const purchaseOrderStatuses = new Set(["ordered", "in_production", "received", "cancelled"]);
 const shippingPolicyTypes = new Set(["free", "flat", "threshold"]);
 const requestStatuses = new Set(["pending", "await_deposit", "paid", "hold", "error", "consignment_unpaid", "deleted"]);
@@ -1105,9 +1105,10 @@ function buildInitialDb() {
     priceEntries: [],
     priceAliases: [],
     promotionRules: [],
-    partners: [],
+    partners: [defaultIssuerPartner(createdAt)],
     materials: [],
     purchaseOrders: [],
+    deliveryPlaces: [],
     requests,
     auditLogs: [
       {
@@ -1289,6 +1290,12 @@ function migrateDb(db) {
   touch(db, "partners", []);
   touch(db, "materials", []);
   touch(db, "purchaseOrders", []);
+  touch(db, "deliveryPlaces", []);
+  if (!(db.partners || []).some((p) => p.category === "issuer")) {
+    db.partners = db.partners || [];
+    db.partners.push(defaultIssuerPartner());
+    changed = true;
+  }
   for (const rule of db.promotionRules || []) {
     touch(rule, "scopeType", "all");
     touch(rule, "discountKind", "");
@@ -3799,6 +3806,36 @@ const COMPANY_INFO = {
   bankInfo: "KB국민은행 802-21-0429-353"
 };
 
+// 발행 법인이 여러 개(우프컴퍼니/픽키파크/베럴즈 등)로 늘어나면서 COMPANY_INFO
+// 하나로는 부족해졌다 — partners 컬렉션에 "issuer" 분류를 추가해 재사용한다.
+// 기존 COMPANY_INFO 값은 최초 1건을 자동 등록해 기존 동작을 그대로 유지한다.
+function defaultIssuerPartner(createdAt = now()) {
+  const [bankName, ...bankRest] = String(COMPANY_INFO.bankInfo || "").split(" ");
+  return {
+    id: id("partner"),
+    category: "issuer",
+    name: COMPANY_INFO.businessName,
+    businessName: COMPANY_INFO.businessName,
+    businessNumber: COMPANY_INFO.businessNumber,
+    representativeName: COMPANY_INFO.representativeName,
+    address: COMPANY_INFO.address,
+    invoiceEmail: "",
+    bankName: bankName || "",
+    bankAccount: bankRest.join(" "),
+    depositorName: "",
+    orderMethod: "",
+    invoiceTiming: "",
+    contactName: "",
+    contactPhone: "",
+    contactEmail: "",
+    note: "기존 고정 발행자 정보에서 자동 생성됨",
+    attachments: [],
+    isActive: true,
+    createdAt,
+    updatedAt: createdAt
+  };
+}
+
 async function generatePurchaseOrderXlsx(spec) {
   const tmpBase = path.join(os.tmpdir(), `wooofpay-po-${crypto.randomBytes(8).toString("hex")}`);
   const inputPath = `${tmpBase}.json`;
@@ -4388,6 +4425,20 @@ function sanitizePurchaseOrderLineItems(raw) {
       };
     })
     .filter((item) => item.itemName);
+}
+
+// 납품장소는 거래처와 달리 발주서 저장 시점의 스냅샷으로만 남는다 — 재사용
+// 목록(deliveryPlaces)이 나중에 바뀌거나 지워져도 이미 발행한 발주서 내용은
+// 그대로 유지되어야 하기 때문에, id 참조가 아니라 값 자체를 복사해 저장한다.
+function sanitizeDeliveryPlace(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  return {
+    name: String(source.name || "").trim(),
+    address: String(source.address || "").trim(),
+    contactName: String(source.contactName || "").trim(),
+    contactPhone: String(source.contactPhone || "").trim(),
+    note: String(source.note || "").trim()
+  };
 }
 
 // 문서번호는 별도 카운터를 두지 않고, 같은 날짜로 이미 저장된 발주서 개수에서
@@ -8380,7 +8431,8 @@ async function routeApi(req, res, url) {
       orderDate,
       status: purchaseOrderStatuses.has(body.status) ? body.status : "ordered",
       lineItems,
-      deliveryPlace: String(body.deliveryPlace || "").trim(),
+      issuerPartnerId: String(body.issuerPartnerId || "").trim(),
+      deliveryPlace: sanitizeDeliveryPlace(body.deliveryPlace),
       subtotal,
       vat,
       total: subtotal + vat,
@@ -8414,7 +8466,8 @@ async function routeApi(req, res, url) {
     }
     if ("orderDate" in body) po.orderDate = dateOnly(body.orderDate) || po.orderDate;
     if ("status" in body && purchaseOrderStatuses.has(body.status)) po.status = body.status;
-    if ("deliveryPlace" in body) po.deliveryPlace = String(body.deliveryPlace || "").trim();
+    if ("issuerPartnerId" in body) po.issuerPartnerId = String(body.issuerPartnerId || "").trim();
+    if ("deliveryPlace" in body) po.deliveryPlace = sanitizeDeliveryPlace(body.deliveryPlace);
     if ("note" in body) po.note = String(body.note || "").trim();
     if ("lineItems" in body) {
       po.lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
@@ -8450,10 +8503,22 @@ async function routeApi(req, res, url) {
       return;
     }
     const partner = db.partners.find((item) => item.id === po.partnerId);
+    // issuerPartnerId가 없는(이 기능 이전에 만들어진) 발주서는 예전처럼
+    // COMPANY_INFO 고정값으로 대체한다 — 과거 기록의 발행자 표기를 바꾸지 않는다.
+    const issuerPartner = db.partners.find((item) => item.id === po.issuerPartnerId);
+    const issuer = issuerPartner
+      ? {
+          businessName: issuerPartner.businessName || issuerPartner.name,
+          businessNumber: issuerPartner.businessNumber,
+          representativeName: issuerPartner.representativeName,
+          address: issuerPartner.address,
+          bankInfo: [issuerPartner.bankName, issuerPartner.bankAccount].filter(Boolean).join(" ")
+        }
+      : COMPANY_INFO;
     const spec = {
       docNo: po.docNo,
       orderDate: po.orderDate,
-      issuer: COMPANY_INFO,
+      issuer,
       partner: partner
         ? {
             name: partner.name,
@@ -8480,6 +8545,43 @@ async function routeApi(req, res, url) {
     } catch (error) {
       sendJson(res, 500, { error: `발주서 생성 실패: ${error.message}` });
     }
+    return;
+  }
+
+  if (pathname === "/api/delivery-places" && method === "GET") {
+    const rows = (db.deliveryPlaces || [])
+      .slice()
+      .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ko"));
+    sendJson(res, 200, { deliveryPlaces: rows });
+    return;
+  }
+
+  if (pathname === "/api/delivery-places" && method === "POST") {
+    const body = await readBody(req);
+    const name = String(body.name || "").trim();
+    if (!name) {
+      sendJson(res, 400, { error: "납품장소명은 필수입니다." });
+      return;
+    }
+    const existing = (db.deliveryPlaces || []).find((item) => item.name === name);
+    if (existing) {
+      sendJson(res, 200, { deliveryPlace: existing });
+      return;
+    }
+    const deliveryPlace = {
+      id: id("delivery"),
+      name,
+      address: String(body.address || "").trim(),
+      contactName: String(body.contactName || "").trim(),
+      contactPhone: String(body.contactPhone || "").trim(),
+      note: String(body.note || "").trim(),
+      createdAt: now(),
+      updatedAt: now()
+    };
+    db.deliveryPlaces.push(deliveryPlace);
+    addAudit(db, actor, "create", "deliveryPlace", deliveryPlace.id, `${deliveryPlace.name} 납품장소 등록`, null, deliveryPlace);
+    await writeDb(db);
+    sendJson(res, 201, { deliveryPlace });
     return;
   }
 
