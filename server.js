@@ -4441,6 +4441,24 @@ function sanitizeDeliveryPlace(raw) {
   };
 }
 
+// 발행자도 납품장소와 같은 이유로 스냅샷이어야 한다 — 오히려 여기가 더
+// 중요하다. 발주서에는 사업자번호·대표자·계좌가 대외 문서로 찍히는데, 이걸
+// issuerPartnerId 참조로만 들고 있으면 나중에 그 거래처 정보를 고치거나
+// 삭제하는 순간 이미 발행한 과거 문서까지 조용히 바뀐다. 참조는 UI가 수정
+// 폼에서 원래 고른 값을 다시 보여주는 용도로만 남기고, 실제 문서 내용은
+// 저장 시점에 확정한 이 스냅샷을 쓴다.
+function resolveIssuerSnapshot(db, issuerPartnerId) {
+  const partner = (db.partners || []).find((item) => item.id === issuerPartnerId && item.category === "issuer");
+  if (!partner) return null;
+  return {
+    businessName: partner.businessName || partner.name,
+    businessNumber: partner.businessNumber,
+    representativeName: partner.representativeName,
+    address: partner.address,
+    bankInfo: [partner.bankName, partner.bankAccount].filter(Boolean).join(" ")
+  };
+}
+
 // 문서번호는 별도 카운터를 두지 않고, 같은 날짜로 이미 저장된 발주서 개수에서
 // 파생한다 — 저장된 데이터가 곧 진실이라 카운터가 어긋날 일이 없다.
 function nextPurchaseOrderDocNo(db, orderDate) {
@@ -8319,9 +8337,14 @@ async function routeApi(req, res, url) {
       sendJson(res, 404, { error: "거래처를 찾을 수 없습니다." });
       return;
     }
-    const inUse = (db.purchaseOrders || []).some((po) => po.partnerId === partnerMatch[1]);
+    // 납품 거래처(partnerId)뿐 아니라 발행자(issuerPartnerId)로도 참조될 수
+    // 있다 — 후자를 안 보면 발행 법인 삭제가 조용히 통과해 과거 발주서의
+    // 발행자 스냅샷과 실제 거래처 상태가 어긋난다.
+    const inUse = (db.purchaseOrders || []).some(
+      (po) => po.partnerId === partnerMatch[1] || po.issuerPartnerId === partnerMatch[1]
+    );
     if (inUse) {
-      sendJson(res, 400, { error: "발주서가 있는 거래처는 삭제할 수 없습니다. 먼저 사용 안 함으로 전환하세요." });
+      sendJson(res, 400, { error: "발주서에 사용 중인 거래처는 삭제할 수 없습니다. 먼저 사용 안 함으로 전환하세요." });
       return;
     }
     const [before] = db.partners.splice(index, 1);
@@ -8420,6 +8443,12 @@ async function routeApi(req, res, url) {
       sendJson(res, 400, { error: "거래처를 선택하세요." });
       return;
     }
+    const issuerPartnerId = String(body.issuerPartnerId || "").trim();
+    const issuer = resolveIssuerSnapshot(db, issuerPartnerId);
+    if (!issuer) {
+      sendJson(res, 400, { error: "발행자를 선택하세요." });
+      return;
+    }
     const orderDate = dateOnly(body.orderDate) || now().slice(0, 10);
     const lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
     const subtotal = lineItems.reduce((sum, item) => sum + item.totalPrice, 0);
@@ -8431,7 +8460,8 @@ async function routeApi(req, res, url) {
       orderDate,
       status: purchaseOrderStatuses.has(body.status) ? body.status : "ordered",
       lineItems,
-      issuerPartnerId: String(body.issuerPartnerId || "").trim(),
+      issuerPartnerId,
+      issuer,
       deliveryPlace: sanitizeDeliveryPlace(body.deliveryPlace),
       subtotal,
       vat,
@@ -8466,7 +8496,15 @@ async function routeApi(req, res, url) {
     }
     if ("orderDate" in body) po.orderDate = dateOnly(body.orderDate) || po.orderDate;
     if ("status" in body && purchaseOrderStatuses.has(body.status)) po.status = body.status;
-    if ("issuerPartnerId" in body) po.issuerPartnerId = String(body.issuerPartnerId || "").trim();
+    if ("issuerPartnerId" in body) {
+      const issuer = resolveIssuerSnapshot(db, String(body.issuerPartnerId || "").trim());
+      if (!issuer) {
+        sendJson(res, 400, { error: "발행자를 찾을 수 없습니다." });
+        return;
+      }
+      po.issuerPartnerId = String(body.issuerPartnerId).trim();
+      po.issuer = issuer;
+    }
     if ("deliveryPlace" in body) po.deliveryPlace = sanitizeDeliveryPlace(body.deliveryPlace);
     if ("note" in body) po.note = String(body.note || "").trim();
     if ("lineItems" in body) {
@@ -8503,18 +8541,11 @@ async function routeApi(req, res, url) {
       return;
     }
     const partner = db.partners.find((item) => item.id === po.partnerId);
-    // issuerPartnerId가 없는(이 기능 이전에 만들어진) 발주서는 예전처럼
-    // COMPANY_INFO 고정값으로 대체한다 — 과거 기록의 발행자 표기를 바꾸지 않는다.
-    const issuerPartner = db.partners.find((item) => item.id === po.issuerPartnerId);
-    const issuer = issuerPartner
-      ? {
-          businessName: issuerPartner.businessName || issuerPartner.name,
-          businessNumber: issuerPartner.businessNumber,
-          representativeName: issuerPartner.representativeName,
-          address: issuerPartner.address,
-          bankInfo: [issuerPartner.bankName, issuerPartner.bankAccount].filter(Boolean).join(" ")
-        }
-      : COMPANY_INFO;
+    // 발행자는 저장 시점에 이미 스냅샷(po.issuer)으로 확정되어 있다 — 지금 다시
+    // db.partners를 찾아 조립하면, 그 거래처 정보가 나중에 바뀌었을 때 예전
+    // 발주서 엑셀까지 소급해서 달라진다. issuer가 없는(이 필드가 생기기 전)
+    // 발주서만 COMPANY_INFO 고정값으로 대체한다.
+    const issuer = po.issuer || COMPANY_INFO;
     const spec = {
       docNo: po.docNo,
       orderDate: po.orderDate,
@@ -8578,6 +8609,7 @@ async function routeApi(req, res, url) {
       createdAt: now(),
       updatedAt: now()
     };
+    if (!Array.isArray(db.deliveryPlaces)) db.deliveryPlaces = [];
     db.deliveryPlaces.push(deliveryPlace);
     addAudit(db, actor, "create", "deliveryPlace", deliveryPlace.id, `${deliveryPlace.name} 납품장소 등록`, null, deliveryPlace);
     await writeDb(db);

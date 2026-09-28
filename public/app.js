@@ -4340,7 +4340,7 @@ function renderPurchaseOrderRow(item) {
       <td>${h(partner?.name || "")}</td>
       <td>${h(item.orderDate)}</td>
       <td>${PO_STATUS_LABELS[item.status] || item.status}</td>
-      <td>${money.format(item.total)}원<br><span class="muted" style="font-size:11px">공급가 ${money.format(item.subtotal)} · 부가세 ${money.format(item.vat)}</span></td>
+      <td>${money.format(item.total)}원<br><span class="muted" style="font-size:11px">공급가 ${money.format(Number(item.subtotal || 0))} · 부가세 ${money.format(Number(item.vat || 0))}</span></td>
       <td><div class="row-actions">
         <button data-edit-purchase-order="${item.id}">수정</button>
         <a href="/api/purchase-orders/${item.id}/excel"><button type="button">엑셀</button></a>
@@ -4364,7 +4364,8 @@ function renderPurchaseOrderForm() {
         </div>
         <div>
           <label>발행자(우리 회사)</label>
-          <select name="issuerPartnerId">
+          <select name="issuerPartnerId" required>
+            <option value="">발행자 선택</option>
             ${partnerSelectOptions(po.issuerPartnerId, "issuer").join("")}
           </select>
         </div>
@@ -4559,13 +4560,31 @@ function bindPurchaseOrders() {
   });
 
   const deliveryNameInput = form.querySelector("[name=deliveryPlaceName]");
+  const deliveryAddressInput = form.querySelector("[name=deliveryPlaceAddress]");
+  const deliveryContactNameInput = form.querySelector("[name=deliveryPlaceContactName]");
+  const deliveryContactPhoneInput = form.querySelector("[name=deliveryPlaceContactPhone]");
+  const deliveryNoteInput = form.querySelector("[name=deliveryPlaceNote]");
+  let lastAutofillName = null;
   deliveryNameInput?.addEventListener("input", () => {
-    const match = (state.deliveryPlaces || []).find((d) => d.name === deliveryNameInput.value.trim());
-    if (!match) return;
-    form.querySelector("[name=deliveryPlaceAddress]").value = match.address || "";
-    form.querySelector("[name=deliveryPlaceContactName]").value = match.contactName || "";
-    form.querySelector("[name=deliveryPlaceContactPhone]").value = match.contactPhone || "";
-    form.querySelector("[name=deliveryPlaceNote]").value = match.note || "";
+    const typed = deliveryNameInput.value.trim();
+    const match = (state.deliveryPlaces || []).find((d) => d.name === typed);
+    if (match) {
+      lastAutofillName = match.name;
+      deliveryAddressInput.value = match.address || "";
+      deliveryContactNameInput.value = match.contactName || "";
+      deliveryContactPhoneInput.value = match.contactPhone || "";
+      deliveryNoteInput.value = match.note || "";
+      return;
+    }
+    // 이전에 목록에서 자동 채워졌던 값인데, 사용자가 이름을 바꿔서 더 이상
+    // 매칭되지 않으면 그 자동 채움 값이 새 이름과 함께 그대로 남아있으면 안 된다.
+    if (lastAutofillName !== null) {
+      lastAutofillName = null;
+      deliveryAddressInput.value = "";
+      deliveryContactNameInput.value = "";
+      deliveryContactPhoneInput.value = "";
+      deliveryNoteInput.value = "";
+    }
   });
 
   form.addEventListener("submit", async (event) => {
@@ -4573,11 +4592,11 @@ function bindPurchaseOrders() {
     const body = formObject(event.currentTarget);
     body.lineItems = getLineItems();
     body.deliveryPlace = {
-      name: body.deliveryPlaceName || "",
-      address: body.deliveryPlaceAddress || "",
-      contactName: body.deliveryPlaceContactName || "",
-      contactPhone: body.deliveryPlaceContactPhone || "",
-      note: body.deliveryPlaceNote || ""
+      name: String(body.deliveryPlaceName || "").trim(),
+      address: String(body.deliveryPlaceAddress || "").trim(),
+      contactName: String(body.deliveryPlaceContactName || "").trim(),
+      contactPhone: String(body.deliveryPlaceContactPhone || "").trim(),
+      note: String(body.deliveryPlaceNote || "").trim()
     };
     const saveDeliveryPlace = body.saveDeliveryPlace === "on";
     delete body.deliveryPlaceName;
@@ -4589,7 +4608,8 @@ function bindPurchaseOrders() {
     if (saveDeliveryPlace && body.deliveryPlace.name) {
       try {
         const created = await api("/api/delivery-places", { method: "POST", body: body.deliveryPlace });
-        if (created.deliveryPlace && !(state.deliveryPlaces || []).some((d) => d.id === created.deliveryPlace.id)) {
+        if (!Array.isArray(state.deliveryPlaces)) state.deliveryPlaces = [];
+        if (created.deliveryPlace && !state.deliveryPlaces.some((d) => d.id === created.deliveryPlace.id)) {
           state.deliveryPlaces.push(created.deliveryPlace);
         }
       } catch (error) {
