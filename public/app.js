@@ -4137,6 +4137,111 @@ function bindPartners() {
   });
 }
 
+function renderMaterials() {
+  const rows = state.materials || [];
+  return `
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>원부자재 목록</h2><span class="muted">${money.format(rows.length)}개</span></div>
+        <div class="panel-body" style="padding-bottom:0">
+          <button class="primary" data-new-material>새 원부자재</button>
+        </div>
+        <div class="table-wrap">
+          <table class="materials-table">
+            <thead><tr><th>품목명</th><th>카테고리</th><th>거래처</th><th>발주단위</th><th>기본단가</th><th>리드타임</th><th>작업</th></tr></thead>
+            <tbody>${rows.map(renderMaterialRow).join("") || `<tr><td colspan="7" class="empty">등록된 원부자재가 없습니다.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>${state.procurement.editingMaterial ? "원부자재 수정" : "원부자재 입력"}</h2></div>
+        <div class="panel-body">${renderMaterialForm()}</div>
+      </div>
+    </section>
+  `;
+}
+
+function renderMaterialRow(item) {
+  const partner = (state.partners || []).find((p) => p.id === item.partnerId);
+  return `
+    <tr>
+      <td>${h(item.itemName)}</td>
+      <td>${h(item.category)}</td>
+      <td>${h(partner?.name || "")}</td>
+      <td>${h(item.orderUnit)}</td>
+      <td>${item.basePrice ? `${money.format(item.basePrice)}원` : "-"}</td>
+      <td>${item.leadTimeDays ? `${item.leadTimeDays}일` : "-"}</td>
+      <td><div class="row-actions"><button data-edit-material="${item.id}">수정</button><button class="danger icon-btn" data-delete-material="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
+    </tr>`;
+}
+
+function renderMaterialForm() {
+  const m = state.procurement.editingMaterial || {};
+  return `
+    <form class="form-grid" data-material-form>
+      <div class="field">
+        <label>거래처(생산업체)</label>
+        <select name="partnerId">
+          <option value="">선택 안 함</option>
+          ${productionPartners().map((p) => `<option value="${p.id}" ${m.partnerId === p.id ? "selected" : ""}>${h(p.name)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field"><label>품목명</label><input name="itemName" value="${h(m.itemName)}" required></div>
+      <div class="field two">
+        <div><label>카테고리</label><input name="category" value="${h(m.category)}" placeholder="예: 원단, 부자재, 포장재, 사은품"></div>
+        <div><label>발주단위</label><input name="orderUnit" value="${h(m.orderUnit)}" placeholder="예: 개, Roll, box"></div>
+      </div>
+      <div class="field two">
+        <div><label>기본단가</label><input name="basePrice" type="number" min="0" value="${h(m.basePrice || "")}"></div>
+        <div><label>리드타임(일)</label><input name="leadTimeDays" type="number" min="0" value="${h(m.leadTimeDays || "")}"></div>
+      </div>
+      <div class="field"><label>메모</label><textarea name="note">${h(m.note)}</textarea></div>
+      <div class="field"><label>사용 상태</label><select name="isActive"><option value="true" ${m.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${m.isActive === false ? "selected" : ""}>N</option></select></div>
+      <div class="toolbar">
+        <button class="primary" type="submit">${m.id ? "수정 저장" : "원부자재 추가"}</button>
+        ${state.procurement.editingMaterial ? `<button type="button" data-cancel-edit-material>취소</button>` : ""}
+      </div>
+    </form>
+  `;
+}
+
+function bindMaterials() {
+  app.querySelector("[data-new-material]")?.addEventListener("click", () => {
+    state.procurement.editingMaterial = null;
+    renderApp();
+  });
+  app.querySelectorAll("[data-edit-material]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.procurement.editingMaterial = state.materials.find((item) => item.id === button.dataset.editMaterial);
+      renderApp();
+    });
+  });
+  app.querySelector("[data-cancel-edit-material]")?.addEventListener("click", () => {
+    state.procurement.editingMaterial = null;
+    renderApp();
+  });
+  app.querySelectorAll("[data-delete-material]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("이 원부자재를 삭제할까요?")) return;
+      await api(`/api/materials/${button.dataset.deleteMaterial}`, { method: "DELETE" });
+      await refreshAndRender();
+    });
+  });
+  app.querySelector("[data-material-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = formObject(event.currentTarget);
+    body.isActive = body.isActive === "true";
+    const editing = state.procurement.editingMaterial;
+    if (editing) {
+      await api(`/api/materials/${editing.id}`, { method: "PUT", body });
+    } else {
+      await api("/api/materials", { method: "POST", body });
+    }
+    state.procurement.editingMaterial = null;
+    await refreshAndRender();
+  });
+}
+
 function bindAdmins() {
   app.querySelector("[data-new-admin]").addEventListener("click", () => {
     state.editingAdmin = null;
