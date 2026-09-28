@@ -82,12 +82,27 @@ const state = {
       { party: "", ratio: 0, excluded: false, note: "" },
       { party: "", ratio: 0, excluded: false, note: "" }
     ]
+  },
+  procurement: {
+    screen: "partners",
+    editingPartner: null,
+    editingMaterial: null,
+    editingPurchaseOrder: null,
+    partnerFilterCategory: ""
   }
 };
 
 // 정산 브랜드는 화면에서 고른다. 도톤 외 브랜드도 같은 방식으로 정산한다.
 const NPB_DEFAULT_BRAND = "doteon";
 const npbBrand = () => state.npb.brandId || NPB_DEFAULT_BRAND;
+const PARTNER_CATEGORY_LABELS = { production: "생산업체", sales: "판매납품처", purchase: "매입공급처" };
+const PO_STATUS_LABELS = { ordered: "발주", in_production: "생산중", received: "입고완료", cancelled: "취소" };
+const PROCUREMENT_SCREENS = [
+  ["partners", "거래처관리"],
+  ["materials", "원부자재관리"],
+  ["orders", "명세서 발행"]
+];
+
 const NPB_SCREENS = [
   ["list", "월 목록/이력"],
   ["worksheet", "정산 워크시트"],
@@ -483,7 +498,7 @@ async function init() {
 async function loadAll() {
   // 이력·아카이브는 화면을 열 때가 아니라 해당 탭을 눌렀을 때 부른다. 감사로그
   // 전체는 2MB가 넘어서, 매번 실어 보내면 나머지 응답까지 같이 밀린다.
-  const [dashboard, brands, requests, priceEntries, priceAliases, promotionRules, paymentLogs, admins, menus] = await Promise.all([
+  const [dashboard, brands, requests, priceEntries, priceAliases, promotionRules, paymentLogs, admins, menus, partners, materials, purchaseOrders] = await Promise.all([
     api("/api/dashboard"),
     api("/api/brands"),
     api("/api/requests"),
@@ -492,7 +507,10 @@ async function loadAll() {
     api("/api/promotion-rules"),
     api("/api/payment-logs"),
     api("/api/admins"),
-    api("/api/menus")
+    api("/api/menus"),
+    api("/api/partners"),
+    api("/api/materials"),
+    api("/api/purchase-orders")
   ]);
   state.menus = menus.menus || [];
   state.actionLabels = menus.actionLabels || {};
@@ -505,6 +523,9 @@ async function loadAll() {
   state.promotionRules = promotionRules.promotionRules;
   state.paymentLogs = paymentLogs.paymentLogs;
   state.admins = admins.admins;
+  state.partners = partners.partners;
+  state.materials = materials.materials;
+  state.purchaseOrders = purchaseOrders.purchaseOrders;
 
   ensureRequestFilterDefaults();
   state.selectedRequestIds = state.selectedRequestIds.filter((id) =>
@@ -599,6 +620,7 @@ function renderApp() {
     ["requests", "입금요청"],
     ["prices", "단가표"],
     ["brands", "브랜드"],
+    ["procurement", "거래관리"],
     ["admins", "관리자"],
     ["audits", "이력"],
     ["archive", "아카이브"],
@@ -726,6 +748,7 @@ function renderCurrentTab() {
   if (state.tab === "requests") return renderRequests();
   if (state.tab === "prices") return renderPrices();
   if (state.tab === "brands") return renderBrands();
+  if (state.tab === "procurement") return renderProcurement();
   if (state.tab === "admins") return renderAdmins();
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
@@ -2125,6 +2148,7 @@ function bindCurrentTab() {
   if (state.tab === "requests") bindRequests();
   if (state.tab === "prices") bindPrices();
   if (state.tab === "brands") bindBrands();
+  if (state.tab === "procurement") bindProcurement();
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
   if (state.tab === "settlement") bindSettlement();
@@ -3945,6 +3969,171 @@ function bindBrands() {
   app.querySelector("[data-cancel-promotion-rule]")?.addEventListener("click", () => {
     state.editingPromotionRule = null;
     renderApp();
+  });
+}
+
+function filteredPartners() {
+  const cat = state.procurement.partnerFilterCategory;
+  return (state.partners || []).filter((item) => !cat || item.category === cat);
+}
+
+function productionPartners() {
+  return (state.partners || []).filter((item) => item.category === "production" && item.isActive !== false);
+}
+
+function renderProcurement() {
+  const p = state.procurement;
+  const subnav = PROCUREMENT_SCREENS
+    .map(([key, label]) => `<button data-procurement-screen="${key}" class="npb-subtab ${p.screen === key ? "active" : ""}">${label}</button>`)
+    .join("");
+  let body = "";
+  if (p.screen === "materials") body = renderMaterials();
+  else if (p.screen === "orders") body = renderPurchaseOrders();
+  else body = renderPartners();
+  return `
+    ${pageHead("거래관리", "생산업체·판매납품처·매입공급처 거래처와 발주서를 관리합니다.")}
+    <div class="npb-subnav">${subnav}</div>
+    ${body}
+  `;
+}
+
+function bindProcurement() {
+  app.querySelectorAll("[data-procurement-screen]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.procurement.screen = btn.dataset.procurementScreen;
+      renderApp();
+    });
+  });
+  if (state.procurement.screen === "materials") bindMaterials();
+  else if (state.procurement.screen === "orders") bindPurchaseOrders();
+  else bindPartners();
+}
+
+function renderPartners() {
+  const rows = filteredPartners();
+  return `
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>거래처 목록</h2><span class="muted">${money.format(rows.length)}개</span></div>
+        <div class="panel-body" style="padding-bottom:0">
+          <select data-partner-filter-category>
+            <option value="">전체 분류</option>
+            ${Object.entries(PARTNER_CATEGORY_LABELS).map(([key, label]) => `<option value="${key}" ${state.procurement.partnerFilterCategory === key ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+          <button class="primary" data-new-partner style="margin-left:8px">새 거래처</button>
+        </div>
+        <div class="table-wrap">
+          <table class="partners-table">
+            <thead><tr><th>거래처명</th><th>상호명</th><th>담당자</th><th>발주방식</th><th>계좌</th><th>작업</th></tr></thead>
+            <tbody>${rows.map(renderPartnerRow).join("") || `<tr><td colspan="6" class="empty">등록된 거래처가 없습니다.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>${state.procurement.editingPartner ? "거래처 수정" : "거래처 입력"}</h2></div>
+        <div class="panel-body">${renderPartnerForm()}</div>
+      </div>
+    </section>
+  `;
+}
+
+function renderPartnerRow(item) {
+  return `
+    <tr>
+      <td>${h(item.name)}<br><span class="muted">${PARTNER_CATEGORY_LABELS[item.category] || item.category}</span></td>
+      <td>${h(item.businessName)}</td>
+      <td>${h(item.contactName)}${item.contactPhone ? ` · ${h(item.contactPhone)}` : ""}</td>
+      <td>${h(item.orderMethod)}</td>
+      <td>${h(item.bankName)} ${h(item.bankAccount)}</td>
+      <td><div class="row-actions"><button data-edit-partner="${item.id}">수정</button><button class="danger icon-btn" data-delete-partner="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
+    </tr>`;
+}
+
+function renderPartnerForm() {
+  const p = state.procurement.editingPartner || {};
+  return `
+    <form class="form-grid" data-partner-form>
+      <div class="field">
+        <label>분류</label>
+        <select name="category">
+          ${Object.entries(PARTNER_CATEGORY_LABELS).map(([key, label]) => `<option value="${key}" ${(p.category || "production") === key ? "selected" : ""}>${label}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field"><label>거래처명</label><input name="name" value="${h(p.name)}" required></div>
+      <div class="field two">
+        <div><label>상호명</label><input name="businessName" value="${h(p.businessName)}"></div>
+        <div><label>사업자등록번호</label><input name="businessNumber" value="${h(p.businessNumber)}"></div>
+      </div>
+      <div class="field"><label>대표자명</label><input name="representativeName" value="${h(p.representativeName)}"></div>
+      <div class="field"><label>주소</label><input name="address" value="${h(p.address)}"></div>
+      <div class="field"><label>세금계산서 발행 메일</label><input name="invoiceEmail" type="email" value="${h(p.invoiceEmail)}"></div>
+      <div class="field two">
+        <div><label>은행</label><input name="bankName" value="${h(p.bankName)}"></div>
+        <div><label>계좌번호</label><input name="bankAccount" value="${h(p.bankAccount)}"></div>
+      </div>
+      <div class="field"><label>예금주명</label><input name="depositorName" value="${h(p.depositorName)}"></div>
+      <div class="field two">
+        <div><label>발주방식</label><input name="orderMethod" value="${h(p.orderMethod)}" placeholder="예: 메일, 개별요청"></div>
+        <div><label>증빙구분(계산서 발행 시점)</label><input name="invoiceTiming" value="${h(p.invoiceTiming)}" placeholder="예: 입금 후 발행"></div>
+      </div>
+      <div class="field two">
+        <div><label>담당자명</label><input name="contactName" value="${h(p.contactName)}"></div>
+        <div><label>담당자 연락처</label><input name="contactPhone" value="${h(p.contactPhone)}"></div>
+      </div>
+      <div class="field"><label>담당자 이메일</label><input name="contactEmail" type="email" value="${h(p.contactEmail)}"></div>
+      <div class="field"><label>메모</label><textarea name="note">${h(p.note)}</textarea></div>
+      <div class="field"><label>사용 상태</label><select name="isActive"><option value="true" ${p.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${p.isActive === false ? "selected" : ""}>N</option></select></div>
+      <div class="toolbar">
+        <button class="primary" type="submit">${p.id ? "수정 저장" : "거래처 추가"}</button>
+        ${state.procurement.editingPartner ? `<button type="button" data-cancel-edit-partner>취소</button>` : ""}
+      </div>
+    </form>
+  `;
+}
+
+function bindPartners() {
+  app.querySelector("[data-partner-filter-category]")?.addEventListener("change", (event) => {
+    state.procurement.partnerFilterCategory = event.target.value;
+    renderApp();
+  });
+  app.querySelector("[data-new-partner]")?.addEventListener("click", () => {
+    state.procurement.editingPartner = null;
+    renderApp();
+  });
+  app.querySelectorAll("[data-edit-partner]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.procurement.editingPartner = state.partners.find((item) => item.id === button.dataset.editPartner);
+      renderApp();
+    });
+  });
+  app.querySelector("[data-cancel-edit-partner]")?.addEventListener("click", () => {
+    state.procurement.editingPartner = null;
+    renderApp();
+  });
+  app.querySelectorAll("[data-delete-partner]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("이 거래처를 삭제할까요?")) return;
+      try {
+        await api(`/api/partners/${button.dataset.deletePartner}`, { method: "DELETE" });
+      } catch (error) {
+        alert(error.message);
+        return;
+      }
+      await refreshAndRender();
+    });
+  });
+  app.querySelector("[data-partner-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = formObject(event.currentTarget);
+    body.isActive = body.isActive === "true";
+    const editing = state.procurement.editingPartner;
+    if (editing) {
+      await api(`/api/partners/${editing.id}`, { method: "PUT", body });
+    } else {
+      await api("/api/partners", { method: "POST", body });
+    }
+    state.procurement.editingPartner = null;
+    await refreshAndRender();
   });
 }
 
