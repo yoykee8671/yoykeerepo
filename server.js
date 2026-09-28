@@ -21,6 +21,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const DB_PATH = path.join(DATA_DIR, "db.json");
 const PRICE_WORKBOOK_SCRIPT = path.join(__dirname, "scripts", "price_entry_excel.py");
 const SETTLEMENT_SCRIPT = path.join(__dirname, "scripts", "settlement_excel.py");
+const PURCHASE_ORDER_SCRIPT = path.join(__dirname, "scripts", "purchase_order_excel.py");
 const XLSX_PARSE_SCRIPT = path.join(__dirname, "scripts", "xlsx_to_json.py");
 const NPB_PARSE_SCRIPT = path.join(__dirname, "scripts", "npb_parse.py");
 const NPB_XLSX_SCRIPT = path.join(__dirname, "scripts", "npb_settlement_xlsx.py");
@@ -3778,6 +3779,33 @@ async function generateSettlementXlsx(spec) {
   try {
     await writeFile(inputPath, JSON.stringify(spec), "utf8");
     await execFileAsync("python3", [SETTLEMENT_SCRIPT, "--input", inputPath, "--output", outputPath], {
+      cwd: __dirname,
+      maxBuffer: 20 * 1024 * 1024
+    });
+    return await readFile(outputPath);
+  } finally {
+    await safeUnlink(inputPath);
+    await safeUnlink(outputPath);
+  }
+}
+
+// 발주서 발행자(우리 회사) 고정 정보 — 거래처마다 바뀌는 값이 아니라 상수로 둔다.
+// 발행 법인이 여러 개로 늘어나면 그때 설정 화면으로 옮긴다.
+const COMPANY_INFO = {
+  businessName: "주식회사 우프컴퍼니",
+  businessNumber: "314-87-00725",
+  representativeName: "이교영",
+  address: "",
+  bankInfo: "KB국민은행 802-21-0429-353"
+};
+
+async function generatePurchaseOrderXlsx(spec) {
+  const tmpBase = path.join(os.tmpdir(), `wooofpay-po-${crypto.randomBytes(8).toString("hex")}`);
+  const inputPath = `${tmpBase}.json`;
+  const outputPath = `${tmpBase}.xlsx`;
+  try {
+    await writeFile(inputPath, JSON.stringify(spec), "utf8");
+    await execFileAsync("python3", [PURCHASE_ORDER_SCRIPT, "--input", inputPath, "--output", outputPath], {
       cwd: __dirname,
       maxBuffer: 20 * 1024 * 1024
     });
@@ -8411,6 +8439,47 @@ async function routeApi(req, res, url) {
     addAudit(db, actor, "delete", "purchaseOrder", before.id, `${before.docNo} 발주서 삭제`, before, null);
     await writeDb(db);
     sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  const poExcelMatch = pathname.match(/^\/api\/purchase-orders\/([^/]+)\/excel$/);
+  if (poExcelMatch && method === "GET") {
+    const po = db.purchaseOrders.find((item) => item.id === poExcelMatch[1]);
+    if (!po) {
+      sendJson(res, 404, { error: "발주서를 찾을 수 없습니다." });
+      return;
+    }
+    const partner = db.partners.find((item) => item.id === po.partnerId);
+    const spec = {
+      docNo: po.docNo,
+      orderDate: po.orderDate,
+      issuer: COMPANY_INFO,
+      partner: partner
+        ? {
+            name: partner.name,
+            businessName: partner.businessName,
+            businessNumber: partner.businessNumber,
+            representativeName: partner.representativeName,
+            address: partner.address,
+            contactName: partner.contactName,
+            contactEmail: partner.contactEmail
+          }
+        : {},
+      lineItems: po.lineItems,
+      deliveryPlace: po.deliveryPlace,
+      subtotal: po.subtotal,
+      vat: po.vat,
+      total: po.total,
+      note: po.note
+    };
+    try {
+      const buffer = await generatePurchaseOrderXlsx(spec);
+      sendBuffer(res, 200, buffer,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        { "content-disposition": contentDisposition(`발주서_${po.docNo}.xlsx`) });
+    } catch (error) {
+      sendJson(res, 500, { error: `발주서 생성 실패: ${error.message}` });
+    }
     return;
   }
 
