@@ -117,6 +117,7 @@ DOC_CONFIGS = {
             ("상호", "issuer.businessName"),
             ("대표자", "issuer.representativeName"),
             ("주소", "issuer.address"),
+            ("이메일", "issuer.invoiceEmail"),
             ("계좌", "issuer.bankInfo"),
         ],
         "closing": "위와 같이 발주합니다.",

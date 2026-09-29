@@ -6,7 +6,7 @@ route in server.js:
 {
   "docNo": "PO-20260928-001",
   "orderDate": "2026-09-28",
-  "issuer": {"businessName","businessNumber","representativeName","address","bankInfo"},
+  "issuer": {"businessName","businessNumber","representativeName","address","invoiceEmail","bankInfo"},
   "partner": {"name","businessName","businessNumber","representativeName","address",
               "contactName","contactEmail"},  # {} if the partner record was deleted
   "lineItems": [{"itemName","spec","quantity","unit","unitPrice","totalPrice"}, ...],
