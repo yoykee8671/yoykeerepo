@@ -1,0 +1,20 @@
+{
+  "docNo": "PO-20260929-003",
+  "orderDate": "2026-09-29",
+  "issuer": {
+    "businessName": "픽키파크",
+    "businessNumber": "314-87-00725",
+    "representativeName": "이교영",
+    "address": "",
+    "bankInfo": ""
+  },
+  "partner": {},
+  "lineItems": [
+    {"itemName": "원단", "spec": "", "quantity": 1, "unit": "개", "unitPrice": 1000, "totalPrice": 1000}
+  ],
+  "deliveryPlace": {"name": "", "address": "", "contactName": "", "contactPhone": "", "note": ""},
+  "subtotal": 1000,
+  "vat": 100,
+  "total": 1100,
+  "note": ""
+}

@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """Generate a production purchase order (발주서) xlsx from a JSON spec.
 
-Spec JSON:
+Spec JSON, exactly as built by the `GET /api/purchase-orders/:id/excel`
+route in server.js:
 {
   "docNo": "PO-20260928-001",
   "orderDate": "2026-09-28",
   "issuer": {"businessName","businessNumber","representativeName","address","bankInfo"},
   "partner": {"name","businessName","businessNumber","representativeName","address",
-              "contactName","contactEmail"},
+              "contactName","contactEmail"},  # {} if the partner record was deleted
   "lineItems": [{"itemName","spec","quantity","unit","unitPrice","totalPrice"}, ...],
   "deliveryPlace": {"name","address","contactName","contactPhone","note"},  # all optional
-  "subtotal": 0, "vat": 0, "total": 0,
+  "subtotal": 0, "vat": 0, "total": 0,   # not used for display -- trade_doc_common
+                                          # recomputes these as live Excel formulas from
+                                          # lineItems, which is always equal to these
+                                          # server-computed values (same formula) but
+                                          # verifiable/editable in the workbook itself
   "note": "..."
 }
 """
@@ -19,29 +24,15 @@ import argparse
 import json
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
-_THIN = Side(style="thin", color="808080")
-BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
-HEAD_FILL = PatternFill("solid", fgColor="D9D9D9")
-BOLD = Font(bold=True)
-TITLE = Font(size=20, bold=True)
-CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
-WON = "#,##0"
+from trade_doc_common import render
 
 
-def _num(v):
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _delivery_text(delivery):
-    """Join the delivery-place snapshot into one readable cell.
-    Accepts the current object shape; a plain string is passed through as-is
-    for backward compatibility with purchase orders saved before this field
-    became structured."""
+def _delivery_place_line(delivery):
+    """Join the delivery-place snapshot into one readable line. Accepts the
+    current object shape; a plain string passes through as-is for backward
+    compatibility with purchase orders saved before this field became
+    structured."""
     if isinstance(delivery, str):
         return delivery
     if not isinstance(delivery, dict):
@@ -59,81 +50,19 @@ def _delivery_text(delivery):
     return " / ".join(parts)
 
 
-def build_purchase_order(ws, spec):
-    ws.title = "발주서"
-    ws["A1"] = "발  주  서"
-    ws["A1"].font = TITLE
-    ws.merge_cells("A1:E1")
-    ws["A1"].alignment = CENTER
-
-    ws["F2"] = "문서번호"
-    ws["G2"] = spec.get("docNo", "")
-    ws["F3"] = "발주일"
-    ws["G3"] = spec.get("orderDate", "")
-
-    issuer = spec.get("issuer", {})
-    partner = spec.get("partner", {})
-
-    ws["A3"] = "발행"
-    ws["A3"].font = BOLD
-    ws["B3"] = issuer.get("businessName", "")
-    ws["A4"] = "사업자번호"
-    ws["B4"] = issuer.get("businessNumber", "")
-    ws["A5"] = "대표자"
-    ws["B5"] = issuer.get("representativeName", "")
-    ws["A6"] = "주소"
-    ws["B6"] = issuer.get("address", "")
-    ws["A7"] = "계좌"
-    ws["B7"] = issuer.get("bankInfo", "")
-
-    ws["D3"] = "수신"
-    ws["D3"].font = BOLD
-    ws["E3"] = partner.get("businessName") or partner.get("name", "")
-    ws["D4"] = "사업자번호"
-    ws["E4"] = partner.get("businessNumber", "")
-    ws["D5"] = "대표자"
-    ws["E5"] = partner.get("representativeName", "")
-    ws["D6"] = "담당자"
-    ws["E6"] = f"{partner.get('contactName', '')} {partner.get('contactEmail', '')}".strip()
-    ws["D7"] = "주소"
-    ws["E7"] = partner.get("address", "")
-
-    headers = ["순번", "품목명", "규격", "수량", "단위", "단가", "합계"]
-    header_row = 9
-    for ci, htext in enumerate(headers, start=1):
-        c = ws.cell(row=header_row, column=ci, value=htext)
-        c.font = BOLD
-        c.fill = HEAD_FILL
-        c.alignment = CENTER
-        c.border = BORDER
-
-    r = header_row + 1
-    for i, item in enumerate(spec.get("lineItems", []), start=1):
-        vals = [i, item.get("itemName", ""), item.get("spec", ""), _num(item.get("quantity")),
-                item.get("unit", ""), _num(item.get("unitPrice")), _num(item.get("totalPrice"))]
-        for ci, v in enumerate(vals, start=1):
-            c = ws.cell(row=r, column=ci, value=v)
-            c.border = BORDER
-            if ci in (6, 7):
-                c.number_format = WON
-        r += 1
-
-    sr = r + 1
-    ws.cell(row=sr, column=6, value="소계").font = BOLD
-    ws.cell(row=sr, column=7, value=_num(spec.get("subtotal"))).number_format = WON
-    ws.cell(row=sr + 1, column=6, value="부가세").font = BOLD
-    ws.cell(row=sr + 1, column=7, value=_num(spec.get("vat"))).number_format = WON
-    ws.cell(row=sr + 2, column=6, value="합계").font = BOLD
-    ws.cell(row=sr + 2, column=7, value=_num(spec.get("total"))).number_format = WON
-
-    ws.cell(row=sr, column=1, value="납품장소")
-    ws.cell(row=sr, column=2, value=_delivery_text(spec.get("deliveryPlace")))
-    ws.cell(row=sr + 1, column=1, value="비고")
-    ws.cell(row=sr + 1, column=2, value=spec.get("note", ""))
-
-    widths = [6, 26, 16, 8, 8, 12, 14]
-    for ci, w in enumerate(widths, start=1):
-        ws.column_dimensions[ws.cell(row=header_row, column=ci).column_letter].width = w
+def _prepare_spec(spec):
+    """Derive the flat fields trade_doc_common.DOC_CONFIGS references
+    (dotted paths only reach real dict keys, never computed values) from
+    the richer objects server.js actually sends."""
+    partner = spec.setdefault("partner", {})
+    # 거래처의 공식 상호가 없으면(등록 시 생략 가능) 화면에서 쓰던 내부
+    # 표시명(name)으로 대체한다 -- 발주서에 수신처가 빈칸으로 나가면 안 된다.
+    partner["displayName"] = partner.get("businessName") or partner.get("name") or ""
+    partner["contactLine"] = " ".join(
+        x for x in [partner.get("contactName"), partner.get("contactEmail")] if x
+    )
+    spec["deliveryPlaceLine"] = _delivery_place_line(spec.get("deliveryPlace"))
+    return spec
 
 
 def main():
@@ -144,10 +73,12 @@ def main():
 
     with open(args.input, encoding="utf-8") as f:
         spec = json.load(f)
+    _prepare_spec(spec)
 
     wb = Workbook()
     ws = wb.active
-    build_purchase_order(ws, spec)
+    ws.title = "발주서"
+    render(ws, "purchase_order", spec)
     wb.save(args.output)
     print(json.dumps({"ok": True, "lineCount": len(spec.get("lineItems", []))}))
 
