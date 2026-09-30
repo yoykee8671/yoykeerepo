@@ -1931,6 +1931,10 @@ a.button:hover {
   text-align: right;
 }
 
+.po-doc-table td.po-doc-center {
+  text-align: center;
+}
+
 .po-doc-amount {
   background: #dce6f1;
 }

@@ -121,6 +121,9 @@ DOC_CONFIGS = {
             ("상호", "issuer.businessName"),
             ("대표자", "issuer.representativeName"),
             ("주소", "issuer.address"),
+            # 거래처 쪽 이메일(왼쪽 블록)과는 별개 필드다 -- 이쪽은 우리
+            # 발행자가 세금계산서를 받을 때 쓰는 주소.
+            ("이메일", "issuer.invoiceEmail"),
             ("계좌", "issuer.bankInfo"),
         ],
         "closing": "위와 같이 발주합니다.",
@@ -451,9 +454,9 @@ def apply_template(ws, doc_type, layout, issuer):
             cell = ws.cell(row=r, column=ci)
             cell.font = FONT_TABLE_CELL
             cell.border = BORDER_THIN_BOTTOM
-            if ci in (4, 6, 7):
+            if ci in (6, 7):
                 cell.alignment = RIGHT
-            elif ci in (1, 5):
+            elif ci in (1, 4, 5):
                 cell.alignment = CENTER
             else:  # 2 품목명, 3 규격 -- free text, must wrap or it clips
                 cell.alignment = LEFT_WRAP

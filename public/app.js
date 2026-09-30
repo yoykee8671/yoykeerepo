@@ -4540,6 +4540,7 @@ function renderPurchaseOrderPreviewOverlay(poId) {
               <div class="po-doc-info-row"><span>상호</span><strong>${h(issuer.businessName)}</strong></div>
               <div class="po-doc-info-row"><span>대표자</span>${h(issuer.representativeName)}</div>
               <div class="po-doc-info-row"><span>주소</span>${h(issuer.address)}</div>
+              <div class="po-doc-info-row"><span>이메일</span>${h(issuer.invoiceEmail)}</div>
               <div class="po-doc-info-row"><span>계좌</span>${h(issuer.bankInfo)}</div>
             </div>
           </div>
@@ -4548,11 +4549,11 @@ function renderPurchaseOrderPreviewOverlay(poId) {
             <tbody>
               ${items.map((item, i) => `
                 <tr>
-                  <td class="num">${i + 1}</td>
+                  <td class="po-doc-center">${i + 1}</td>
                   <td>${h(item.itemName)}</td>
                   <td>${h(item.spec)}</td>
-                  <td class="num">${money.format(item.quantity || 0)}</td>
-                  <td>${h(item.unit)}</td>
+                  <td class="po-doc-center">${money.format(item.quantity || 0)}</td>
+                  <td class="po-doc-center">${h(item.unit)}</td>
                   <td class="num">${money.format(item.unitPrice || 0)}</td>
                   <td class="num po-doc-amount">${money.format(item.totalPrice || 0)}</td>
                 </tr>`).join("") || `<tr><td colspan="7" class="empty">추가된 품목이 없습니다.</td></tr>`}
