@@ -257,6 +257,12 @@ a {
   font-size: 24px;
 }
 
+/* 대분류 뒤에 붙는 현재 화면 이름 — 제목보다 한 톤 연하게. */
+.page-crumb {
+  color: var(--muted);
+  font-weight: 500;
+}
+
 .topbar p {
   margin: 0;
   color: var(--muted);
@@ -1905,12 +1911,13 @@ a.button:hover {
 .materials-table th:nth-child(7), .materials-table td:nth-child(7) { width: 172px; min-width: 172px; }
 
 /* 발주서 목록 */
-.purchase-orders-table th:nth-child(1), .purchase-orders-table td:nth-child(1) { width: 172px; min-width: 172px; }
-.purchase-orders-table th:nth-child(2), .purchase-orders-table td:nth-child(2) { min-width: 160px; }
-.purchase-orders-table th:nth-child(3), .purchase-orders-table td:nth-child(3) { width: 100px; min-width: 100px; }
-.purchase-orders-table th:nth-child(4), .purchase-orders-table td:nth-child(4) { width: 90px; min-width: 90px; }
-.purchase-orders-table th:nth-child(5), .purchase-orders-table td:nth-child(5) { width: 105px; min-width: 105px; }
-.purchase-orders-table th:nth-child(6), .purchase-orders-table td:nth-child(6) { width: 220px; min-width: 220px; }
+.purchase-orders-table th:nth-child(1), .purchase-orders-table td:nth-child(1) { width: 140px; min-width: 140px; }
+.purchase-orders-table th:nth-child(2), .purchase-orders-table td:nth-child(2) { width: 84px; min-width: 84px; }
+.purchase-orders-table th:nth-child(3), .purchase-orders-table td:nth-child(3) { min-width: 130px; }
+.purchase-orders-table th:nth-child(4), .purchase-orders-table td:nth-child(4) { width: 100px; min-width: 100px; }
+.purchase-orders-table th:nth-child(5), .purchase-orders-table td:nth-child(5) { width: 80px; min-width: 80px; }
+.purchase-orders-table th:nth-child(6), .purchase-orders-table td:nth-child(6) { width: 105px; min-width: 105px; }
+.purchase-orders-table th:nth-child(7), .purchase-orders-table td:nth-child(7) { width: 220px; min-width: 220px; }
 
 /* 발주서 미리보기 -- 실제 엑셀 파일이 아니라 같은 내용을 발주서 양식과
    비슷한 모양의 HTML로 보여주는 오버레이. 색상은 trade_doc_common.py의

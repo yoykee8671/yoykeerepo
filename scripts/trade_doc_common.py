@@ -99,77 +99,65 @@ DEFAULT_ITEM_ROWS = 10
 # before calling render() -- see purchase_order_excel.py.
 # ---------------------------------------------------------------------------
 
+# 네 양식 모두 같은 레코드(수신처 / 품목 / 금액)를 쓴다 -- 다른 것은 제목,
+# 두 번째 날짜의 뜻, 마감 문구, 납품장소 표시 여부뿐이라 공통 부분은 한 번만
+# 적고 양식별 차이만 아래 표에 둔다.
+_RECIPIENT_FIELDS = [
+    ("수신", "partner.displayName"),
+    ("사업자번호", "partner.businessNumber"),
+    ("대표자", "partner.representativeName"),
+    ("주소", "partner.address"),
+    ("담당자", "partner.contactLine"),
+    # 담당자 개인 이메일(contactLine)과는 별개로, 거래처의 세금계산서 발행
+    # 메일(invoiceEmail)을 보여준다.
+    ("이메일", "partner.invoiceEmail"),
+]
+
+_ISSUER_FIELDS = [
+    ("사업자번호", "issuer.businessNumber"),
+    ("상호", "issuer.businessName"),
+    ("대표자", "issuer.representativeName"),
+    ("주소", "issuer.address"),
+    # 거래처 쪽 이메일(왼쪽 블록)과는 별개 -- 이쪽은 우리 발행자가 세금계산서를
+    # 받을 때 쓰는 주소.
+    ("이메일", "issuer.invoiceEmail"),
+    ("계좌", "issuer.bankInfo"),
+]
+
+
+def _doc_config(title, right_label, date_label, due_label, closing, show_delivery):
+    """양식 하나의 설정. date_label은 orderDate에, due_label은 dueDate에 붙는
+    이름 -- 같은 칸이 발주서에서는 납기일, 견적서에서는 유효기간이 된다."""
+    left = list(_RECIPIENT_FIELDS) + [(date_label, "orderDate")]
+    if due_label:
+        left.append((due_label, "dueDate"))
+    return {
+        "title": title,
+        "left_label": "수신 To",
+        "right_label": right_label,
+        "left_fields": left,
+        "right_fields": list(_ISSUER_FIELDS),
+        "closing": closing,
+        "extra_note_label": "납품장소" if show_delivery else None,
+        "extra_note_key": "deliveryPlaceLine" if show_delivery else None,
+    }
+
+
 DOC_CONFIGS = {
-    "purchase_order": {
-        "title": "발  주  서",
-        "left_label": "수신 To",
-        "right_label": "발주처 Provider",
-        "left_fields": [
-            ("수신", "partner.displayName"),
-            ("사업자번호", "partner.businessNumber"),
-            ("대표자", "partner.representativeName"),
-            ("주소", "partner.address"),
-            ("담당자", "partner.contactLine"),
-            # 담당자 개인 이메일(contactLine)과는 별개로, 거래처의 세금계산서
-            # 발행 메일(invoiceEmail)을 보여준다 -- 발행자가 아니라 이 거래처
-            # 자신이 세금계산서를 발행/수신할 때 쓰는 주소다.
-            ("이메일", "partner.invoiceEmail"),
-            ("발주일", "orderDate"),
-        ],
-        "right_fields": [
-            ("사업자번호", "issuer.businessNumber"),
-            ("상호", "issuer.businessName"),
-            ("대표자", "issuer.representativeName"),
-            ("주소", "issuer.address"),
-            # 거래처 쪽 이메일(왼쪽 블록)과는 별개 필드다 -- 이쪽은 우리
-            # 발행자가 세금계산서를 받을 때 쓰는 주소.
-            ("이메일", "issuer.invoiceEmail"),
-            ("계좌", "issuer.bankInfo"),
-        ],
-        "closing": "위와 같이 발주합니다.",
-        "extra_note_label": "납품장소",
-        "extra_note_key": "deliveryPlaceLine",
-    },
-    "quote": {
-        "title": "견  적  서",
-        "left_label": "수신 To",
-        "right_label": "공급자 Provider",
-        "left_fields": [
-            ("수신", "partner.displayName"),
-            ("담당자", "partner.contactLine"),
-            ("견적일", "quoteDate"),
-            ("유효기간", "validUntil"),
-        ],
-        "right_fields": [
-            ("사업자번호", "issuer.businessNumber"),
-            ("상호", "issuer.businessName"),
-            ("대표자", "issuer.representativeName"),
-            ("담당자", "issuer.contactLine"),
-            ("참조", "reference"),
-        ],
-        "closing": "위와 같이 견적합니다.",
-        "extra_note_label": None,
-        "extra_note_key": None,
-    },
-    "statement": {
-        "title": "거래명세서",
-        "left_label": "수신 To",
-        "right_label": "공급자 Provider",
-        "left_fields": [
-            ("수신", "partner.displayName"),
-            ("담당자", "partner.contactLine"),
-            ("거래일자", "transactionDate"),
-        ],
-        "right_fields": [
-            ("사업자번호", "issuer.businessNumber"),
-            ("상호", "issuer.businessName"),
-            ("대표자", "issuer.representativeName"),
-            ("계좌", "issuer.bankInfo"),
-        ],
-        "closing": "위와 같이 청구합니다.",
-        "extra_note_label": None,
-        "extra_note_key": None,
-    },
+    # 우리가 생산처에 주문을 넣는 문서 -- 이때만 상대가 "발주처"가 아니라
+    # 우리가 발주하는 쪽이라 오른쪽 블록 이름이 다르다.
+    "purchase_order": _doc_config(
+        "발  주  서", "발주처 Provider", "발주일", "납기일",
+        "위와 같이 발주합니다.", show_delivery=True),
+    "quote": _doc_config(
+        "견  적  서", "공급자 Provider", "견적일", "유효기간",
+        "위와 같이 견적합니다.", show_delivery=False),
+    "statement": _doc_config(
+        "거래명세서", "공급자 Provider", "거래일자", None,
+        "위와 같이 거래명세서를 발행합니다.", show_delivery=True),
+    "invoice": _doc_config(
+        "청  구  서", "공급자 Provider", "청구일", "지급기일",
+        "위와 같이 청구합니다.", show_delivery=False),
 }
 
 # ---------------------------------------------------------------------------
