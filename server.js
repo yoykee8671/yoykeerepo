@@ -3803,7 +3803,6 @@ const COMPANY_INFO = {
   businessNumber: "314-87-00725",
   representativeName: "이교영",
   address: "",
-  invoiceEmail: "",
   bankInfo: "KB국민은행 802-21-0429-353"
 };
 
@@ -4456,7 +4455,6 @@ function resolveIssuerSnapshot(db, issuerPartnerId) {
     businessNumber: partner.businessNumber,
     representativeName: partner.representativeName,
     address: partner.address,
-    invoiceEmail: partner.invoiceEmail,
     bankInfo: [partner.bankName, partner.bankAccount].filter(Boolean).join(" ")
   };
 }
@@ -8560,7 +8558,8 @@ async function routeApi(req, res, url) {
             representativeName: partner.representativeName,
             address: partner.address,
             contactName: partner.contactName,
-            contactEmail: partner.contactEmail
+            contactEmail: partner.contactEmail,
+            invoiceEmail: partner.invoiceEmail
           }
         : {},
       lineItems: po.lineItems,

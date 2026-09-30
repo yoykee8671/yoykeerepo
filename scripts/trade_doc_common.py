@@ -110,6 +110,10 @@ DOC_CONFIGS = {
             ("대표자", "partner.representativeName"),
             ("주소", "partner.address"),
             ("담당자", "partner.contactLine"),
+            # 담당자 개인 이메일(contactLine)과는 별개로, 거래처의 세금계산서
+            # 발행 메일(invoiceEmail)을 보여준다 -- 발행자가 아니라 이 거래처
+            # 자신이 세금계산서를 발행/수신할 때 쓰는 주소다.
+            ("이메일", "partner.invoiceEmail"),
             ("발주일", "orderDate"),
         ],
         "right_fields": [
@@ -117,7 +121,6 @@ DOC_CONFIGS = {
             ("상호", "issuer.businessName"),
             ("대표자", "issuer.representativeName"),
             ("주소", "issuer.address"),
-            ("이메일", "issuer.invoiceEmail"),
             ("계좌", "issuer.bankInfo"),
         ],
         "closing": "위와 같이 발주합니다.",

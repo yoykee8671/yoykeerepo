@@ -6,9 +6,10 @@ route in server.js:
 {
   "docNo": "PO-20260928-001",
   "orderDate": "2026-09-28",
-  "issuer": {"businessName","businessNumber","representativeName","address","invoiceEmail","bankInfo"},
+  "issuer": {"businessName","businessNumber","representativeName","address","bankInfo"},
   "partner": {"name","businessName","businessNumber","representativeName","address",
-              "contactName","contactEmail"},  # {} if the partner record was deleted
+              "contactName","contactEmail","invoiceEmail"},  # {} if the partner record
+                                                              # was deleted
   "lineItems": [{"itemName","spec","quantity","unit","unitPrice","totalPrice"}, ...],
   "deliveryPlace": {"name","address","contactName","contactPhone","note"},  # all optional
   "subtotal": 0, "vat": 0, "total": 0,   # not used for display -- trade_doc_common
