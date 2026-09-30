@@ -23,6 +23,7 @@ const PRICE_WORKBOOK_SCRIPT = path.join(__dirname, "scripts", "price_entry_excel
 const SETTLEMENT_SCRIPT = path.join(__dirname, "scripts", "settlement_excel.py");
 const PURCHASE_ORDER_SCRIPT = path.join(__dirname, "scripts", "purchase_order_excel.py");
 const XLSX_PARSE_SCRIPT = path.join(__dirname, "scripts", "xlsx_to_json.py");
+const ROWS_TO_XLSX_SCRIPT = path.join(__dirname, "scripts", "rows_to_xlsx.py");
 const NPB_PARSE_SCRIPT = path.join(__dirname, "scripts", "npb_parse.py");
 const NPB_XLSX_SCRIPT = path.join(__dirname, "scripts", "npb_settlement_xlsx.py");
 const NPB_INVOICE_SCRIPT = path.join(__dirname, "scripts", "npb_invoice_xlsx.py");
@@ -196,6 +197,12 @@ const importedRequests = [
 
 const settlementTypes = new Set(["prepay_debt", "prepay_fee", "prepay_supply", "consignment", "direct_purchase"]);
 const partnerCategories = new Set(["production", "sales", "purchase", "issuer"]);
+// public/app.js의 PARTNER_CATEGORY_LABELS와 동일한 라벨 — 엑셀 내보내기/
+// 업로드에서 "분류" 열을 사람이 읽는 한글로 주고받기 위해 서버에도 둔다.
+const PARTNER_CATEGORY_LABELS = { production: "생산업체", sales: "판매납품처", purchase: "매입공급처", issuer: "발행자(자사)" };
+const PARTNER_CATEGORY_LABEL_TO_KEY = Object.fromEntries(
+  Object.entries(PARTNER_CATEGORY_LABELS).map(([key, label]) => [label, key])
+);
 const purchaseOrderStatuses = new Set(["ordered", "in_production", "received", "cancelled"]);
 const shippingPolicyTypes = new Set(["free", "flat", "threshold"]);
 const requestStatuses = new Set(["pending", "await_deposit", "paid", "hold", "error", "consignment_unpaid", "deleted"]);
@@ -1833,6 +1840,56 @@ async function parsePriceWorkbookUpload(body = {}) {
     const stdout = await runPriceWorkbookScript(["import", "--input", tmpPath]);
     const parsed = JSON.parse(stdout || "{}");
     return Array.isArray(parsed.rows) ? parsed.rows : [];
+  } finally {
+    await safeUnlink(tmpPath);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Generic "목록을 엑셀로 다운로드 / 엑셀로 일괄 업로드" support, shared by the
+// 거래처/원부자재/납품지 master-data screens. Each table just declares its
+// column list (Korean header <-> field key, ID always first for round-trip
+// matching on re-upload); everything else is one shared writer/reader.
+// ---------------------------------------------------------------------------
+
+async function buildRowsXlsx(sheetName, headers, rows) {
+  const tmpBase = path.join(os.tmpdir(), `wooofpay-rows-${crypto.randomBytes(8).toString("hex")}`);
+  const inputPath = `${tmpBase}.json`;
+  const outputPath = `${tmpBase}.xlsx`;
+  try {
+    await writeFile(inputPath, JSON.stringify({ sheetName, headers, rows }), "utf8");
+    await execFileAsync("python3", [ROWS_TO_XLSX_SCRIPT, "--input", inputPath, "--output", outputPath], {
+      cwd: __dirname,
+      maxBuffer: 20 * 1024 * 1024
+    });
+    return await readFile(outputPath);
+  } finally {
+    await safeUnlink(inputPath);
+    await safeUnlink(outputPath);
+  }
+}
+
+// Returns the first sheet's rows as {headerText: cellValue} objects — the
+// same shape parseBankXlsxUpload's caller unwraps, just without assuming
+// which sheet name to look for (a re-uploaded export always has one sheet).
+async function parseUploadedXlsxRows(body = {}) {
+  const fileBase64 = String(body.fileBase64 || "").trim();
+  if (!fileBase64) {
+    throw new Error("업로드할 Excel 파일을 선택하세요.");
+  }
+  const fileBuffer = Buffer.from(fileBase64, "base64");
+  const extension = path.extname(String(body.fileName || "")).toLowerCase() || ".xlsx";
+  const tmpPath = path.join(os.tmpdir(), `wooofpay-rows-import-${crypto.randomBytes(8).toString("hex")}${extension}`);
+  try {
+    await writeFile(tmpPath, fileBuffer);
+    const { stdout } = await execFileAsync("python3", [XLSX_PARSE_SCRIPT, "--input", tmpPath], {
+      cwd: __dirname,
+      maxBuffer: 20 * 1024 * 1024
+    });
+    const parsed = JSON.parse(stdout || "{}");
+    const sheets = parsed.sheets || {};
+    const firstKey = Object.keys(sheets)[0];
+    return firstKey ? sheets[firstKey] : [];
   } finally {
     await safeUnlink(tmpPath);
   }
@@ -8354,6 +8411,91 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  const PARTNER_EXPORT_HEADERS = [
+    "ID", "분류", "거래처명", "상호명", "사업자등록번호", "대표자명", "주소",
+    "세금계산서 발행 메일", "은행", "계좌번호", "예금주명", "발주방식", "증빙구분",
+    "담당자명", "담당자 연락처", "담당자 이메일", "메모", "사용상태"
+  ];
+
+  if (pathname === "/api/partners/export" && method === "GET") {
+    const rows = (db.partners || []).map((p) => [
+      p.id, PARTNER_CATEGORY_LABELS[p.category] || p.category, p.name, p.businessName,
+      p.businessNumber, p.representativeName, p.address, p.invoiceEmail, p.bankName,
+      p.bankAccount, p.depositorName, p.orderMethod, p.invoiceTiming, p.contactName,
+      p.contactPhone, p.contactEmail, p.note, p.isActive !== false ? "Y" : "N"
+    ]);
+    const buffer = await buildRowsXlsx("거래처", PARTNER_EXPORT_HEADERS, rows);
+    sendBuffer(res, 200, buffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      { "content-disposition": contentDisposition("거래처.xlsx") });
+    return;
+  }
+
+  if (pathname === "/api/partners/import" && method === "POST") {
+    const body = await readBody(req);
+    let rows;
+    try {
+      rows = await parseUploadedXlsxRows(body);
+    } catch (error) {
+      sendJson(res, 400, { error: error.message || "Excel 파일을 읽지 못했습니다." });
+      return;
+    }
+    let created = 0;
+    let updated = 0;
+    const skipped = [];
+    rows.forEach((row, index) => {
+      const rowNo = index + 2; // 헤더가 1행이므로 데이터는 2행부터
+      const rowId = String(row["ID"] || "").trim();
+      const name = String(row["거래처명"] || "").trim();
+      if (!name) {
+        skipped.push({ row: rowNo, reason: "거래처명이 비어 있습니다." });
+        return;
+      }
+      const categoryLabel = String(row["분류"] || "").trim();
+      const category = PARTNER_CATEGORY_LABEL_TO_KEY[categoryLabel]
+        || (partnerCategories.has(categoryLabel) ? categoryLabel : "production");
+      const fields = {
+        category,
+        name,
+        businessName: String(row["상호명"] || "").trim(),
+        businessNumber: String(row["사업자등록번호"] || "").trim(),
+        representativeName: String(row["대표자명"] || "").trim(),
+        address: String(row["주소"] || "").trim(),
+        invoiceEmail: String(row["세금계산서 발행 메일"] || "").trim(),
+        bankName: String(row["은행"] || "").trim(),
+        bankAccount: String(row["계좌번호"] || "").trim(),
+        depositorName: String(row["예금주명"] || "").trim(),
+        orderMethod: String(row["발주방식"] || "").trim(),
+        invoiceTiming: String(row["증빙구분"] || "").trim(),
+        contactName: String(row["담당자명"] || "").trim(),
+        contactPhone: String(row["담당자 연락처"] || "").trim(),
+        contactEmail: String(row["담당자 이메일"] || "").trim(),
+        note: String(row["메모"] || "").trim(),
+        isActive: String(row["사용상태"] || "").trim().toUpperCase() !== "N"
+      };
+      if (rowId) {
+        const existing = db.partners.find((item) => item.id === rowId);
+        if (!existing) {
+          skipped.push({ row: rowNo, reason: `ID(${rowId})가 일치하는 거래처를 찾을 수 없습니다.` });
+          return;
+        }
+        const before = { ...existing };
+        Object.assign(existing, fields, { updatedAt: now() });
+        addAudit(db, actor, "update", "partner", existing.id, `${existing.name} 거래처 엑셀 일괄 수정`, before, existing);
+        updated += 1;
+      } else {
+        const partner = {
+          id: id("partner"), ...fields, attachments: [], createdAt: now(), updatedAt: now()
+        };
+        db.partners.unshift(partner);
+        addAudit(db, actor, "create", "partner", partner.id, `${partner.name} 거래처 엑셀 일괄 등록`, null, partner);
+        created += 1;
+      }
+    });
+    if (created || updated) await writeDb(db);
+    sendJson(res, 200, { result: { created, updated, skipped } });
+    return;
+  }
+
   if (pathname === "/api/materials" && method === "GET") {
     const partnerId = url.searchParams.get("partnerId") || "";
     const rows = (db.materials || [])
@@ -8423,6 +8565,84 @@ async function routeApi(req, res, url) {
     addAudit(db, actor, "delete", "material", before.id, `${before.itemName} 원부자재 삭제`, before, null);
     await writeDb(db);
     sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  const MATERIAL_EXPORT_HEADERS = [
+    "ID", "거래처명", "품목명", "카테고리", "발주단위", "기본단가", "리드타임(일)", "메모", "사용상태"
+  ];
+
+  if (pathname === "/api/materials/export" && method === "GET") {
+    const partnerName = (partnerId) => (db.partners || []).find((p) => p.id === partnerId)?.name || "";
+    const rows = (db.materials || []).map((m) => [
+      m.id, partnerName(m.partnerId), m.itemName, m.category, m.orderUnit,
+      m.basePrice || "", m.leadTimeDays || "", m.note, m.isActive !== false ? "Y" : "N"
+    ]);
+    const buffer = await buildRowsXlsx("원부자재", MATERIAL_EXPORT_HEADERS, rows);
+    sendBuffer(res, 200, buffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      { "content-disposition": contentDisposition("원부자재.xlsx") });
+    return;
+  }
+
+  if (pathname === "/api/materials/import" && method === "POST") {
+    const body = await readBody(req);
+    let rows;
+    try {
+      rows = await parseUploadedXlsxRows(body);
+    } catch (error) {
+      sendJson(res, 400, { error: error.message || "Excel 파일을 읽지 못했습니다." });
+      return;
+    }
+    let created = 0;
+    let updated = 0;
+    const skipped = [];
+    rows.forEach((row, index) => {
+      const rowNo = index + 2;
+      const rowId = String(row["ID"] || "").trim();
+      const itemName = String(row["품목명"] || "").trim();
+      if (!itemName) {
+        skipped.push({ row: rowNo, reason: "품목명이 비어 있습니다." });
+        return;
+      }
+      const partnerName = String(row["거래처명"] || "").trim();
+      let partnerId = "";
+      if (partnerName) {
+        const matched = db.partners.find((p) => p.name === partnerName);
+        if (!matched) {
+          skipped.push({ row: rowNo, reason: `거래처명(${partnerName})과 일치하는 거래처를 찾을 수 없습니다.` });
+          return;
+        }
+        partnerId = matched.id;
+      }
+      const fields = {
+        partnerId,
+        itemName,
+        category: String(row["카테고리"] || "").trim(),
+        orderUnit: String(row["발주단위"] || "").trim(),
+        basePrice: number(row["기본단가"]),
+        leadTimeDays: number(row["리드타임(일)"]),
+        note: String(row["메모"] || "").trim(),
+        isActive: String(row["사용상태"] || "").trim().toUpperCase() !== "N"
+      };
+      if (rowId) {
+        const existing = db.materials.find((item) => item.id === rowId);
+        if (!existing) {
+          skipped.push({ row: rowNo, reason: `ID(${rowId})가 일치하는 원부자재를 찾을 수 없습니다.` });
+          return;
+        }
+        const before = { ...existing };
+        Object.assign(existing, fields, { updatedAt: now() });
+        addAudit(db, actor, "update", "material", existing.id, `${existing.itemName} 원부자재 엑셀 일괄 수정`, before, existing);
+        updated += 1;
+      } else {
+        const material = { id: id("material"), ...fields, createdAt: now(), updatedAt: now() };
+        db.materials.unshift(material);
+        addAudit(db, actor, "create", "material", material.id, `${material.itemName} 원부자재 엑셀 일괄 등록`, null, material);
+        created += 1;
+      }
+    });
+    if (created || updated) await writeDb(db);
+    sendJson(res, 200, { result: { created, updated, skipped } });
     return;
   }
 
@@ -8615,6 +8835,116 @@ async function routeApi(req, res, url) {
     addAudit(db, actor, "create", "deliveryPlace", deliveryPlace.id, `${deliveryPlace.name} 납품장소 등록`, null, deliveryPlace);
     await writeDb(db);
     sendJson(res, 201, { deliveryPlace });
+    return;
+  }
+
+  const deliveryPlaceMatch = pathname.match(/^\/api\/delivery-places\/([^/]+)$/);
+  if (deliveryPlaceMatch && method === "PUT") {
+    const body = await readBody(req);
+    const list = Array.isArray(db.deliveryPlaces) ? db.deliveryPlaces : [];
+    const deliveryPlace = list.find((item) => item.id === deliveryPlaceMatch[1]);
+    if (!deliveryPlace) {
+      sendJson(res, 404, { error: "납품장소를 찾을 수 없습니다." });
+      return;
+    }
+    const before = { ...deliveryPlace };
+    if ("name" in body) {
+      const name = String(body.name || "").trim();
+      if (!name) {
+        sendJson(res, 400, { error: "납품장소명은 필수입니다." });
+        return;
+      }
+      deliveryPlace.name = name;
+    }
+    for (const key of ["address", "contactName", "contactPhone", "note"]) {
+      if (key in body) deliveryPlace[key] = String(body[key] || "").trim();
+    }
+    deliveryPlace.updatedAt = now();
+    addAudit(db, actor, "update", "deliveryPlace", deliveryPlace.id, `${deliveryPlace.name} 납품장소 수정`, before, deliveryPlace);
+    await writeDb(db);
+    sendJson(res, 200, { deliveryPlace });
+    return;
+  }
+
+  if (deliveryPlaceMatch && method === "DELETE") {
+    const list = Array.isArray(db.deliveryPlaces) ? db.deliveryPlaces : [];
+    const index = list.findIndex((item) => item.id === deliveryPlaceMatch[1]);
+    if (index === -1) {
+      sendJson(res, 404, { error: "납품장소를 찾을 수 없습니다." });
+      return;
+    }
+    // deliveryPlaces는 참조가 아니라 발주서 저장 시점의 스냅샷(값 복사)으로만
+    // 쓰이므로, 목록에서 지워도 이미 만들어진 발주서 내용은 바뀌지 않는다 —
+    // partners/issuer 삭제와 달리 사용 중 여부를 막을 이유가 없다.
+    const [before] = list.splice(index, 1);
+    addAudit(db, actor, "delete", "deliveryPlace", before.id, `${before.name} 납품장소 삭제`, before, null);
+    await writeDb(db);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  const DELIVERY_PLACE_EXPORT_HEADERS = ["ID", "납품지명", "주소", "담당자명", "전화번호", "메모"];
+
+  if (pathname === "/api/delivery-places/export" && method === "GET") {
+    const rows = (db.deliveryPlaces || []).map((d) => [d.id, d.name, d.address, d.contactName, d.contactPhone, d.note]);
+    const buffer = await buildRowsXlsx("납품지", DELIVERY_PLACE_EXPORT_HEADERS, rows);
+    sendBuffer(res, 200, buffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      { "content-disposition": contentDisposition("납품지.xlsx") });
+    return;
+  }
+
+  if (pathname === "/api/delivery-places/import" && method === "POST") {
+    const body = await readBody(req);
+    let rows;
+    try {
+      rows = await parseUploadedXlsxRows(body);
+    } catch (error) {
+      sendJson(res, 400, { error: error.message || "Excel 파일을 읽지 못했습니다." });
+      return;
+    }
+    if (!Array.isArray(db.deliveryPlaces)) db.deliveryPlaces = [];
+    let created = 0;
+    let updated = 0;
+    const skipped = [];
+    rows.forEach((row, index) => {
+      const rowNo = index + 2;
+      const rowId = String(row["ID"] || "").trim();
+      const name = String(row["납품지명"] || "").trim();
+      if (!name) {
+        skipped.push({ row: rowNo, reason: "납품지명이 비어 있습니다." });
+        return;
+      }
+      const fields = {
+        name,
+        address: String(row["주소"] || "").trim(),
+        contactName: String(row["담당자명"] || "").trim(),
+        contactPhone: String(row["전화번호"] || "").trim(),
+        note: String(row["메모"] || "").trim()
+      };
+      // /api/delivery-places POST와 같은 규칙: ID가 없으면 이름으로 기존
+      // 항목을 먼저 찾는다 -- 그래야 발주서 화면의 "이 납품장소 저장"
+      // 체크박스로 이미 만들어진 항목을 이 업로드가 중복 생성하지 않는다.
+      const existing = rowId
+        ? db.deliveryPlaces.find((item) => item.id === rowId)
+        : db.deliveryPlaces.find((item) => item.name === name);
+      if (rowId && !existing) {
+        skipped.push({ row: rowNo, reason: `ID(${rowId})가 일치하는 납품지를 찾을 수 없습니다.` });
+        return;
+      }
+      if (existing) {
+        const before = { ...existing };
+        Object.assign(existing, fields, { updatedAt: now() });
+        addAudit(db, actor, "update", "deliveryPlace", existing.id, `${existing.name} 납품지 엑셀 일괄 수정`, before, existing);
+        updated += 1;
+      } else {
+        const deliveryPlace = { id: id("delivery"), ...fields, createdAt: now(), updatedAt: now() };
+        db.deliveryPlaces.push(deliveryPlace);
+        addAudit(db, actor, "create", "deliveryPlace", deliveryPlace.id, `${deliveryPlace.name} 납품지 엑셀 일괄 등록`, null, deliveryPlace);
+        created += 1;
+      }
+    });
+    if (created || updated) await writeDb(db);
+    sendJson(res, 200, { result: { created, updated, skipped } });
     return;
   }
 

@@ -270,6 +270,12 @@ a {
   grid-template-columns: minmax(0, 1fr);
 }
 
+/* 발주서 작성 폼은 품목 표/납품장소/비고까지 들어가 기본 360px 폭으로는
+   입력칸이 너무 좁다 -- 이 화면에서만 폼 칸을 2배(720px)로 넓힌다. */
+.layout.wide-form {
+  grid-template-columns: minmax(0, 1fr) 720px;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -363,6 +369,7 @@ td.wrap {
 .row-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
@@ -1800,4 +1807,187 @@ a.button:hover {
 .purchase-orders-table th:nth-child(3), .purchase-orders-table td:nth-child(3) { width: 100px; min-width: 100px; }
 .purchase-orders-table th:nth-child(4), .purchase-orders-table td:nth-child(4) { width: 90px; min-width: 90px; }
 .purchase-orders-table th:nth-child(5), .purchase-orders-table td:nth-child(5) { width: 105px; min-width: 105px; }
-.purchase-orders-table th:nth-child(6), .purchase-orders-table td:nth-child(6) { width: 170px; min-width: 170px; }
+.purchase-orders-table th:nth-child(6), .purchase-orders-table td:nth-child(6) { width: 220px; min-width: 220px; }
+
+/* 발주서 미리보기 -- 실제 엑셀 파일이 아니라 같은 내용을 발주서 양식과
+   비슷한 모양의 HTML로 보여주는 오버레이. 색상은 trade_doc_common.py의
+   디자인 시스템(차콜 헤더, 연한 하늘색 금액 강조)과 맞춘다. */
+.po-preview-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 20, 20, 0.55);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 32px 16px;
+  overflow-y: auto;
+  z-index: 1000;
+}
+
+.po-preview-modal {
+  background: #fff;
+  border-radius: 10px;
+  width: 100%;
+  max-width: 880px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.35);
+}
+
+.po-preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: #fff;
+  border-radius: 10px 10px 0 0;
+}
+
+.po-preview-toolbar > div {
+  display: flex;
+  gap: 8px;
+}
+
+.po-doc {
+  padding: 32px 36px 28px;
+  color: #1a1a1a;
+  font-size: 13px;
+}
+
+.po-doc-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 24px;
+}
+
+.po-doc-issuer {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.po-doc-docno {
+  font-size: 11px;
+  color: #808080;
+  text-align: right;
+  margin-bottom: 4px;
+}
+
+.po-doc-title {
+  font-size: 30px;
+  font-weight: 800;
+  text-align: right;
+  letter-spacing: 2px;
+}
+
+.po-doc-info {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 28px;
+  margin-bottom: 22px;
+}
+
+.po-doc-info-label {
+  font-weight: 700;
+  font-size: 13px;
+  border-bottom: 1px solid #1a1a1a;
+  padding-bottom: 4px;
+  margin-bottom: 6px;
+}
+
+.po-doc-info-row {
+  display: flex;
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.po-doc-info-row > span:first-child {
+  flex: 0 0 72px;
+  color: #808080;
+}
+
+.po-doc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.po-doc-table th {
+  background: #4d4d4d;
+  color: #fff;
+  padding: 7px 8px;
+  text-align: center;
+}
+
+.po-doc-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #bfbfbf;
+}
+
+.po-doc-table td.po-doc-num,
+.po-doc-table td.num {
+  text-align: right;
+}
+
+.po-doc-amount {
+  background: #dce6f1;
+}
+
+.po-doc-footer {
+  display: grid;
+  grid-template-columns: 1fr 280px;
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.po-doc-notes {
+  border: 1px solid #bfbfbf;
+  min-height: 64px;
+}
+
+.po-doc-notes-label {
+  background: #4d4d4d;
+  color: #fff;
+  font-weight: 700;
+  padding: 4px 10px;
+}
+
+.po-doc-notes-body {
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.po-doc-totals {
+  border: 1px solid #bfbfbf;
+  font-size: 12px;
+}
+
+.po-doc-total-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid #bfbfbf;
+}
+
+.po-doc-total-row:last-child {
+  border-bottom: none;
+}
+
+.po-doc-total-row .num {
+  font-variant-numeric: tabular-nums;
+}
+
+.po-doc-total-row-grand {
+  background: #dce6f1;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.po-doc-closing {
+  text-align: center;
+  margin-top: 18px;
+  font-size: 13px;
+}

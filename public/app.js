@@ -92,7 +92,10 @@ const state = {
     editingPartner: null,
     editingMaterial: null,
     editingPurchaseOrder: null,
-    partnerFilterCategory: ""
+    editingDeliveryPlace: null,
+    partnerFilterCategory: "",
+    importStatus: null,
+    previewPurchaseOrder: null
   }
 };
 
@@ -104,6 +107,7 @@ const PO_STATUS_LABELS = { ordered: "발주", in_production: "생산중", receiv
 const PROCUREMENT_SCREENS = [
   ["partners", "거래처관리"],
   ["materials", "원부자재관리"],
+  ["deliveryPlaces", "납품지관리"],
   ["orders", "명세서 발행"]
 ];
 
@@ -4012,6 +4016,54 @@ function partnerSelectOptions(selectedPartnerId, category = "production") {
   return options;
 }
 
+// 거래처/원부자재/납품지 세 목록 화면이 똑같은 "엑셀 다운로드 / 엑셀 업로드"
+// 도구를 쓴다 -- prefix로 어느 화면의 상태(importStatus)인지 가른다.
+function renderBulkExcelTools(prefix, exportUrl) {
+  const status = state.procurement.importStatus;
+  const showStatus = status && status.prefix === prefix;
+  return `
+    <div class="toolbar" style="margin-top:8px;flex-wrap:wrap">
+      <a href="${exportUrl}"><button type="button">엑셀 다운로드</button></a>
+      <button type="button" data-bulk-import-trigger="${prefix}">엑셀 업로드</button>
+      <input type="file" data-bulk-import-file="${prefix}" accept=".xlsx" style="display:none">
+    </div>
+    ${showStatus ? `
+      <div class="${status.kind === "error" ? "error-text" : "notice"}" style="margin-top:6px">
+        ${h(status.text)}
+        ${(status.details || []).length ? `<br>${status.details.slice(0, 20).map((d) => h(`${d.row}행: ${d.reason}`)).join("<br>")}` : ""}
+        ${(status.details || []).length > 20 ? `<br>...외 ${status.details.length - 20}건` : ""}
+      </div>` : ""}
+  `;
+}
+
+function bindBulkExcelTools(prefix, importUrl) {
+  app.querySelector(`[data-bulk-import-trigger="${prefix}"]`)?.addEventListener("click", () => {
+    app.querySelector(`[data-bulk-import-file="${prefix}"]`)?.click();
+  });
+  app.querySelector(`[data-bulk-import-file="${prefix}"]`)?.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const fileBase64 = await readFileAsBase64(file);
+      const response = await api(importUrl, { method: "POST", body: { fileName: file.name, fileBase64 } });
+      const result = response.result || {};
+      const skipped = result.skipped || [];
+      state.procurement.importStatus = {
+        prefix,
+        kind: skipped.length ? "error" : "ok",
+        text: `반영 완료: 생성 ${result.created || 0}건, 수정 ${result.updated || 0}건${skipped.length ? `, 건너뜀 ${skipped.length}건` : ""}`,
+        details: skipped
+      };
+      await refreshAndRender();
+    } catch (error) {
+      state.procurement.importStatus = { prefix, kind: "error", text: error.message || "엑셀 업로드에 실패했습니다." };
+      renderApp();
+    } finally {
+      event.target.value = "";
+    }
+  });
+}
+
 function renderProcurement() {
   const p = state.procurement;
   const subnav = PROCUREMENT_SCREENS
@@ -4019,6 +4071,7 @@ function renderProcurement() {
     .join("");
   let body = "";
   if (p.screen === "materials") body = renderMaterials();
+  else if (p.screen === "deliveryPlaces") body = renderDeliveryPlaces();
   else if (p.screen === "orders") body = renderPurchaseOrders();
   else body = renderPartners();
   return `
@@ -4032,10 +4085,12 @@ function bindProcurement() {
   app.querySelectorAll("[data-procurement-screen]").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.procurement.screen = btn.dataset.procurementScreen;
+      state.procurement.importStatus = null;
       renderApp();
     });
   });
   if (state.procurement.screen === "materials") bindMaterials();
+  else if (state.procurement.screen === "deliveryPlaces") bindDeliveryPlaces();
   else if (state.procurement.screen === "orders") bindPurchaseOrders();
   else bindPartners();
 }
@@ -4052,6 +4107,7 @@ function renderPartners() {
             ${Object.entries(PARTNER_CATEGORY_LABELS).map(([key, label]) => `<option value="${key}" ${state.procurement.partnerFilterCategory === key ? "selected" : ""}>${label}</option>`).join("")}
           </select>
           <button class="primary" data-new-partner style="margin-left:8px">새 거래처</button>
+          ${renderBulkExcelTools("partner", "/api/partners/export")}
         </div>
         <div class="table-wrap">
           <table class="partners-table">
@@ -4136,6 +4192,7 @@ function renderAttachmentRow(url) {
 }
 
 function bindPartners() {
+  bindBulkExcelTools("partner", "/api/partners/import");
   app.querySelector("[data-partner-filter-category]")?.addEventListener("change", (event) => {
     state.procurement.partnerFilterCategory = event.target.value;
     renderApp();
@@ -4206,6 +4263,7 @@ function renderMaterials() {
         <div class="panel-head"><h2>원부자재 목록</h2><span class="muted">${money.format(rows.length)}개</span></div>
         <div class="panel-body" style="padding-bottom:0">
           <button class="primary" data-new-material>새 원부자재</button>
+          ${renderBulkExcelTools("material", "/api/materials/export")}
         </div>
         <div class="table-wrap">
           <table class="materials-table">
@@ -4267,6 +4325,7 @@ function renderMaterialForm() {
 }
 
 function bindMaterials() {
+  bindBulkExcelTools("material", "/api/materials/import");
   app.querySelector("[data-new-material]")?.addEventListener("click", () => {
     state.procurement.editingMaterial = null;
     renderApp();
@@ -4308,10 +4367,111 @@ function bindMaterials() {
   });
 }
 
+function renderDeliveryPlaces() {
+  const rows = (state.deliveryPlaces || []).slice().sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ko"));
+  return `
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>납품지 목록</h2><span class="muted">${money.format(rows.length)}개</span></div>
+        <div class="panel-body" style="padding-bottom:0">
+          <button class="primary" data-new-delivery-place>새 납품지</button>
+          ${renderBulkExcelTools("deliveryPlace", "/api/delivery-places/export")}
+        </div>
+        <div class="table-wrap">
+          <table class="partners-table">
+            <thead><tr><th>납품지명</th><th>주소</th><th>담당자</th><th>작업</th></tr></thead>
+            <tbody>${rows.map(renderDeliveryPlaceRow).join("") || `<tr><td colspan="4" class="empty">등록된 납품지가 없습니다.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>${state.procurement.editingDeliveryPlace ? "납품지 수정" : "납품지 입력"}</h2></div>
+        <div class="panel-body">${renderDeliveryPlaceForm()}</div>
+      </div>
+    </section>
+  `;
+}
+
+function renderDeliveryPlaceRow(item) {
+  return `
+    <tr>
+      <td>${h(item.name)}</td>
+      <td>${h(item.address)}</td>
+      <td>${h(item.contactName)}${item.contactPhone ? ` · ${h(item.contactPhone)}` : ""}</td>
+      <td><div class="row-actions"><button data-edit-delivery-place="${item.id}">수정</button><button class="danger icon-btn" data-delete-delivery-place="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
+    </tr>`;
+}
+
+function renderDeliveryPlaceForm() {
+  const d = state.procurement.editingDeliveryPlace || {};
+  return `
+    <form class="form-grid" data-delivery-place-form>
+      <div class="field"><label>납품지명</label><input name="name" value="${h(d.name)}" required></div>
+      <div class="field"><label>주소</label><input name="address" value="${h(d.address)}"></div>
+      <div class="field two">
+        <div><label>담당자명</label><input name="contactName" value="${h(d.contactName)}"></div>
+        <div><label>전화번호</label><input name="contactPhone" value="${h(d.contactPhone)}"></div>
+      </div>
+      <div class="field"><label>메모</label><textarea name="note">${h(d.note)}</textarea></div>
+      <div class="toolbar">
+        <button class="primary" type="submit">${d.id ? "수정 저장" : "납품지 추가"}</button>
+        ${state.procurement.editingDeliveryPlace ? `<button type="button" data-cancel-edit-delivery-place>취소</button>` : ""}
+      </div>
+    </form>
+  `;
+}
+
+function bindDeliveryPlaces() {
+  bindBulkExcelTools("deliveryPlace", "/api/delivery-places/import");
+  app.querySelector("[data-new-delivery-place]")?.addEventListener("click", () => {
+    state.procurement.editingDeliveryPlace = null;
+    renderApp();
+  });
+  app.querySelectorAll("[data-edit-delivery-place]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.procurement.editingDeliveryPlace = (state.deliveryPlaces || []).find((item) => item.id === button.dataset.editDeliveryPlace);
+      renderApp();
+    });
+  });
+  app.querySelector("[data-cancel-edit-delivery-place]")?.addEventListener("click", () => {
+    state.procurement.editingDeliveryPlace = null;
+    renderApp();
+  });
+  app.querySelectorAll("[data-delete-delivery-place]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("이 납품지를 삭제할까요?")) return;
+      try {
+        await api(`/api/delivery-places/${button.dataset.deleteDeliveryPlace}`, { method: "DELETE" });
+      } catch (error) {
+        alert(error.message);
+        return;
+      }
+      await refreshAndRender();
+    });
+  });
+  app.querySelector("[data-delivery-place-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = formObject(event.currentTarget);
+    const editing = state.procurement.editingDeliveryPlace;
+    try {
+      if (editing) {
+        await api(`/api/delivery-places/${editing.id}`, { method: "PUT", body });
+      } else {
+        await api("/api/delivery-places", { method: "POST", body });
+      }
+    } catch (error) {
+      alert(error.message);
+      return;
+    }
+    state.procurement.editingDeliveryPlace = null;
+    await refreshAndRender();
+  });
+}
+
 function renderPurchaseOrders() {
   const rows = (state.purchaseOrders || []).slice().sort((a, b) => (b.orderDate || "").localeCompare(a.orderDate || ""));
   return `
-    <section class="layout">
+    <section class="layout wide-form">
       <div class="panel">
         <div class="panel-head"><h2>발주서 목록</h2><span class="muted">${money.format(rows.length)}건</span></div>
         <div class="panel-body" style="padding-bottom:0">
@@ -4329,7 +4489,106 @@ function renderPurchaseOrders() {
         <div class="panel-body">${renderPurchaseOrderForm()}</div>
       </div>
     </section>
+    ${state.procurement.previewPurchaseOrder ? renderPurchaseOrderPreviewOverlay(state.procurement.previewPurchaseOrder) : ""}
   `;
+}
+
+// 다운로드하기 전에 실제로 어떤 내용이 들어가는지 한눈에 보여주는 미리보기다
+// -- 엑셀 파일 자체를 그대로 렌더링하는 게 아니라(브라우저에서 xlsx를 보여줄
+// 방법이 마땅치 않다), 같은 데이터를 발주서 양식과 비슷한 모양의 HTML로
+// 보여준다. "일금 ○○원 정" 한글 금액 표기처럼 화면 확인에는 꼭 필요하지
+// 않은 서식용 디테일은 뺐다 -- 실제 파일에는 그대로 들어간다.
+function renderPurchaseOrderPreviewOverlay(poId) {
+  const po = (state.purchaseOrders || []).find((item) => item.id === poId);
+  if (!po) return "";
+  const partner = (state.partners || []).find((p) => p.id === po.partnerId) || {};
+  const issuer = po.issuer || {};
+  const items = Array.isArray(po.lineItems) ? po.lineItems : [];
+  const deliveryLine = deliveryPlaceDisplayLine(po.deliveryPlace);
+  return `
+    <div class="po-preview-overlay" data-po-preview-overlay>
+      <div class="po-preview-modal">
+        <div class="po-preview-toolbar">
+          <strong>발주서 미리보기 · ${h(po.docNo)}</strong>
+          <div>
+            <a href="/api/purchase-orders/${po.id}/excel"><button class="primary" type="button">엑셀 다운로드</button></a>
+            <button type="button" data-close-po-preview>닫기</button>
+          </div>
+        </div>
+        <div class="po-doc">
+          <div class="po-doc-header">
+            <div class="po-doc-issuer">${h(issuer.businessName || "")}</div>
+            <div>
+              <div class="po-doc-docno">${h(po.docNo)}</div>
+              <div class="po-doc-title">발&nbsp;&nbsp;주&nbsp;&nbsp;서</div>
+            </div>
+          </div>
+          <div class="po-doc-info">
+            <div class="po-doc-info-block">
+              <div class="po-doc-info-label">수신 To</div>
+              <div class="po-doc-info-row"><span>수신</span><strong>${h(partner.businessName || partner.name || "")}</strong></div>
+              <div class="po-doc-info-row"><span>사업자번호</span>${h(partner.businessNumber)}</div>
+              <div class="po-doc-info-row"><span>대표자</span>${h(partner.representativeName)}</div>
+              <div class="po-doc-info-row"><span>주소</span>${h(partner.address)}</div>
+              <div class="po-doc-info-row"><span>담당자</span>${[partner.contactName, partner.contactEmail].filter(Boolean).map(h).join(" ")}</div>
+              <div class="po-doc-info-row"><span>이메일</span>${h(partner.invoiceEmail)}</div>
+              <div class="po-doc-info-row"><span>발주일</span>${h(po.orderDate)}</div>
+            </div>
+            <div class="po-doc-info-block">
+              <div class="po-doc-info-label">발주처 Provider</div>
+              <div class="po-doc-info-row"><span>사업자번호</span>${h(issuer.businessNumber)}</div>
+              <div class="po-doc-info-row"><span>상호</span><strong>${h(issuer.businessName)}</strong></div>
+              <div class="po-doc-info-row"><span>대표자</span>${h(issuer.representativeName)}</div>
+              <div class="po-doc-info-row"><span>주소</span>${h(issuer.address)}</div>
+              <div class="po-doc-info-row"><span>계좌</span>${h(issuer.bankInfo)}</div>
+            </div>
+          </div>
+          <table class="po-doc-table">
+            <thead><tr><th>순번</th><th>품목명</th><th>규격</th><th>수량</th><th>단위</th><th>단가</th><th>공급가액</th></tr></thead>
+            <tbody>
+              ${items.map((item, i) => `
+                <tr>
+                  <td class="num">${i + 1}</td>
+                  <td>${h(item.itemName)}</td>
+                  <td>${h(item.spec)}</td>
+                  <td class="num">${money.format(item.quantity || 0)}</td>
+                  <td>${h(item.unit)}</td>
+                  <td class="num">${money.format(item.unitPrice || 0)}</td>
+                  <td class="num po-doc-amount">${money.format(item.totalPrice || 0)}</td>
+                </tr>`).join("") || `<tr><td colspan="7" class="empty">추가된 품목이 없습니다.</td></tr>`}
+            </tbody>
+          </table>
+          <div class="po-doc-footer">
+            <div class="po-doc-notes">
+              <div class="po-doc-notes-label">Notes</div>
+              <div class="po-doc-notes-body">${deliveryLine ? `납품장소: ${h(deliveryLine)}` : ""}${deliveryLine && po.note ? "<br>" : ""}${h(po.note || "").replace(/\n/g, "<br>")}</div>
+            </div>
+            <div class="po-doc-totals">
+              <div class="po-doc-total-row"><span>총 공급가액</span><span class="num">${money.format(po.subtotal || 0)}</span></div>
+              <div class="po-doc-total-row"><span>총 부가세</span><span class="num">${money.format(po.vat || 0)}</span></div>
+              <div class="po-doc-total-row po-doc-total-row-grand"><span>총 합계금액</span><span class="num">${money.format(po.total || 0)}</span></div>
+            </div>
+          </div>
+          <div class="po-doc-closing">위와 같이 발주합니다.</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// deliveryPlace 스냅샷(구조화된 객체)과, 그 필드가 생기기 전 저장된 옛
+// 발주서의 문자열 형태를 둘 다 사람이 읽는 한 줄로 합친다 -- 엑셀 생성
+// 스크립트(purchase_order_excel.py)의 _delivery_place_line과 같은 규칙이다.
+function deliveryPlaceDisplayLine(delivery) {
+  if (typeof delivery === "string") return delivery;
+  if (!delivery || typeof delivery !== "object") return "";
+  const parts = [];
+  if (delivery.name) parts.push(delivery.name);
+  if (delivery.address) parts.push(delivery.address);
+  const contact = [delivery.contactName, delivery.contactPhone].filter(Boolean).join(" ");
+  if (contact) parts.push(`담당: ${contact}`);
+  if (delivery.note) parts.push(`메모: ${delivery.note}`);
+  return parts.join(" / ");
 }
 
 function renderPurchaseOrderRow(item) {
@@ -4343,6 +4602,7 @@ function renderPurchaseOrderRow(item) {
       <td>${money.format(item.total)}원<br><span class="muted" style="font-size:11px">공급가 ${money.format(Number(item.subtotal || 0))} · 부가세 ${money.format(Number(item.vat || 0))}</span></td>
       <td><div class="row-actions">
         <button data-edit-purchase-order="${item.id}">수정</button>
+        <button type="button" data-preview-purchase-order="${item.id}">미리보기</button>
         <a href="/api/purchase-orders/${item.id}/excel"><button type="button">엑셀</button></a>
         <button class="danger icon-btn" data-delete-purchase-order="${item.id}" aria-label="삭제" title="삭제">×</button>
       </div></td>
@@ -4480,6 +4740,23 @@ function bindPurchaseOrders() {
       }
       await refreshAndRender();
     });
+  });
+  app.querySelectorAll("[data-preview-purchase-order]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.procurement.previewPurchaseOrder = button.dataset.previewPurchaseOrder;
+      renderApp();
+    });
+  });
+  app.querySelector("[data-close-po-preview]")?.addEventListener("click", () => {
+    state.procurement.previewPurchaseOrder = null;
+    renderApp();
+  });
+  // 배경(오버레이 자체) 클릭은 닫고, 모달 내용 클릭은 전파를 막아 안 닫히게 한다.
+  app.querySelector("[data-po-preview-overlay]")?.addEventListener("click", (event) => {
+    if (event.target.dataset.poPreviewOverlay !== undefined) {
+      state.procurement.previewPurchaseOrder = null;
+      renderApp();
+    }
   });
 
   const form = app.querySelector("[data-purchase-order-form]");
