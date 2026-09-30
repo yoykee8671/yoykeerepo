@@ -96,6 +96,8 @@ const state = {
     partnerFilterCategory: "",
     importStatus: null,
     templateDownloadFor: null,
+    docTypeFilter: "",
+    formDocType: "purchase_order",
     previewPurchaseOrder: null
   }
 };
@@ -105,6 +107,19 @@ const NPB_DEFAULT_BRAND = "doteon";
 const npbBrand = () => state.npb.brandId || NPB_DEFAULT_BRAND;
 const PARTNER_CATEGORY_LABELS = { production: "생산업체", sales: "판매납품처", purchase: "매입공급처", issuer: "발행자(자사)" };
 const PO_STATUS_LABELS = { ordered: "발주", in_production: "생산중", received: "입고완료", cancelled: "취소" };
+// 네 양식은 담기는 내용이 같아 한 목록에 모아 두고 docType으로만 가른다.
+// dateLabel/dueLabel은 같은 날짜 칸이 양식마다 다르게 불리는 이름이고,
+// defaultCategory는 작성 화면에서 수신처로 먼저 보여줄 거래처 분류다
+// (생산처에 발주서, 납품지에 견적·청구·명세 -- 다른 분류도 고를 수 있다).
+const TRADE_DOC_TYPES = [
+  ["purchase_order", "발주서", { dateLabel: "발주일", dueLabel: "납기일", defaultCategory: "production" }],
+  ["statement", "거래명세서", { dateLabel: "거래일자", dueLabel: "", defaultCategory: "sales" }],
+  ["invoice", "청구서", { dateLabel: "청구일", dueLabel: "지급기일", defaultCategory: "sales" }],
+  ["quote", "견적서", { dateLabel: "견적일", dueLabel: "유효기간", defaultCategory: "sales" }]
+];
+const TRADE_DOC_LABELS = Object.fromEntries(TRADE_DOC_TYPES.map(([key, label]) => [key, label]));
+const TRADE_DOC_META = Object.fromEntries(TRADE_DOC_TYPES.map(([key, , meta]) => [key, meta]));
+const tradeDocMeta = (docType) => TRADE_DOC_META[docType] || TRADE_DOC_META.purchase_order;
 const PROCUREMENT_SCREENS = [
   ["partners", "거래처관리"],
   ["materials", "원부자재관리"],
@@ -896,11 +911,24 @@ function renderCurrentTab() {
   return renderDashboard();
 }
 
+// 하위 메뉴가 있는 대분류는 지금 보고 있는 화면 이름까지 제목에 붙인다 --
+// 좌측에서 고른 하위 메뉴가 본문 제목과 이어져 보이도록.
+function currentScreenLabel(tabKey) {
+  // 새 창(팝업)은 제목이 이미 "거래처 입력"처럼 구체적이라 빵부스러기가 붙으면
+  // 되레 헷갈린다.
+  if (isRequestPopup || isBrandPopup || procurementPopupKind) return "";
+  const config = TAB_SUBMENUS[tabKey];
+  if (!config) return "";
+  const current = state[config.stateKey]?.screen;
+  return (config.screens.find(([key]) => key === current) || [])[1] || "";
+}
+
 function pageHead(title, subtitle, actions = "") {
+  const screenLabel = currentScreenLabel(state.tab);
   return `
     <div class="topbar">
       <div>
-        <h1>${h(title)}</h1>
+        <h1>${h(title)}${screenLabel ? `<span class="page-crumb"> / ${h(screenLabel)}</span>` : ""}</h1>
         <p>${h(subtitle)}</p>
       </div>
       <div class="toolbar">${actions}</div>
@@ -4260,6 +4288,28 @@ function bindBulkExcelTools(prefix, importUrl) {
   });
 }
 
+// 양식에 맞는 분류를 먼저 보여주되(발주서->생산업체, 나머지->판매납품처)
+// 다른 분류도 고를 수 있게 그룹으로 나눠 전부 싣는다.
+function partnerSelectOptionsForDoc(selectedPartnerId, defaultCategory) {
+  const groups = [defaultCategory]
+    .concat(Object.keys(PARTNER_CATEGORY_LABELS).filter((key) => key !== defaultCategory && key !== "issuer"));
+  const options = groups.map((category) => {
+    const rows = partnersByCategory(category);
+    if (!rows.length) return "";
+    const items = rows
+      .map((p) => `<option value="${p.id}" ${selectedPartnerId === p.id ? "selected" : ""}>${h(p.name)}</option>`)
+      .join("");
+    return `<optgroup label="${h(PARTNER_CATEGORY_LABELS[category])}">${items}</optgroup>`;
+  });
+  // 사용 안 함으로 바뀐 거래처를 고른 문서를 열었을 때 선택이 풀리면 안 된다.
+  const known = new Set(groups.flatMap((c) => partnersByCategory(c).map((p) => p.id)));
+  if (selectedPartnerId && !known.has(selectedPartnerId)) {
+    const inactive = (state.partners || []).find((p) => p.id === selectedPartnerId);
+    if (inactive) options.push(`<option value="${inactive.id}" selected>${h(inactive.name)} (사용 안 함)</option>`);
+  }
+  return options;
+}
+
 function renderProcurement() {
   const p = state.procurement;
   // 화면 이동(거래처관리/원부자재관리/…)은 좌측 사이드바로 옮겼다. 여기
@@ -4692,23 +4742,42 @@ function bindDeliveryPlaces() {
 }
 
 function renderPurchaseOrders() {
-  const rows = (state.purchaseOrders || []).slice().sort((a, b) => (b.orderDate || "").localeCompare(a.orderDate || ""));
+  const filter = state.procurement.docTypeFilter || "";
+  const all = (state.purchaseOrders || []).slice()
+    .sort((a, b) => (b.orderDate || "").localeCompare(a.orderDate || ""));
+  const rows = filter ? all.filter((item) => (item.docType || "purchase_order") === filter) : all;
+  const counts = all.reduce((acc, item) => {
+    const key = item.docType || "purchase_order";
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  const tabs = [["", "전체", all.length]]
+    .concat(TRADE_DOC_TYPES.map(([key, label]) => [key, label, counts[key] || 0]));
+  const editing = state.procurement.editingPurchaseOrder;
+  const formDocType = editing?.docType || state.procurement.formDocType || "purchase_order";
+  const formLabel = TRADE_DOC_LABELS[formDocType] || "발주서";
   return `
+    <div class="npb-subnav">
+      ${tabs
+        .map(([key, label, count]) =>
+          `<button data-doc-type-tab="${key}" class="npb-subtab ${filter === key ? "active" : ""}">${label} <span class="muted">${count}</span></button>`)
+        .join("")}
+    </div>
     <section class="layout">
       <div class="panel">
-        <div class="panel-head"><h2>발주서 목록</h2><span class="muted">${money.format(rows.length)}건</span></div>
+        <div class="panel-head"><h2>${filter ? `${TRADE_DOC_LABELS[filter]} 목록` : "발행 문서 목록"}</h2><span class="muted">${money.format(rows.length)}건</span></div>
         <div class="panel-body" style="padding-bottom:0">
-          <button class="primary" data-new-purchase-order>새 발주서</button>
+          <button class="primary" data-new-purchase-order>새 ${formLabel}</button>
         </div>
         <div class="table-wrap">
           <table class="purchase-orders-table">
-            <thead><tr><th>문서번호</th><th>거래처</th><th>발주일</th><th>상태</th><th>합계</th><th>작업</th></tr></thead>
-            <tbody>${rows.map(renderPurchaseOrderRow).join("") || `<tr><td colspan="6" class="empty">등록된 발주서가 없습니다.</td></tr>`}</tbody>
+            <thead><tr><th>문서번호</th><th>양식</th><th>거래처</th><th>일자</th><th>상태</th><th>합계</th><th>작업</th></tr></thead>
+            <tbody>${rows.map(renderPurchaseOrderRow).join("") || `<tr><td colspan="7" class="empty">등록된 문서가 없습니다.</td></tr>`}</tbody>
           </table>
         </div>
       </div>
       <div class="panel">
-        <div class="panel-head"><h2>${state.procurement.editingPurchaseOrder ? "발주서 수정" : "발주서 작성"}</h2></div>
+        <div class="panel-head"><h2>${editing ? `${formLabel} 수정` : `${formLabel} 작성`}</h2></div>
         <div class="panel-body">${renderPurchaseOrderForm()}</div>
       </div>
     </section>
@@ -4727,12 +4796,23 @@ function renderPurchaseOrderPreviewOverlay(poId) {
   const partner = (state.partners || []).find((p) => p.id === po.partnerId) || {};
   const issuer = po.issuer || {};
   const items = Array.isArray(po.lineItems) ? po.lineItems : [];
-  const deliveryLine = deliveryPlaceDisplayLine(po.deliveryPlace);
+  const docType = po.docType || "purchase_order";
+  const docLabel = TRADE_DOC_LABELS[docType] || "발주서";
+  const meta = tradeDocMeta(docType);
+  // 실제 엑셀과 같은 규칙 -- 견적서/청구서에는 납품장소를 싣지 않는다.
+  const showDelivery = docType === "purchase_order" || docType === "statement";
+  const deliveryLine = showDelivery ? deliveryPlaceDisplayLine(po.deliveryPlace) : "";
+  const closing = {
+    purchase_order: "위와 같이 발주합니다.",
+    quote: "위와 같이 견적합니다.",
+    statement: "위와 같이 거래명세서를 발행합니다.",
+    invoice: "위와 같이 청구합니다."
+  }[docType] || "위와 같이 발주합니다.";
   return `
     <div class="po-preview-overlay" data-po-preview-overlay>
       <div class="po-preview-modal">
         <div class="po-preview-toolbar">
-          <strong>발주서 미리보기 · ${h(po.docNo)}</strong>
+          <strong>${h(docLabel)} 미리보기 · ${h(po.docNo)}</strong>
           <div>
             <a href="/api/purchase-orders/${po.id}/excel"><button class="primary" type="button">엑셀 다운로드</button></a>
             <button type="button" data-close-po-preview>닫기</button>
@@ -4743,7 +4823,7 @@ function renderPurchaseOrderPreviewOverlay(poId) {
             <div class="po-doc-issuer">${h(issuer.businessName || "")}</div>
             <div>
               <div class="po-doc-docno">${h(po.docNo)}</div>
-              <div class="po-doc-title">발&nbsp;&nbsp;주&nbsp;&nbsp;서</div>
+              <div class="po-doc-title">${h(docLabel.split("").join("\u2009"))}</div>
             </div>
           </div>
           <div class="po-doc-info">
@@ -4755,10 +4835,10 @@ function renderPurchaseOrderPreviewOverlay(poId) {
               <div class="po-doc-info-row"><span>주소</span>${h(partner.address)}</div>
               <div class="po-doc-info-row"><span>담당자</span>${[partner.contactName, partner.contactEmail].filter(Boolean).map(h).join(" ")}</div>
               <div class="po-doc-info-row"><span>이메일</span>${h(partner.invoiceEmail)}</div>
-              <div class="po-doc-info-row"><span>발주일</span>${h(po.orderDate)}</div>
+              <div class="po-doc-info-row"><span>${h(meta.dateLabel)}</span>${h(po.orderDate)}</div>\n              ${meta.dueLabel && po.dueDate ? `<div class="po-doc-info-row"><span>${h(meta.dueLabel)}</span>${h(po.dueDate)}</div>` : ""}
             </div>
             <div class="po-doc-info-block">
-              <div class="po-doc-info-label">발주처 Provider</div>
+              <div class="po-doc-info-label">${docType === "purchase_order" ? "발주처" : "공급자"} Provider</div>
               <div class="po-doc-info-row"><span>사업자번호</span>${h(issuer.businessNumber)}</div>
               <div class="po-doc-info-row"><span>상호</span><strong>${h(issuer.businessName)}</strong></div>
               <div class="po-doc-info-row"><span>대표자</span>${h(issuer.representativeName)}</div>
@@ -4793,7 +4873,7 @@ function renderPurchaseOrderPreviewOverlay(poId) {
               <div class="po-doc-total-row po-doc-total-row-grand"><span>총 합계금액</span><span class="num">${money.format(po.total || 0)}</span></div>
             </div>
           </div>
-          <div class="po-doc-closing">위와 같이 발주합니다.</div>
+          <div class="po-doc-closing">${h(closing)}</div>
         </div>
       </div>
     </div>
@@ -4820,8 +4900,9 @@ function renderPurchaseOrderRow(item) {
   return `
     <tr>
       <td>${h(item.docNo)}</td>
+      <td>${h(TRADE_DOC_LABELS[item.docType || "purchase_order"] || "발주서")}</td>
       <td>${h(partner?.name || "")}</td>
-      <td>${h(item.orderDate)}</td>
+      <td>${h(item.orderDate)}${item.dueDate ? `<br><span class="muted" style="font-size:11px">${h(tradeDocMeta(item.docType).dueLabel)} ${h(item.dueDate)}</span>` : ""}</td>
       <td>${PO_STATUS_LABELS[item.status] || item.status}</td>
       <td>${money.format(item.total)}원<br><span class="muted" style="font-size:11px">공급가 ${money.format(Number(item.subtotal || 0))} · 부가세 ${money.format(Number(item.vat || 0))}</span></td>
       <td><div class="row-actions">
@@ -4836,14 +4917,15 @@ function renderPurchaseOrderRow(item) {
 function renderPurchaseOrderForm() {
   const po = state.procurement.editingPurchaseOrder || {};
   const lineItems = Array.isArray(po.lineItems) ? po.lineItems : [];
+  const docType = po.docType || state.procurement.formDocType || "purchase_order";
+  const meta = tradeDocMeta(docType);
   return `
     <form class="form-grid" data-purchase-order-form>
       <div class="field two">
         <div>
-          <label>거래처(생산업체)</label>
-          <select name="partnerId" required>
-            <option value="">거래처 선택</option>
-            ${partnerSelectOptions(po.partnerId).join("")}
+          <label>양식</label>
+          <select name="docType" data-po-doc-type>
+            ${TRADE_DOC_TYPES.map(([key, label]) => `<option value="${key}" ${docType === key ? "selected" : ""}>${label}</option>`).join("")}
           </select>
         </div>
         <div>
@@ -4854,15 +4936,31 @@ function renderPurchaseOrderForm() {
           </select>
         </div>
       </div>
+      <div class="field">
+        <label>수신처</label>
+        <select name="partnerId" required>
+          <option value="">거래처 선택</option>
+          ${partnerSelectOptionsForDoc(po.partnerId, meta.defaultCategory).join("")}
+        </select>
+      </div>
       <div class="field two">
-        <div><label>발주일</label><input name="orderDate" type="date" value="${h(po.orderDate || new Date().toISOString().slice(0, 10))}"></div>
-        <div>
+        <div><label>${h(meta.dateLabel)}</label><input name="orderDate" type="date" value="${h(po.orderDate || new Date().toISOString().slice(0, 10))}"></div>
+        ${meta.dueLabel
+          ? `<div><label>${h(meta.dueLabel)}</label><input name="dueDate" type="date" value="${h(po.dueDate || "")}"></div>`
+          : `<div>
+              <label>상태</label>
+              <select name="status">
+                ${Object.entries(PO_STATUS_LABELS).map(([key, label]) => `<option value="${key}" ${(po.status || "ordered") === key ? "selected" : ""}>${label}</option>`).join("")}
+              </select>
+            </div>`}
+      </div>
+      ${meta.dueLabel ? `
+        <div class="field">
           <label>상태</label>
           <select name="status">
             ${Object.entries(PO_STATUS_LABELS).map(([key, label]) => `<option value="${key}" ${(po.status || "ordered") === key ? "selected" : ""}>${label}</option>`).join("")}
           </select>
-        </div>
-      </div>
+        </div>` : ""}
       <div class="field">
         <label>납품장소 <span class="muted" style="font-weight:400">(선택 입력)</span></label>
         <datalist id="po-delivery-place-options">
@@ -4939,6 +5037,28 @@ function renderPurchaseOrderSummary(items) {
 }
 
 function bindPurchaseOrders() {
+  app.querySelectorAll("[data-doc-type-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const key = btn.dataset.docTypeTab;
+      state.procurement.docTypeFilter = key;
+      // 탭에서 양식을 고르면 작성 폼도 그 양식으로 맞춘다 -- 목록과 폼이
+      // 따로 놀면 "견적서 탭인데 발주서가 써지는" 혼란이 생긴다.
+      if (key) state.procurement.formDocType = key;
+      state.procurement.editingPurchaseOrder = null;
+      renderApp();
+    });
+  });
+  // 폼에서 양식을 바꾸면 날짜 라벨과 수신처 기본 분류가 달라지므로 다시 그린다.
+  app.querySelector("[data-po-doc-type]")?.addEventListener("change", (event) => {
+    state.procurement.formDocType = event.target.value;
+    if (state.procurement.editingPurchaseOrder) {
+      state.procurement.editingPurchaseOrder = {
+        ...state.procurement.editingPurchaseOrder,
+        docType: event.target.value
+      };
+    }
+    renderApp();
+  });
   app.querySelector("[data-new-purchase-order]")?.addEventListener("click", () => {
     state.procurement.editingPurchaseOrder = null;
     renderApp();
