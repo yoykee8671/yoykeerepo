@@ -1,0 +1,38 @@
+{
+  "docNo": "PO-20260929-002",
+  "orderDate": "2026-09-29",
+  "issuer": {
+    "businessName": "주식회사 우프컴퍼니",
+    "businessNumber": "314-87-00725",
+    "representativeName": "이교영",
+    "address": "서울특별시 용산구 한남대로8길 6-17, 지하1층~지상4층 우프컴퍼니 사옥 (한남동)",
+    "bankInfo": "하나은행 247-910039-03504 (예금주: 주식회사 우프컴퍼니)"
+  },
+  "partner": {
+    "name": "",
+    "businessName": "대한민국원단산업협동조합연합회 동광섬유제조 안성2공장",
+    "businessNumber": "127-46-35651",
+    "representativeName": "채선태",
+    "address": "경기도 동두천시 삼육사로548번길 118, C동(상패동) 2층 원단재단실 및 포장창고 일체",
+    "contactName": "박상무",
+    "contactEmail": "very.long.contact.email.address.for.testing@donggwang-textile-manufacturing.co.kr"
+  },
+  "lineItems": [
+    {"itemName": "프리미엄 극세사 충전솜 앞판용 45mm 두께 35D 밀도 0.4kg/m² 규격 (친환경 인증)", "spec": "1200mm x 2400mm 롤 단위, 방염 처리 완료", "quantity": 150, "unit": "롤", "unitPrice": 2700, "totalPrice": 405000},
+    {"itemName": "옆솜 60-35(0.5)", "spec": "", "quantity": 300, "unit": "개", "unitPrice": 3000, "totalPrice": 900000},
+    {"itemName": "스텝온 45-60(0.4)", "spec": "표준", "quantity": 50, "unit": "개", "unitPrice": 3000, "totalPrice": 150000},
+    {"itemName": "지퍼테잎 5호 (양방향, 논슬립 코팅, 컬러 매칭 그레이/베이지/블랙 택1)", "spec": "롤당 100m, 절단 없이 원단 그대로 납품", "quantity": 20, "unit": "롤", "unitPrice": 45000, "totalPrice": 900000},
+    {"itemName": "봉제사 폴리에스터 120수", "spec": "5000m 콘", "quantity": 200, "unit": "콘", "unitPrice": 1200, "totalPrice": 240000}
+  ],
+  "deliveryPlace": {
+    "name": "우프/베럴즈 통합 물류센터 (임시 야외 하차장 포함)",
+    "address": "경기도 광주시 오포읍 봉골길 159 (안쪽), 3동 202호 - 정문이 아닌 후문(화물전용) 이용 요망, 주차공간 협소하므로 5톤 이상 차량은 사전 연락 필수",
+    "contactName": "김동환",
+    "contactPhone": "010-9838-8018",
+    "note": "오전 9시~11시 사이 하차만 가능, 그 외 시간은 경비실 통해 사전 연락"
+  },
+  "subtotal": 2595000,
+  "vat": 259500,
+  "total": 2854500,
+  "note": "- 솜 충진량 꼭 준수해주세요, 임의로 밀도 조정 시 전량 반품 처리됩니다\n- 압축 포장 잘 부탁드립니다\n- 지퍼테잎은 색상 샘플 먼저 발송 후 승인받고 생산 진행\n- 납품 전 검수 담당자에게 사전 연락 필수 (전화 02-1234-5678)\n- 세금계산서는 매월 말일 마감 기준으로 익월 10일 발행"
+}

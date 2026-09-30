@@ -1,0 +1,36 @@
+{
+  "docNo": "PO-20260929-001",
+  "orderDate": "2026-09-29",
+  "issuer": {
+    "businessName": "주식회사 우프컴퍼니",
+    "businessNumber": "314-87-00725",
+    "representativeName": "이교영",
+    "address": "서울 용산구 한남대로8길 6-17, 1F",
+    "bankInfo": "하나은행 247-910039-03504"
+  },
+  "partner": {
+    "name": "동광섬유",
+    "businessName": "",
+    "businessNumber": "127-46-35651",
+    "representativeName": "채선태",
+    "address": "경기도 동두천시 삼육사로548번길 118, C동(상패동)",
+    "contactName": "",
+    "contactEmail": ""
+  },
+  "lineItems": [
+    {"itemName": "앞솜 45-35(0.4)", "spec": "", "quantity": 150, "unit": "개", "unitPrice": 2700, "totalPrice": 405000},
+    {"itemName": "옆솜 60-35(0.5)", "spec": "", "quantity": 300, "unit": "개", "unitPrice": 3000, "totalPrice": 900000},
+    {"itemName": "스텝온 45-60(0.4)", "spec": "", "quantity": 50, "unit": "개", "unitPrice": 3000, "totalPrice": 150000}
+  ],
+  "deliveryPlace": {
+    "name": "우프/베럴즈 물류센터",
+    "address": "경기도 광주시 오포읍 봉골길 159 (안쪽)",
+    "contactName": "김동환",
+    "contactPhone": "010-9838-8018",
+    "note": ""
+  },
+  "subtotal": 1455000,
+  "vat": 145500,
+  "total": 1600500,
+  "note": "- 솜 충진량 꼭 준수해주세요\n- 압축 포장 잘 부탁드립니다."
+}
