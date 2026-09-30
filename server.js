@@ -204,6 +204,21 @@ const PARTNER_CATEGORY_LABEL_TO_KEY = Object.fromEntries(
   Object.entries(PARTNER_CATEGORY_LABELS).map(([key, label]) => [label, key])
 );
 const purchaseOrderStatuses = new Set(["ordered", "in_production", "received", "cancelled"]);
+// 발주서·거래명세서·청구서·견적서는 담기는 내용(수신처/품목/금액)이 같아서 한
+// 컬렉션에 두고 docType으로만 가른다. 문서번호 앞자리는 양식마다 달리 준다.
+const tradeDocTypes = new Set(["purchase_order", "statement", "invoice", "quote"]);
+const TRADE_DOC_PREFIXES = {
+  purchase_order: "PO",
+  statement: "TS",
+  invoice: "IV",
+  quote: "QT"
+};
+const TRADE_DOC_LABELS = {
+  purchase_order: "발주서",
+  statement: "거래명세서",
+  invoice: "청구서",
+  quote: "견적서"
+};
 const shippingPolicyTypes = new Set(["free", "flat", "threshold"]);
 const requestStatuses = new Set(["pending", "await_deposit", "paid", "hold", "error", "consignment_unpaid", "deleted"]);
 // Statuses that still represent an unpaid, live obligation (counted in 대기금액).
@@ -1298,6 +1313,11 @@ function migrateDb(db) {
   touch(db, "materials", []);
   touch(db, "purchaseOrders", []);
   touch(db, "deliveryPlaces", []);
+  // 발주서만 있던 시절에 저장된 문서는 docType이 없다 -- 전부 발주서로 본다.
+  for (const po of db.purchaseOrders || []) {
+    touch(po, "docType", "purchase_order");
+    touch(po, "dueDate", "");
+  }
   if (!(db.partners || []).some((p) => p.category === "issuer")) {
     db.partners = db.partners || [];
     db.partners.push(defaultIssuerPartner());
@@ -4520,11 +4540,12 @@ function resolveIssuerSnapshot(db, issuerPartnerId) {
 
 // 문서번호는 별도 카운터를 두지 않고, 같은 날짜로 이미 저장된 발주서 개수에서
 // 파생한다 — 저장된 데이터가 곧 진실이라 카운터가 어긋날 일이 없다.
-function nextPurchaseOrderDocNo(db, orderDate) {
+function nextPurchaseOrderDocNo(db, orderDate, docType = "purchase_order") {
+  const prefix = TRADE_DOC_PREFIXES[docType] || TRADE_DOC_PREFIXES.purchase_order;
   const dateKey = (dateOnly(orderDate) || now().slice(0, 10)).replaceAll("-", "");
-  const sameDay = (db.purchaseOrders || []).filter((po) => String(po.docNo || "").startsWith(`PO-${dateKey}-`));
+  const sameDay = (db.purchaseOrders || []).filter((po) => String(po.docNo || "").startsWith(`${prefix}-${dateKey}-`));
   const maxSeq = sameDay.reduce((max, po) => Math.max(max, Number(String(po.docNo).slice(-3)) || 0), 0);
-  return `PO-${dateKey}-${String(maxSeq + 1).padStart(3, "0")}`;
+  return `${prefix}-${dateKey}-${String(maxSeq + 1).padStart(3, "0")}`;
 }
 
 function sanitizeLineItems(raw) {
@@ -8675,15 +8696,20 @@ async function routeApi(req, res, url) {
       sendJson(res, 400, { error: "발행자를 선택하세요." });
       return;
     }
+    const docType = tradeDocTypes.has(body.docType) ? body.docType : "purchase_order";
     const orderDate = dateOnly(body.orderDate) || now().slice(0, 10);
     const lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
     const subtotal = lineItems.reduce((sum, item) => sum + item.totalPrice, 0);
     const vat = Math.round(subtotal * 0.1);
     const po = {
       id: id("po"),
-      docNo: nextPurchaseOrderDocNo(db, orderDate),
+      docType,
+      docNo: nextPurchaseOrderDocNo(db, orderDate, docType),
       partnerId: partner.id,
       orderDate,
+      // 양식마다 뜻이 다른 두 번째 날짜 — 발주서는 납기일, 견적서는 유효기간,
+      // 청구서는 지급기일. 거래명세서는 쓰지 않는다.
+      dueDate: dateOnly(body.dueDate) || "",
       status: purchaseOrderStatuses.has(body.status) ? body.status : "ordered",
       lineItems,
       issuerPartnerId,
@@ -8697,7 +8723,7 @@ async function routeApi(req, res, url) {
       updatedAt: now()
     };
     db.purchaseOrders.unshift(po);
-    addAudit(db, actor, "create", "purchaseOrder", po.id, `${po.docNo} 발주서 생성`, null, po);
+    addAudit(db, actor, "create", "purchaseOrder", po.id, `${po.docNo} ${TRADE_DOC_LABELS[docType]} 생성`, null, po);
     await writeDb(db);
     sendJson(res, 201, { purchaseOrder: po });
     return;
@@ -8721,6 +8747,13 @@ async function routeApi(req, res, url) {
       po.partnerId = partner.id;
     }
     if ("orderDate" in body) po.orderDate = dateOnly(body.orderDate) || po.orderDate;
+    if ("dueDate" in body) po.dueDate = dateOnly(body.dueDate) || "";
+    // 양식을 바꾸면 문서번호 앞자리도 그 양식 것으로 다시 딴다 -- PO-...로
+    // 시작하는 견적서가 남아 있으면 목록에서 양식을 구분할 수 없다.
+    if ("docType" in body && tradeDocTypes.has(body.docType) && body.docType !== po.docType) {
+      po.docType = body.docType;
+      po.docNo = nextPurchaseOrderDocNo(db, po.orderDate, po.docType);
+    }
     if ("status" in body && purchaseOrderStatuses.has(body.status)) po.status = body.status;
     if ("issuerPartnerId" in body) {
       const issuer = resolveIssuerSnapshot(db, String(body.issuerPartnerId || "").trim());
@@ -8740,7 +8773,7 @@ async function routeApi(req, res, url) {
       po.total = po.subtotal + po.vat;
     }
     po.updatedAt = now();
-    addAudit(db, actor, "update", "purchaseOrder", po.id, `${po.docNo} 발주서 수정`, before, po);
+    addAudit(db, actor, "update", "purchaseOrder", po.id, `${po.docNo} ${TRADE_DOC_LABELS[po.docType] || "발주서"} 수정`, before, po);
     await writeDb(db);
     sendJson(res, 200, { purchaseOrder: po });
     return;
@@ -8773,8 +8806,10 @@ async function routeApi(req, res, url) {
     // 발주서만 COMPANY_INFO 고정값으로 대체한다.
     const issuer = po.issuer || COMPANY_INFO;
     const spec = {
+      docType: po.docType || "purchase_order",
       docNo: po.docNo,
       orderDate: po.orderDate,
+      dueDate: po.dueDate || "",
       issuer,
       partner: partner
         ? {
@@ -8799,9 +8834,9 @@ async function routeApi(req, res, url) {
       const buffer = await generatePurchaseOrderXlsx(spec);
       sendBuffer(res, 200, buffer,
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        { "content-disposition": contentDisposition(`발주서_${po.docNo}.xlsx`) });
+        { "content-disposition": contentDisposition(`${TRADE_DOC_LABELS[po.docType] || "발주서"}_${po.docNo}.xlsx`) });
     } catch (error) {
-      sendJson(res, 500, { error: `발주서 생성 실패: ${error.message}` });
+      sendJson(res, 500, { error: `${TRADE_DOC_LABELS[po.docType] || "발주서"} 생성 실패: ${error.message}` });
     }
     return;
   }

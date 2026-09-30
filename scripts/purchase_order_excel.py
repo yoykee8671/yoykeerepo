@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Generate a production purchase order (발주서) xlsx from a JSON spec.
+"""Generate a trade document xlsx (발주서/거래명세서/청구서/견적서) from a JSON spec.
 
 Spec JSON, exactly as built by the `GET /api/purchase-orders/:id/excel`
 route in server.js:
 {
+  "docType": "purchase_order",  # | statement | invoice | quote
   "docNo": "PO-20260928-001",
   "orderDate": "2026-09-28",
+  "dueDate": "2026-10-05",   # 양식별로 납기일 / 유효기간 / 지급기일
   "issuer": {"businessName","businessNumber","representativeName","address","invoiceEmail","bankInfo"},
   "partner": {"name","businessName","businessNumber","representativeName","address",
               "contactName","contactEmail","invoiceEmail"},  # {} if the partner record
@@ -26,7 +28,7 @@ import json
 
 from openpyxl import Workbook
 
-from trade_doc_common import render
+from trade_doc_common import DOC_CONFIGS, render
 
 
 def _delivery_place_line(delivery):
@@ -76,10 +78,15 @@ def main():
         spec = json.load(f)
     _prepare_spec(spec)
 
+    doc_type = spec.get("docType") or "purchase_order"
+    if doc_type not in DOC_CONFIGS:
+        doc_type = "purchase_order"
+
     wb = Workbook()
     ws = wb.active
-    ws.title = "발주서"
-    render(ws, "purchase_order", spec)
+    # 시트 이름은 양식 제목에서 자간용 공백을 뺀 것 (발  주  서 -> 발주서)
+    ws.title = DOC_CONFIGS[doc_type]["title"].replace(" ", "")
+    render(ws, doc_type, spec)
     wb.save(args.output)
     print(json.dumps({"ok": True, "lineCount": len(spec.get("lineItems", []))}))
 
