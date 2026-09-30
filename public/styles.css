@@ -1928,28 +1928,33 @@ a.button:hover {
   background: rgba(20, 20, 20, 0.55);
   display: flex;
   justify-content: center;
-  align-items: flex-start;
-  padding: 32px 16px;
-  overflow-y: auto;
+  align-items: center;
+  padding: 24px 16px;
   z-index: 1000;
 }
 
+/* 창이 문서보다 작아도 모달 전체가 화면 안에 들어오게 하고, 넘치는 문서
+   내용만 모달 안에서 스크롤시킨다 -- 모달째로 잘려 합계와 마감 문구가
+   안 보이면 미리보기 구실을 못 한다. 툴바(닫기/다운로드)도 늘 보인다. */
 .po-preview-modal {
   background: #fff;
   border-radius: 10px;
   width: 100%;
   max-width: 880px;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.35);
 }
 
 .po-preview-toolbar {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--line);
-  position: sticky;
-  top: 0;
   background: #fff;
   border-radius: 10px 10px 0 0;
 }
@@ -1960,6 +1965,8 @@ a.button:hover {
 }
 
 .po-doc {
+  flex: 1 1 auto;
+  overflow: auto;
   padding: 32px 36px 28px;
   color: #1a1a1a;
   font-size: 13px;
@@ -2019,6 +2026,8 @@ a.button:hover {
 
 .po-doc-table {
   width: 100%;
+  /* 아주 좁은 창에서 7열이 뭉개지지 않게 -- 대신 가로로 스크롤한다. */
+  min-width: 560px;
   border-collapse: collapse;
   font-size: 12px;
   margin-bottom: 4px;
