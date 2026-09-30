@@ -1,5 +1,5 @@
 import http from "node:http";
-import { readFile, writeFile, mkdir, stat, unlink } from "node:fs/promises";
+import { readFile, writeFile, mkdir, stat, unlink, rm } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -3914,20 +3914,115 @@ function defaultIssuerPartner(createdAt = now()) {
   };
 }
 
-async function generatePurchaseOrderXlsx(spec) {
-  const tmpBase = path.join(os.tmpdir(), `wooofpay-po-${crypto.randomBytes(8).toString("hex")}`);
-  const inputPath = `${tmpBase}.json`;
-  const outputPath = `${tmpBase}.xlsx`;
+// 엑셀과 PDF는 같은 문서의 두 가지 출력이므로 사양(spec)도 한 곳에서만
+// 만든다 -- 따로 조립하면 한쪽에만 필드를 추가하는 사고가 난다.
+function tradeDocSpecFromPurchaseOrder(db, po) {
+  const partner = db.partners.find((item) => item.id === po.partnerId);
+  // 발행자는 저장 시점에 이미 스냅샷(po.issuer)으로 확정되어 있다 — 지금 다시
+  // db.partners를 찾아 조립하면, 그 거래처 정보가 나중에 바뀌었을 때 예전
+  // 발주서 엑셀까지 소급해서 달라진다. issuer가 없는(이 필드가 생기기 전)
+  // 발주서만 COMPANY_INFO 고정값으로 대체한다.
+  return {
+    docType: po.docType || "purchase_order",
+    docNo: po.docNo,
+    orderDate: po.orderDate,
+    dueDate: po.dueDate || "",
+    issuer: po.issuer || COMPANY_INFO,
+    partner: partner
+      ? {
+          name: partner.name,
+          businessName: partner.businessName,
+          businessNumber: partner.businessNumber,
+          representativeName: partner.representativeName,
+          address: partner.address,
+          contactName: partner.contactName,
+          contactEmail: partner.contactEmail,
+          invoiceEmail: partner.invoiceEmail
+        }
+      : {},
+    lineItems: po.lineItems,
+    deliveryPlace: po.deliveryPlace,
+    subtotal: po.subtotal,
+    vat: po.vat,
+    total: po.total,
+    note: po.note
+  };
+}
+
+async function writePurchaseOrderXlsx(spec, outputPath) {
+  const inputPath = `${outputPath}.spec.json`;
   try {
     await writeFile(inputPath, JSON.stringify(spec), "utf8");
     await execFileAsync("python3", [PURCHASE_ORDER_SCRIPT, "--input", inputPath, "--output", outputPath], {
       cwd: __dirname,
       maxBuffer: 20 * 1024 * 1024
     });
-    return await readFile(outputPath);
   } finally {
     await safeUnlink(inputPath);
+  }
+}
+
+async function generatePurchaseOrderXlsx(spec) {
+  const outputPath = path.join(os.tmpdir(), `wooofpay-po-${crypto.randomBytes(8).toString("hex")}.xlsx`);
+  try {
+    await writePurchaseOrderXlsx(spec, outputPath);
+    return await readFile(outputPath);
+  } finally {
     await safeUnlink(outputPath);
+  }
+}
+
+// LibreOffice는 변환 한 번에 200MB 가까이 쓴다. 이 서버는 512MB짜리라
+// 두 건이 겹치면 OOM으로 프로세스째 죽으므로, 변환은 한 줄로 세워서
+// 한 번에 하나씩만 돌린다 (문서 발행은 하루 몇 건 수준이라 대기는 문제없다).
+let sofficeQueue = Promise.resolve();
+
+function runSerialized(task) {
+  const run = sofficeQueue.then(task, task);
+  // 다음 대기자는 성공/실패와 무관하게 이어져야 하므로 거부는 여기서 흡수한다.
+  sofficeQueue = run.then(() => {}, () => {});
+  return run;
+}
+
+async function convertToPdf(sourcePath, outDir) {
+  // 프로필 디렉터리를 건마다 새로 주지 않으면, 같은 기본 프로필을 두
+  // 프로세스가 잠글 때 변환이 조용히 실패한다.
+  const profileDir = path.join(os.tmpdir(), `wooofpay-lo-${crypto.randomBytes(8).toString("hex")}`);
+  try {
+    await execFileAsync("soffice", [
+      "--headless",
+      "--norestore",
+      "--nolockcheck",
+      `-env:UserInstallation=file://${profileDir}`,
+      "--convert-to", "pdf:calc_pdf_Export",
+      "--outdir", outDir,
+      sourcePath
+    ], { maxBuffer: 20 * 1024 * 1024, timeout: 120000 });
+  } finally {
+    await rm(profileDir, { recursive: true, force: true }).catch(() => {});
+  }
+  const pdfPath = path.join(outDir, `${path.basename(sourcePath, path.extname(sourcePath))}.pdf`);
+  // soffice는 변환에 실패해도 종료 코드 0으로 끝나는 경우가 있어, 결과
+  // 파일이 실제로 생겼는지를 성공 판정 기준으로 삼는다.
+  try {
+    await stat(pdfPath);
+  } catch {
+    throw new Error("LibreOffice가 PDF를 만들지 못했습니다.");
+  }
+  return pdfPath;
+}
+
+async function generatePurchaseOrderPdf(spec) {
+  const workDir = path.join(os.tmpdir(), `wooofpay-pdf-${crypto.randomBytes(8).toString("hex")}`);
+  await mkdir(workDir, { recursive: true });
+  try {
+    const xlsxPath = path.join(workDir, "doc.xlsx");
+    await writePurchaseOrderXlsx(spec, xlsxPath);
+    // 엑셀 생성은 가볍고 병렬로 돌아도 되니, 무거운 변환 구간만 줄을 세운다.
+    const pdfPath = await runSerialized(() => convertToPdf(xlsxPath, workDir));
+    return await readFile(pdfPath);
+  } finally {
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -8792,51 +8887,29 @@ async function routeApi(req, res, url) {
     return;
   }
 
-  const poExcelMatch = pathname.match(/^\/api\/purchase-orders\/([^/]+)\/excel$/);
-  if (poExcelMatch && method === "GET") {
-    const po = db.purchaseOrders.find((item) => item.id === poExcelMatch[1]);
+  const poFileMatch = pathname.match(/^\/api\/purchase-orders\/([^/]+)\/(excel|pdf)$/);
+  if (poFileMatch && method === "GET") {
+    const po = db.purchaseOrders.find((item) => item.id === poFileMatch[1]);
     if (!po) {
       sendJson(res, 404, { error: "발주서를 찾을 수 없습니다." });
       return;
     }
-    const partner = db.partners.find((item) => item.id === po.partnerId);
-    // 발행자는 저장 시점에 이미 스냅샷(po.issuer)으로 확정되어 있다 — 지금 다시
-    // db.partners를 찾아 조립하면, 그 거래처 정보가 나중에 바뀌었을 때 예전
-    // 발주서 엑셀까지 소급해서 달라진다. issuer가 없는(이 필드가 생기기 전)
-    // 발주서만 COMPANY_INFO 고정값으로 대체한다.
-    const issuer = po.issuer || COMPANY_INFO;
-    const spec = {
-      docType: po.docType || "purchase_order",
-      docNo: po.docNo,
-      orderDate: po.orderDate,
-      dueDate: po.dueDate || "",
-      issuer,
-      partner: partner
-        ? {
-            name: partner.name,
-            businessName: partner.businessName,
-            businessNumber: partner.businessNumber,
-            representativeName: partner.representativeName,
-            address: partner.address,
-            contactName: partner.contactName,
-            contactEmail: partner.contactEmail,
-            invoiceEmail: partner.invoiceEmail
-          }
-        : {},
-      lineItems: po.lineItems,
-      deliveryPlace: po.deliveryPlace,
-      subtotal: po.subtotal,
-      vat: po.vat,
-      total: po.total,
-      note: po.note
-    };
+    const format = poFileMatch[2];
+    const spec = tradeDocSpecFromPurchaseOrder(db, po);
+    const label = TRADE_DOC_LABELS[po.docType] || "발주서";
     try {
-      const buffer = await generatePurchaseOrderXlsx(spec);
-      sendBuffer(res, 200, buffer,
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        { "content-disposition": contentDisposition(`${TRADE_DOC_LABELS[po.docType] || "발주서"}_${po.docNo}.xlsx`) });
+      if (format === "pdf") {
+        const buffer = await generatePurchaseOrderPdf(spec);
+        sendBuffer(res, 200, buffer, "application/pdf",
+          { "content-disposition": contentDisposition(`${label}_${po.docNo}.pdf`) });
+      } else {
+        const buffer = await generatePurchaseOrderXlsx(spec);
+        sendBuffer(res, 200, buffer,
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          { "content-disposition": contentDisposition(`${label}_${po.docNo}.xlsx`) });
+      }
     } catch (error) {
-      sendJson(res, 500, { error: `${TRADE_DOC_LABELS[po.docType] || "발주서"} 생성 실패: ${error.message}` });
+      sendJson(res, 500, { error: `${label} ${format === "pdf" ? "PDF " : ""}생성 실패: ${error.message}` });
     }
     return;
   }
