@@ -114,31 +114,34 @@ a {
 .shell {
   min-height: 100vh;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
 }
 
+/* 좌측 세로 사이드바: 상단 블랙바의 대분류 메뉴와, 선택된 대분류에 속한
+   하위 메뉴를 한 줄씩 아래로 세워 한 자리에서 이동할 수 있게 한다. */
 .sidebar {
   background: #111827;
   color: #fff;
-  padding: 8px 20px;
+  padding: 18px 0;
   display: flex;
-  flex-direction: row;
-  align-items: center;
+  flex-direction: column;
   gap: 16px;
   position: sticky;
   top: 0;
   z-index: 20;
-  overflow-x: auto;
+  width: 210px;
+  flex-shrink: 0;
+  height: 100vh;
+  overflow-y: auto;
 }
 
 .brandmark {
   display: flex;
-  flex-direction: row;
-  align-items: baseline;
-  gap: 8px;
-  padding: 0 16px 0 0;
-  border-right: 1px solid rgba(255, 255, 255, 0.14);
-  white-space: nowrap;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 0 18px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
   flex-shrink: 0;
 }
 
@@ -149,24 +152,26 @@ a {
 .brandmark span {
   color: #c5cedb;
   font-size: 12px;
+  line-height: 1.35;
 }
 
 .nav {
   display: flex;
-  flex-direction: row;
-  gap: 6px;
-  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 10px;
 }
 
 .nav button {
-  width: auto;
+  width: 100%;
   border: 0;
-  justify-content: center;
-  text-align: center;
+  justify-content: flex-start;
+  text-align: left;
   white-space: nowrap;
   background: transparent;
   color: #d8dee9;
-  padding: 0 14px;
+  padding: 0 12px;
+  border-radius: 8px;
 }
 
 .nav button.active,
@@ -175,16 +180,46 @@ a {
   color: #fff;
 }
 
-.sidebar-footer {
-  margin-top: 0;
-  margin-left: auto;
+/* 대분류 아래 딸려 나오는 하위 메뉴 — 선택된 대분류일 때만 펼친다. */
+.nav-sub {
   display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 6px 20px;
+  padding-left: 8px;
+  border-left: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.nav-sub button {
+  width: 100%;
+  min-height: 32px;
+  border: 0;
+  justify-content: flex-start;
+  text-align: left;
+  white-space: nowrap;
+  background: transparent;
+  color: #9fb0c9;
+  font-size: 13px;
+  padding: 0 10px;
+  border-radius: 6px;
+}
+
+.nav-sub button.active,
+.nav-sub button:hover {
+  background: #22304a;
+  color: #fff;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
   color: #c5cedb;
   font-size: 12px;
-  white-space: nowrap;
+  padding: 16px 18px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
   flex-shrink: 0;
 }
 
@@ -204,6 +239,7 @@ a {
 }
 
 .main {
+  flex: 1;
   min-width: 0;
   padding: 24px;
 }
@@ -259,21 +295,19 @@ a {
   font-size: 26px;
 }
 
+/* 목록 + 입력폼 2단 레이아웃. 입력 폼 칸은 품목 표처럼 폭이 필요한 폼까지
+   감당해야 해서 넉넉히 잡되, 720px로 고정하면 좁은 화면에서 목록 쪽이
+   잘린다 -- 화면 폭에 비례해 늘었다 줄고 720px에서 멈추게 한다. 모든
+   목록+폼 화면이 같은 값을 쓰므로 화면마다 폼 폭이 달라 보이지 않는다. */
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: minmax(0, 1fr) clamp(360px, 38%, 720px);
   gap: 14px;
   align-items: start;
 }
 
 .layout.single {
   grid-template-columns: minmax(0, 1fr);
-}
-
-/* 발주서 작성 폼은 품목 표/납품장소/비고까지 들어가 기본 360px 폭으로는
-   입력칸이 너무 좁다 -- 이 화면에서만 폼 칸을 2배(720px)로 넓힌다. */
-.layout.wide-form {
-  grid-template-columns: minmax(0, 1fr) 720px;
 }
 
 .panel {
@@ -1027,6 +1061,66 @@ details.collapsible-summary[open] > summary {
     display: none;
   }
 
+  /* 좁은 화면에서는 세로 사이드바가 본문을 너무 잡아먹는다 -- 상단 가로
+     바로 눕히고, 하위 메뉴는 대분류 옆에 이어 붙여 가로로 흐르게 한다. */
+  .shell {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: auto;
+    height: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 16px;
+    overflow-x: auto;
+    overflow-y: visible;
+  }
+
+  .brandmark {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 8px;
+    padding: 0 14px 0 0;
+    border-bottom: 0;
+    border-right: 1px solid rgba(255, 255, 255, 0.14);
+    white-space: nowrap;
+  }
+
+  .nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    padding: 0;
+    gap: 4px;
+  }
+
+  .nav button {
+    width: auto;
+  }
+
+  .nav-sub {
+    flex-direction: row;
+    margin: 0;
+    padding-left: 8px;
+    border-left: 1px solid rgba(255, 255, 255, 0.16);
+  }
+
+  .nav-sub button {
+    width: auto;
+  }
+
+  .sidebar-footer {
+    margin-top: 0;
+    margin-left: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    padding: 0;
+    border-top: 0;
+    white-space: nowrap;
+  }
+
   .layout,
   .stats,
   .filters,
@@ -1500,7 +1594,7 @@ a.button:hover {
 .requests-table th:nth-child(3), .requests-table td:nth-child(3) { width: 108px; min-width: 108px; }
 .requests-table th:nth-child(4), .requests-table td:nth-child(4) { width: 96px; min-width: 96px; }
 .requests-table th:nth-child(5), .requests-table td:nth-child(5) { width: 110px; min-width: 110px; }
-.requests-table th:nth-child(6), .requests-table td:nth-child(6) { width: 156px; min-width: 156px; }
+.requests-table th:nth-child(6), .requests-table td:nth-child(6) { width: 172px; min-width: 172px; }
 .requests-table th:nth-child(7), .requests-table td:nth-child(7) { width: 100px; min-width: 100px; }
 .requests-table th:nth-child(8), .requests-table td:nth-child(8) { width: 105px; min-width: 105px; }
 .requests-table th:nth-child(9), .requests-table td:nth-child(9) { width: 95px; min-width: 95px; }
@@ -1593,7 +1687,7 @@ a.button:hover {
 
 /* 시트 미리보기 */
 .sheet-preview-table th:nth-child(1), .sheet-preview-table td:nth-child(1) { width: 70px; min-width: 70px; }
-.sheet-preview-table th:nth-child(2), .sheet-preview-table td:nth-child(2) { width: 156px; min-width: 156px; }
+.sheet-preview-table th:nth-child(2), .sheet-preview-table td:nth-child(2) { width: 172px; min-width: 172px; }
 .sheet-preview-table th:nth-child(3), .sheet-preview-table td:nth-child(3) { width: 100px; min-width: 100px; }
 .sheet-preview-table th:nth-child(4), .sheet-preview-table td:nth-child(4) { width: 105px; min-width: 105px; }
 .sheet-preview-table th:nth-child(5), .sheet-preview-table td:nth-child(5) { width: 100px; min-width: 100px; }
@@ -1621,7 +1715,7 @@ a.button:hover {
 
 /* 파이프라인 — 초안 */
 .pipeline-drafts-table th:nth-child(1), .pipeline-drafts-table td:nth-child(1) { width: 40px; min-width: 40px; }
-.pipeline-drafts-table th:nth-child(2), .pipeline-drafts-table td:nth-child(2) { width: 156px; min-width: 156px; }
+.pipeline-drafts-table th:nth-child(2), .pipeline-drafts-table td:nth-child(2) { width: 172px; min-width: 172px; }
 .pipeline-drafts-table th:nth-child(3), .pipeline-drafts-table td:nth-child(3) { width: 110px; min-width: 110px; }
 .pipeline-drafts-table th:nth-child(4), .pipeline-drafts-table td:nth-child(4) { min-width: 200px; }
 .pipeline-drafts-table th:nth-child(5), .pipeline-drafts-table td:nth-child(5) { width: 120px; min-width: 120px; }
@@ -1631,7 +1725,7 @@ a.button:hover {
 
 /* 파이프라인 — 출고 */
 .pipeline-ship-table th:nth-child(1), .pipeline-ship-table td:nth-child(1) { width: 40px; min-width: 40px; }
-.pipeline-ship-table th:nth-child(2), .pipeline-ship-table td:nth-child(2) { width: 156px; min-width: 156px; }
+.pipeline-ship-table th:nth-child(2), .pipeline-ship-table td:nth-child(2) { width: 172px; min-width: 172px; }
 .pipeline-ship-table th:nth-child(3), .pipeline-ship-table td:nth-child(3) { width: 110px; min-width: 110px; }
 .pipeline-ship-table th:nth-child(4), .pipeline-ship-table td:nth-child(4) { width: 105px; min-width: 105px; }
 .pipeline-ship-table th:nth-child(5), .pipeline-ship-table td:nth-child(5) { width: 150px; min-width: 150px; }
@@ -1785,12 +1879,21 @@ a.button:hover {
 .npb-ws-table th:nth-child(1), .npb-ws-table td:nth-child(1) { width: 100%; }
 
 /* 거래처 목록 */
-.partners-table th:nth-child(1), .partners-table td:nth-child(1) { min-width: 160px; }
-.partners-table th:nth-child(2), .partners-table td:nth-child(2) { width: 160px; min-width: 160px; }
-.partners-table th:nth-child(3), .partners-table td:nth-child(3) { width: 160px; min-width: 160px; }
-.partners-table th:nth-child(4), .partners-table td:nth-child(4) { width: 110px; min-width: 110px; }
-.partners-table th:nth-child(5), .partners-table td:nth-child(5) { width: 180px; min-width: 180px; }
-.partners-table th:nth-child(6), .partners-table td:nth-child(6) { width: 90px; min-width: 90px; }
+/* 입력 폼이 옆자리를 차지하므로 목록이 쓸 수 있는 폭이 넉넉하지 않다 --
+   작업 버튼까지 잘리지 않게 각 열을 필요한 만큼만 잡는다. */
+.partners-table th:nth-child(1), .partners-table td:nth-child(1) { min-width: 140px; }
+.partners-table th:nth-child(2), .partners-table td:nth-child(2) { width: 120px; min-width: 120px; }
+.partners-table th:nth-child(3), .partners-table td:nth-child(3) { width: 110px; min-width: 110px; }
+.partners-table th:nth-child(4), .partners-table td:nth-child(4) { width: 90px; min-width: 90px; }
+.partners-table th:nth-child(5), .partners-table td:nth-child(5) { width: 140px; min-width: 140px; }
+/* 수정 / 새 창 / 삭제 세 버튼이 한 줄에 들어갈 만큼 */
+.partners-table th:nth-child(6), .partners-table td:nth-child(6) { width: 172px; min-width: 172px; }
+
+/* 납품지 목록은 4열이라 거래처 표의 열 규칙을 그대로 쓸 수 없다. */
+.delivery-places-table th:nth-child(1), .delivery-places-table td:nth-child(1) { min-width: 150px; }
+.delivery-places-table th:nth-child(2), .delivery-places-table td:nth-child(2) { min-width: 200px; }
+.delivery-places-table th:nth-child(3), .delivery-places-table td:nth-child(3) { width: 150px; min-width: 150px; }
+.delivery-places-table th:nth-child(4), .delivery-places-table td:nth-child(4) { width: 172px; min-width: 172px; }
 
 /* 원부자재 목록 */
 .materials-table th:nth-child(1), .materials-table td:nth-child(1) { min-width: 180px; }
@@ -1799,10 +1902,10 @@ a.button:hover {
 .materials-table th:nth-child(4), .materials-table td:nth-child(4) { width: 90px; min-width: 90px; }
 .materials-table th:nth-child(5), .materials-table td:nth-child(5) { width: 100px; min-width: 100px; }
 .materials-table th:nth-child(6), .materials-table td:nth-child(6) { width: 90px; min-width: 90px; }
-.materials-table th:nth-child(7), .materials-table td:nth-child(7) { width: 90px; min-width: 90px; }
+.materials-table th:nth-child(7), .materials-table td:nth-child(7) { width: 172px; min-width: 172px; }
 
 /* 발주서 목록 */
-.purchase-orders-table th:nth-child(1), .purchase-orders-table td:nth-child(1) { width: 156px; min-width: 156px; }
+.purchase-orders-table th:nth-child(1), .purchase-orders-table td:nth-child(1) { width: 172px; min-width: 172px; }
 .purchase-orders-table th:nth-child(2), .purchase-orders-table td:nth-child(2) { min-width: 160px; }
 .purchase-orders-table th:nth-child(3), .purchase-orders-table td:nth-child(3) { width: 100px; min-width: 100px; }
 .purchase-orders-table th:nth-child(4), .purchase-orders-table td:nth-child(4) { width: 90px; min-width: 90px; }

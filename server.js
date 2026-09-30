@@ -8420,7 +8420,10 @@ async function routeApi(req, res, url) {
   ];
 
   if (pathname === "/api/partners/export" && method === "GET") {
-    const rows = (db.partners || []).map((p) => [
+    // mode=blank 이면 머리글만 있는 빈 양식을 준다 -- 새로 대량 등록할 때
+    // 기존 데이터가 딸려오면 오히려 지우는 품이 든다.
+    const blank = url.searchParams.get("mode") === "blank";
+    const rows = blank ? [] : (db.partners || []).map((p) => [
       p.id, PARTNER_CATEGORY_LABELS[p.category] || p.category, p.name, p.businessName,
       p.businessNumber, p.representativeName, p.address, p.invoiceEmail, p.bankName,
       p.bankAccount, p.depositorName, p.orderMethod, p.invoiceTiming, p.contactName,
@@ -8428,7 +8431,7 @@ async function routeApi(req, res, url) {
     ]);
     const buffer = await buildRowsXlsx("거래처", PARTNER_EXPORT_HEADERS, rows);
     sendBuffer(res, 200, buffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      { "content-disposition": contentDisposition("거래처.xlsx") });
+      { "content-disposition": contentDisposition(blank ? "거래처_양식.xlsx" : "거래처.xlsx") });
     return;
   }
 
@@ -8575,14 +8578,15 @@ async function routeApi(req, res, url) {
   ];
 
   if (pathname === "/api/materials/export" && method === "GET") {
+    const blank = url.searchParams.get("mode") === "blank";
     const partnerName = (partnerId) => (db.partners || []).find((p) => p.id === partnerId)?.name || "";
-    const rows = (db.materials || []).map((m) => [
+    const rows = blank ? [] : (db.materials || []).map((m) => [
       m.id, partnerName(m.partnerId), m.itemName, m.category, m.orderUnit,
       m.basePrice || "", m.leadTimeDays || "", m.note, m.isActive !== false ? "Y" : "N"
     ]);
     const buffer = await buildRowsXlsx("원부자재", MATERIAL_EXPORT_HEADERS, rows);
     sendBuffer(res, 200, buffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      { "content-disposition": contentDisposition("원부자재.xlsx") });
+      { "content-disposition": contentDisposition(blank ? "원부자재_양식.xlsx" : "원부자재.xlsx") });
     return;
   }
 
@@ -8888,10 +8892,11 @@ async function routeApi(req, res, url) {
   const DELIVERY_PLACE_EXPORT_HEADERS = ["ID", "납품지명", "주소", "담당자명", "전화번호", "메모"];
 
   if (pathname === "/api/delivery-places/export" && method === "GET") {
-    const rows = (db.deliveryPlaces || []).map((d) => [d.id, d.name, d.address, d.contactName, d.contactPhone, d.note]);
+    const blank = url.searchParams.get("mode") === "blank";
+    const rows = blank ? [] : (db.deliveryPlaces || []).map((d) => [d.id, d.name, d.address, d.contactName, d.contactPhone, d.note]);
     const buffer = await buildRowsXlsx("납품지", DELIVERY_PLACE_EXPORT_HEADERS, rows);
     sendBuffer(res, 200, buffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      { "content-disposition": contentDisposition("납품지.xlsx") });
+      { "content-disposition": contentDisposition(blank ? "납품지_양식.xlsx" : "납품지.xlsx") });
     return;
   }
 
