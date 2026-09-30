@@ -4790,6 +4790,53 @@ function renderPurchaseOrders() {
 // 방법이 마땅치 않다), 같은 데이터를 발주서 양식과 비슷한 모양의 HTML로
 // 보여준다. "일금 ○○원 정" 한글 금액 표기처럼 화면 확인에는 꼭 필요하지
 // 않은 서식용 디테일은 뺐다 -- 실제 파일에는 그대로 들어간다.
+// PDF는 서버에서 엑셀을 만든 뒤 LibreOffice로 변환하느라 몇 초 걸린다.
+// 그냥 링크로 두면 눌러도 아무 반응이 없어 보여서 연타하게 되므로,
+// 받아오는 동안 버튼을 잠그고 상태를 보여준다.
+async function downloadTradeDocPdf(button, poId) {
+  if (!poId || button.disabled) return;
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = "PDF 생성 중…";
+  try {
+    const res = await fetch(`/api/purchase-orders/${encodeURIComponent(poId)}/pdf`, {
+      credentials: "same-origin"
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || "PDF를 내려받지 못했습니다.");
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filenameFromResponse(res) || `${poId}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    showToast(error.message || "PDF를 내려받지 못했습니다.", "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = originalLabel;
+  }
+}
+
+// 서버가 붙인 한글 파일명(발주서_PO-20260929-001.pdf)을 그대로 쓴다.
+// 한글은 RFC 5987 형식(filename*)으로 오므로 그쪽을 먼저 본다.
+function filenameFromResponse(res) {
+  const header = res.headers.get("content-disposition") || "";
+  const encoded = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded[1]);
+    } catch {}
+  }
+  const plain = header.match(/filename="([^"]+)"/i);
+  return plain ? plain[1] : "";
+}
+
 function renderPurchaseOrderPreviewOverlay(poId) {
   const po = (state.purchaseOrders || []).find((item) => item.id === poId);
   if (!po) return "";
@@ -4814,7 +4861,8 @@ function renderPurchaseOrderPreviewOverlay(poId) {
         <div class="po-preview-toolbar">
           <strong>${h(docLabel)} 미리보기 · ${h(po.docNo)}</strong>
           <div>
-            <a href="/api/purchase-orders/${po.id}/excel"><button class="primary" type="button">엑셀 다운로드</button></a>
+            <button class="primary" type="button" data-po-pdf="${po.id}">PDF 다운로드</button>
+            <a href="/api/purchase-orders/${po.id}/excel"><button type="button">엑셀 다운로드</button></a>
             <button type="button" data-close-po-preview>닫기</button>
           </div>
         </div>
@@ -4909,6 +4957,7 @@ function renderPurchaseOrderRow(item) {
         <button data-edit-purchase-order="${item.id}">수정</button>
         <button type="button" data-preview-purchase-order="${item.id}">미리보기</button>
         <a href="/api/purchase-orders/${item.id}/excel"><button type="button">엑셀</button></a>
+        <button type="button" data-po-pdf="${item.id}">PDF</button>
         <button class="danger icon-btn" data-delete-purchase-order="${item.id}" aria-label="삭제" title="삭제">×</button>
       </div></td>
     </tr>`;
@@ -5090,6 +5139,9 @@ function bindPurchaseOrders() {
       state.procurement.previewPurchaseOrder = button.dataset.previewPurchaseOrder;
       renderApp();
     });
+  });
+  app.querySelectorAll("[data-po-pdf]").forEach((button) => {
+    button.addEventListener("click", () => downloadTradeDocPdf(button, button.dataset.poPdf));
   });
   app.querySelector("[data-close-po-preview]")?.addEventListener("click", () => {
     state.procurement.previewPurchaseOrder = null;
