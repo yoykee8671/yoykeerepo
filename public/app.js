@@ -7222,14 +7222,18 @@ function renderNpbUpload() {
       ${NPB_ENTRY_MODES.map(([value, label]) =>
         `<option value="${value}" ${(c.entryMode || "review") === value ? "selected" : ""}>${label}</option>`).join("")}
     </select>`;
+  const noSales = n.current?.noSales || {};
   const chip = (c, isDone) => {
     const up = uploads[c.code];
-    return `<div class="npb-ch-chip ${isDone ? "on" : ""}">
+    // 판매가 없던 달과 파일을 깜빡한 달이 똑같이 "미업로드"로 보이면,
+    // 마감할 때마다 그 채널을 다시 뒤져봐야 한다.
+    const isNoSales = !isDone && Boolean(noSales[c.code]);
+    return `<div class="npb-ch-chip ${isDone ? "on" : ""} ${isNoSales ? "none" : ""}">
       <strong>${h(c.name)}</strong>
       ${modeSelect(c)}
       <span class="muted">${isDone
         ? `${h(up.fileName || "업로드됨")}${up.lines ? ` · ${up.lines.length}개 품목` : ""}`
-        : "미업로드"}</span>
+        : isNoSales ? "이달 내역 없음" : "미업로드"}</span>
       ${isDone ? `<div class="npb-chip-actions">
         ${up.pendingRemove
           ? `<span class="badge" style="color:var(--red)">삭제 대기</span>`
@@ -7243,7 +7247,12 @@ function renderNpbUpload() {
           ? `<button data-npb-review-open="${h(c.code)}">검수</button>`
           : ""}
         <button class="ghost" data-npb-upload-del="${h(c.code)}" title="올린 파일 빼기">✕</button>
-      </div>` : ""}
+      </div>` : `<div class="npb-chip-actions">
+        ${isNoSales
+          ? `<span class="badge ok">확인함</span>
+             <button class="ghost" data-npb-nosales-undo="${h(c.code)}" title="표시 취소">✕</button>`
+          : `<button class="ghost" data-npb-nosales="${h(c.code)}">이달 내역 없음</button>`}
+      </div>`}
     </div>`;
   };
 
@@ -8325,6 +8334,28 @@ function bindNpbUpload() {
         showToast(error.message || "삭제 실패", "error");
       }
     });
+  });
+
+  const markNoSales = async (code, remove) => {
+    try {
+      await api(
+        `/api/npb/settlements/${encodeURIComponent(n.currentKey)}/no-sales?channel=${encodeURIComponent(code)}`,
+        { method: remove ? "DELETE" : "POST" }
+      );
+      await npbLoadDetail(n.currentKey);
+      showToast(remove
+        ? `${npbChannelName(code)} 표시를 지웠습니다.`
+        : `${npbChannelName(code)} — 이달 내역 없음으로 표시했습니다.`);
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "표시에 실패했습니다.", "error");
+    }
+  };
+  app.querySelectorAll("[data-npb-nosales]").forEach((btn) => {
+    btn.addEventListener("click", () => markNoSales(btn.getAttribute("data-npb-nosales"), false));
+  });
+  app.querySelectorAll("[data-npb-nosales-undo]").forEach((btn) => {
+    btn.addEventListener("click", () => markNoSales(btn.getAttribute("data-npb-nosales-undo"), true));
   });
   app.querySelectorAll("[data-npb-entry]").forEach((sel) => {
     sel.addEventListener("change", async () => {

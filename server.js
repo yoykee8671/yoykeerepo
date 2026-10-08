@@ -1432,6 +1432,9 @@ function migrateDb(db) {
     // periodMonth 를 채운다. 없으면 전월 이월도 광고비 월 필터도 동작하지 않는다.
     for (const settlement of db.npb.settlements || []) {
       touch(settlement, "promoRates", {});
+      // "이달 내역 없음" 표시는 나중에 생겼다. 비어 있으면 아무 표시도 없는
+      // 지금까지의 모습 그대로다.
+      touch(settlement, "noSales", {});
       if (hiddenProducts.size && Array.isArray(settlement.inventory)) {
         const kept = settlement.inventory.filter((row) => {
           const key = String(row?.productKey || row?.productId || "");
@@ -7695,6 +7698,8 @@ async function routeApi(req, res, url) {
       lines: [],
       // 채널별 그 달의 행사 할인율. 행사를 반반 부담하는 채널만 본다.
       promoRates: {},
+      // 그 달에 판매가 없던 채널 -- 파일을 빠뜨린 것과 구분하기 위한 표시.
+      noSales: {},
       logistics: {},
       inventory: [],
       rollup: null,
@@ -7884,6 +7889,9 @@ async function routeApi(req, res, url) {
           // 채널별 [반영] 을 눌러야 그 채널만 들어간다.
           settlement.uploads[channelCode].confirmed = false;
           delete settlement.uploads[channelCode].pendingRemove;
+          // 내역 없다고 표시해 둔 채널에 파일이 올라오면 그 표시는 더 이상
+          // 맞지 않는다.
+          if (settlement.noSales) delete settlement.noSales[channelCode];
           const computed = npbRecompute(db, settlement);
           await writeDb(db);
           sendJson(res, 200, {
@@ -7960,6 +7968,31 @@ async function routeApi(req, res, url) {
       upload.confirmed = false;
       await writeDb(db);
       sendJson(res, 200, { channel: channelCode, upload });
+      return;
+    }
+
+    // 그 달에 판매가 없던 채널 표시. 빈 채널이 "미업로드"로만 보이면 파일을
+    // 빠뜨린 것인지 팔린 게 없는 것인지 구분이 안 되어, 마감 때마다 다시
+    // 확인하게 된다. 판매 데이터와 무관한 표시일 뿐이라 집계는 건드리지 않는다.
+    if (action === "no-sales" && (method === "POST" || method === "DELETE")) {
+      const channelCode = decodeURIComponent(
+        url.searchParams.get("channel") || (method === "POST" ? (await readBody(req)).channel : "") || ""
+      ).trim();
+      if (!channelCode) { sendJson(res, 400, { error: "채널을 지정해 주세요." }); return; }
+      settlement.noSales = settlement.noSales && typeof settlement.noSales === "object"
+        ? settlement.noSales
+        : {};
+      if (method === "DELETE") {
+        delete settlement.noSales[channelCode];
+      } else {
+        if (settlement.uploads?.[channelCode]) {
+          sendJson(res, 400, { error: "이미 파일이 올라와 있습니다. 파일을 먼저 빼주세요." });
+          return;
+        }
+        settlement.noSales[channelCode] = { markedAt: now(), markedBy: actor?.name || "" };
+      }
+      await writeDb(db);
+      sendJson(res, 200, { channel: channelCode, noSales: settlement.noSales });
       return;
     }
 
