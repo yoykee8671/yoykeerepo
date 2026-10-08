@@ -1322,6 +1322,10 @@ function migrateDb(db) {
   for (const material of db.materials || []) {
     touch(material, "itemCode", "");
   }
+  // 자동 등록은 나중에 생긴 선택 항목 -- 꺼진 상태가 지금까지의 동작이다.
+  for (const brand of db.brands || []) {
+    touch(brand, "autoCreateRequests", false);
+  }
   if (!(db.partners || []).some((p) => p.category === "issuer")) {
     db.partners = db.partners || [];
     db.partners.push(defaultIssuerPartner());
@@ -1603,8 +1607,19 @@ function buildCafe24Namespace() {
     mallId: "",
     connectedBy: "",
     connectedAt: "",
-    lastSyncAt: ""
+    lastSyncAt: "",
+    // 주문을 가져올 멀티쇼핑몰 번호. 1번은 본점이라 항상 들어간다.
+    shopNos: [1, 3]
   };
+}
+
+// 저장된 쇼핑몰 번호. 비어 있으면 1번만 본다(카페24 기본 동작과 같다).
+function cafe24ShopNos(db) {
+  const saved = db.cafe24?.shopNos;
+  const nums = (Array.isArray(saved) ? saved : [])
+    .map((n) => Number(n))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  return nums.length ? [...new Set(nums)].sort((a, b) => a - b) : [1];
 }
 
 function buildClobeNamespace() {
@@ -5406,7 +5421,7 @@ async function settlementOrderRows(db, body, actor, brand) {
     // 정산이 그 달로 묶는 기준과 같은 날짜로 조회해야 범위가 어긋나지 않는다.
     const dateType = brandSettlementDateBasis(brand) === "delivered" ? "shipend_date" : "order_date";
     const orders = await withCafe24Token(db, (token) =>
-      cafe24.fetchOrders(token, { startDate, endDate, dateType }));
+      cafe24.fetchOrders(token, { startDate, endDate, dateType, shopNos: cafe24ShopNos(db) }));
     db.cafe24.lastSyncAt = now();
     return {
       rows: cafe24OrdersToRows(orders),
@@ -6222,6 +6237,7 @@ async function routeApi(req, res, url) {
       requiredMemo: body.requiredMemo || "",
       googleSheetUrl: body.googleSheetUrl || "",
       cafe24Supplier: String(body.cafe24Supplier || "").trim(),
+      autoCreateRequests: body.autoCreateRequests === true || body.autoCreateRequests === "true",
       bankLabel: String(body.bankLabel || "").trim(),
       priceBasis: body.priceBasis === "catalog" ? "catalog" : "cafe24",
       shareToken: crypto.randomBytes(12).toString("hex"),
@@ -6283,6 +6299,9 @@ async function routeApi(req, res, url) {
       "priceBasis"
     ]) {
       if (key in body) brand[key] = body[key];
+    }
+    if ("autoCreateRequests" in body) {
+      brand.autoCreateRequests = body.autoCreateRequests === true || body.autoCreateRequests === "true";
     }
     if (brand.priceBasis !== "catalog") brand.priceBasis = "cafe24";
     brand.commissionRate = number(brand.commissionRate);
@@ -6844,7 +6863,7 @@ async function routeApi(req, res, url) {
         );
         for (const dateType of needed) {
           const orders = await withCafe24Token(db, (token) =>
-            cafe24.fetchOrders(token, { startDate, endDate, dateType }));
+            cafe24.fetchOrders(token, { startDate, endDate, dateType, shopNos: cafe24ShopNos(db) }));
           byDateType.set(dateType, cafe24OrdersToRows(orders));
           ranges.push({ startDate, endDate, dateType, orderCount: orders.length });
         }
@@ -6957,7 +6976,7 @@ async function routeApi(req, res, url) {
       const startDate = dateOnly(body.startDate) ||
         new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
       const orders = await withCafe24Token(db, (token) =>
-        cafe24.fetchOrders(token, { startDate, endDate, dateType: "order_date" }));
+        cafe24.fetchOrders(token, { startDate, endDate, dateType: "order_date", shopNos: cafe24ShopNos(db) }));
       const result = buildRequestDrafts({
         orders,
         brands: db.brands,
@@ -6968,12 +6987,36 @@ async function routeApi(req, res, url) {
         ...draft,
         ...priceDraft(db, draft)
       }));
+      // 월정산 거래처(위탁 등)는 건건이 눈으로 볼 필요가 없다 -- 확인 목록에
+      // 올리지 않고 바로 입금요청으로 넣는다. 나중에 정산내역과 대조할 때만
+      // 주문을 보면 되기 때문이다. 공급사코드는 그대로 두므로 정산 집계와
+      // 정산내역 다운로드는 영향받지 않는다.
+      const drafts = [];
+      const autoCreated = [];
+      for (const draft of priced) {
+        const brand = db.brands.find((item) => item.id === draft.brandId);
+        if (!brand?.autoCreateRequests) {
+          drafts.push(draft);
+          continue;
+        }
+        const request = buildRequestFromDraft(db, brand, draft);
+        db.requests.unshift(request);
+        addAudit(db, actor, "create", "request", request.id,
+          `${request.orderNo} 입금요청 자동등록 (${brand.name} · 월정산)`, null, request);
+        autoCreated.push({
+          orderNo: request.orderNo,
+          brandName: brand.name,
+          customerName: draft.customerName || "",
+          depositAmount: request.depositAmount
+        });
+      }
       db.cafe24.lastSyncAt = now();
       await writeDb(db);
       sendJson(res, 200, {
         range: { startDate, endDate },
         orderCount: orders.length,
-        drafts: priced,
+        drafts,
+        autoCreated,
         skipped: result.skipped,
         unmappedSuppliers: result.unmappedSuppliers
       });
@@ -7024,7 +7067,7 @@ async function routeApi(req, res, url) {
       const startDate = dateOnly(body.startDate) ||
         new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
       const orders = await withCafe24Token(db, (token) =>
-        cafe24.fetchOrders(token, { startDate, endDate, dateType: "order_date" }));
+        cafe24.fetchOrders(token, { startDate, endDate, dateType: "order_date", shopNos: cafe24ShopNos(db) }));
       const found = findShippedAwaiting({ orders, requests: db.requests, brands: db.brands });
       sendJson(res, 200, {
         range: { startDate, endDate },
@@ -7172,7 +7215,8 @@ async function routeApi(req, res, url) {
         startDate: body.startDate,
         endDate: body.endDate,
         dateType: body.dateType || "order_date",
-        supplierId: body.supplierId || ""
+        supplierId: body.supplierId || "",
+        shopNos: cafe24ShopNos(db)
       }));
       const apiRows = cafe24OrdersToRows(orders);
       db.cafe24.lastSyncAt = now();
