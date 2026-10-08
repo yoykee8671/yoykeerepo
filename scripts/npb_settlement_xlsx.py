@@ -184,24 +184,34 @@ def build_summary(ws, spec):
         c.fill = LIGHT_FILL
         c.alignment = CENTER
     inv = spec.get("inventory", [])
-    inv_keys = ["openAll", "openOk", "openDead", "inAll", "inIn", "inReturn",
-                "outAll", "outSold", "outNonsale", "closeAll", "closeOk", "closeDead"]
-    r = 9
+    # N~Y. '전체' 칸은 옆 칸의 합이고 기말은 기초+입고-출고라, 값으로 박지 않고
+    # 수식으로 둔다 -- 실사로 한 칸을 고치면 나머지가 따라와야 한다.
+    # 열: N전체 O정상 P불용 | Q전체 R입고 S반품 | T전체 U판매 V비매출 | W전체 X정상 Y불용
+    inv_inputs = {"O": "openOk", "P": "openDead", "R": "inIn", "S": "inReturn",
+                  "U": "outSold", "V": "outNonsale", "Y": "closeDead"}
+    inv_formulas = {"N": "=O{r}+P{r}", "Q": "=R{r}+S{r}", "T": "=U{r}+V{r}",
+                    "W": "=N{r}+Q{r}-T{r}", "X": "=W{r}-Y{r}"}
+    first = 9
+    r = first
     for item in inv:
         ws.cell(row=r, column=12, value=item.get("code")).alignment = CENTER_NW
         ws.cell(row=r, column=13, value=item.get("name")).font = FONT
-        for j, k in enumerate(inv_keys):
-            c = ws.cell(row=r, column=14 + j, value=item.get(k))
+        for letter, key in inv_inputs.items():
+            c = ws.cell(row=r, column=_col_idx(letter), value=_num(item.get(key)))
+            c.alignment = CENTER_NW
+            c.font = FONT
+        for letter, tpl in inv_formulas.items():
+            c = ws.cell(row=r, column=_col_idx(letter), value=tpl.format(r=r))
             c.alignment = CENTER_NW
             c.font = FONT
         r += 1
-    inv_sum_row = 12
-    tot = spec.get("inventoryTotal") or {
-        k: sum(_num(it.get(k)) for it in inv) for k in inv_keys
-    }
+    last = r - 1
+    # 품목이 둘뿐이어도 합계는 12행에 둔다(기존 양식과 같은 자리).
+    inv_sum_row = max(12, r)
     ws.cell(row=inv_sum_row, column=13, value="합계").font = BOLD
-    for j, k in enumerate(inv_keys):
-        c = ws.cell(row=inv_sum_row, column=14 + j, value=tot.get(k))
+    for letter in list(inv_inputs) + list(inv_formulas):
+        c = ws.cell(row=inv_sum_row, column=_col_idx(letter))
+        c.value = "=SUM({l}{a}:{l}{b})".format(l=letter, a=first, b=last) if inv else 0
         c.alignment = CENTER_NW
         c.font = BOLD
     box(ws, "L8:Y{}".format(inv_sum_row))
@@ -671,6 +681,38 @@ def build_ledger(ws, spec):
         ws.column_dimensions[ws.cell(row=7, column=1 + i).column_letter].width = w
 
 
+def build_channel_db(ws, sheet):
+    """채널 원본 한 장. 업로드한 표를 그대로 싣는다 -- 채널 표의 숫자가 어디서
+    왔는지 받는 쪽이 따라갈 수 있어야 한다."""
+    ws.sheet_view.showGridLines = False
+    rows = sheet.get("rows") or []
+    if not rows:
+        return
+    headers = [k for k in (rows[0] or {}).keys()] if isinstance(rows[0], dict) else []
+    if headers:
+        body = [[r.get(h) for h in headers] for r in rows]
+    else:
+        headers = sheet.get("headers") or []
+        body = rows
+    for i, h in enumerate(headers):
+        c = ws.cell(row=1, column=1 + i, value=h)
+        c.font = BOLD
+        c.fill = GREY_FILL
+        c.alignment = CENTER
+    for n, vals in enumerate(body):
+        for i, v in enumerate(vals):
+            if v is None:
+                continue
+            c = ws.cell(row=2 + n, column=1 + i, value=v)
+            c.font = FONT
+            fmt = _fmt_for(v) if not isinstance(v, str) else None
+            if fmt:
+                c.number_format = fmt
+    ws.freeze_panes = "A2"
+    for i in range(len(headers)):
+        ws.column_dimensions[ws.cell(row=1, column=1 + i).column_letter].width = 16
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
@@ -688,10 +730,24 @@ def main():
     build_channels(wb.create_sheet("채널별 판매데이터 정리"), spec)
     build_summary(ws1, spec)
     build_ledger(wb.create_sheet("DB)입출고목록"), spec)
+    db_sheets = spec.get("channelDbSheets") or []
+    used = set(wb.sheetnames)
+    for sheet in db_sheets:
+        title = sheet.get("name") or "DB)원본"
+        # 같은 이름이 둘이면 openpyxl 이 조용히 바꿔 버린다 -- 직접 번호를 붙인다.
+        if title in used:
+            n = 2
+            while "{}{}".format(title[:28], n) in used:
+                n += 1
+            title = "{}{}".format(title[:28], n)
+        used.add(title)
+        build_channel_db(wb.create_sheet(title), sheet)
 
     wb.save(args.output)
     print(json.dumps({"ok": True,
                       "channels": len(spec.get("channels", [])),
+                      "dbSheets": len(db_sheets),
+                      "inventoryRows": len(spec.get("inventory", [])),
                       "ledgerRows": len(spec.get("ledger", {}).get("rows", []))}))
 
 
