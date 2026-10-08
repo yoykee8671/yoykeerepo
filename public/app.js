@@ -7794,15 +7794,15 @@ function renderNpbWsBlock(block, bi) {
             data-npb-wf="listPrice" value="${h(row.listPrice)}"></td>
           <td><input class="num" type="number" data-npb-ws="${bi}" data-npb-wr="${ri}"
             data-npb-wf="salePrice" value="${h(row.salePrice)}"></td>
-          <td class="num${unitDiscount > 0 ? " npb-ws-discount" : ""}">${unitDiscount > 0 ? `−${money.format(unitDiscount)}` : "-"}</td>
+          <td class="num${unitDiscount > 0 ? " npb-ws-discount" : ""}" data-npb-cell="discount">${unitDiscount > 0 ? `−${money.format(unitDiscount)}` : "-"}</td>
           <td><input class="num" type="number" data-npb-ws="${bi}" data-npb-wr="${ri}"
             data-npb-wf="qty" value="${h(row.qty)}"></td>
-          <td class="num">${money.format(m.list)}</td>
-          <td class="num">${money.format(m.revenue)}</td>
+          <td class="num" data-npb-cell="list">${money.format(m.list)}</td>
+          <td class="num" data-npb-cell="revenue">${money.format(m.revenue)}</td>
           <td><input class="num npb-pct" type="number" step="0.01" data-npb-ws="${bi}"
             data-npb-wr="${ri}" data-npb-wf="feeRate" value="${h(feePct)}"></td>
-          <td class="num">${money.format(m.fee)}</td>
-          <td class="num">${money.format(m.settle)}</td>
+          <td class="num" data-npb-cell="fee">${money.format(m.fee)}</td>
+          <td class="num" data-npb-cell="settle">${money.format(m.settle)}</td>
         </tr>`;
     })
     .join("");
@@ -7846,13 +7846,13 @@ function renderNpbWsBlock(block, bi) {
             <tr>
               <th>합계</th>
               <td class="num">-</td><td class="num">-</td>
-              <td class="num${subDiscount > 0 ? " npb-ws-discount" : ""}">${subDiscount > 0 ? `−${money.format(subDiscount)}` : "-"}</td>
-              <td class="num">${money.format(subQty)}</td>
-              <td class="num">${money.format(subList)}</td>
-              <td class="num">${money.format(subRevenue)}</td>
+              <td class="num${subDiscount > 0 ? " npb-ws-discount" : ""}" data-npb-foot="discount">${subDiscount > 0 ? `−${money.format(subDiscount)}` : "-"}</td>
+              <td class="num" data-npb-foot="qty">${money.format(subQty)}</td>
+              <td class="num" data-npb-foot="list">${money.format(subList)}</td>
+              <td class="num" data-npb-foot="revenue">${money.format(subRevenue)}</td>
               <td class="num">-</td>
-              <td class="num">${money.format(subFee)}</td>
-              <td class="num">${money.format(subSettle)}</td>
+              <td class="num" data-npb-foot="fee">${money.format(subFee)}</td>
+              <td class="num" data-npb-foot="settle">${money.format(subSettle)}</td>
             </tr>
           </tfoot>
         </table>
@@ -8959,22 +8959,34 @@ function renderNpbWorksheetLive() {
   app.querySelectorAll(".npb-ws-block").forEach((blockEl, bi) => {
     const block = state.npb.worksheet?.[bi];
     if (!block) return;
-    let sq = 0, sr = 0, sf = 0, ss = 0;
+    let sq = 0, sr = 0, sf = 0, ss = 0, sl = 0, sd = 0;
+    // 칸 번호가 아니라 이름으로 찾는다. 번호로 짚으면 칸 순서를 바꾸는 순간
+    // 금액이 엉뚱한 칸에 덮어써지고, 입력칸 위에 쓰면 그 칸이 통째로 사라진다.
+    const put = (el, text) => { if (el) el.textContent = text; };
+    const discountText = (v) => (v > 0 ? `−${money.format(v)}` : "-");
     blockEl.querySelectorAll("tbody tr").forEach((tr, ri) => {
       const row = block.rows[ri];
       if (!row) return;
       const m = npbRowMath(row);
+      const unitDiscount = Number(row.listPrice || 0) - Number(row.salePrice || 0);
       sq += Number(row.qty || 0); sr += m.revenue; sf += m.fee; ss += m.settle;
-      const tds = tr.querySelectorAll("td");
-      if (tds[5]) tds[5].textContent = money.format(m.revenue);
-      if (tds[6]) tds[6].textContent = money.format(m.fee);
-      if (tds[7]) tds[7].textContent = money.format(m.settle);
+      sl += m.list; sd += m.list - m.revenue;
+      put(tr.querySelector('[data-npb-cell="list"]'), money.format(m.list));
+      put(tr.querySelector('[data-npb-cell="revenue"]'), money.format(m.revenue));
+      put(tr.querySelector('[data-npb-cell="fee"]'), money.format(m.fee));
+      put(tr.querySelector('[data-npb-cell="settle"]'), money.format(m.settle));
+      const dc = tr.querySelector('[data-npb-cell="discount"]');
+      put(dc, discountText(unitDiscount));
+      if (dc) dc.classList.toggle("npb-ws-discount", unitDiscount > 0);
     });
-    const foot = blockEl.querySelectorAll("tfoot td");
-    if (foot[3]) foot[3].textContent = money.format(sq);
-    if (foot[4]) foot[4].textContent = money.format(sr);
-    if (foot[5]) foot[5].textContent = money.format(sf);
-    if (foot[6]) foot[6].textContent = money.format(ss);
+    put(blockEl.querySelector('[data-npb-foot="qty"]'), money.format(sq));
+    put(blockEl.querySelector('[data-npb-foot="list"]'), money.format(sl));
+    put(blockEl.querySelector('[data-npb-foot="revenue"]'), money.format(sr));
+    put(blockEl.querySelector('[data-npb-foot="fee"]'), money.format(sf));
+    put(blockEl.querySelector('[data-npb-foot="settle"]'), money.format(ss));
+    const fd = blockEl.querySelector('[data-npb-foot="discount"]');
+    put(fd, discountText(sd));
+    if (fd) fd.classList.toggle("npb-ws-discount", sd > 0);
   });
 }
 
