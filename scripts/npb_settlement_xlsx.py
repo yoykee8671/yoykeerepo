@@ -16,6 +16,7 @@ See scripts/settlement_excel.py for the shared openpyxl style vocabulary
 """
 
 import argparse
+import calendar
 import json
 import os
 from datetime import datetime
@@ -131,11 +132,23 @@ def build_summary(ws, spec):
     dcell.number_format = DATE_YM
     dcell.alignment = CENTER_NW
     dcell.font = FONT
-    data = [roll.get("qtyTotal"), roll.get("listTotal"), roll.get("discountTotal"),
-            roll.get("realSaleTotal"), roll.get("feeTotal"), roll.get("revenueTotal"),
-            roll.get("logisticsCost"), roll.get("profit")]
-    for i, v in enumerate(data):
-        c = ws.cell(row=4, column=3 + i, value=v)
+    # 채널 시트의 집계 칸을 가리킨다. 값으로 박으면 채널 표를 고쳤을 때
+    # 종합정산이 따라오지 않아 두 장의 숫자가 어긋난다 -- 손으로 고쳐 보내야
+    # 했던 원인이 이것이다.
+    g = spec.get("_grandCells") or {}
+    ref = lambda key: "='채널별 판매데이터 정리'!{}".format(g[key]) if g.get(key) else None
+    data = [
+        (ref("qty"), roll.get("qtyTotal")),            # C 실판매수량
+        (ref("list"), roll.get("listTotal")),          # D 판매정가계
+        ("=D4-F4", roll.get("discountTotal")),         # E 할인계 = 정가계 - 실판매계
+        (ref("sales"), roll.get("realSaleTotal")),     # F 실판매계
+        (ref("fee"), roll.get("feeTotal")),            # G 공제 수수료
+        ("=F4-G4", roll.get("revenueTotal")),          # H 매출계
+        ("=F26", roll.get("logisticsCost")),           # I 실비 (아래 물류 합계)
+        ("=H4-I4", roll.get("profit")),                # J 이익
+    ]
+    for i, (formula, fallback) in enumerate(data):
+        c = ws.cell(row=4, column=3 + i, value=formula if formula else fallback)
         c.number_format = WON
         c.alignment = CENTER_NW
         c.font = BOLD11
@@ -247,7 +260,9 @@ def build_summary(ws, spec):
         rc.number_format = PCT
         rc.alignment = CENTER_NW
         rc.font = FONT11
-        ac = ws.cell(row=r, column=5, value=p.get("amount"))
+        # 금액은 이익(J4)에 비율을 곱한 수식으로 둔다. 값으로 박으면 위에서
+        # 이익이 바뀌었을 때 분배액이 따라오지 않는다.
+        ac = ws.cell(row=r, column=5, value="=$J$4*D{}".format(r))
         ac.number_format = WON
         ac.alignment = CENTER_NW
         ac.font = FONT11
@@ -260,11 +275,12 @@ def build_summary(ws, spec):
     ws["B{}".format(sum_row)].font = FONT11
     ws["B{}".format(sum_row)].alignment = CENTER_NW
     rc = ws.cell(row=sum_row, column=4,
-                 value=spec.get("profitSplitTotalRatio", 1))
+                 value="=SUM(D16:D{})".format(15 + n) if n else 1)
     rc.number_format = PCT
     rc.alignment = CENTER_NW
     ac = ws.cell(row=sum_row, column=5,
-                 value=spec.get("profitSplitTotalAmount", roll.get("profit")))
+                 value="=SUM(E16:E{})".format(15 + n) if n
+                 else roll.get("profit"))
     ac.number_format = WON
     ac.alignment = CENTER_NW
     box(ws, "B15:F{}".format(sum_row))
@@ -298,25 +314,54 @@ def build_summary(ws, spec):
          "freight": log.get("largeShip"), "handling": log.get("pickPack"),
          "amount": log.get("largeTotal", 0)},
     ]
+    # 3PL 단가표에서 건당 단가를 끌어온다 -- spec 이 단가를 안 주면 실비가
+    # 0 으로 나가고, 종합정산의 이익까지 그만큼 부풀려진다.
+    table = spec.get("threePLTable") or []
+
+    def unit_price(*keywords):
+        for row in table:
+            text = "{} {}".format(row.get("item", ""), row.get("note", ""))
+            if all(k in text for k in keywords):
+                return _num(row.get("unitPrice"))
+        return None
+
+    handling_default = unit_price("물류비")
+    freight_defaults = {0: unit_price("택배운임비", "소형"),
+                        1: unit_price("택배운임비", "중대형")}
+
     money_cells = []
     row_i = 24
-    for b in breakdown:
+    first_row = row_i
+    for n, b in enumerate(breakdown):
         ws.cell(row=row_i, column=2, value=b.get("label")).alignment = CENTER_NW
         ws.cell(row=row_i, column=3, value=b.get("count") or None)
         # 용달·퀵은 건당 단가가 없고 실비만 있다.
-        ws.cell(row=row_i, column=4, value=b.get("freight") or None)
-        ws.cell(row=row_i, column=5, value=b.get("handling") or None)
-        ws.cell(row=row_i, column=6, value=b.get("amount"))
+        freight = b.get("freight")
+        if freight is None:
+            freight = freight_defaults.get(n)
+        handling = b.get("handling")
+        if handling is None and freight is not None:
+            handling = handling_default
+        ws.cell(row=row_i, column=4, value=freight or None)
+        ws.cell(row=row_i, column=5, value=handling or None)
+        # 건수 x (택배 + 피킹) 를 수식으로 둔다. 건수를 고치면 실비와 이익이
+        # 따라 움직여야 한다.
+        if b.get("amount") is not None and freight is None:
+            ws.cell(row=row_i, column=6, value=b.get("amount"))
+        else:
+            ws.cell(row=row_i, column=6,
+                    value="=C{r}*(D{r}+E{r})".format(r=row_i))
         money_cells += [("C", row_i, True), ("D", row_i, False),
                         ("E", row_i, False), ("F", row_i, True)]
         row_i += 1
+    last_row = row_i - 1
     sum_r = row_i
     ws.cell(row=sum_r, column=2, value="합계").alignment = CENTER_NW
     ws.cell(row=sum_r, column=2).font = BOLD
-    # 합계에서 뺀 유형(용달/퀵)은 아래 주석대로 개별 기재만 한다.
-    counted = [b for b in breakdown if not b.get("excludeFromTotal")]
-    ws.cell(row=sum_r, column=3, value=sum(_num(b.get("count")) for b in counted))
-    ws.cell(row=sum_r, column=6, value=log.get("grandTotal", roll.get("logisticsCost")))
+    ws.cell(row=sum_r, column=3,
+            value="=SUM(C{}:C{})".format(first_row, last_row))
+    ws.cell(row=sum_r, column=6,
+            value="=SUM(F{}:F{})".format(first_row, last_row))
     money_cells += [("C", sum_r, True), ("F", sum_r, True)]
     for col, rr, bold in money_cells:
         cell = ws["{}{}".format(col, rr)]
@@ -387,71 +432,163 @@ def build_summary(ws, spec):
 
 
 # --------------------------------------------------------------- sheet 2
+# 채널 표는 거래 형태에 따라 칸이 다르다. 위탁은 공급가와 기본수수료를,
+# 직매출은 프로모션가와 할인율을, 대리점 매입은 대리점가를 보여 줘야 받는 쪽이
+# 자기 계약 조건을 확인할 수 있다. 열 문자는 B 부터 시작한다(A 는 여백).
+#
+# inputs   : 서버가 보낸 줄 값에서 그 열에 그대로 적을 것
+# formulas : 그 열에 적을 수식 ({r} 은 행 번호)
+# totals   : 아래 집계 블록이 모아 쓸 열
+# pct      : 백분율 서식을 쓸 열
+LAYOUTS = {
+    "consignment": {
+        "label": "위탁재고",
+        "headers": ["순번", "제품", "정가", "공급가", "기본수수료", "판매수량",
+                    "프로모션차감", "매출합계", "수수료합계", "정산합계", "정가합계"],
+        "inputs": {"D": "listPrice", "E": "supplyPrice", "F": "feeRate",
+                   "G": "qty", "H": "promoDiscount"},
+        "formulas": {"I": "=D{r}*G{r}-H{r}", "J": "=I{r}*F{r}",
+                     "K": "=I{r}-J{r}", "L": "=D{r}*G{r}"},
+        "totals": {"qty": "G", "discount": "H", "sales": "I", "fee": "J",
+                   "settle": "K", "list": "L"},
+        "pct": ["F"],
+    },
+    "direct": {
+        "label": "직매출",
+        "headers": ["순번", "품목 구성", "정가", "프로모션가", "할인율", "판매수량",
+                    "매출합계", "수수료", "수수료합계", "정산합계", "정가합계"],
+        "inputs": {"D": "listPrice", "F": "discountRate", "G": "qty", "I": "feeRate"},
+        "formulas": {"E": "=D{r}-(D{r}*F{r})", "H": "=E{r}*G{r}",
+                     "J": "=H{r}*I{r}", "K": "=H{r}-J{r}", "L": "=D{r}*G{r}"},
+        "totals": {"qty": "G", "sales": "H", "fee": "J", "settle": "K", "list": "L"},
+        "pct": ["F", "I"],
+    },
+    "wholesale": {
+        "label": "매입(판매)",
+        "headers": ["순번", "품목 구성", "정가", "대리점가", "기본수수료", "판매수량",
+                    "프로모션차감", "매출합계", "수수료합계", "정산합계", "정가합계"],
+        "inputs": {"D": "listPrice", "E": "supplyPrice", "F": "feeRate",
+                   "G": "qty", "H": "promoDiscount"},
+        "formulas": {"I": "=D{r}*G{r}-H{r}", "J": "=I{r}*F{r}",
+                     "K": "=I{r}-J{r}", "L": "=D{r}*G{r}"},
+        "totals": {"qty": "G", "discount": "H", "sales": "I", "fee": "J",
+                   "settle": "K", "list": "L"},
+        "pct": ["F"],
+    },
+    "vendor_ship": {
+        "label": "판매자위탁배송",
+        "headers": ["순번", "품목 구성", "정가", "프로모션가", "공급가", "수수료율",
+                    "판매수량", "매출합계", "수수료합계", "정산합계", "정가합계"],
+        "inputs": {"D": "listPrice", "E": "salePrice", "G": "feeRate", "H": "qty"},
+        "formulas": {"F": "=E{r}-E{r}*G{r}", "I": "=E{r}*H{r}",
+                     "J": "=E{r}*G{r}*H{r}", "K": "=I{r}-J{r}", "L": "=H{r}*D{r}"},
+        "totals": {"qty": "H", "sales": "I", "fee": "J", "settle": "K", "list": "L"},
+        "pct": ["G"],
+    },
+}
+
+DEFAULT_LAYOUT = "direct"
+
+
+def _col_idx(letter):
+    return ord(letter) - ord("A") + 1
+
+
+def _write_channel_block(ws, ch, r):
+    """채널 한 블록을 그리고 (다음 시작행, 합계행 참조) 를 돌려준다."""
+    layout = LAYOUTS.get(ch.get("layout")) or LAYOUTS[DEFAULT_LAYOUT]
+
+    ws.cell(row=r, column=2, value=ch.get("name")).font = BOLD11
+    if ch.get("desc"):
+        ws.cell(row=r, column=4, value=ch["desc"]).font = FONT
+    tag = ch.get("tag") or layout["label"]
+    tc = ws.cell(row=r, column=11, value=tag)
+    tc.font = FONT
+    tc.alignment = CENTER_NW
+
+    hr = r + 1
+    for i, h in enumerate(layout["headers"]):
+        c = ws.cell(row=hr, column=2 + i, value=h)
+        c.font = BOLD
+        c.fill = LIGHT_FILL
+        c.alignment = CENTER
+
+    rows = ch.get("rows", [])
+    first = hr + 1
+    for n, data in enumerate(rows):
+        rr = first + n
+        seq = ws.cell(row=rr, column=2, value=n + 1)
+        seq.font = FONT
+        seq.alignment = CENTER_NW
+        name = ws.cell(row=rr, column=3, value=data.get("label", ""))
+        name.font = FONT
+        name.alignment = CENTER_NW
+        for letter, key in layout["inputs"].items():
+            c = ws.cell(row=rr, column=_col_idx(letter), value=_num(data.get(key)))
+            c.font = FONT
+            c.alignment = CENTER_NW
+            c.number_format = PCT if letter in layout["pct"] else WON
+        for letter, tpl in layout["formulas"].items():
+            c = ws.cell(row=rr, column=_col_idx(letter), value=tpl.format(r=rr))
+            c.font = FONT
+            c.alignment = CENTER_NW
+            c.number_format = WON
+    last = first + len(rows) - 1
+
+    # 합계 줄 — 값이 아니라 SUM 이라야 위 칸을 고쳤을 때 따라 움직인다.
+    sr = last + 1 if rows else first
+    sc = ws.cell(row=sr, column=3, value="합계")
+    sc.font = BOLD
+    sc.alignment = CENTER_NW
+    refs = {}
+    for key, letter in layout["totals"].items():
+        c = ws.cell(row=sr, column=_col_idx(letter))
+        c.value = "=SUM({l}{a}:{l}{b})".format(l=letter, a=first, b=last) if rows else 0
+        c.font = BOLD
+        c.alignment = CENTER_NW
+        c.number_format = WON
+        refs[key] = "{}{}".format(letter, sr)
+    box(ws, "B{}:L{}".format(hr, sr))
+    return sr + 2, refs
+
+
 def build_channels(ws, spec):
     ws.sheet_view.showGridLines = False
     period = spec.get("period", {})
-    ws["B1"] = "판매기간 {} {} - {}".format(
-        period.get("year", ""), period.get("start", ""), period.get("end", ""))
+    # "판매기간 2026 8/1 - 8/31". start/end 가 비면 월에서 만들어 쓴다 --
+    # 머리글에 기간이 빠진 정산서가 나가면 어느 달 것인지 알 수 없다.
+    start = period.get("start") or ""
+    end = period.get("end") or ""
+    if not start or not end:
+        y, m = int(period.get("year") or 0), int(period.get("month") or 0)
+        if y and m:
+            last = calendar.monthrange(y, m)[1]
+            start, end = "{}/1".format(m), "{}/{}".format(m, last)
+    ws["B1"] = "판매기간 {} {} - {}".format(period.get("year", ""), start, end)
     ws["B1"].font = BOLD11
 
     r = 4
+    channel_refs = []
     for ch in spec.get("channels", []):
-        # name row
-        ws.cell(row=r, column=2, value=ch.get("name")).font = BOLD11
-        if ch.get("desc"):
-            ws.cell(row=r, column=4, value=ch["desc"]).font = FONT
-        if ch.get("pgTag"):
-            ws.cell(row=r, column=7, value=ch["pgTag"]).font = FONT
-        if ch.get("tag"):
-            tc = ws.cell(row=r, column=11, value=ch["tag"])
-            tc.font = FONT
-            tc.alignment = CENTER_NW
-        hr = r + 1
-        headers = ch.get("headers", [])
-        for i, h in enumerate(headers):
-            c = ws.cell(row=hr, column=2 + i, value=h)
-            c.font = BOLD
-            c.fill = LIGHT_FILL
-            c.alignment = CENTER
-        dr = hr + 1
-        for row_vals in ch.get("rows", []):
-            for i, v in enumerate(row_vals):
-                if v is None:
-                    continue
-                c = ws.cell(row=dr, column=2 + i, value=v)
-                c.font = FONT
-                c.alignment = CENTER_NW
-                fmt = _fmt_for(v)
-                if fmt:
-                    c.number_format = fmt
-            dr += 1
-        # 합계 row
-        total = ch.get("totalRow")
-        if total is not None:
-            for i, v in enumerate(total):
-                if v is None:
-                    continue
-                c = ws.cell(row=dr, column=2 + i, value=v)
-                c.font = BOLD
-                c.alignment = CENTER_NW
-                fmt = _fmt_for(v)
-                if fmt:
-                    c.number_format = fmt
-            dr += 1
-        box(ws, "B{}:L{}".format(hr, dr - 1))
-        r = dr + 1  # one blank row between blocks
+        r, refs = _write_channel_block(ws, ch, r)
+        channel_refs.append(refs)
 
-    # grand totals (fixed at J78:L82 to match the answer key)
-    g = spec.get("grandTotals", {})
+    # 채널 합계를 모으는 블록. 종합정산이 이 칸들을 가리키므로, 두 장의 숫자가
+    # 따로 계산되어 어긋나는 일이 없다.
+    def total_of(key):
+        cells = [refs[key] for refs in channel_refs if refs.get(key)]
+        return "=" + "+".join(cells) if cells else 0
+
     grand = [
-        ("총 판매수량", g.get("qty"), "실 수량(1EA단위)"),
-        ("정가합계", g.get("list"), "정가 22,000원 기준"),
-        ("매출합계", g.get("sales"), "할인/프로모션 반영 판매계"),
-        ("공제합계", g.get("deduction"), "공제 수수료 계"),
-        ("정산합계", g.get("settle"), "실 정산합계"),
+        ("총 판매수량", total_of("qty"), "실 수량(1EA단위)"),
+        ("정가합계", total_of("list"), "정가 기준"),
+        ("매출합계", total_of("sales"), "할인/프로모션 반영 판매계"),
+        ("공제합계", total_of("fee"), "공제 수수료 계"),
+        ("정산합계", total_of("settle"), "실 정산합계"),
     ]
+    base = r + 1
     for i, (label, val, note) in enumerate(grand):
-        rr = 78 + i
+        rr = base + i
         lc = ws.cell(row=rr, column=10, value=label)  # J
         lc.font = BOLD
         lc.fill = LIGHT_FILL
@@ -462,10 +599,16 @@ def build_channels(ws, spec):
         vc.alignment = CENTER_NW
         nc = ws.cell(row=rr, column=12, value=note)  # L
         nc.font = FONT9
-    box(ws, "J78:L82")
+    box(ws, "J{}:L{}".format(base, base + len(grand) - 1))
+    # 종합정산이 참조할 수 있도록 어디에 찍혔는지 돌려준다.
+    spec["_grandCells"] = {
+        "qty": "K{}".format(base), "list": "K{}".format(base + 1),
+        "sales": "K{}".format(base + 2), "fee": "K{}".format(base + 3),
+        "settle": "K{}".format(base + 4),
+    }
 
     for col, w in (("B", 6), ("C", 30), ("D", 12), ("E", 12), ("F", 11),
-                   ("G", 11), ("H", 11), ("I", 12), ("J", 12), ("K", 13), ("L", 20)):
+                   ("G", 11), ("H", 12), ("I", 13), ("J", 13), ("K", 13), ("L", 20)):
         ws.column_dimensions[col].width = w
 
 
@@ -540,8 +683,10 @@ def main():
     wb = Workbook()
     ws1 = wb.active
     ws1.title = "종합정산"
-    build_summary(ws1, spec)
+    # 채널 시트를 먼저 그린다 -- 종합정산이 그 집계 칸을 수식으로 가리키므로,
+    # 어느 행에 찍혔는지 알아야 참조를 쓸 수 있다.
     build_channels(wb.create_sheet("채널별 판매데이터 정리"), spec)
+    build_summary(ws1, spec)
     build_ledger(wb.create_sheet("DB)입출고목록"), spec)
 
     wb.save(args.output)
