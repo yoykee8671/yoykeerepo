@@ -1834,6 +1834,9 @@ a.button:hover {
 .npb-lines-table th:nth-child(11), .npb-lines-table td:nth-child(11) { width: 120px; min-width: 120px; }
 .npb-lines-table th:nth-child(12), .npb-lines-table td:nth-child(12) { width: 84px; min-width: 84px; }
 
+/* 워크시트의 할인 — 빼는 금액이라 눈에 띄게 둔다 (0 이면 "-" 로 비워 둔다). */
+.npb-ws-discount { color: var(--red); }
+
 /* 할인 칸: 금액과 그 금액을 읽는 기준(원/%/줄)을 한 줄에 둔다. */
 .npb-discount-cell {
   display: flex;

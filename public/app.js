@@ -7770,14 +7770,20 @@ function renderNpbWsBlock(block, bi) {
   let subFee = 0;
   let subSettle = 0;
   let subList = 0;
+  let subDiscount = 0;
   const rows = block.rows
     .map((row, ri) => {
       const m = npbRowMath(row);
+      // 할인은 따로 저장하지 않고 "정가계 − 매출"로 드러난다. 종합정산의
+      // 할인계와 같은 식이라, 줄마다 보여주면 어느 줄에서 나온 할인인지
+      // 바로 짚을 수 있다.
+      const discount = m.list - m.revenue;
       subQty += Number(row.qty || 0);
       subRevenue += m.revenue;
       subFee += m.fee;
       subSettle += m.settle;
       subList += m.list;
+      subDiscount += discount;
       const feePct = (Number(row.feeRate || 0) * 100).toFixed(2).replace(/\.?0+$/, "");
       return `
         <tr>
@@ -7792,6 +7798,8 @@ function renderNpbWsBlock(block, bi) {
             data-npb-wr="${ri}" data-npb-wf="feeRate" value="${h(feePct)}"></td>
           <td><input class="num" type="number" data-npb-ws="${bi}" data-npb-wr="${ri}"
             data-npb-wf="qty" value="${h(row.qty)}"></td>
+          <td class="num">${money.format(m.list)}</td>
+          <td class="num${discount ? " npb-ws-discount" : ""}">${discount ? `−${money.format(discount)}` : "-"}</td>
           <td class="num">${money.format(m.revenue)}</td>
           <td class="num">${money.format(m.fee)}</td>
           <td class="num">${money.format(m.settle)}</td>
@@ -7829,7 +7837,7 @@ function renderNpbWsBlock(block, bi) {
           <thead>
             <tr>
               <th>제품</th><th>정가</th><th>기준가</th><th>수수료율(%)</th>
-              <th>판매수량</th><th>매출</th><th>수수료</th><th>정산</th>
+              <th>판매수량</th><th>정가계</th><th>할인</th><th>매출</th><th>수수료</th><th>정산</th>
             </tr>
           </thead>
           <tbody>${rows}</tbody>
@@ -7838,6 +7846,8 @@ function renderNpbWsBlock(block, bi) {
               <th>합계</th>
               <td class="num">-</td><td class="num">-</td><td class="num">-</td>
               <td class="num">${money.format(subQty)}</td>
+              <td class="num">${money.format(subList)}</td>
+              <td class="num${subDiscount ? " npb-ws-discount" : ""}">${subDiscount ? `−${money.format(subDiscount)}` : "-"}</td>
               <td class="num">${money.format(subRevenue)}</td>
               <td class="num">${money.format(subFee)}</td>
               <td class="num">${money.format(subSettle)}</td>
