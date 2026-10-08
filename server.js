@@ -1125,6 +1125,8 @@ function buildInitialDb() {
     admins: [admin],
     brands,
     priceEntries: [],
+    products: [],
+    productPrices: [],
     priceAliases: [],
     promotionRules: [],
     partners: [defaultIssuerPartner(createdAt)],
@@ -1321,6 +1323,14 @@ function migrateDb(db) {
   // 코드(바코드)는 나중에 생긴 선택 항목이다.
   for (const material of db.materials || []) {
     touch(material, "itemCode", "");
+  }
+  touch(db, "products", []);
+  touch(db, "productPrices", []);
+  // 할인 조건은 나중에 생겼다. 기존 거래처는 "할인 없음 + 원단위 절사"로
+  // 두면 지금까지와 똑같이 동작한다(할인율 0이면 절사할 것도 없다).
+  for (const partner of db.partners || []) {
+    touch(partner, "defaultDiscountRate", 0);
+    touch(partner, "priceRounding", "floor10");
   }
   if (!(db.partners || []).some((p) => p.category === "issuer")) {
     db.partners = db.partners || [];
@@ -3915,6 +3925,61 @@ function defaultIssuerPartner(createdAt = now()) {
     isActive: true,
     createdAt,
     updatedAt: createdAt
+  };
+}
+
+// --- 상품 공급가 결정 --------------------------------------------------
+//
+// 같은 상품이라도 수신처마다 받는 단가가 다르다. 할인된 금액을 상품에
+// 적어두면 그 상품을 다른 거래처에 못 쓰므로, 상품에는 정가만 두고
+// 거래처 쪽에 할인 조건을 둔다. 찾는 순서는 좁은 것부터다:
+//
+//   ① 거래처 x 상품 예외  (테일릿처럼 상품마다 조건이 다른 경우)
+//   ② 거래처 기본 할인율  (동대문점처럼 전 품목 동일한 경우)
+//   ③ 정가
+//
+// public/app.js 의 resolveProductPrice 와 규칙이 같아야 한다 -- 화면이
+// 보여준 단가와 저장되는 단가가 다르면 사용자가 눈으로 본 금액과 발행된
+// 문서의 금액이 어긋난다.
+
+const PRICE_ROUNDINGS = new Set(["floor10", "round10", "floor100", "none"]);
+
+function applyPriceRounding(amount, mode) {
+  const value = Math.max(0, Number(amount) || 0);
+  if (mode === "none") return Math.round(value);
+  if (mode === "round10") return Math.round(value / 10) * 10;
+  if (mode === "floor100") return Math.floor(value / 100) * 100;
+  return Math.floor(value / 10) * 10; // floor10 (원단위 절사) = 기본값
+}
+
+function resolveProductPrice(db, product, partner) {
+  if (!product) return null;
+  const listPrice = Math.max(0, number(product.listPrice));
+  const override = partner
+    ? (db.productPrices || []).find(
+        (row) => row.partnerId === partner.id && row.productId === product.id
+      )
+    : null;
+  const rounding = PRICE_ROUNDINGS.has(partner?.priceRounding)
+    ? partner.priceRounding
+    : "floor10";
+
+  // 고정단가는 거래처와 합의한 금액 그 자체다 -- 끝자리를 임의로 깎으면
+  // 합의한 값이 아니게 되므로 절사하지 않는다.
+  if (override && number(override.fixedPrice) > 0) {
+    return { unitPrice: Math.round(number(override.fixedPrice)), listPrice, source: "fixed", rate: null };
+  }
+  const rate = override && override.discountRate !== "" && override.discountRate !== null &&
+    override.discountRate !== undefined
+    ? number(override.discountRate)
+    : partner ? number(partner.defaultDiscountRate) : 0;
+  const source = override ? "override" : (rate ? "partner" : "list");
+  if (!rate) return { unitPrice: Math.round(listPrice), listPrice, source: "list", rate: 0 };
+  return {
+    unitPrice: applyPriceRounding(listPrice * (1 - rate / 100), rounding),
+    listPrice,
+    source,
+    rate
   };
 }
 
@@ -8465,6 +8530,8 @@ async function routeApi(req, res, url) {
       contactName: String(body.contactName || "").trim(),
       contactPhone: String(body.contactPhone || "").trim(),
       contactEmail: String(body.contactEmail || "").trim(),
+      defaultDiscountRate: number(body.defaultDiscountRate),
+      priceRounding: PRICE_ROUNDINGS.has(body.priceRounding) ? body.priceRounding : "floor10",
       note: String(body.note || "").trim(),
       attachments: Array.isArray(body.attachments)
         ? body.attachments.map((item) => String(item || "").trim()).filter(Boolean)
@@ -8495,6 +8562,10 @@ async function routeApi(req, res, url) {
       "orderMethod", "invoiceTiming", "contactName", "contactPhone", "contactEmail", "note"
     ]) {
       if (key in body) partner[key] = String(body[key] || "").trim();
+    }
+    if ("defaultDiscountRate" in body) partner.defaultDiscountRate = number(body.defaultDiscountRate);
+    if ("priceRounding" in body) {
+      partner.priceRounding = PRICE_ROUNDINGS.has(body.priceRounding) ? body.priceRounding : "floor10";
     }
     if (!partnerCategories.has(partner.category)) partner.category = "production";
     if ("attachments" in body) {
@@ -8768,6 +8839,259 @@ async function routeApi(req, res, url) {
         const material = { id: id("material"), ...fields, createdAt: now(), updatedAt: now() };
         db.materials.unshift(material);
         addAudit(db, actor, "create", "material", material.id, `${material.itemName} 원부자재 엑셀 일괄 등록`, null, material);
+        created += 1;
+      }
+    });
+    if (created || updated) await writeDb(db);
+    sendJson(res, 200, { result: { created, updated, skipped } });
+    return;
+  }
+
+  // --- 판매 상품 -------------------------------------------------------
+  // 원부자재(생산처에서 사오는 것)와 달리 여러 수신처에 같은 상품을 팔기
+  // 때문에, 여기에는 정가만 두고 할인은 거래처 쪽에서 건다.
+
+  if (pathname === "/api/products" && method === "GET") {
+    // partnerId를 주면 그 거래처에 적용될 공급가까지 계산해서 돌려준다 --
+    // 화면이 직접 계산하면 서버 저장값과 어긋날 수 있다.
+    const partner = (db.partners || []).find((p) => p.id === url.searchParams.get("partnerId"));
+    const rows = (db.products || [])
+      .slice()
+      .sort((a, b) => String(a.itemName || "").localeCompare(String(b.itemName || ""), "ko"))
+      .map((product) => ({ ...product, pricing: resolveProductPrice(db, product, partner) }));
+    sendJson(res, 200, { products: rows });
+    return;
+  }
+
+  if (pathname === "/api/products" && method === "POST") {
+    const body = await readBody(req);
+    const itemName = String(body.itemName || "").trim();
+    if (!itemName) {
+      sendJson(res, 400, { error: "상품명은 필수입니다." });
+      return;
+    }
+    const product = {
+      id: id("product"),
+      itemName,
+      itemCode: String(body.itemCode || "").trim(),
+      category: String(body.category || "").trim(),
+      spec: String(body.spec || "").trim(),
+      unit: String(body.unit || "").trim(),
+      listPrice: number(body.listPrice),
+      note: String(body.note || "").trim(),
+      isActive: body.isActive !== false && body.isActive !== "false",
+      createdAt: now(),
+      updatedAt: now()
+    };
+    db.products.unshift(product);
+    addAudit(db, actor, "create", "product", product.id, `${product.itemName} 상품 생성`, null, product);
+    await writeDb(db);
+    sendJson(res, 201, { product });
+    return;
+  }
+
+  const productMatch = pathname.match(/^\/api\/products\/([^/]+)$/);
+  if (productMatch && method === "PUT") {
+    const body = await readBody(req);
+    const product = (db.products || []).find((item) => item.id === productMatch[1]);
+    if (!product) {
+      sendJson(res, 404, { error: "상품을 찾을 수 없습니다." });
+      return;
+    }
+    const before = { ...product };
+    for (const key of ["itemName", "itemCode", "category", "spec", "unit", "note"]) {
+      if (key in body) product[key] = String(body[key] || "").trim();
+    }
+    if ("listPrice" in body) product.listPrice = number(body.listPrice);
+    if ("isActive" in body) product.isActive = body.isActive !== false && body.isActive !== "false";
+    product.updatedAt = now();
+    addAudit(db, actor, "update", "product", product.id, `${product.itemName} 상품 수정`, before, product);
+    await writeDb(db);
+    sendJson(res, 200, { product });
+    return;
+  }
+
+  if (productMatch && method === "DELETE") {
+    const index = (db.products || []).findIndex((item) => item.id === productMatch[1]);
+    if (index === -1) {
+      sendJson(res, 404, { error: "상품을 찾을 수 없습니다." });
+      return;
+    }
+    const [before] = db.products.splice(index, 1);
+    // 그 상품에 걸려 있던 거래처별 예외 단가도 같이 지운다 -- 남겨두면
+    // 어느 상품 것인지 알 수 없는 유령 행이 된다.
+    db.productPrices = (db.productPrices || []).filter((row) => row.productId !== before.id);
+    addAudit(db, actor, "delete", "product", before.id, `${before.itemName} 상품 삭제`, before, null);
+    await writeDb(db);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  // 이미 원부자재로 등록해둔 것 중 실제로 파는 상품을 골라 옮겨온다.
+  if (pathname === "/api/products/import-materials" && method === "POST") {
+    const body = await readBody(req);
+    const ids = Array.isArray(body.materialIds) ? body.materialIds.map((x) => String(x)) : [];
+    const created = [];
+    const skipped = [];
+    for (const materialId of ids) {
+      const material = (db.materials || []).find((m) => m.id === materialId);
+      if (!material) {
+        skipped.push({ id: materialId, reason: "원부자재를 찾을 수 없습니다." });
+        continue;
+      }
+      if ((db.products || []).some((p) => p.itemName === material.itemName)) {
+        skipped.push({ id: materialId, reason: `"${material.itemName}"은(는) 이미 상품에 있습니다.` });
+        continue;
+      }
+      const product = {
+        id: id("product"),
+        itemName: material.itemName,
+        itemCode: material.itemCode || "",
+        category: material.category || "",
+        spec: "",
+        unit: material.orderUnit || "",
+        // 원부자재의 기본공급가는 사오는 값이라 파는 정가와 다르다.
+        // 0으로 두고 사용자가 정가를 채우게 한다.
+        listPrice: 0,
+        note: material.note || "",
+        isActive: true,
+        createdAt: now(),
+        updatedAt: now()
+      };
+      db.products.unshift(product);
+      addAudit(db, actor, "create", "product", product.id, `${product.itemName} 상품 생성(원부자재에서 가져옴)`, null, product);
+      created.push(product);
+    }
+    if (created.length) await writeDb(db);
+    sendJson(res, 200, { result: { created: created.length, skipped }, products: created });
+    return;
+  }
+
+  // --- 거래처 x 상품 예외 단가 ------------------------------------------
+  // 거래처 기본 할인율로 안 되는 조합만 여기에 둔다. 할인율과 고정단가 중
+  // 하나만 쓰며, 고정단가가 있으면 그 값이 우선이다.
+
+  if (pathname === "/api/product-prices" && method === "GET") {
+    const partnerId = url.searchParams.get("partnerId") || "";
+    const rows = (db.productPrices || [])
+      .filter((row) => !partnerId || row.partnerId === partnerId)
+      .map((row) => ({
+        ...row,
+        productName: (db.products || []).find((p) => p.id === row.productId)?.itemName || ""
+      }));
+    sendJson(res, 200, { productPrices: rows });
+    return;
+  }
+
+  if (pathname === "/api/product-prices" && method === "POST") {
+    const body = await readBody(req);
+    const partnerId = String(body.partnerId || "").trim();
+    const productId = String(body.productId || "").trim();
+    if (!(db.partners || []).some((p) => p.id === partnerId)) {
+      sendJson(res, 400, { error: "거래처를 찾을 수 없습니다." });
+      return;
+    }
+    if (!(db.products || []).some((p) => p.id === productId)) {
+      sendJson(res, 400, { error: "상품을 찾을 수 없습니다." });
+      return;
+    }
+    const fields = {
+      discountRate: body.discountRate === "" || body.discountRate === null || body.discountRate === undefined
+        ? "" : number(body.discountRate),
+      fixedPrice: number(body.fixedPrice),
+      note: String(body.note || "").trim(),
+      updatedAt: now()
+    };
+    // 한 조합에 행이 둘이면 어느 쪽이 맞는지 알 수 없으므로 덮어쓴다.
+    const existing = (db.productPrices || []).find(
+      (row) => row.partnerId === partnerId && row.productId === productId
+    );
+    let productPrice;
+    if (existing) {
+      Object.assign(existing, fields);
+      productPrice = existing;
+    } else {
+      productPrice = { id: id("pprice"), partnerId, productId, ...fields, createdAt: now() };
+      db.productPrices.unshift(productPrice);
+    }
+    await writeDb(db);
+    sendJson(res, 200, { productPrice });
+    return;
+  }
+
+  const productPriceMatch = pathname.match(/^\/api\/product-prices\/([^/]+)$/);
+  if (productPriceMatch && method === "DELETE") {
+    const index = (db.productPrices || []).findIndex((row) => row.id === productPriceMatch[1]);
+    if (index === -1) {
+      sendJson(res, 404, { error: "예외 단가를 찾을 수 없습니다." });
+      return;
+    }
+    db.productPrices.splice(index, 1);
+    await writeDb(db);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  const PRODUCT_EXPORT_HEADERS = [
+    "ID", "상품명", "코드(바코드)", "카테고리", "규격", "단위", "정가", "메모", "사용상태"
+  ];
+
+  if (pathname === "/api/products/export" && method === "GET") {
+    const blank = url.searchParams.get("mode") === "blank";
+    const rows = blank ? [] : (db.products || []).map((p) => [
+      p.id, p.itemName, p.itemCode, p.category, p.spec, p.unit,
+      p.listPrice || "", p.note, p.isActive !== false ? "Y" : "N"
+    ]);
+    const buffer = await buildRowsXlsx("상품", PRODUCT_EXPORT_HEADERS, rows);
+    sendBuffer(res, 200, buffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      { "content-disposition": contentDisposition(blank ? "상품_양식.xlsx" : "상품.xlsx") });
+    return;
+  }
+
+  if (pathname === "/api/products/import" && method === "POST") {
+    const body = await readBody(req);
+    let rows;
+    try {
+      rows = await parseUploadedXlsxRows(body);
+    } catch (error) {
+      sendJson(res, 400, { error: error.message || "Excel 파일을 읽지 못했습니다." });
+      return;
+    }
+    let created = 0;
+    let updated = 0;
+    const skipped = [];
+    rows.forEach((row, index) => {
+      const rowNo = index + 2;
+      const rowId = String(row["ID"] || "").trim();
+      const itemName = String(row["상품명"] || "").trim();
+      if (!itemName) {
+        skipped.push({ row: rowNo, reason: "상품명이 비어 있습니다." });
+        return;
+      }
+      const fields = {
+        itemName,
+        itemCode: String(row["코드(바코드)"] || "").trim(),
+        category: String(row["카테고리"] || "").trim(),
+        spec: String(row["규격"] || "").trim(),
+        unit: String(row["단위"] || "").trim(),
+        listPrice: number(row["정가"]),
+        note: String(row["메모"] || "").trim(),
+        isActive: String(row["사용상태"] || "").trim().toUpperCase() !== "N"
+      };
+      if (rowId) {
+        const existing = (db.products || []).find((item) => item.id === rowId);
+        if (!existing) {
+          skipped.push({ row: rowNo, reason: `ID(${rowId})가 일치하는 상품을 찾을 수 없습니다.` });
+          return;
+        }
+        const before = { ...existing };
+        Object.assign(existing, fields, { updatedAt: now() });
+        addAudit(db, actor, "update", "product", existing.id, `${existing.itemName} 상품 엑셀 일괄 수정`, before, existing);
+        updated += 1;
+      } else {
+        const product = { id: id("product"), ...fields, createdAt: now(), updatedAt: now() };
+        db.products.unshift(product);
+        addAudit(db, actor, "create", "product", product.id, `${product.itemName} 상품 엑셀 일괄 등록`, null, product);
         created += 1;
       }
     });
