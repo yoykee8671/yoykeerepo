@@ -1520,6 +1520,14 @@ a.button:hover {
   background: #f2fbf5;
 }
 
+/* 판매가 없던 달로 확인해 둔 채널. 처리는 끝났지만 매출이 없으므로
+   업로드된 채널(초록)과는 구분되게 회색으로 가라앉힌다. */
+.npb-ch-chip.none {
+  border-color: var(--line);
+  background: #f6f7f8;
+  color: var(--muted);
+}
+
 .npb-pending-wrap {
   margin-top: 12px;
 }
@@ -1808,19 +1816,39 @@ a.button:hover {
 .npb-invoice-table th:nth-child(4), .npb-invoice-table td:nth-child(4) { width: 110px; min-width: 110px; }
 .npb-invoice-table th:nth-child(5), .npb-invoice-table td:nth-child(5) { width: 100px; min-width: 100px; }
 
-/* npb — 품목 라인 */
+/* npb — 품목 라인.
+   금액 칸은 대부분 숫자 입력칸이라, 글자 폭만 재면 좁다 -- 브라우저가 붙이는
+   증감 화살표가 자리를 먹어 여섯 자리 금액이 잘린다. 특히 수량은 56px에
+   화살표까지 들어가 값이 안 보였다. 넉넉하게 잡고, 표가 넘치면 가로로
+   스크롤시킨다(품목명은 늘어나는 칸이라 줄지 않는다). */
 .npb-lines-table th:nth-child(1), .npb-lines-table td:nth-child(1) { width: 56px; min-width: 56px; }
-.npb-lines-table th:nth-child(2), .npb-lines-table td:nth-child(2) { min-width: 220px; }
-.npb-lines-table th:nth-child(3), .npb-lines-table td:nth-child(3) { width: 100px; min-width: 100px; }
-.npb-lines-table th:nth-child(4), .npb-lines-table td:nth-child(4) { width: 100px; min-width: 100px; }
-.npb-lines-table th:nth-child(5), .npb-lines-table td:nth-child(5) { width: 56px; min-width: 56px; }
-.npb-lines-table th:nth-child(6), .npb-lines-table td:nth-child(6) { width: 100px; min-width: 100px; }
-.npb-lines-table th:nth-child(7), .npb-lines-table td:nth-child(7) { width: 95px; min-width: 95px; }
-.npb-lines-table th:nth-child(8), .npb-lines-table td:nth-child(8) { width: 110px; min-width: 110px; }
-.npb-lines-table th:nth-child(9), .npb-lines-table td:nth-child(9) { width: 80px; min-width: 80px; }
-.npb-lines-table th:nth-child(10), .npb-lines-table td:nth-child(10) { width: 100px; min-width: 100px; }
-.npb-lines-table th:nth-child(11), .npb-lines-table td:nth-child(11) { width: 110px; min-width: 110px; }
-.npb-lines-table th:nth-child(12), .npb-lines-table td:nth-child(12) { width: 100px; min-width: 100px; }
+.npb-lines-table th:nth-child(2), .npb-lines-table td:nth-child(2) { min-width: 240px; }
+.npb-lines-table th:nth-child(3), .npb-lines-table td:nth-child(3) { width: 112px; min-width: 112px; }
+.npb-lines-table th:nth-child(4), .npb-lines-table td:nth-child(4) { width: 124px; min-width: 124px; }
+.npb-lines-table th:nth-child(5), .npb-lines-table td:nth-child(5) { width: 96px; min-width: 96px; }
+.npb-lines-table th:nth-child(6), .npb-lines-table td:nth-child(6) { width: 124px; min-width: 124px; }
+.npb-lines-table th:nth-child(7), .npb-lines-table td:nth-child(7) { width: 116px; min-width: 116px; }
+.npb-lines-table th:nth-child(8), .npb-lines-table td:nth-child(8) { width: 124px; min-width: 124px; }
+.npb-lines-table th:nth-child(9), .npb-lines-table td:nth-child(9) { width: 104px; min-width: 104px; }
+.npb-lines-table th:nth-child(10), .npb-lines-table td:nth-child(10) { width: 112px; min-width: 112px; }
+.npb-lines-table th:nth-child(11), .npb-lines-table td:nth-child(11) { width: 120px; min-width: 120px; }
+.npb-lines-table th:nth-child(12), .npb-lines-table td:nth-child(12) { width: 84px; min-width: 84px; }
+
+/* 숫자 입력칸이 칸 폭을 넘지 않게. 화살표는 눌러 쓸 일이 없어 숨긴다 --
+   그만큼 숫자가 보일 자리가 늘어난다. */
+.npb-lines-table input[type="number"] {
+  width: 100%;
+  min-width: 0;
+  padding-left: 6px;
+  padding-right: 6px;
+  -moz-appearance: textfield;
+}
+
+.npb-lines-table input[type="number"]::-webkit-outer-spin-button,
+.npb-lines-table input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
 
 /* npb — 워크시트 */
 .npb-ws-table th:nth-child(1), .npb-ws-table td:nth-child(1) { min-width: 200px; }
