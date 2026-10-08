@@ -4357,7 +4357,7 @@ function npbXlsxChannelSheets(db, settlement) {
   }
   const sheets = [];
   for (const [code, upload] of Object.entries(settlement.uploads || {})) {
-    if (!sold.has(code)) continue;
+    if (!sold.has(code) || upload.disabled) continue;
     const rows = Array.isArray(upload.rawRows) ? upload.rawRows : [];
     if (!rows.length) continue;
     const meta = (db.npb?.channels || []).find((c) => c.code === code);
@@ -8084,6 +8084,56 @@ async function routeApi(req, res, url) {
       upload.confirmed = false;
       await writeDb(db);
       sendJson(res, 200, { channel: channelCode, upload });
+      return;
+    }
+
+    // 올린 파일을 이번 달 정산에서 빼되 지우지는 않는다. 잘못 올렸거나 다음
+    // 달 것이 섞여 온 경우, 지워 버리면 근거가 사라지고 다시 올려야 한다.
+    // 그 채널 줄은 워크시트에서 걷어내고 파일은 남긴다.
+    if (action === "upload-disable" && method === "POST") {
+      const body = await readBody(req);
+      const codes = Array.isArray(body.channels) ? body.channels.map(String) : [];
+      const disabled = body.disabled !== false;
+      const touched = [];
+      for (const code of codes) {
+        const upload = settlement.uploads?.[code];
+        if (!upload) continue;
+        upload.disabled = disabled;
+        if (disabled) {
+          settlement.lines = (settlement.lines || []).filter((line) => line.channel !== code);
+          upload.confirmed = false;
+        }
+        touched.push(code);
+      }
+      if (touched.length) {
+        const computed = npbRecompute(db, settlement);
+        await writeDb(db);
+        sendJson(res, 200, { channels: touched, disabled, rollup: computed.rollup });
+        return;
+      }
+      sendJson(res, 200, { channels: [], disabled });
+      return;
+    }
+
+    // 여러 채널의 파일을 한 번에 뺀다. 한 달 치를 다시 올릴 때 하나씩 ✕ 를
+    // 누르게 하면 실수로 남겨 두기 쉽다.
+    if (action === "upload-bulk-delete" && method === "POST") {
+      const body = await readBody(req);
+      const codes = Array.isArray(body.channels) ? body.channels.map(String) : [];
+      const removed = [];
+      for (const code of codes) {
+        if (!settlement.uploads?.[code]) continue;
+        delete settlement.uploads[code];
+        settlement.lines = (settlement.lines || []).filter((line) => line.channel !== code);
+        removed.push(code);
+      }
+      if (removed.length) {
+        const computed = npbRecompute(db, settlement);
+        await writeDb(db);
+        sendJson(res, 200, { channels: removed, rollup: computed.rollup });
+        return;
+      }
+      sendJson(res, 200, { channels: [] });
       return;
     }
 

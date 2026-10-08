@@ -1520,6 +1520,34 @@ a.button:hover {
   background: #f2fbf5;
 }
 
+/* 올린 파일 일괄 처리 줄. */
+.npb-bulk {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-alt, #f7f9fb);
+  font-size: 13px;
+}
+
+.npb-bulk .toolbar { margin: 0; }
+.npb-bulk label { display: flex; align-items: center; gap: 6px; }
+
+.npb-chip-pick { display: flex; align-items: center; gap: 6px; }
+
+/* 사용안함으로 둔 채널 -- 제목만 남기고 접는다. */
+.npb-ch-chip.off {
+  border-style: dashed;
+  background: #fafafa;
+  color: var(--muted);
+}
+
+.npb-ch-chip.off strong { font-weight: 500; }
+
 /* 판매가 없던 달로 확인해 둔 채널. 처리는 끝났지만 매출이 없으므로
    업로드된 채널(초록)과는 구분되게 회색으로 가라앉힌다. */
 .npb-ch-chip.none {
