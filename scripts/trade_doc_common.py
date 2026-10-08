@@ -82,8 +82,9 @@ LEFT_TOP = Alignment(horizontal="left", vertical="top", wrap_text=True)
 MONEY_FMT = "#,##0;;\"-\""
 QTY_FMT = "#,##0;;\"-\""
 
-# 7-column item table shared by every document: 순번·품목명·규격·수량·단위·단가·공급가액.
-TABLE_HEADERS = ["순번", "품목명", "규격", "수량", "단위", "단가", "공급가액"]
+# 7-column item table shared by every document: 순번·품목명·규격·수량·단위·공급가·공급가액.
+# "공급가"는 개당 금액(부가세 제외), "공급가액"은 그 줄의 합(수량 x 공급가)이다.
+TABLE_HEADERS = ["순번", "품목명", "규격", "수량", "단위", "공급가", "공급가액"]
 # Column A doubles as the item-table's 순번 column AND the left info-block's
 # field-label column ("사업자번호"/"유효기간"/"거래일자" are 5 Hangul glyphs
 # wide); column D doubles as the item-table's 수량 column AND the right
@@ -597,7 +598,7 @@ def write_values(ws, doc_type, layout, spec):
             value=f"=F{layout.total_supply_row}+F{layout.total_vat_row}")
 
     # A formula cell renders as "###..." exactly like a literal number does
-    # when its column is too narrow -- widen 단가/공급가액 (and 수량, for a
+    # when its column is too narrow -- widen 공급가/공급가액 (and 수량, for a
     # very large order) if the real data needs more room than the default.
     qty_width = _numeric_width_for(max_quantity, COLUMN_WIDTHS[3], padding=1)
     price_width = _numeric_width_for(max_unit_price, COLUMN_WIDTHS[5])
