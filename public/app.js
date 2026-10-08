@@ -7774,9 +7774,9 @@ function renderNpbWsBlock(block, bi) {
   const rows = block.rows
     .map((row, ri) => {
       const m = npbRowMath(row);
-      // 할인은 따로 저장하지 않고 "정가계 − 매출"로 드러난다. 종합정산의
-      // 할인계와 같은 식이라, 줄마다 보여주면 어느 줄에서 나온 할인인지
-      // 바로 짚을 수 있다.
+      // 할인은 따로 저장하지 않고 정가와 기준가의 차이로 드러난다. 개당
+       // 금액들(정가·기준가) 사이에 두므로 여기도 개당으로 적는다.
+      const unitDiscount = Number(row.listPrice || 0) - Number(row.salePrice || 0);
       const discount = m.list - m.revenue;
       subQty += Number(row.qty || 0);
       subRevenue += m.revenue;
@@ -7794,13 +7794,13 @@ function renderNpbWsBlock(block, bi) {
             data-npb-wf="listPrice" value="${h(row.listPrice)}"></td>
           <td><input class="num" type="number" data-npb-ws="${bi}" data-npb-wr="${ri}"
             data-npb-wf="salePrice" value="${h(row.salePrice)}"></td>
-          <td><input class="num npb-pct" type="number" step="0.01" data-npb-ws="${bi}"
-            data-npb-wr="${ri}" data-npb-wf="feeRate" value="${h(feePct)}"></td>
+          <td class="num${unitDiscount > 0 ? " npb-ws-discount" : ""}">${unitDiscount > 0 ? `−${money.format(unitDiscount)}` : "-"}</td>
           <td><input class="num" type="number" data-npb-ws="${bi}" data-npb-wr="${ri}"
             data-npb-wf="qty" value="${h(row.qty)}"></td>
           <td class="num">${money.format(m.list)}</td>
-          <td class="num${discount ? " npb-ws-discount" : ""}">${discount ? `−${money.format(discount)}` : "-"}</td>
           <td class="num">${money.format(m.revenue)}</td>
+          <td><input class="num npb-pct" type="number" step="0.01" data-npb-ws="${bi}"
+            data-npb-wr="${ri}" data-npb-wf="feeRate" value="${h(feePct)}"></td>
           <td class="num">${money.format(m.fee)}</td>
           <td class="num">${money.format(m.settle)}</td>
         </tr>`;
@@ -7836,19 +7836,21 @@ function renderNpbWsBlock(block, bi) {
         <table class="npb-ws-table">
           <thead>
             <tr>
-              <th>제품</th><th>정가</th><th>기준가</th><th>수수료율(%)</th>
-              <th>판매수량</th><th>정가계</th><th>할인</th><th>매출</th><th>수수료</th><th>정산</th>
+              <th>제품</th><th>정가</th><th>기준가</th>
+              <th title="정가 − 기준가 (개당). 합계 줄은 금액 합계입니다.">할인</th><th>판매수량</th>
+              <th>정가계</th><th>매출계</th><th>수수료율(%)</th><th>수수료계</th><th>정산계</th>
             </tr>
           </thead>
           <tbody>${rows}</tbody>
           <tfoot>
             <tr>
               <th>합계</th>
-              <td class="num">-</td><td class="num">-</td><td class="num">-</td>
+              <td class="num">-</td><td class="num">-</td>
+              <td class="num${subDiscount > 0 ? " npb-ws-discount" : ""}">${subDiscount > 0 ? `−${money.format(subDiscount)}` : "-"}</td>
               <td class="num">${money.format(subQty)}</td>
               <td class="num">${money.format(subList)}</td>
-              <td class="num${subDiscount ? " npb-ws-discount" : ""}">${subDiscount ? `−${money.format(subDiscount)}` : "-"}</td>
               <td class="num">${money.format(subRevenue)}</td>
+              <td class="num">-</td>
               <td class="num">${money.format(subFee)}</td>
               <td class="num">${money.format(subSettle)}</td>
             </tr>
@@ -8485,7 +8487,19 @@ function bindNpbUpload() {
     const rows = review.rows.map((row) => {
       if (row.dropped) return row;
       const m = npbReviewMath(row);
-      return { ...row, saleAmount: m.sale, discountAmount: m.discount, discountMode: "line" };
+      const qty = Number(row.qty || 0);
+      // 워크시트는 '기준가 x 수량' 으로 매출을 구한다. 할인이 녹은 단가를
+      // salePrice 로 넘겨야 검수표에서 본 금액이 그대로 따라간다.
+      // unitPrice(할인 전)는 건드리지 않는다 -- 다음 달 기본값으로 쓰인다.
+      const shipping = Number(row.shippingAmount || 0);
+      const effectiveUnit = qty > 0 ? Math.round((m.sale - shipping) / qty) : 0;
+      return {
+        ...row,
+        salePrice: effectiveUnit,
+        saleAmount: m.sale,
+        discountAmount: m.discount,
+        discountMode: "line"
+      };
     });
     try {
       const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/confirm`, {

@@ -8048,6 +8048,14 @@ async function routeApi(req, res, url) {
             line.salePrice = number(row.unitPrice);
             line.unitPrice = number(row.unitPrice);
           }
+          // 프로모션 할인이 붙은 행은 실제로 팔린 단가가 기준가보다 낮다.
+          // 워크시트는 매출을 '기준가 x 수량' 으로 구하므로, 할인가를 여기에
+          // 싣지 않으면 할인이 반영되지 않은 매출이 정산서로 간다.
+          // unitPrice 는 할인 전 값 그대로 둔다 -- 다음 달에 기억해 채울 값은
+          // 한 달짜리 행사가가 아니라 평소 단가여야 한다.
+          if (row.salePrice !== undefined && row.salePrice !== "") {
+            line.salePrice = number(row.salePrice);
+          }
           line.manualFields = [...manual];
           return line;
         });
