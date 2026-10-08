@@ -1971,6 +1971,16 @@ function renderBrandForm() {
           <option value="catalog" ${b.priceBasis === "catalog" ? "selected" : ""}>정가(단가표) 기준</option>
         </select>
       </div>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:6px;font-weight:400">
+          <input type="checkbox" name="autoCreateRequests" ${b.autoCreateRequests ? "checked" : ""}>
+          수집 시 입금요청 자동 등록 <span class="muted">(확인 목록에 띄우지 않음)</span>
+        </label>
+        <p class="muted" style="margin:4px 0 0;font-size:11px">
+          월정산 거래처처럼 건건이 확인할 필요가 없을 때 켜세요. 공급사코드는 그대로 쓰므로
+          정산 집계와 정산내역 다운로드에는 영향이 없습니다.
+        </p>
+      </div>
       <div class="field"><label>Google Sheets 아카이브 URL</label><input name="googleSheetUrl" value="${h(b.googleSheetUrl)}" placeholder="브랜드별 공유용 스프레드시트 링크"></div>
       <div class="toolbar">
         <button class="primary" type="submit">${state.editingBrand ? "수정 저장" : "브랜드 추가"}</button>
@@ -3984,6 +3994,11 @@ function bindBrands() {
     body.isActive = body.isActive === "true";
     body.hasReceivable = body.hasReceivable === "true";
     body.payAfterShipping = body.payAfterShipping === "true";
+    // 체크 해제된 체크박스는 FormData에 아예 담기지 않는다 -- 폼에서 직접
+    // 읽지 않으면 "끄기"가 저장되지 않는다.
+    body.autoCreateRequests = Boolean(
+      event.currentTarget.querySelector("[name=autoCreateRequests]")?.checked
+    );
     body.starred = false;
     let savedId = state.editingBrand?.id || "";
     if (state.editingBrand) {
@@ -6380,7 +6395,8 @@ function renderPipeline() {
         </div>
         <div class="toolbar">
           <button class="primary" data-pipe-collect ${p.collecting ? "disabled" : ""}>${p.collecting ? "수집 중…" : "수집하기"}</button>
-          <span class="muted">결제된 주문만 가져옵니다. 이미 등록된 건은 건너뜁니다. 여기서는 아무것도 저장하지 않습니다.</span>
+          <span class="muted">결제된 주문만 가져옵니다. 이미 등록된 건은 건너뜁니다.
+            확인 목록에 올라온 건은 <b>생성</b>을 눌러야 저장됩니다 — 단, 자동 등록으로 설정한 브랜드는 수집과 동시에 등록됩니다.</span>
         </div>
         ${p.error ? `<p class="muted" style="color:var(--red)">${h(p.error)}</p>` : ""}
         ${renderPipelineCollect(p.collect)}
@@ -6445,11 +6461,37 @@ function renderClobeFreshness(scraping) {
   `;
 }
 
+// 월정산 브랜드는 수집과 동시에 등록되므로 확인 목록에 없다. 소리 없이
+// 사라진 것처럼 보이면 안 되니, 몇 건이 들어갔는지는 항상 알려주고 주문번호는
+// 접어둔다.
+function renderPipelineAutoCreated(autoCreated) {
+  const rows = autoCreated || [];
+  if (!rows.length) return "";
+  const byBrand = new Map();
+  for (const row of rows) byBrand.set(row.brandName, (byBrand.get(row.brandName) || 0) + 1);
+  const summary = [...byBrand.entries()].map(([name, count]) => `${h(name)} ${count}`).join(" · ");
+  return `
+    <details class="auto-created">
+      <summary>자동 등록됨 ${rows.length}건 <span class="muted">(${summary})</span></summary>
+      <div class="table-wrap" style="max-height:220px;margin-top:8px">
+        <table class="pipeline-drafts-table">
+          <thead><tr><th>주문</th><th>브랜드</th><th>입금액</th></tr></thead>
+          <tbody>${rows.map((row) => `<tr>
+            <td>${h(row.orderNo)}<br><span class="muted">${h(row.customerName)}</span></td>
+            <td>${h(row.brandName)}</td>
+            <td class="num">${money.format(row.depositAmount || 0)}원</td>
+          </tr>`).join("")}</tbody>
+        </table>
+      </div>
+    </details>`;
+}
+
 function renderPipelineCollect(collect) {
   if (!collect) return "";
   const drafts = collect.drafts || [];
+  const auto = renderPipelineAutoCreated(collect.autoCreated);
   if (!drafts.length) {
-    return `<p class="muted">새로 만들 입금요청이 없습니다. (조회 주문 ${money.format(collect.orderCount || 0)}건 ·
+    return `${auto}<p class="muted">확인이 필요한 입금요청은 없습니다. (조회 주문 ${money.format(collect.orderCount || 0)}건 ·
       이미 등록 ${collect.skipped?.duplicate || 0} · 미결제 제외 ${collect.skipped?.unpaid || 0})</p>`;
   }
   const selected = new Set(state.pipeline.selected);
@@ -6478,6 +6520,7 @@ function renderPipelineCollect(collect) {
   }).join("");
   return `
     <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
+      ${auto}
       <h3>② 확인 — 만들어질 요청 ${drafts.length}건</h3>
       <p class="muted">
         조회 주문 ${money.format(collect.orderCount || 0)}건 · 이미 등록 ${collect.skipped?.duplicate || 0} ·
@@ -6491,7 +6534,7 @@ function renderPipelineCollect(collect) {
       <p class="muted">행별 <b>입금요청 입력</b>은 그 건의 계산된 초안을 입금요청 창에 채워 보여줍니다. 수동 확인이 필요한 건(룰루키친 등)은
         이 버튼으로 열어 필요한 값만 고쳐서 바로 등록하세요.</p>
       <div class="table-wrap" style="max-height:420px"><table class="pipeline-drafts-table">
-        <thead><tr><th><input type="checkbox" data-pipe-all></th><th>주문</th><th>브랜드</th><th>품목</th><th>품목번호</th><th>입금액</th><th>비고</th><th>동작</th></tr></thead>
+        <thead><tr><th><input type="checkbox" data-pipe-all ${drafts.length && selected.size === drafts.length ? "checked" : ""}></th><th>주문</th><th>브랜드</th><th>품목</th><th>품목번호</th><th>입금액</th><th>비고</th><th>동작</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>
       <div class="toolbar">
@@ -6812,10 +6855,18 @@ function bindPipeline() {
       renderApp();
     });
   });
-  app.querySelector("[data-pipe-all]")?.addEventListener("change", (e) => {
-    p.selected = e.target.checked ? (p.collect?.drafts || []).map((_, i) => i) : [];
-    renderApp();
-  });
+  const pipeAll = app.querySelector("[data-pipe-all]");
+  if (pipeAll) {
+    // 일부만 골라져 있을 때는 '중간' 표시를 해둔다 -- 체크가 꺼져 보이면
+    // 다음 클릭이 전체 해제인지 전체 선택인지 헷갈린다. (HTML 속성으로는
+    // 표현할 수 없어 그린 뒤에 직접 넣는다.)
+    const total = (p.collect?.drafts || []).length;
+    pipeAll.indeterminate = p.selected.length > 0 && p.selected.length < total;
+    pipeAll.addEventListener("change", (e) => {
+      p.selected = e.target.checked ? (p.collect?.drafts || []).map((_, i) => i) : [];
+      renderApp();
+    });
+  }
 
   app.querySelectorAll("[data-pipe-draft-request]").forEach((button) => {
     button.addEventListener("click", () => {
