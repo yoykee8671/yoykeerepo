@@ -7223,13 +7223,33 @@ function renderNpbUpload() {
         `<option value="${value}" ${(c.entryMode || "review") === value ? "selected" : ""}>${label}</option>`).join("")}
     </select>`;
   const noSales = n.current?.noSales || {};
+  const picked = new Set(n.uploadPicked || []);
   const chip = (c, isDone) => {
     const up = uploads[c.code];
     // 판매가 없던 달과 파일을 깜빡한 달이 똑같이 "미업로드"로 보이면,
     // 마감할 때마다 그 채널을 다시 뒤져봐야 한다.
     const isNoSales = !isDone && Boolean(noSales[c.code]);
+    // 사용안함으로 둔 채널은 제목만 남기고 접는다 -- 쓰지 않기로 한 것이
+    // 쓰는 것과 같은 자리를 차지하면 목록이 읽히지 않는다.
+    if (isDone && up.disabled) {
+      return `<div class="npb-ch-chip off">
+        <label class="npb-chip-pick">
+          <input type="checkbox" data-npb-pick="${h(c.code)}" ${picked.has(c.code) ? "checked" : ""}>
+          <strong>${h(c.name)}</strong>
+        </label>
+        <span class="muted">사용안함 · ${h(up.fileName || "업로드됨")}</span>
+        <div class="npb-chip-actions">
+          <button data-npb-enable="${h(c.code)}">다시 사용</button>
+        </div>
+      </div>`;
+    }
     return `<div class="npb-ch-chip ${isDone ? "on" : ""} ${isNoSales ? "none" : ""}">
-      <strong>${h(c.name)}</strong>
+      ${isDone
+        ? `<label class="npb-chip-pick">
+             <input type="checkbox" data-npb-pick="${h(c.code)}" ${picked.has(c.code) ? "checked" : ""}>
+             <strong>${h(c.name)}</strong>
+           </label>`
+        : `<strong>${h(c.name)}</strong>`}
       ${modeSelect(c)}
       <span class="muted">${isDone
         ? `${h(up.fileName || "업로드됨")}${up.lines ? ` · ${up.lines.length}개 품목` : ""}`
@@ -7299,6 +7319,16 @@ function renderNpbUpload() {
         ${pending ? `<div class="npb-pending-wrap">
           <p class="muted" style="color:var(--red)">채널을 알 수 없는 파일이 있습니다. 직접 지정하세요.</p>
           ${pending}</div>` : ""}
+        ${done.length ? `<div class="npb-bulk">
+          <label><input type="checkbox" data-npb-pick-all
+            ${picked.size && picked.size === done.length ? "checked" : ""}> 전체 선택</label>
+          <span class="muted">${picked.size ? `${picked.size}개 선택됨` : "올린 파일을 골라 한 번에 처리합니다"}</span>
+          <div class="toolbar">
+            <button class="primary" data-npb-bulk="apply" ${picked.size ? "" : "disabled"}>선택 반영</button>
+            <button data-npb-bulk="disable" ${picked.size ? "" : "disabled"}>선택 사용안함</button>
+            <button class="danger" data-npb-bulk="delete" ${picked.size ? "" : "disabled"}>선택 삭제</button>
+          </div>
+        </div>` : ""}
         <div class="npb-ch-chips">
           ${done.map((c) => chip(c, true)).join("")}
           ${todo.map((c) => chip(c, false)).join("")}
@@ -8344,20 +8374,26 @@ function bindNpbUpload() {
       showToast(error.message || "매칭 저장 실패", "error");
     }
   });
-  const npbApplyChannel = async (code) => {
+  // silent 는 일괄 반영용 -- 채널마다 알림을 띄우고 다시 그리면 화면이 깜빡이고
+  // 느리다. 부르는 쪽이 끝나고 한 번만 정리한다.
+  const npbApplyChannel = async (code, opts = {}) => {
     try {
       const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/confirm`, {
         method: "POST", body: { channel: code }
       });
+      if (opts.silent) return res;
       n.review = null;
       await npbLoadDetail(n.currentKey);
       showToast(res.removed
         ? `${npbChannelName(code)} 내역을 워크시트에서 뺐습니다.`
         : `${npbChannelName(code)} 반영 완료 — ${res.rows.length}개 품목. 다른 채널은 그대로입니다.`);
       renderApp();
+      return res;
     } catch (error) {
+      if (opts.silent) throw error;
       showToast(error.message || "반영 실패", "error");
     }
+    return null;
   };
   app.querySelectorAll("[data-npb-apply]").forEach((btn) => {
     btn.addEventListener("click", () => npbApplyChannel(btn.getAttribute("data-npb-apply")));
@@ -8373,6 +8409,70 @@ function bindNpbUpload() {
         renderApp();
       } catch (error) {
         showToast(error.message || "삭제 실패", "error");
+      }
+    });
+  });
+
+  // 올린 파일 고르기 + 일괄 처리
+  const doneCodes = () =>
+    Object.keys(n.current?.uploads || {}).filter((code) => code !== "logistics");
+  app.querySelectorAll("[data-npb-pick]").forEach((box) => {
+    box.addEventListener("change", () => {
+      const code = box.getAttribute("data-npb-pick");
+      const set = new Set(n.uploadPicked || []);
+      if (box.checked) set.add(code); else set.delete(code);
+      n.uploadPicked = [...set];
+      renderApp();
+    });
+  });
+  app.querySelector("[data-npb-pick-all]")?.addEventListener("change", (e) => {
+    n.uploadPicked = e.target.checked ? doneCodes() : [];
+    renderApp();
+  });
+  app.querySelectorAll("[data-npb-bulk]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const kind = btn.getAttribute("data-npb-bulk");
+      const codes = [...(n.uploadPicked || [])];
+      if (!codes.length) return;
+      const names = codes.map(npbChannelName).join(", ");
+      if (kind === "delete" && !confirm(`${codes.length}개 채널의 파일을 지울까요?\n${names}`)) return;
+      const key = encodeURIComponent(n.currentKey);
+      try {
+        if (kind === "apply") {
+          // 반영은 채널마다 검수 내용이 달라 한 건씩 보낸다.
+          for (const code of codes) await npbApplyChannel(code, { silent: true });
+          showToast(`${codes.length}개 채널을 반영했습니다.`);
+        } else if (kind === "disable") {
+          await api(`/api/npb/settlements/${key}/upload-disable`, {
+            method: "POST", body: { channels: codes, disabled: true }
+          });
+          showToast(`${codes.length}개 채널을 사용안함으로 두었습니다. 파일은 남아 있습니다.`);
+        } else {
+          await api(`/api/npb/settlements/${key}/upload-bulk-delete`, {
+            method: "POST", body: { channels: codes }
+          });
+          showToast(`${codes.length}개 채널의 파일을 지웠습니다.`);
+        }
+        n.uploadPicked = [];
+        await npbLoadDetail(n.currentKey);
+        renderApp();
+      } catch (error) {
+        showToast(error.message || "처리에 실패했습니다.", "error");
+      }
+    });
+  });
+  app.querySelectorAll("[data-npb-enable]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const code = btn.getAttribute("data-npb-enable");
+      try {
+        await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/upload-disable`, {
+          method: "POST", body: { channels: [code], disabled: false }
+        });
+        await npbLoadDetail(n.currentKey);
+        showToast(`${npbChannelName(code)} — 다시 사용합니다. [반영] 을 눌러야 워크시트에 들어갑니다.`);
+        renderApp();
+      } catch (error) {
+        showToast(error.message || "처리에 실패했습니다.", "error");
       }
     });
   });
