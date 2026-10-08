@@ -978,6 +978,21 @@ details.collapsible-summary[open] > summary {
   gap: 10px;
 }
 
+/* 수집 화면에서 자동 등록된 건 -- 평소엔 건수만, 눌러서 펼치면 주문번호. */
+.auto-created {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-alt, #f7f9fb);
+}
+
+.auto-created > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+}
+
 /* 묶음 안에서 칸 하나를 가리키는 작은 라벨 (예: 공급가 / 세액 / 합계).
    바깥 .field > label 과 달리 한 줄짜리 보조 설명이라 더 작고 연하다. */
 .sub-label {
