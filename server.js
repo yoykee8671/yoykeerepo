@@ -4277,6 +4277,99 @@ function npbUploadWarnings(parsed, channel, excluded) {
   return out;
 }
 
+// 정산서 채널 표의 칸 구성. 채널 설정에서 고르게 하되(sheetLayout), 지정이
+// 없으면 거래 형태(archetype/calcType)에서 고른다 -- 5월 발행본의 채널별
+// 모양을 그대로 따른 기본값이라, 기존 채널은 설정하지 않아도 맞게 나온다.
+const NPB_SHEET_LAYOUTS = new Set(["consignment", "direct", "wholesale", "vendor_ship"]);
+
+function npbSheetLayout(meta) {
+  if (NPB_SHEET_LAYOUTS.has(meta?.sheetLayout)) return meta.sheetLayout;
+  const archetype = String(meta?.archetype || "");
+  const category = String(meta?.category || "");
+  if (category.includes("위탁배송")) return "vendor_ship";
+  if (archetype === "consignment") return "consignment";
+  // 대리점과 매입은 공급가(대리점가)로 넘기고 그 차액이 공제가 된다.
+  if (archetype === "agency" || archetype === "purchase"
+      || meta?.calcType === "margin_supply") return "wholesale";
+  return "direct";
+}
+
+// 재고현황 칸 이름 맞추기. 저장된 줄은 opening/inbound/outbound/sold/nonSale/
+// closing 인데 정산서는 기초·입고·출고·기말을 각각 전체/정상/불용으로 나눠
+// 적는다. 이름이 어긋나 있어서 재고가 통째로 빈칸으로 나갔다.
+function npbXlsxInventory(db, settlement) {
+  const products = new Map(
+    (db.npb?.products || [])
+      .filter((p) => npbSameBrand(p.brandId, settlement.brand))
+      .map((p) => [p.id, p])
+  );
+  return (settlement.inventory || []).map((row) => {
+    const key = String(row.productKey || row.productId || "");
+    const product = products.get(key);
+    return {
+      code: product?.barcode || "",
+      name: row.name || product?.name || key,
+      // 불용(파손 등)은 아직 따로 세지 않는다 -- 전량 정상으로 둔다.
+      openOk: number(row.opening),
+      openDead: 0,
+      inIn: number(row.inbound),
+      inReturn: 0,
+      outSold: number(row.sold),
+      outNonsale: number(row.nonSale),
+      closeDead: 0
+    };
+  });
+}
+
+// DB)입출고목록. 업로드한 원장은 uploads.logistics.rows 에 있는데 spec 은
+// settlement.ledger 를 보고 있어서, 머리글만 있고 데이터가 0행으로 나갔다.
+function npbXlsxLedger(db, settlement) {
+  const upload = settlement.uploads?.logistics;
+  const rows = Array.isArray(upload?.rows) ? upload.rows : [];
+  if (!rows.length) return {};
+  // 원장은 열 이름이 파일마다 조금씩 달라, 첫 행에서 본 순서를 그대로 쓴다.
+  const headers = [...new Set(rows.flatMap((r) => Object.keys(r || {})))];
+  const items = (settlement.inventory || []).map((row) => ({
+    name: row.name,
+    inSum: number(row.inbound),
+    outSum: number(row.outbound)
+  }));
+  return {
+    headers,
+    rows: rows.map((r) => headers.map((h) => (r?.[h] === undefined ? null : r[h]))),
+    summary: {
+      outCount: number(settlement.logistics?.counts?.small)
+        + number(settlement.logistics?.counts?.large),
+      items,
+      totalIn: items.reduce((sum, it) => sum + it.inSum, 0),
+      totalOut: items.reduce((sum, it) => sum + it.outSum, 0)
+    }
+  };
+}
+
+// 채널별 원본 시트. 숫자의 출처를 받는 쪽이 따라갈 수 있어야 한다.
+// 그 달에 판매가 있는 채널만 싣는다 -- 0건 채널까지 넣으면 시트가 스무 장을
+// 넘고 정작 볼 것을 못 찾는다.
+function npbXlsxChannelSheets(db, settlement) {
+  const sold = new Set();
+  for (const line of settlement.lines || []) {
+    if (number(line.qty) > 0) sold.add(line.channelCode || line.channel);
+  }
+  const sheets = [];
+  for (const [code, upload] of Object.entries(settlement.uploads || {})) {
+    if (!sold.has(code)) continue;
+    const rows = Array.isArray(upload.rawRows) ? upload.rawRows : [];
+    if (!rows.length) continue;
+    const meta = (db.npb?.channels || []).find((c) => c.code === code);
+    sheets.push({
+      // 시트 이름은 31자 제한이 있고 : \ / ? * [ ] 를 못 쓴다.
+      name: `DB)${String(meta?.name || code).replace(/[:\\/?*[\]]/g, " ")}`.slice(0, 31),
+      rows: rows.slice(0, 5000)
+    });
+  }
+  return sheets;
+}
+
 function npbBuildXlsxSpec(db, settlement) {
   const brand = npbGetBrand(db, settlement.brand);
   const costConfig = brand?.costConfig || {};
@@ -4293,17 +4386,26 @@ function npbBuildXlsxSpec(db, settlement) {
     const meta = allChannels.find((item) => item.code === code);
     channels.push({
       name: meta?.name || code,
-      headers: ["상품", "수량", "정가", "매출", "공제", "정산"],
+      // 칸 구성은 거래 형태에 따라 다르다. 어떤 칸을 쓸지는 파이썬이 정하고
+      // (셀 주소를 아는 쪽이 수식을 써야 한다), 여기서는 줄 값만 넘긴다.
+      layout: npbSheetLayout(meta),
+      tag: meta?.category || "",
+      desc: meta?.note || "",
       rows: lines.map((line) => {
-        const computed = npbComputeLine(line);
-        return [
-          line.label || line.lineLabel || line.productKey || "",
-          number(line.qty),
-          computed.listTotal,
-          computed.saleTotal,
-          computed.feeTotal,
-          computed.settleTotal
-        ];
+        const listPrice = number(line.listPrice);
+        const salePrice = number(line.salePrice);
+        return {
+          label: line.label || line.lineLabel || line.productKey || "",
+          listPrice,
+          salePrice,
+          // 정가 대비 얼마나 깎였는지. 직매출 표의 '할인율' 칸이 이 값을 쓰고,
+          // 프로모션가는 거기서 수식으로 되돌린다.
+          discountRate: listPrice > 0 ? Math.max(0, 1 - salePrice / listPrice) : 0,
+          supplyPrice: number(meta?.supplyPrice) || salePrice,
+          feeRate: number(line.feeRate),
+          qty: number(line.qty),
+          promoDiscount: number(line.promoDiscount)
+        };
       })
     });
   }
@@ -4325,15 +4427,16 @@ function npbBuildXlsxSpec(db, settlement) {
       end: period.end || ""
     },
     rollup: settlement.rollup || {},
-    inventory: settlement.inventory || [],
+    inventory: npbXlsxInventory(db, settlement),
     inventoryTotal: settlement.inventoryTotal || null,
+    channelDbSheets: npbXlsxChannelSheets(db, settlement),
     profitSplit,
     profitSplitTotalRatio: settlement.rollup ? 1 : undefined,
     profitSplitTotalAmount: settlement.rollup?.profit,
     logistics: settlement.logistics || {},
     threePLTable: costConfig.threePlTable || [],
     channels,
-    ledger: settlement.ledger || {},
+    ledger: npbXlsxLedger(db, settlement),
     memo: settlement.memo || []
   };
 }
