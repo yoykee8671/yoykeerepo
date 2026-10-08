@@ -4552,7 +4552,7 @@ function renderMaterialRow(item) {
   const partner = (state.partners || []).find((p) => p.id === item.partnerId);
   return `
     <tr>
-      <td>${h(item.itemName)}</td>
+      <td>${h(item.itemName)}${item.itemCode ? `<br><span class="muted" style="font-size:11px">${h(item.itemCode)}</span>` : ""}</td>
       <td>${h(item.category)}</td>
       <td>${h(partner?.name || "")}</td>
       <td>${h(item.orderUnit)}</td>
@@ -4575,13 +4575,14 @@ function renderMaterialForm() {
       </div>
       <div class="field"><label>품목명</label><input name="itemName" value="${h(m.itemName)}" required></div>
       <div class="field two">
+        <div><label>코드(바코드)</label><input name="itemCode" value="${h(m.itemCode)}" placeholder="선택 입력 — 바코드 스캔 또는 직접 입력"></div>
         <div><label>카테고리</label><input name="category" value="${h(m.category)}" placeholder="예: 원단, 부자재, 포장재, 사은품"></div>
-        <div><label>발주단위</label><input name="orderUnit" value="${h(m.orderUnit)}" placeholder="예: 개, Roll, box"></div>
       </div>
       <div class="field two">
-        <div><label>기본단가</label><input name="basePrice" type="number" min="0" value="${h(m.basePrice || "")}"></div>
+        <div><label>발주단위</label><input name="orderUnit" value="${h(m.orderUnit)}" placeholder="예: 개, Roll, box"></div>
         <div><label>리드타임(일)</label><input name="leadTimeDays" type="number" min="0" value="${h(m.leadTimeDays || "")}"></div>
       </div>
+      <div class="field"><label>기본 공급가</label><input name="basePrice" type="number" min="0" value="${h(m.basePrice || "")}" placeholder="부가세 제외 금액"></div>
       <div class="field"><label>메모</label><textarea name="note">${h(m.note)}</textarea></div>
       <div class="field"><label>사용 상태</label><select name="isActive"><option value="true" ${m.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${m.isActive === false ? "selected" : ""}>N</option></select></div>
       <div class="toolbar">
@@ -5032,12 +5033,28 @@ function renderPurchaseOrderForm() {
         <datalist id="po-material-options">
           ${(state.materials || []).map((m) => `<option value="${h(m.itemName)}">`).join("")}
         </datalist>
-        <div class="field four">
+        <div class="field three">
           <div><input data-po-item-name list="po-material-options" placeholder="원부자재명 (검색 또는 신규 입력)"></div>
           <div><input data-po-item-spec placeholder="규격"></div>
           <div><input data-po-item-qty type="number" min="1" value="1" placeholder="수량"></div>
-          <div><input data-po-item-price type="number" min="0" placeholder="단가"></div>
         </div>
+        <div class="field three" style="margin-top:8px">
+          <div>
+            <label class="sub-label">공급가 (개당)</label>
+            <input data-po-item-price type="number" min="0" step="1" placeholder="부가세 제외">
+          </div>
+          <div>
+            <label class="sub-label">세액 (10%)</label>
+            <input data-po-item-vat type="number" min="0" step="1" placeholder="자동 계산">
+          </div>
+          <div>
+            <label class="sub-label">합계 (개당)</label>
+            <input data-po-item-gross type="number" min="0" step="1" placeholder="부가세 포함">
+          </div>
+        </div>
+        <p class="muted" style="margin:6px 0 0;font-size:11px">
+          공급가를 넣으면 세액·합계가 채워지고, 합계를 넣으면 공급가·세액을 거꾸로 계산합니다.
+        </p>
         <button type="button" data-add-po-line-item style="margin-top:8px">품목 추가</button>
       </div>
       <div data-po-line-items-table>${renderPurchaseOrderLineItems(lineItems)}</div>
@@ -5055,7 +5072,7 @@ function renderPurchaseOrderLineItems(items) {
   if (!items.length) return `<div class="empty">추가된 품목이 없습니다.</div>`;
   return `
     <table class="line-items-table">
-      <thead><tr><th>작업</th><th>품목명</th><th>규격</th><th>수량</th><th>단위</th><th>단가</th><th>합계</th></tr></thead>
+      <thead><tr><th>작업</th><th>품목명</th><th>규격</th><th>수량</th><th>단위</th><th>공급가</th><th>공급가액</th></tr></thead>
       <tbody>
         ${items.map((item) => `
           <tr data-po-line-row="${item.id}">
@@ -5070,6 +5087,13 @@ function renderPurchaseOrderLineItems(items) {
       </tbody>
     </table>
   `;
+}
+
+// 부가세 포함 금액에서 공급가를 되돌린다. 세액은 이 값을 10%로 다시 구하지
+// 말고 "합계 - 공급가"로 쓸 것 — 반올림 때문에 1원이 어긋나면, 거래처가 준
+// 합계 금액과 우리 문서의 금액이 달라진다.
+function supplyFromGross(gross) {
+  return Math.round(Math.max(0, Number(gross) || 0) / 1.1);
 }
 
 function renderPurchaseOrderSummary(items) {
@@ -5182,16 +5206,63 @@ function bindPurchaseOrders() {
   };
   bindPoLineItemRemovers();
 
+  // 거래처마다 단가를 주는 기준이 다르다 — 어떤 곳은 공급가(부가세 별도),
+  // 어떤 곳은 합계(부가세 포함)로 준다. 둘 중 아는 쪽을 넣으면 나머지를
+  // 채워준다. 저장되는 값은 예전과 똑같이 공급가(unitPrice) 하나뿐이고,
+  // 세액·합계 칸은 입력을 돕는 계산기일 뿐이다.
+  const priceInput = form.querySelector("[data-po-item-price]");
+  const vatInput = form.querySelector("[data-po-item-vat]");
+  const grossInput = form.querySelector("[data-po-item-gross]");
+
+  const clearMoneyInputs = () => {
+    if (priceInput) priceInput.value = "";
+    if (vatInput) vatInput.value = "";
+    if (grossInput) grossInput.value = "";
+  };
+
+  // 공급가가 비어 있고 합계만 적혀 있으면 합계에서 거꾸로 계산한다.
+  const resolveUnitPrice = (fallback) => {
+    if (priceInput && priceInput.value !== "") return Math.max(0, Number(priceInput.value) || 0);
+    if (grossInput && grossInput.value !== "") return supplyFromGross(Number(grossInput.value) || 0);
+    return Math.max(0, Number(fallback) || 0);
+  };
+
+  if (priceInput && vatInput && grossInput) {
+    priceInput.addEventListener("input", () => {
+      if (priceInput.value === "") {
+        vatInput.value = "";
+        grossInput.value = "";
+        return;
+      }
+      const supply = Math.max(0, Number(priceInput.value) || 0);
+      const vat = Math.round(supply * 0.1);
+      vatInput.value = String(vat);
+      grossInput.value = String(supply + vat);
+    });
+    grossInput.addEventListener("input", () => {
+      if (grossInput.value === "") {
+        priceInput.value = "";
+        vatInput.value = "";
+        return;
+      }
+      const gross = Math.max(0, Number(grossInput.value) || 0);
+      const supply = supplyFromGross(gross);
+      priceInput.value = String(supply);
+      // 세액을 따로 10%로 다시 구하지 않고 차액으로 둔다 — 그래야 거래처가
+      // 알려준 합계 금액이 1원도 틀어지지 않는다.
+      vatInput.value = String(gross - supply);
+    });
+  }
+
   form.querySelector("[data-add-po-line-item]")?.addEventListener("click", async () => {
     const nameInput = form.querySelector("[data-po-item-name]");
     const specInput = form.querySelector("[data-po-item-spec]");
     const qtyInput = form.querySelector("[data-po-item-qty]");
-    const priceInput = form.querySelector("[data-po-item-price]");
     const name = nameInput.value.trim();
     if (!name) return;
     const material = (state.materials || []).find((m) => m.itemName.trim() === name);
     const quantity = Math.max(1, Number(qtyInput.value) || 1);
-    const unitPrice = priceInput.value !== "" ? Number(priceInput.value) : Number(material?.basePrice || 0);
+    const unitPrice = resolveUnitPrice(material?.basePrice);
     const newItemId = cryptoRandomId();
     const items = getLineItems();
     items.push({
@@ -5208,7 +5279,7 @@ function bindPurchaseOrders() {
     nameInput.value = "";
     specInput.value = "";
     qtyInput.value = "1";
-    priceInput.value = "";
+    clearMoneyInputs();
     nameInput.focus();
     if (!material && confirm(`"${name}" 품목을 원부자재 카탈로그에 등록할까요?`)) {
       const partnerId = form.querySelector("[name=partnerId]").value;

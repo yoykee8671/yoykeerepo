@@ -1318,6 +1318,10 @@ function migrateDb(db) {
     touch(po, "docType", "purchase_order");
     touch(po, "dueDate", "");
   }
+  // 코드(바코드)는 나중에 생긴 선택 항목이다.
+  for (const material of db.materials || []) {
+    touch(material, "itemCode", "");
+  }
   if (!(db.partners || []).some((p) => p.category === "issuer")) {
     db.partners = db.partners || [];
     db.partners.push(defaultIssuerPartner());
@@ -8638,6 +8642,7 @@ async function routeApi(req, res, url) {
       id: id("material"),
       partnerId: String(body.partnerId || "").trim(),
       itemName,
+      itemCode: String(body.itemCode || "").trim(),
       category: String(body.category || "").trim(),
       orderUnit: String(body.orderUnit || "").trim(),
       basePrice: number(body.basePrice),
@@ -8663,7 +8668,7 @@ async function routeApi(req, res, url) {
       return;
     }
     const before = { ...material };
-    for (const key of ["partnerId", "itemName", "category", "orderUnit", "note"]) {
+    for (const key of ["partnerId", "itemName", "itemCode", "category", "orderUnit", "note"]) {
       if (key in body) material[key] = String(body[key] || "").trim();
     }
     if ("basePrice" in body) material.basePrice = number(body.basePrice);
@@ -8690,14 +8695,14 @@ async function routeApi(req, res, url) {
   }
 
   const MATERIAL_EXPORT_HEADERS = [
-    "ID", "거래처명", "품목명", "카테고리", "발주단위", "기본단가", "리드타임(일)", "메모", "사용상태"
+    "ID", "거래처명", "품목명", "코드(바코드)", "카테고리", "발주단위", "기본공급가", "리드타임(일)", "메모", "사용상태"
   ];
 
   if (pathname === "/api/materials/export" && method === "GET") {
     const blank = url.searchParams.get("mode") === "blank";
     const partnerName = (partnerId) => (db.partners || []).find((p) => p.id === partnerId)?.name || "";
     const rows = blank ? [] : (db.materials || []).map((m) => [
-      m.id, partnerName(m.partnerId), m.itemName, m.category, m.orderUnit,
+      m.id, partnerName(m.partnerId), m.itemName, m.itemCode || "", m.category, m.orderUnit,
       m.basePrice || "", m.leadTimeDays || "", m.note, m.isActive !== false ? "Y" : "N"
     ]);
     const buffer = await buildRowsXlsx("원부자재", MATERIAL_EXPORT_HEADERS, rows);
@@ -8739,9 +8744,12 @@ async function routeApi(req, res, url) {
       const fields = {
         partnerId,
         itemName,
+        itemCode: String(row["코드(바코드)"] || "").trim(),
         category: String(row["카테고리"] || "").trim(),
         orderUnit: String(row["발주단위"] || "").trim(),
-        basePrice: number(row["기본단가"]),
+        // "기본단가"는 이 열의 예전 이름이다 — 그때 받아둔 양식 파일을
+        // 올려도 금액이 0으로 날아가지 않도록 둘 다 받는다.
+        basePrice: number(row["기본공급가"] ?? row["기본단가"]),
         leadTimeDays: number(row["리드타임(일)"]),
         note: String(row["메모"] || "").trim(),
         isActive: String(row["사용상태"] || "").trim().toUpperCase() !== "N"
