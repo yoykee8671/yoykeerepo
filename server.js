@@ -849,16 +849,29 @@ export function buildNpbNamespace() {
     vatIncluded: true, active: true, sortOrder: 100 + i
   }));
 
+  // nameKeywords 의 바깥 배열은 AND, 안쪽 배열은 OR 이다 (npbMatchProduct).
+  // 도톤 두 상품은 동의어를 바깥에 늘어놓는 바람에 "풋클리너"와 "발세정제"와
+  // "Foot Cleaner" 가 한 이름에 전부 들어 있어야 매칭됐고, 그런 이름은 없어서
+  // 모든 파일 줄이 미식별로 빠졌다. 동의어는 한 묶음(OR)이 맞다.
+  const DOTEON_KEYWORDS_VERSION = 2;
   const products = [
     {
       id: "fc", brandId: "doteon", barcode: "8809879544118",
       name: "도톤 포레스트 워터리스 풋클리너 100ml", listPrice: 22000,
-      nameKeywords: ["풋클리너", "발세정제", "Foot Cleaner"], skuCodes: ["BT25DTFC"]
+      nameKeywords: [["풋클리너", "발세정제", "foot cleaner", "footcleaner"]],
+      skuCodes: ["BT25DTFC"],
+      keywordsVersion: DOTEON_KEYWORDS_VERSION
     },
     {
       id: "os", brandId: "doteon", barcode: "8809879544101",
       name: "도톤 포레스트 아웃도어 스프레이 150ml", listPrice: 22000,
-      nameKeywords: ["아웃도어", "스프레이", "해충방지", "Outdoor Spray"], skuCodes: ["BT25OS"]
+      // "스프레이" 한 단어만 들어 있어도 이 브랜드에서는 이 상품뿐이다.
+      nameKeywords: [["아웃도어", "스프레이", "해충방지", "outdoor spray", "outdoorspray"]],
+      // 풋클리너가 스프레이 형태로 불리는 파일이 있으면 두 상품이 같이 잡혀
+      // 사람에게 넘어간다. 그 경우를 막아 아웃도어 스프레이만 남긴다.
+      excludeKeywords: ["풋클리너", "발세정제", "foot cleaner"],
+      skuCodes: ["BT25OS"],
+      keywordsVersion: DOTEON_KEYWORDS_VERSION
     }
   ];
 
@@ -3464,7 +3477,7 @@ function npbKeywordHit(norm, keyword) {
   return list.some((k) => k && norm.includes(npbNormalizeName(k)));
 }
 
-function npbMatchProduct(sourceName, products) {
+export function npbMatchProduct(sourceName, products) {
   const norm = npbNormalizeName(sourceName);
   if (!norm) return null;
   // 후보가 하나로 좁혀질 때만 채택한다 — 맛이나 용량을 못 가르면 임의로

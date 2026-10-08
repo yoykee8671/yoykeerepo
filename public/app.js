@@ -7403,6 +7403,17 @@ function renderNpbUnresolved() {
 // 파싱 결과 검수. 파일이 기준금액을 빼먹고 오는 일이 잦아, 워크시트로 바로
 // 밀어 넣지 않고 여기서 행별로 고친 뒤 [확정/반영] 을 눌러 반영한다.
 // 열 구성은 브랜드가 쓰던 '채널별 판매데이터 정리' 시트와 맞췄다.
+// 할인을 어떻게 읽을지. 사람이 적는 프로모션 할인은 "개당 얼마"나 "몇 %"가
+// 자연스럽고(그래서 수량보다 먼저 적용된다), 판매처 파일이 주는 할인액은
+// 이미 그 줄 전체의 합계다. 둘을 같은 칸에서 구분 없이 쓰면 한쪽이 반드시
+// 틀리므로 행마다 어느 쪽인지 들고 있는다.
+function npbDiscountMode(row) {
+  if (row.discountMode) return row.discountMode;
+  // 파일이 할인액을 준 행은 예전처럼 줄 합계로 본다 — 바꾸면 이미 맞아 있던
+  // 채널의 금액이 조용히 달라진다.
+  return row.money && row.money.discount != null ? "line" : "unit";
+}
+
 function npbReviewMath(row) {
   const qty = Number(row.qty || 0);
   const listTotal = Number(row.listPrice || 0) * qty;
@@ -7411,11 +7422,18 @@ function npbReviewMath(row) {
   const unit = row.unitPrice != null && row.unitPrice !== ""
     ? Number(row.unitPrice)
     : Number(row.listPrice || 0);
-  const discount = Number(row.discountAmount || 0);
+  const entered = Number(row.discountAmount || 0);
+  const mode = npbDiscountMode(row);
+  // 개당 할인은 수량을 곱하기 전에 단가에서 뺀다.
+  const perUnit = mode === "rate" ? Math.round(unit * (entered / 100))
+    : mode === "unit" ? entered
+    : 0;
+  const lineDiscount = mode === "line" ? entered : 0;
+  const discount = mode === "line" ? lineDiscount : perUnit * qty;
   const shipping = Number(row.shippingAmount || 0);
   const sale = row.saleAmount != null && row.saleAmount !== ""
     ? Number(row.saleAmount)
-    : unit * qty - discount + shipping;
+    : Math.max(0, unit - perUnit) * qty - lineDiscount + shipping;
   // 정산금이 확정된 채널(쿠팡)은 공제를 역산한다 — 서버 계산과 같은 규칙이다.
   if (row.settleAmount != null && row.settleAmount !== "") {
     const settle = Number(row.settleAmount);
@@ -7572,6 +7590,7 @@ function renderNpbReview() {
 
   const rows = review.rows.map((row, i) => {
     const m = npbReviewMath(row);
+    const dmode = npbDiscountMode(row);
     const feePct = (Number(row.feeRate || 0) * 100).toFixed(2).replace(/\.?0+$/, "");
     const fromFile = row.money && Object.keys(row.money).length ? "파일" : "";
     return `
@@ -7588,8 +7607,15 @@ function renderNpbReview() {
             : ""}</td>
         <td><input class="num" type="number" data-npb-rv="${i}" data-npb-rf="qty"
           value="${h(row.qty ?? 0)}"></td>
-        <td><input class="num" type="number" data-npb-rv="${i}" data-npb-rf="discountAmount"
-          value="${h(row.discountAmount ?? 0)}"></td>
+        <td><div class="npb-discount-cell">
+          <input class="num" type="number" data-npb-rv="${i}" data-npb-rf="discountAmount"
+            value="${h(row.discountAmount ?? 0)}">
+          <select data-npb-rv="${i}" data-npb-rf="discountMode" title="할인을 읽는 기준">
+            <option value="unit" ${dmode === "unit" ? "selected" : ""}>원</option>
+            <option value="rate" ${dmode === "rate" ? "selected" : ""}>%</option>
+            <option value="line" ${dmode === "line" ? "selected" : ""}>원(줄)</option>
+          </select>
+        </div></td>
         <td><input class="num" type="number" data-npb-rv="${i}" data-npb-rf="shippingAmount"
           value="${h(row.shippingAmount ?? 0)}"></td>
         <td class="num">${money.format(m.sale)}</td>
@@ -7614,12 +7640,15 @@ function renderNpbReview() {
           <b>기준가</b>는 그 판매처에서 실제로 팔린 단가입니다 — 확정하면 기억해 두었다가
           다음 달 같은 코드에 자동으로 채웁니다. 파일이 다른 단가를 말하면 빨간 글씨로 알려드립니다.
           기준가·수량·할인·수수료율을 여기서 고칠 수 있습니다. 고치면 그 행은 <b>파일 금액 대신
-          계산식</b>을 씁니다. <b>[확정/반영]</b> 을 눌러야 워크시트와 정산서에 들어갑니다.
+          계산식</b>을 씁니다. <b>[확정/반영]</b> 을 눌러야 워크시트와 정산서에 들어갑니다.<br>
+          <b>할인</b>은 기본이 <b>개당</b>입니다 — <code>(기준가 − 할인) × 수량 + 배송비</code> 로 계산합니다.
+          <b>%</b> 를 고르면 기준가의 몇 %인지로 읽고, <b>원(줄)</b> 은 그 줄 전체에서 한 번만 뺍니다
+          (판매처 파일이 할인액을 합계로 주는 경우).
         </p>
       </div>
       <div class="table-wrap" style="max-height:420px"><table class="npb-lines-table">
         <thead><tr>
-          <th>순번</th><th>품목</th><th>정가</th><th>기준가</th><th>수량</th><th>할인(원)</th>
+          <th>순번</th><th>품목</th><th>정가</th><th>기준가</th><th>수량</th><th>할인</th>
           <th>배송비</th><th>최종결제</th><th>수수료(%)</th><th>수수료(원)</th><th>정산</th><th></th>
         </tr></thead>
         <tbody>${rows}</tbody>
@@ -8402,13 +8431,17 @@ function bindNpbUpload() {
       const field = input.getAttribute("data-npb-rf");
       const row = n.review?.rows?.[i];
       if (!row) return;
-      const value = Number(input.value || 0);
-      row[field] = field === "feeRate" ? value / 100 : value;
+      if (field === "discountMode") {
+        row.discountMode = input.value;
+      } else {
+        const value = Number(input.value || 0);
+        row[field] = field === "feeRate" ? value / 100 : value;
+      }
       // 손대는 순간 그 행은 파일 금액 대신 계산식을 쓴다. 파일 추출이 기준금액을
       // 빠뜨리고 오는 경우가 있어, 고친 값이 이기지 않으면 고칠 방법이 없다.
       const manual = new Set(row.manualFields || []);
       manual.add("listPrice");
-      if (["unitPrice", "qty", "discountAmount", "shippingAmount"].includes(field)) {
+      if (["unitPrice", "qty", "discountAmount", "discountMode", "shippingAmount"].includes(field)) {
         delete row.saleAmount;
         delete row.settleAmount;
         manual.add("saleAmount");
@@ -8436,10 +8469,18 @@ function bindNpbUpload() {
   app.querySelector("[data-npb-confirm]")?.addEventListener("click", async () => {
     const review = n.review;
     if (!review) return;
+    // 서버의 npbComputeLine 은 할인을 빼지 않는다(단가 x 수량). 검수표에서 본
+    // 금액을 그대로 실어 보내지 않으면, 화면에 뜬 최종결제와 정산서에 들어가는
+    // 매출이 달라진다 -- 사람이 적은 프로모션 할인이 통째로 무시된다.
+    const rows = review.rows.map((row) => {
+      if (row.dropped) return row;
+      const m = npbReviewMath(row);
+      return { ...row, saleAmount: m.sale, discountAmount: m.discount, discountMode: "line" };
+    });
     try {
       const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/confirm`, {
         method: "POST",
-        body: { channel: review.channel, rows: review.rows }
+        body: { channel: review.channel, rows }
       });
       n.review = null;
       await npbLoadDetail(n.currentKey);

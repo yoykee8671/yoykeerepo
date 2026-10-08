@@ -1826,13 +1826,28 @@ a.button:hover {
 .npb-lines-table th:nth-child(3), .npb-lines-table td:nth-child(3) { width: 112px; min-width: 112px; }
 .npb-lines-table th:nth-child(4), .npb-lines-table td:nth-child(4) { width: 124px; min-width: 124px; }
 .npb-lines-table th:nth-child(5), .npb-lines-table td:nth-child(5) { width: 96px; min-width: 96px; }
-.npb-lines-table th:nth-child(6), .npb-lines-table td:nth-child(6) { width: 124px; min-width: 124px; }
+.npb-lines-table th:nth-child(6), .npb-lines-table td:nth-child(6) { width: 164px; min-width: 164px; }
 .npb-lines-table th:nth-child(7), .npb-lines-table td:nth-child(7) { width: 116px; min-width: 116px; }
 .npb-lines-table th:nth-child(8), .npb-lines-table td:nth-child(8) { width: 124px; min-width: 124px; }
 .npb-lines-table th:nth-child(9), .npb-lines-table td:nth-child(9) { width: 104px; min-width: 104px; }
 .npb-lines-table th:nth-child(10), .npb-lines-table td:nth-child(10) { width: 112px; min-width: 112px; }
 .npb-lines-table th:nth-child(11), .npb-lines-table td:nth-child(11) { width: 120px; min-width: 120px; }
 .npb-lines-table th:nth-child(12), .npb-lines-table td:nth-child(12) { width: 84px; min-width: 84px; }
+
+/* 할인 칸: 금액과 그 금액을 읽는 기준(원/%/줄)을 한 줄에 둔다. */
+.npb-discount-cell {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.npb-discount-cell input { flex: 1 1 auto; min-width: 0; }
+.npb-discount-cell select {
+  flex: 0 0 auto;
+  width: 62px;
+  padding: 4px 2px;
+  font-size: 11px;
+}
 
 /* 숫자 입력칸이 칸 폭을 넘지 않게. 화살표는 눌러 쓸 일이 없어 숨긴다 --
    그만큼 숫자가 보일 자리가 늘어난다. */
