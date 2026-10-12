@@ -224,6 +224,64 @@ def data_rows(ws):
     return rows
 
 
+# 한글 CSV 는 인코딩이 제각각이다. 네이버·카페24 는 UTF-8, 재고관리나 택배사
+# 관리자는 아직 CP949 로 내려 준다. 틀린 인코딩으로 열면 UnicodeDecodeError 가
+# 나면서 파일을 통째로 못 읽는다 -- 차례로 시도한다.
+CSV_ENCODINGS = ("utf-8-sig", "cp949", "euc-kr", "utf-16")
+
+
+def read_csv_rows(path):
+    import csv
+    last = None
+    for encoding in CSV_ENCODINGS:
+        try:
+            with open(path, newline="", encoding=encoding) as fh:
+                return [tuple(row) for row in csv.reader(fh)]
+        except UnicodeDecodeError as exc:
+            last = exc
+    raise ValueError(
+        "CSV 인코딩을 알 수 없습니다 (%s 를 모두 시도): %s"
+        % (", ".join(CSV_ENCODINGS), last)
+    )
+
+
+def xls_to_xlsx(path):
+    """구형 .xls 를 LibreOffice 로 .xlsx 로 바꿔 그 경로를 돌려준다.
+
+    서버 이미지에 LibreOffice 가 이미 들어 있다(정산서 PDF 변환용). 파이썬
+    쪽에 xlrd 를 더 얹는 대신 그걸 쓴다.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        raise ValueError(
+            "구형 .xls 형식은 이 서버에서 변환할 수 없습니다. "
+            ".xlsx 또는 .csv로 저장 후 올려주세요."
+        )
+    outdir = tempfile.mkdtemp(prefix="npb-xls-")
+    try:
+        subprocess.run(
+            [soffice, "--headless", "--norestore", "--nolockcheck",
+             "-env:UserInstallation=file://" + os.path.join(outdir, "profile"),
+             "--convert-to", "xlsx", "--outdir", outdir, path],
+            check=True, capture_output=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        raise ValueError("구형 .xls 변환이 시간을 넘겼습니다. .xlsx 로 저장해 올려주세요.")
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or b"").decode("utf-8", "replace").strip().split("\n")[-1]
+        raise ValueError("구형 .xls 를 변환하지 못했습니다: %s" % (detail or "변환 실패"))
+    converted = os.path.join(
+        outdir, os.path.splitext(os.path.basename(path))[0] + ".xlsx"
+    )
+    if not os.path.exists(converted):
+        raise ValueError("구형 .xls 변환 결과를 찾을 수 없습니다.")
+    return converted
+
+
 def load_sheets(path):
     """Read every sheet as (name, rows). Supports .xlsx/.xlsm via openpyxl and
     .csv via the csv module (many channel exports are CSV). Raises on unreadable
@@ -233,13 +291,11 @@ def load_sheets(path):
     붙어 오거나, 원본 다운로드가 두 번째 시트에 있는 경우가 흔하다."""
     ext = os.path.splitext(path)[1].lower()
     if ext in (".csv", ".txt"):
-        import csv
-        with open(path, newline="", encoding="utf-8-sig") as fh:
-            return [("csv", [tuple(row) for row in csv.reader(fh)])]
+        return [("csv", read_csv_rows(path))]
     if ext == ".xls":
-        raise ValueError(
-            "구형 .xls 형식은 지원하지 않습니다. .xlsx 또는 .csv로 저장 후 올려주세요."
-        )
+        # 택배사·물류사 관리자에서 받는 파일은 아직 구형 .xls 로 온다. 쓰는
+        # 사람이 매달 다시 저장하게 할 일은 아니니, 여기서 변환해 읽는다.
+        path = xls_to_xlsx(path)
     wb = load_workbook(path, data_only=True, read_only=True)
     sheets = []
     for ws in wb.worksheets:
@@ -262,6 +318,42 @@ def load_rows(path):
 
 # --- per-channel parsers ----------------------------------------------------
 
+# --- 못 알아본 줄 -----------------------------------------------------------
+# identify_product 는 도톤 두 품목만 안다. 다른 브랜드의 품목은 전부 여기로
+# 온다. 버리면 화면의 상품명 매칭이 할 일이 없어지고 그 달 매출이 통째로 0 이
+# 된다 (픽키 8월이 그랬다: cafe24·쿠팡·몽슈슈 전부 0줄). 넘겨 주면 검수
+# 화면에서 한 번 지정하고, 그 뒤로는 저장된 별칭이 자동으로 처리한다.
+#
+# 별칭의 열쇠는 raw.code 와 raw.sourceName 이다 (server.js npbAliasKeys).
+# 같은 상품명에 옵션만 다른 묶음(수량=1개/5개)은 이름이 같으면 한 규칙으로
+# 뭉개지므로, 옵션이 있으면 이름에 붙여 각각 따로 기억하게 한다.
+def hand_off(agg, unmatched, *, name, qty, orders=1, code=None, option=None, extra=None):
+    label = norm(name)
+    opt = norm(option)
+    if opt:
+        label = ("%s / %s" % (label, opt)).strip(" /")
+    raw = {"sourceName": label}
+    if norm(code):
+        raw["code"] = norm(code)
+    if opt:
+        raw["option"] = opt
+    if extra:
+        raw.update({k: v for k, v in extra.items() if v is not None})
+    agg.add(None, orders=orders, ea=qty, ea_per_unit=1, raw=raw)
+    unmatched.append(label or norm(code))
+
+
+def note_unmatched(channel, warnings, names):
+    if not names:
+        return
+    uniq = list(dict.fromkeys(n for n in names if n))
+    head = ", ".join(uniq[:5]) + (" …" if len(uniq) > 5 else "")
+    warnings.append(
+        "[%s] 상품명 매칭이 필요한 품목 %d종 (%d줄). 검수 화면에서 한 번 지정하면"
+        " 다음 달부터 자동입니다: %s" % (channel, len(uniq), len(names), head)
+    )
+
+
 def parse_cafe24(rows, channel, warnings, is_gongu=False):
     """cafe24 family (cafe24, gongu, b2b, tailit): J=상품명, K=옵션, L=수량."""
     agg = Aggregator()
@@ -277,6 +369,7 @@ def parse_cafe24(rows, channel, warnings, is_gongu=False):
     )
     if ci_name is None or ci_qty is None:
         return agg.lines()
+    unmatched = []
     for r in rows[1:]:
         if r is None or all(x is None for x in r):
             continue
@@ -285,11 +378,12 @@ def parse_cafe24(rows, channel, warnings, is_gongu=False):
             continue
         name = r[ci_name] if ci_name < len(r) else None
         qty = to_int(r[ci_qty]) if ci_qty < len(r) else 0
+        option = r[ci_opt] if (ci_opt is not None and ci_opt < len(r)) else None
         product = identify_product(name=name)
         if product is None:
-            warnings.append(
-                "[%s] unrecognized product (qty=%d): %r" % (channel, qty, norm(name))
-            )
+            # 옵션(수량=5개)이 묶음을 가른다. 이름만으로 기억하면 1개와 5개가
+            # 한 규칙으로 뭉개진다.
+            hand_off(agg, unmatched, name=name, qty=qty, orders=1, option=option)
             continue
         if is_gongu:
             opt = norm(r[ci_opt]) if (ci_opt is not None and ci_opt < len(r)) else ""
@@ -315,12 +409,14 @@ def parse_cafe24(rows, channel, warnings, is_gongu=False):
             )
         else:
             agg.add(product, orders=1, ea=qty, ea_per_unit=1)
+    note_unmatched(channel, warnings, unmatched)
     return agg.lines()
 
 
 def parse_mongshu(rows, channel, warnings):
     """몽슈슈 재고표: product col B, code col C, qty from 판매 col H."""
     agg = Aggregator()
+    unmatched = []
     B, C, H = 1, 2, 7  # 제품, 상품코드, 판매
     for r in rows:
         if r is None or len(r) <= H:
@@ -334,25 +430,88 @@ def parse_mongshu(rows, channel, warnings):
         qty = to_int(r[H])
         product = identify_product(name=name, code=code)
         if product is None:
-            warnings.append(
-                "[%s] non-doteon / unrecognized product (판매=%d): %r / %r"
-                % (channel, qty, norm(name), norm(code))
-            )
+            # 몽슈슈 표는 제품명을 영문('Pill Bites')으로 적고 상품코드가
+            # 안정적이다 — 코드로 기억하면 이름이 바뀌어도 따라온다.
+            hand_off(agg, unmatched, name=name, code=code, qty=qty, orders=1)
             continue
         agg.add(product, orders=1, ea=qty, ea_per_unit=1)
+    note_unmatched(channel, warnings, unmatched)
+    return agg.lines()
+
+
+def parse_smartstore_payout(rows, idx, channel, warnings):
+    """네이버 '결제정산 - 일별상세' 양식.
+
+    한 줄이 한 상품주문이고 **수량 열이 없다** (한 줄 = 1건). '구분' 이
+    상품주문과 배송비를 가르고, 금액은 정산기준금액(A) 과 수수료 세 칸이다.
+    수수료는 파일에 음수로 적혀 온다.
+
+    이 양식을 못 읽어 smartstore 가 매달 0줄로 올라왔다 — '수량' 열을 찾다
+    실패하고 표를 통째로 버렸다.
+    """
+    agg = Aggregator()
+    ci_gubun = idx.get("구분")
+    ci_name = idx.get("상품명")
+    ci_sale = idx.get("정산기준금액(A)")
+    fee_cols = [idx[k] for k in idx if k.startswith(("Npay 수수료", "매출연동 수수료", "무이자할부 수수료"))]
+    if ci_sale is None:
+        warnings.append("[%s] 정산기준금액(A) 열을 찾지 못했습니다" % channel)
+        return agg.lines()
+
+    unmatched = []
+    kinds = {}
+    for r in rows[1:]:
+        if r is None or all(x is None for x in r):
+            continue
+        gubun = norm(r[ci_gubun]) if (ci_gubun is not None and ci_gubun < len(r)) else ""
+        name = norm(r[ci_name]) if (ci_name is not None and ci_name < len(r)) else ""
+        if not gubun and not name:
+            continue
+        kinds[gubun or "(구분없음)"] = kinds.get(gubun or "(구분없음)", 0) + 1
+        sale = (to_num(r[ci_sale]) or 0) if ci_sale < len(r) else 0
+        fee = -sum((to_num(r[c]) or 0) for c in fee_cols if c < len(r))
+        money = {"sale": sale, "fee": fee}
+        if gubun == "배송비":
+            # 배송비는 상품이 아니다. 상품이 아니라고 버리면 배송비 매출이
+            # 통째로 빠진다 (8월 213,000원). 서버가 부대비용으로 알아보는
+            # 이름으로 넘긴다.
+            money["shipping"] = sale
+            agg.add(None, orders=1, ea=0, ea_per_unit=1,
+                    raw={"sourceName": "배송비", "money": money})
+            continue
+        product = identify_product(name=name)
+        if product is None:
+            hand_off(agg, unmatched, name=name, qty=1, orders=1,
+                     extra={"money": money})
+            continue
+        agg.add(product, orders=1, ea=1, ea_per_unit=1, raw={"money": money})
+
+    if kinds:
+        warnings.append(
+            "[%s] 결제정산 양식으로 읽었습니다 (수량 열이 없어 한 줄을 1건으로 셉니다): %s"
+            % (channel, ", ".join("%s %d줄" % (k, v) for k, v in kinds.items()))
+        )
+    note_unmatched(channel, warnings, unmatched)
     return agg.lines()
 
 
 def parse_smartstore(rows, channel, warnings):
-    """Naver smartstore: 상품명 col O, 수량 col R, 판매채널 col D."""
+    """네이버 스마트스토어. 양식이 두 가지 온다.
+
+      1. 결제정산 - 일별상세 : 구분/상품명/정산기준금액(A)/수수료 — 수량 없음
+      2. 주문 내역          : 상품명 + 수량
+    """
     agg = Aggregator()
     if not rows:
         warnings.append("[%s] empty sheet" % channel)
         return agg.lines()
     idx = header_index(rows[0])
+    if "정산기준금액(A)" in idx or any(k.startswith("정산기준금액") for k in idx):
+        return parse_smartstore_payout(rows, idx, channel, warnings)
     ci_name, ci_qty = resolve_cols(idx, ["상품명", "수량"], warnings, channel)
     if ci_name is None or ci_qty is None:
         return agg.lines()
+    unmatched = []
     for r in rows[1:]:
         if r is None or all(x is None for x in r):
             continue
@@ -360,11 +519,10 @@ def parse_smartstore(rows, channel, warnings):
         qty = to_int(r[ci_qty]) if ci_qty < len(r) else 0
         product = identify_product(name=name)
         if product is None:
-            warnings.append(
-                "[%s] unrecognized product (qty=%d): %r" % (channel, qty, norm(name))
-            )
+            hand_off(agg, unmatched, name=name, qty=qty, orders=1)
             continue
         agg.add(product, orders=1, ea=qty, ea_per_unit=1)
+    note_unmatched(channel, warnings, unmatched)
     return agg.lines()
 
 
@@ -380,6 +538,7 @@ def parse_kurly(rows, channel, warnings):
     )
     if ci_name is None or ci_qty is None:
         return agg.lines()
+    unmatched = []
     for r in rows[1:]:
         if r is None or all(x is None for x in r):
             continue
@@ -388,11 +547,10 @@ def parse_kurly(rows, channel, warnings):
         qty = to_int(r[ci_qty]) if ci_qty < len(r) else 0
         product = identify_product(name=name) or identify_product(name=opt)
         if product is None:
-            warnings.append(
-                "[%s] unrecognized product (qty=%d): %r" % (channel, qty, norm(name))
-            )
+            hand_off(agg, unmatched, name=name, qty=qty, orders=1, option=opt)
             continue
         agg.add(product, orders=1, ea=qty, ea_per_unit=1)
+    note_unmatched(channel, warnings, unmatched)
     return agg.lines()
 
 
@@ -406,9 +564,15 @@ def parse_coupang(rows, channel, warnings):
     ci_gubun, ci_sku, ci_qty = resolve_cols(
         idx, ["구분", "SKU명", "수량"], warnings, channel
     )
+    # 쿠팡은 묶음(1개/3개/5개)을 SKU명이 아니라 SKU번호로 가른다 — 이름은 전부
+    # '픽키도기클럽 필바이츠 45g (5개입)' 로 같다. 번호를 넘겨야 한 번 매칭한
+    # 규칙이 묶음별로 남는다.
+    ci_skuno = idx.get("SKU번호")
+    ci_total = idx.get("총단가")
     if ci_sku is None or ci_qty is None:
         return agg.lines()
     distinct_skus = []
+    unmatched = []
     for r in rows[1:]:
         if r is None or all(x is None for x in r):
             continue
@@ -417,11 +581,13 @@ def parse_coupang(rows, channel, warnings):
                 continue
         sku = norm(r[ci_sku]) if ci_sku < len(r) else ""
         qty = to_int(r[ci_qty]) if ci_qty < len(r) else 0
+        skuno = norm(r[ci_skuno]) if (ci_skuno is not None and ci_skuno < len(r)) else ""
         product = identify_product(name=sku)
         if product is None:
-            warnings.append(
-                "[%s] unrecognized SKU (수량=%d): %r" % (channel, qty, sku)
-            )
+            # 총단가는 이름과 달리 그 줄의 합계(VAT 포함 공급가)다.
+            total = (to_num(r[ci_total]) or 0) if (ci_total is not None and ci_total < len(r)) else None
+            hand_off(agg, unmatched, name=sku, code=skuno, qty=qty, orders=qty,
+                     extra={"money": {"settle": total}} if total else None)
             continue
         if sku not in distinct_skus:
             distinct_skus.append(sku)
@@ -442,6 +608,7 @@ def parse_coupang(rows, channel, warnings):
             "[%s] distinct SKU names (verify bundle composition): %s"
             % (channel, "; ".join(distinct_skus))
         )
+    note_unmatched(channel, warnings, unmatched)
     return agg.lines()
 
 
@@ -460,6 +627,7 @@ def parse_emart(rows, channel, warnings, meta):
     meta["vatIncluded"] = False
     meta["basis"] = "납품금액"
     warnings.append("[%s] VAT 별도 (unit price excludes VAT)" % channel)
+    unmatched = []
     for r in rows[1:]:
         if r is None or all(x is None for x in r):
             continue
@@ -468,12 +636,12 @@ def parse_emart(rows, channel, warnings, meta):
         qty = to_int(r[ci_qty]) if ci_qty < len(r) else 0
         amt = to_int(r[ci_amt]) if (ci_amt is not None and ci_amt < len(r)) else 0
         product = identify_product(name=name, barcode=barcode)
-        if product is None:
-            warnings.append(
-                "[%s] unrecognized product (납품량=%d): %r" % (channel, qty, norm(name))
-            )
-            continue
         unit = round(amt / qty) if qty else None
+        if product is None:
+            hand_off(agg, unmatched, name=name, code=barcode, qty=qty, orders=1,
+                     extra={"vatIncluded": False, "basis": "납품금액",
+                            "unitPrice": unit, "barcode": norm(barcode)})
+            continue
         agg.add(
             product,
             orders=1,
@@ -481,6 +649,7 @@ def parse_emart(rows, channel, warnings, meta):
             ea_per_unit=1,
             raw={"vatIncluded": False, "basis": "납품금액", "unitPrice": unit},
         )
+    note_unmatched(channel, warnings, unmatched)
     return agg.lines()
 
 
@@ -496,6 +665,7 @@ def parse_pharmasquare(rows, channel, warnings):
     )
     if ci_qty is None or ci_code is None:
         return agg.lines()
+    unmatched = []
     for r in rows[1:]:
         if r is None or all(x is None for x in r):
             continue
@@ -507,13 +677,13 @@ def parse_pharmasquare(rows, channel, warnings):
         qty = to_int(r[ci_qty]) if ci_qty < len(r) else 0
         product = identify_product(barcode=barcode, name=name)
         if product is None:
-            warnings.append(
-                "[%s] unrecognized product (판매수량=%d): %r" % (channel, qty, norm(name))
-            )
+            hand_off(agg, unmatched, name=name, code=barcode, qty=qty, orders=1,
+                     extra={"feeRate": 0.45, "barcode": norm(barcode)})
             continue
         agg.add(
             product, orders=1, ea=qty, ea_per_unit=1, raw={"feeRate": 0.45}
         )
+    note_unmatched(channel, warnings, unmatched)
     return agg.lines()
 
 
@@ -529,6 +699,7 @@ def parse_terrymarket(rows, channel, warnings):
     )
     if ci_item is None or ci_qty is None:
         return agg.lines()
+    unmatched = []
     for r in rows[1:]:
         if r is None or all(x is None for x in r):
             continue
@@ -544,9 +715,8 @@ def parse_terrymarket(rows, channel, warnings):
         )
         product = identify_product(name=item)
         if product is None:
-            warnings.append(
-                "[%s] unrecognized 품목 (판매수량=%d): %r" % (channel, qty, item)
-            )
+            hand_off(agg, unmatched, name=item, qty=qty, orders=1,
+                     extra={"marketPrice": price, "eventName": event})
             continue
         agg.add(
             product,
@@ -555,6 +725,7 @@ def parse_terrymarket(rows, channel, warnings):
             ea_per_unit=1,
             raw={"marketPrice": price, "eventName": event},
         )
+    note_unmatched(channel, warnings, unmatched)
     return agg.lines()
 
 
