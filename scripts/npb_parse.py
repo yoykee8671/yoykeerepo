@@ -33,6 +33,10 @@ import unicodedata
 
 from openpyxl import load_workbook
 
+# 파일 읽기(구형 .xls 변환 · CSV 인코딩)는 재고 쪽 파서와 함께 쓴다.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sheet_io import read_csv_rows, workbook_path  # noqa: E402
+
 
 # --- product identity -------------------------------------------------------
 
@@ -227,64 +231,6 @@ def data_rows(ws):
     return rows
 
 
-# 한글 CSV 는 인코딩이 제각각이다. 네이버·카페24 는 UTF-8, 재고관리나 택배사
-# 관리자는 아직 CP949 로 내려 준다. 틀린 인코딩으로 열면 UnicodeDecodeError 가
-# 나면서 파일을 통째로 못 읽는다 -- 차례로 시도한다.
-CSV_ENCODINGS = ("utf-8-sig", "cp949", "euc-kr", "utf-16")
-
-
-def read_csv_rows(path):
-    import csv
-    last = None
-    for encoding in CSV_ENCODINGS:
-        try:
-            with open(path, newline="", encoding=encoding) as fh:
-                return [tuple(row) for row in csv.reader(fh)]
-        except UnicodeDecodeError as exc:
-            last = exc
-    raise ValueError(
-        "CSV 인코딩을 알 수 없습니다 (%s 를 모두 시도): %s"
-        % (", ".join(CSV_ENCODINGS), last)
-    )
-
-
-def xls_to_xlsx(path):
-    """구형 .xls 를 LibreOffice 로 .xlsx 로 바꿔 그 경로를 돌려준다.
-
-    서버 이미지에 LibreOffice 가 이미 들어 있다(정산서 PDF 변환용). 파이썬
-    쪽에 xlrd 를 더 얹는 대신 그걸 쓴다.
-    """
-    import shutil
-    import subprocess
-    import tempfile
-
-    soffice = shutil.which("soffice") or shutil.which("libreoffice")
-    if not soffice:
-        raise ValueError(
-            "구형 .xls 형식은 이 서버에서 변환할 수 없습니다. "
-            ".xlsx 또는 .csv로 저장 후 올려주세요."
-        )
-    outdir = tempfile.mkdtemp(prefix="npb-xls-")
-    try:
-        subprocess.run(
-            [soffice, "--headless", "--norestore", "--nolockcheck",
-             "-env:UserInstallation=file://" + os.path.join(outdir, "profile"),
-             "--convert-to", "xlsx", "--outdir", outdir, path],
-            check=True, capture_output=True, timeout=120,
-        )
-    except subprocess.TimeoutExpired:
-        raise ValueError("구형 .xls 변환이 시간을 넘겼습니다. .xlsx 로 저장해 올려주세요.")
-    except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or b"").decode("utf-8", "replace").strip().split("\n")[-1]
-        raise ValueError("구형 .xls 를 변환하지 못했습니다: %s" % (detail or "변환 실패"))
-    converted = os.path.join(
-        outdir, os.path.splitext(os.path.basename(path))[0] + ".xlsx"
-    )
-    if not os.path.exists(converted):
-        raise ValueError("구형 .xls 변환 결과를 찾을 수 없습니다.")
-    return converted
-
-
 def load_sheets(path):
     """Read every sheet as (name, rows). Supports .xlsx/.xlsm via openpyxl and
     .csv via the csv module (many channel exports are CSV). Raises on unreadable
@@ -295,11 +241,9 @@ def load_sheets(path):
     ext = os.path.splitext(path)[1].lower()
     if ext in (".csv", ".txt"):
         return [("csv", read_csv_rows(path))]
-    if ext == ".xls":
-        # 택배사·물류사 관리자에서 받는 파일은 아직 구형 .xls 로 온다. 쓰는
-        # 사람이 매달 다시 저장하게 할 일은 아니니, 여기서 변환해 읽는다.
-        path = xls_to_xlsx(path)
-    wb = load_workbook(path, data_only=True, read_only=True)
+    # 택배사·물류사 관리자에서 받는 파일은 아직 구형 .xls 로 온다. 쓰는
+    # 사람이 매달 다시 저장하게 할 일은 아니니, 여기서 변환해 읽는다.
+    wb = load_workbook(workbook_path(path), data_only=True, read_only=True)
     sheets = []
     for ws in wb.worksheets:
         # 거래처 파일은 <dimension> 이 틀리게 적혀 오는 경우가 흔하다. read_only

@@ -2002,9 +2002,16 @@ function parseCafe24Csv(base64) {
   });
 }
 
-async function parseBankXlsxUpload(base64) {
+// 업로드 파일을 임시로 떨어뜨려 xlsx_to_json.py 로 읽는다.
+//
+// 확장자를 그대로 넘겨야 한다. 전에는 무조건 .xlsx 로 썼기 때문에 택배사가
+// 주는 구형 .xls 와 CSV 가 openpyxl 에서 바로 터졌다 — 재고 입출고 내역이
+// 매달 파싱 오류였던 이유다.
+async function parseBankXlsxUpload(base64, fileName = "") {
   const buf = Buffer.from(base64, "base64");
-  const tmpPath = path.join(os.tmpdir(), `wooofpay-bank-${crypto.randomBytes(8).toString("hex")}.xlsx`);
+  const given = path.extname(String(fileName || "")).toLowerCase();
+  const ext = [".xlsx", ".xlsm", ".xls", ".csv", ".txt"].includes(given) ? given : ".xlsx";
+  const tmpPath = path.join(os.tmpdir(), `wooofpay-bank-${crypto.randomBytes(8).toString("hex")}${ext}`);
   try {
     await writeFile(tmpPath, buf);
     const { stdout } = await execFileAsync("python3", [XLSX_PARSE_SCRIPT, "--input", tmpPath], {
@@ -3178,11 +3185,11 @@ export function npbInventoryFromLogistics(rows, products) {
       if (barcode && p.barcode && barcode === String(p.barcode)) return p.id;
       if (code && (p.skuCodes || []).some((sku) => code.startsWith(String(sku).toUpperCase()))) return p.id;
     }
-    // 바코드·코드가 비면 이름으로 찾는다. 여러 상품에 걸리면 판단하지 않는다.
-    const hits = products.filter((p) =>
-      (p.nameKeywords || []).some((k) => name.includes(k))
-    );
-    return hits.length === 1 ? hits[0].id : "";
+    // 바코드·코드가 비면 이름으로 찾는다. 판매내역과 같은 매칭기를 쓴다 —
+    // 여기서만 단순 비교(`name.includes(k)`)를 하고 있었는데, 픽키처럼
+    // 키워드가 중첩 배열(AND/OR)인 브랜드는 한 건도 못 잡았고 제외 키워드도
+    // 안 봐서 45g 출고가 180g 으로 붙을 수 있었다.
+    return npbMatchProduct(name, products)?.id || "";
   };
 
   const totals = new Map();
@@ -8163,7 +8170,7 @@ async function routeApi(req, res, url) {
           // 원본 보관이 안 된다고 정산을 막을 이유는 없다.
           let rawRows = [];
           try {
-            rawRows = await parseBankXlsxUpload(body.fileBase64);
+            rawRows = await parseBankXlsxUpload(body.fileBase64, body.fileName);
           } catch {
             rawRows = [];
           }
@@ -8205,7 +8212,7 @@ async function routeApi(req, res, url) {
             rollup: computed.rollup
           });
         } else {
-          const rows = await parseBankXlsxUpload(body.fileBase64);
+          const rows = await parseBankXlsxUpload(body.fileBase64, body.fileName);
           settlement.uploads.logistics = {
             kind,
             fileName: body.fileName || "",
@@ -8607,7 +8614,7 @@ async function routeApi(req, res, url) {
       if (!shipType) { sendJson(res, 400, { error: "출고 유형을 지정해 주세요." }); return; }
       if (!body.fileBase64) { sendJson(res, 400, { error: "업로드할 파일이 없습니다." }); return; }
       try {
-        const rows = await parseBankXlsxUpload(body.fileBase64);
+        const rows = await parseBankXlsxUpload(body.fileBase64, body.fileName);
         const counted = npbCountShipments(rows);
         if (!settlement.shipFiles || typeof settlement.shipFiles !== "object") settlement.shipFiles = {};
         settlement.shipFiles[shipType] = {
