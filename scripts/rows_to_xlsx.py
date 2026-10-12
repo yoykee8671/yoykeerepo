@@ -7,7 +7,8 @@ Spec JSON:
 {
   "sheetName": "거래처",
   "headers": ["ID", "거래처명", ...],
-  "rows": [["partner_abc123", "동광섬유", ...], ...]
+  "rows": [["partner_abc123", "동광섬유", ...], ...],
+  "notes": ["작성방법 시트에 들어갈 줄", ...]   // 선택
 }
 
 The ID column (always first) is how a re-uploaded row is matched back to
@@ -69,6 +70,17 @@ def main():
     wb = Workbook()
     ws = wb.active
     build(ws, spec)
+    # 샘플 양식용 안내. 머리글 행을 1행에 그대로 둬야 다시 올렸을 때 읽히므로,
+    # 설명은 별도 시트에 적는다.
+    notes = spec.get("notes") or []
+    if notes:
+        note_ws = wb.create_sheet("작성방법")
+        note_ws.column_dimensions["A"].width = 100
+        for ri, line in enumerate(notes, start=1):
+            cell = note_ws.cell(row=ri, column=1, value=line)
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            if ri == 1:
+                cell.font = HEADER_FONT
     wb.save(args.output)
     print(json.dumps({"ok": True, "rowCount": len(spec.get("rows", []))}))
 

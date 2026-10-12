@@ -161,7 +161,10 @@ class Aggregator:
         # 미식별 라인은 원본 이름별로 모은다 — 서버가 나중에 매칭한다.
         if product is None:
             tier = (raw or {}).get("sourceName") or tier
-        key = (product, tier)
+        # 상품코드가 다르면 다른 상품이다. 쿠팡은 묶음(1개·3개·5개)의 SKU명이
+        # 모두 같고 SKU번호만 다르다 — 이름으로만 모으면 세 묶음이 한 줄로
+        # 뭉개진다. 이름(sourceName)은 그대로 둔다: 별칭의 열쇠이기 때문이다.
+        key = (product, tier, norm((raw or {}).get("code")))
         line = self._lines.get(key)
         if line is None:
             line = {
@@ -318,6 +321,178 @@ def load_rows(path):
 
 # --- per-channel parsers ----------------------------------------------------
 
+# --- 채널별 양식 ------------------------------------------------------------
+# 파서가 찾는 열 이름을 여기 한 곳에 모은다. 아래 parse_* 가 이 표를 읽고,
+# 샘플 양식 다운로드(--describe)도 같은 표에서 나온다 -- 두 쪽이 갈라져서
+# "양식대로 올렸는데 파싱이 안 된다" 가 되는 일을 막는다.
+#
+# required 는 없으면 표를 못 읽는 열, optional 은 있으면 쓰는 열이다.
+CHANNEL_FORMS = {
+    "cafe24": {
+        "label": "카페24 (자사몰 · B2B · 대리점)",
+        "cols": {"name": "주문상품명(기본)", "option": "상품옵션(기본)",
+                 "qty": "수량", "refund": "환불완료일"},
+        "required": ["name", "qty"],
+        "sheet": "주문내역",
+        "note": "카페24 관리자 > 주문 > 주문조회 > 엑셀 내려받기. "
+                "환불완료일이 적힌 줄은 매출에서 빠집니다.",
+        "sample": [
+            {"name": "픽키도기클럽 필바이츠 45g (5개입)", "option": "수량=5개",
+             "qty": 1, "refund": ""},
+            {"name": "픽키도기클럽 필바이츠 비건 - 고구마 피넛버터 45g (5개입)",
+             "option": "수량=1개", "qty": 2, "refund": ""},
+        ],
+    },
+    "gongu": {
+        "label": "공동구매 (카페24 양식)",
+        "cols": {"name": "주문상품명(기본)", "option": "상품옵션(기본)",
+                 "qty": "수량", "refund": "환불완료일"},
+        "required": ["name", "qty"],
+        "sheet": "주문내역",
+        "note": "옵션에 '3개세트 (32%할인)' 처럼 묶음 수와 할인율이 적혀 있어야 합니다.",
+        "sample": [
+            {"name": "도톤 아웃도어 스프레이", "option": "2개세트 (28%할인)",
+             "qty": 1, "refund": ""},
+        ],
+    },
+    "mongshu": {
+        "label": "몽슈슈 (매장 위탁)",
+        "cols": {"seq": "순번", "name": "제품", "code": "상품코드", "price": "단가",
+                 "stock": "재고", "inbound": "입고", "return": "반송",
+                 "qty": "판매", "closing": "월말재고", "amount": "판매합계"},
+        "required": ["seq", "name", "qty"],
+        "sheet": "Sheet1",
+        "note": "순번이 적힌 줄만 읽습니다. 상품코드가 있으면 그 코드로 기억하니 "
+                "제품명이 영문이어도 다음 달부터 자동 매칭됩니다.",
+        "sample": [
+            {"seq": 1, "name": "Pill Bites", "code": "FO25PB", "price": 4080,
+             "stock": 18, "inbound": "", "return": "", "qty": 6,
+             "closing": 12, "amount": 24480},
+        ],
+    },
+    "smartstore": {
+        "label": "네이버 스마트스토어 (결제정산 - 일별상세)",
+        "cols": {"order": "주문번호", "orderItem": "상품주문번호", "gubun": "구분",
+                 "name": "상품명", "basisDate": "세금신고기준일",
+                 "sale": "정산기준금액(A)", "feeNpay": "Npay 수수료(B)",
+                 "feeLink": "매출연동 수수료 합계(C)", "feeInstall": "무이자할부 수수료(D)"},
+        "required": ["gubun", "name", "sale"],
+        "sheet": "결제정산 - 일별상세",
+        "note": "스마트스토어센터 > 정산관리 > 결제정산 > 일별상세 내려받기. "
+                "수량 열이 없는 양식이라 한 줄을 1건으로 셉니다. "
+                "구분이 '배송비' 인 줄은 배송비 매출로 따로 잡습니다. "
+                "수수료 세 칸은 파일에 적힌 대로(음수) 두세요.",
+        "sample": [
+            {"order": "2026072277765381", "orderItem": "2026072277391791",
+             "gubun": "상품주문", "name": "(5팩/25개입) 픽키도기클럽 필바이츠 치킨, 45g, 5개",
+             "basisDate": "2026.08.01", "sale": 33700, "feeNpay": -1222,
+             "feeLink": -337, "feeInstall": 0},
+            {"order": "2026072277765381", "orderItem": "20260722109274547516",
+             "gubun": "배송비", "name": "기본배송비", "basisDate": "2026.08.01",
+             "sale": 3000, "feeNpay": -108, "feeLink": 0, "feeInstall": 0},
+        ],
+    },
+    # 스마트스토어는 주문 내역(수량 있는 양식)으로도 올라온다.
+    "smartstore_order": {
+        "label": "네이버 스마트스토어 (주문 내역)",
+        "cols": {"name": "상품명", "qty": "수량"},
+        "required": ["name", "qty"],
+        "sheet": "주문내역",
+        "note": "수량이 있는 주문 양식입니다. 정산금액까지 맞추려면 "
+                "결제정산 - 일별상세 쪽을 올리는 편이 정확합니다.",
+        "sample": [
+            {"name": "픽키도기클럽 필바이츠 45g (5개입) 치킨", "qty": 3},
+        ],
+    },
+    "kurly": {
+        "label": "마켓컬리",
+        "cols": {"name": "상품명", "option": "옵션명", "qty": "수량"},
+        "required": ["name", "qty"],
+        "sheet": "판매내역",
+        "note": "상품명으로 못 가리면 옵션명도 함께 봅니다.",
+        "sample": [
+            {"name": "픽키도기클럽 필바이츠 45g", "option": "치킨 5개입", "qty": 3},
+        ],
+    },
+    "coupang": {
+        "label": "쿠팡 (입고완료 내역)",
+        "cols": {"gubun": "구분", "skuNo": "SKU번호", "name": "SKU명",
+                 "qty": "수량", "unit": "단가", "total": "총단가"},
+        "required": ["name", "qty"],
+        "sheet": "Sheet1",
+        "note": "쿠팡 WING > 발주 > 입고완료 내역. 구분이 '발주' 인 줄만 읽습니다. "
+                "묶음(1개·3개·5개)은 SKU명이 모두 같아 SKU번호로 가립니다 — "
+                "번호 열을 꼭 남겨 주세요. "
+                "'총단가' 는 이름과 달리 그 줄의 합계(VAT 포함 공급가)입니다.",
+        "sample": [
+            {"gubun": "발주", "skuNo": "63097195", "name": "픽키도기클럽 필바이츠 45g (5개입)",
+             "qty": 18, "unit": 4080, "total": 73440},
+            {"gubun": "발주", "skuNo": "63097196", "name": "픽키도기클럽 필바이츠 45g (5개입)",
+             "qty": 15, "unit": 12852, "total": 192780},
+        ],
+    },
+    "molly": {
+        "label": "이마트 몰리스 (납품내역)",
+        "cols": {"code": "상품코드", "name": "상품명", "qty": "납품량",
+                 "amount": "납품금액"},
+        "required": ["qty"],
+        "sheet": "납품내역",
+        "note": "납품금액은 VAT 별도입니다 — 정산은 VAT 포함으로 환산합니다. "
+                "상품코드 칸에는 바코드를 적어 주세요.",
+        "sample": [
+            {"code": "8809879544118", "name": "도톤 풋클리너", "qty": 24,
+             "amount": 336000},
+        ],
+    },
+    "pharmasquare": {
+        "label": "파마스퀘어",
+        "cols": {"code": "바코드", "name": "상품", "qty": "판매수량"},
+        "required": ["code", "qty"],
+        "sheet": "판매내역",
+        "note": "바코드가 빈 줄은 소계로 보고 건너뜁니다.",
+        "sample": [
+            {"code": "8809879544071", "name": "필바이츠 45g 치킨", "qty": 12},
+        ],
+    },
+    "terrymarket": {
+        "label": "태리마켓 / 팝업·행사",
+        "cols": {"name": "품목", "qty": "판매수량", "price": "마켓 할인가",
+                 "event": "행사명"},
+        "required": ["name", "qty"],
+        "sheet": "판매내역",
+        "note": "품목에 '합계' 가 들어간 줄은 건너뜁니다.",
+        "sample": [
+            {"name": "필바이츠 45g 치킨 5개입", "qty": 8, "price": 5800,
+             "event": "9월 철수마켓"},
+        ],
+    },
+}
+
+
+def form_cols(recipe, *keys):
+    """레시피의 열 이름을 순서대로 돌려준다 (resolve_cols 에 넘길 용도)."""
+    cols = CHANNEL_FORMS.get(recipe, {}).get("cols", {})
+    return [cols.get(k, k) for k in keys]
+
+
+def describe_forms():
+    """샘플 양식 다운로드용. 열 이름·설명·예시 줄을 그대로 넘긴다."""
+    out = {}
+    for recipe, form in CHANNEL_FORMS.items():
+        cols = form["cols"]
+        order = list(cols)
+        required = {cols[k] for k in form.get("required", [])}
+        out[recipe] = {
+            "label": form["label"],
+            "sheet": form.get("sheet") or "Sheet1",
+            "note": form.get("note") or "",
+            "headers": [cols[k] for k in order],
+            "required": [h for h in (cols[k] for k in order) if h in required],
+            "rows": [[row.get(k, "") for k in order] for row in form.get("sample", [])],
+        }
+    return out
+
+
 # --- 못 알아본 줄 -----------------------------------------------------------
 # identify_product 는 도톤 두 품목만 안다. 다른 브랜드의 품목은 전부 여기로
 # 온다. 버리면 화면의 상품명 매칭이 할 일이 없어지고 그 달 매출이 통째로 0 이
@@ -363,7 +538,7 @@ def parse_cafe24(rows, channel, warnings, is_gongu=False):
     idx = header_index(rows[0])
     ci_name, ci_opt, ci_qty, ci_refund = resolve_cols(
         idx,
-        ["주문상품명(기본)", "상품옵션(기본)", "수량", "환불완료일"],
+        form_cols("gongu" if is_gongu else "cafe24", "name", "option", "qty", "refund"),
         warnings,
         channel,
     )
@@ -450,10 +625,14 @@ def parse_smartstore_payout(rows, idx, channel, warnings):
     실패하고 표를 통째로 버렸다.
     """
     agg = Aggregator()
-    ci_gubun = idx.get("구분")
-    ci_name = idx.get("상품명")
-    ci_sale = idx.get("정산기준금액(A)")
-    fee_cols = [idx[k] for k in idx if k.startswith(("Npay 수수료", "매출연동 수수료", "무이자할부 수수료"))]
+    F = CHANNEL_FORMS["smartstore"]["cols"]
+    ci_gubun = idx.get(F["gubun"])
+    ci_name = idx.get(F["name"])
+    ci_sale = idx.get(F["sale"])
+    fee_prefixes = tuple(
+        F[k].split("(")[0] for k in ("feeNpay", "feeLink", "feeInstall")
+    )
+    fee_cols = [idx[k] for k in idx if k.startswith(fee_prefixes)]
     if ci_sale is None:
         warnings.append("[%s] 정산기준금액(A) 열을 찾지 못했습니다" % channel)
         return agg.lines()
@@ -508,7 +687,9 @@ def parse_smartstore(rows, channel, warnings):
     idx = header_index(rows[0])
     if "정산기준금액(A)" in idx or any(k.startswith("정산기준금액") for k in idx):
         return parse_smartstore_payout(rows, idx, channel, warnings)
-    ci_name, ci_qty = resolve_cols(idx, ["상품명", "수량"], warnings, channel)
+    ci_name, ci_qty = resolve_cols(
+        idx, form_cols("smartstore_order", "name", "qty"), warnings, channel
+    )
     if ci_name is None or ci_qty is None:
         return agg.lines()
     unmatched = []
@@ -534,7 +715,7 @@ def parse_kurly(rows, channel, warnings):
         return agg.lines()
     idx = header_index(rows[0])
     ci_name, ci_opt, ci_qty = resolve_cols(
-        idx, ["상품명", "옵션명", "수량"], warnings, channel
+        idx, form_cols("kurly", "name", "option", "qty"), warnings, channel
     )
     if ci_name is None or ci_qty is None:
         return agg.lines()
@@ -562,13 +743,13 @@ def parse_coupang(rows, channel, warnings):
         return agg.lines()
     idx = header_index(rows[0])
     ci_gubun, ci_sku, ci_qty = resolve_cols(
-        idx, ["구분", "SKU명", "수량"], warnings, channel
+        idx, form_cols("coupang", "gubun", "name", "qty"), warnings, channel
     )
     # 쿠팡은 묶음(1개/3개/5개)을 SKU명이 아니라 SKU번호로 가른다 — 이름은 전부
     # '픽키도기클럽 필바이츠 45g (5개입)' 로 같다. 번호를 넘겨야 한 번 매칭한
     # 규칙이 묶음별로 남는다.
-    ci_skuno = idx.get("SKU번호")
-    ci_total = idx.get("총단가")
+    ci_skuno = idx.get(CHANNEL_FORMS["coupang"]["cols"]["skuNo"])
+    ci_total = idx.get(CHANNEL_FORMS["coupang"]["cols"]["total"])
     if ci_sku is None or ci_qty is None:
         return agg.lines()
     distinct_skus = []
@@ -620,7 +801,7 @@ def parse_emart(rows, channel, warnings, meta):
         return agg.lines()
     idx = header_index(rows[0])
     ci_code, ci_name, ci_qty, ci_amt = resolve_cols(
-        idx, ["상품코드", "상품명", "납품량", "납품금액"], warnings, channel
+        idx, form_cols("molly", "code", "name", "qty", "amount"), warnings, channel
     )
     if ci_qty is None or (ci_code is None and ci_name is None):
         return agg.lines()
@@ -661,7 +842,7 @@ def parse_pharmasquare(rows, channel, warnings):
         return agg.lines()
     idx = header_index(rows[0])
     ci_code, ci_name, ci_qty = resolve_cols(
-        idx, ["바코드", "상품", "판매수량"], warnings, channel
+        idx, form_cols("pharmasquare", "code", "name", "qty"), warnings, channel
     )
     if ci_qty is None or ci_code is None:
         return agg.lines()
@@ -695,7 +876,7 @@ def parse_terrymarket(rows, channel, warnings):
         return agg.lines()
     idx = header_index(rows[0])
     ci_item, ci_qty, ci_price, ci_event = resolve_cols(
-        idx, ["품목", "판매수량", "마켓 할인가", "행사명"], warnings, channel
+        idx, form_cols("terrymarket", "name", "qty", "price", "event"), warnings, channel
     )
     if ci_item is None or ci_qty is None:
         return agg.lines()
@@ -1103,6 +1284,13 @@ def scan_rows(block, channel, warnings, period=None, date_basis=""):
     if period:
         date_idx, date_label = pick_date_column(block, date_basis)
 
+    has_qty = bool(roles.get("qty"))
+    if not has_qty:
+        warnings.append(
+            "[%s] 수량 열이 없는 양식입니다 — 한 줄을 1건으로 셉니다. "
+            "묶음 상품은 상품명 매칭에서 배수를 지정하세요." % channel
+        )
+
     # 자동 추정이 주문 단위 열을 매출로 집었으면 물린다 — 합계가 배로 튄다.
     sale_idxs = roles.get("saleAmount") or []
     if sale_idxs and looks_order_level((block["labels"].get("saleAmount") or [""])[0]):
@@ -1134,7 +1322,9 @@ def scan_rows(block, channel, warnings, period=None, date_basis=""):
                 skipped_period += 1
                 continue
         qty_raw = role_value(row, roles, "qty")
-        qty = int(round(qty_raw)) if qty_raw is not None else 0
+        # 수량 열이 아예 없는 양식(네이버 결제정산 - 일별상세)은 한 줄이 한
+        # 건이다. 0 으로 두면 판매수량이 통째로 0 이 되어 재고도 안 빠진다.
+        qty = int(round(qty_raw)) if qty_raw is not None else (0 if has_qty else 1)
         amounts = {}
         for i, label in numeric.items():
             value = to_num(cell_of(row, i))
@@ -1299,6 +1489,11 @@ def parse(channel, sheets, warnings, meta, hint=None, period=None, date_basis=""
 
 def main():
     ap = argparse.ArgumentParser()
+    # 샘플 양식 다운로드용. 파일 없이 레시피 표만 내놓는다.
+    if "--describe" in sys.argv:
+        print(json.dumps(describe_forms(), ensure_ascii=False))
+        return
+    ap.add_argument("--describe", action="store_true")
     ap.add_argument("--input", required=True)
     ap.add_argument("--channel", default="")
     # 사람이 화면에서 "이 시트의 이 행이 머리글" 이라고 고쳐 준 경우.

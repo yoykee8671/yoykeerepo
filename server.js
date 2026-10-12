@@ -1907,12 +1907,12 @@ async function parsePriceWorkbookUpload(body = {}) {
 // matching on re-upload); everything else is one shared writer/reader.
 // ---------------------------------------------------------------------------
 
-async function buildRowsXlsx(sheetName, headers, rows) {
+async function buildRowsXlsx(sheetName, headers, rows, notes = null) {
   const tmpBase = path.join(os.tmpdir(), `wooofpay-rows-${crypto.randomBytes(8).toString("hex")}`);
   const inputPath = `${tmpBase}.json`;
   const outputPath = `${tmpBase}.xlsx`;
   try {
-    await writeFile(inputPath, JSON.stringify({ sheetName, headers, rows }), "utf8");
+    await writeFile(inputPath, JSON.stringify({ sheetName, headers, rows, notes }), "utf8");
     await execFileAsync("python3", [ROWS_TO_XLSX_SCRIPT, "--input", inputPath, "--output", outputPath], {
       cwd: __dirname,
       maxBuffer: 20 * 1024 * 1024
@@ -4084,6 +4084,42 @@ const NPB_PARSER_CHANNEL = {
   wooofmall: "cafe24",
   tarimarket: "terrymarket"
 };
+
+// 채널 코드 -> 샘플 양식 레시피 (npb_parse.py CHANNEL_FORMS 의 열쇠).
+// 파서의 전용 레시피 이름과 채널 코드가 늘 같지는 않다 — 브랜드마다 코드에
+// 접두사가 붙고, 같은 양식을 여러 채널이 쓴다(카페24 자사몰·B2B·대리점).
+const NPB_SAMPLE_FORM = {
+  cafe24: "cafe24", wooofmall: "cafe24", b2b: "cafe24", tailit: "cafe24",
+  gongu: "gongu", mongshu: "mongshu", smartstore: "smartstore", kurly: "kurly",
+  coupang: "coupang", emart: "molly", pharmasquare: "pharmasquare",
+  terrymarket: "terrymarket", tarimarket: "terrymarket",
+  picky_b2c: "cafe24", picky_b2b: "cafe24", picky_tailit: "cafe24",
+  picky_betters_ss: "smartstore_order", picky_smartstore: "smartstore",
+  picky_coupang: "coupang", picky_kurly: "kurly", picky_mongshu: "mongshu",
+  picky_pharmasquare: "pharmasquare", picky_popup: "terrymarket"
+};
+
+// 파서가 실제로 찾는 열 이름을 그대로 받아 온다. 양식을 여기서 따로 적으면
+// 파서와 갈라져 "양식대로 올렸는데 파싱이 안 된다" 가 된다.
+let npbFormsCache = null;
+async function npbChannelForms() {
+  if (npbFormsCache) return npbFormsCache;
+  const { stdout } = await execFileAsync("python3", [NPB_PARSE_SCRIPT, "--describe"], {
+    cwd: __dirname,
+    maxBuffer: 4 * 1024 * 1024
+  });
+  npbFormsCache = JSON.parse(stdout || "{}");
+  return npbFormsCache;
+}
+
+function npbSampleFormKey(code, forms) {
+  const key = String(code || "").trim();
+  if (NPB_SAMPLE_FORM[key]) return NPB_SAMPLE_FORM[key];
+  if (forms[key]) return key;
+  // 브랜드 접두사만 붙은 코드는 떼고 다시 본다 (picky_kurly -> kurly).
+  const bare = key.includes("_") ? key.slice(key.indexOf("_") + 1) : "";
+  return forms[bare] ? bare : "";
+}
 
 function npbGetBrand(db, brandCode) {
   const code = String(brandCode || "").trim().toLowerCase();
@@ -7587,6 +7623,51 @@ async function routeApi(req, res, url) {
       writing ? "npb정산을 수정할 권한이 없습니다." : "npb정산을 볼 권한이 없습니다.")) {
       return;
     }
+  }
+
+  // 채널별 샘플 양식. 매달 판매처 파일을 손으로 가공해 올리다 보니 열 이름이
+  // 조금씩 달라져 파싱이 깨진다 — 파서가 찾는 열 그대로의 빈 양식을 내려
+  // 준다. 어느 열이 꼭 있어야 하는지는 '작성방법' 시트에 적는다.
+  if (pathname === "/api/npb/sample-form" && method === "GET") {
+    const code = String(url.searchParams.get("channel") || "").trim();
+    const channel = (db.npb?.channels || []).find((item) => item.code === code);
+    let forms;
+    try {
+      forms = await npbChannelForms();
+    } catch (err) {
+      sendJson(res, 500, { error: `양식 목록을 읽지 못했습니다: ${err.message}` });
+      return;
+    }
+    const key = npbSampleFormKey(code, forms);
+    const form = key ? forms[key] : null;
+    if (!form) {
+      sendJson(res, 400, {
+        error: "이 채널은 정해진 양식이 없습니다. 판매처가 주는 파일을 그대로 올리면 "
+          + "표를 찾아 읽습니다 (열이 틀리면 화면에서 지정할 수 있습니다)."
+      });
+      return;
+    }
+    const name = channel?.name || code;
+    const notes = [
+      `${name} 업로드 양식 — ${form.label}`,
+      "",
+      "· 1행의 머리글은 고치지 마세요. 그 이름으로 열을 찾습니다.",
+      `· 반드시 있어야 하는 열: ${form.required.join(", ")}`,
+      `· 읽는 열 전체: ${form.headers.join(", ")}`,
+      "· 열 순서는 달라도 되고, 쓰지 않는 열이 더 붙어 있어도 됩니다.",
+      "· 2행부터는 예시입니다. 지우고 쓰세요.",
+      ""
+    ];
+    if (form.note) notes.push(form.note);
+    if (channel?.dateBasis) {
+      notes.push("", `· 집계 기준: ${channel.dateBasis} — 이 기준일이 정산 월을 벗어난 줄은 빠집니다.`);
+    }
+    if (channel?.uploadMemo) notes.push("", `· 메모: ${channel.uploadMemo}`);
+    const workbook = await buildRowsXlsx(form.sheet, form.headers, form.rows, notes);
+    sendBuffer(res, 200, workbook,
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      { "content-disposition": contentDisposition(`샘플양식_${name}.xlsx`) });
+    return;
   }
 
   // 실비 청구서 목록·입금확인·출력.

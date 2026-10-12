@@ -4839,6 +4839,39 @@ async function downloadTradeDocPdf(button, poId) {
   }
 }
 
+// 채널별 업로드 샘플 양식. 파서가 찾는 열 이름으로 서버가 만들어 준다 —
+// 매달 판매처 파일을 손으로 가공하다 열 이름이 어긋나 파싱이 깨지는 걸 막는
+// 것이 목적이다. 양식이 정해져 있지 않은 채널은 서버가 그 사실을 알려 준다.
+async function downloadNpbSampleForm(button, code) {
+  if (!code || button.disabled) return;
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "준비 중…";
+  try {
+    const res = await fetch(`/api/npb/sample-form?channel=${encodeURIComponent(code)}`, {
+      credentials: "same-origin"
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || "샘플양식을 내려받지 못했습니다.");
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filenameFromResponse(res) || `샘플양식_${code}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    showToast(error.message || "샘플양식을 내려받지 못했습니다.", "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
 // 서버가 붙인 한글 파일명(발주서_PO-20260929-001.pdf)을 그대로 쓴다.
 // 한글은 RFC 5987 형식(filename*)으로 오므로 그쪽을 먼저 본다.
 function filenameFromResponse(res) {
@@ -7271,7 +7304,9 @@ function renderNpbUpload() {
         ${isNoSales
           ? `<span class="badge ok">확인함</span>
              <button class="ghost" data-npb-nosales-undo="${h(c.code)}" title="표시 취소">✕</button>`
-          : `<button class="ghost" data-npb-nosales="${h(c.code)}">이달 내역 없음</button>`}
+          : `<button class="ghost" data-npb-sample="${h(c.code)}"
+               title="파서가 찾는 열 그대로의 빈 양식">샘플양식</button>
+             <button class="ghost" data-npb-nosales="${h(c.code)}">이달 내역 없음</button>`}
       </div>`}
     </div>`;
   };
@@ -8497,6 +8532,9 @@ function bindNpbUpload() {
   });
   app.querySelectorAll("[data-npb-nosales-undo]").forEach((btn) => {
     btn.addEventListener("click", () => markNoSales(btn.getAttribute("data-npb-nosales-undo"), true));
+  });
+  app.querySelectorAll("[data-npb-sample]").forEach((btn) => {
+    btn.addEventListener("click", () => downloadNpbSampleForm(btn, btn.getAttribute("data-npb-sample")));
   });
   app.querySelectorAll("[data-npb-entry]").forEach((sel) => {
     sel.addEventListener("change", async () => {
