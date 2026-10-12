@@ -19,6 +19,7 @@ CLI: python3 npb_settlement_picky.py --input <spec.json> --output <out.xlsx>
 
 import argparse
 import json
+import math
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -94,6 +95,31 @@ def widths(ws, spec):
 def heights(ws, rows, value):
     for row in rows:
         ws.row_dimensions[row].height = value
+
+
+# 끝자리 처리. 화면 계산과 같은 규칙을 엑셀 수식에도 입혀야 셀을 눌러
+# 검산할 때 숫자가 어긋나지 않는다.
+ROUND_FN = {"round": "ROUND", "ceil": "ROUNDUP", "floor": "ROUNDDOWN"}
+
+
+def rounded(expr, mode):
+    """`=C6-E6` 같은 수식을 `=ROUNDUP(C6-E6,0)` 으로 감싼다."""
+    fn = ROUND_FN.get(str(mode or ""))
+    if not fn:
+        return expr
+    body = expr[1:] if expr.startswith("=") else expr
+    return f"={fn}({body},0)"
+
+
+def round_cell(value, mode):
+    """수식이면 감싸고, 숫자면 그 자리에서 떨어뜨린다."""
+    if isinstance(value, str):
+        return rounded(value, mode) if value.startswith("=") else value
+    fn = str(mode or "")
+    if not fn:
+        return value
+    n = _num(value)
+    return math.ceil(n) if fn == "ceil" else math.floor(n) if fn == "floor" else round(n)
 
 
 def fee_cell(ws, row, col, value, *, font=F11):
@@ -199,6 +225,7 @@ def build_channel_totals(ws, spec, detail):
                 return f"={DETAIL_SHEET}!{letter}{src['row']}"
             return fallback
 
+        mode = channel.get("rounding") or ""
         put(ws, row, 2, "합계", font=F11B)
         put(ws, row, 3, from_detail("E", totals.get("list", 0)), fmt=MONEY)
         # 채널이 배송을 맡으면 금액 대신 그 사실을 적는다 (쿠팡배송/자체배송 등).
@@ -207,19 +234,20 @@ def build_channel_totals(ws, spec, detail):
             put(ws, row, 4, ship_note, align="center")
         else:
             put(ws, row, 4, from_detail("F", totals.get("shipping", 0)), fmt=MONEY)
-        put(ws, row, 5, from_detail("G", totals.get("discount", 0)), fmt=MONEY)
+        put(ws, row, 5, round_cell(from_detail("G", totals.get("discount", 0)), mode),
+            fmt=MONEY)
         # 최종결제 = 정가 - 할인 (+ 배송비 결제분).
         sale_f = f"=C{row}-E{row}" if ship_note else f"=C{row}-E{row}+D{row}"
-        put(ws, row, 6, sale_f, fmt=MONEY)
+        put(ws, row, 6, rounded(sale_f, mode), fmt=MONEY)
         fee_cell(ws, row, 7, channel.get("feeLabel"))
         # 공제율이 숫자인 채널만 수식으로 묶는다. '품목별상이'·'네이버기준'처럼
         # 글자가 오는 채널은 품목별 합을 그대로 받는다.
         rate = channel.get("feeRate")
         if isinstance(rate, (int, float)) and rate:
-            put(ws, row, 8, f"=F{row}*G{row}", fmt=MONEY)
+            put(ws, row, 8, rounded(f"=F{row}*G{row}", mode), fmt=MONEY)
         else:
             put(ws, row, 8, from_detail("J", totals.get("fee", 0)), fmt=MONEY)
-        put(ws, row, 9, f"=F{row}-H{row}", fmt=MONEY)
+        put(ws, row, 9, rounded(f"=F{row}-H{row}", mode), fmt=MONEY)
         put(ws, row, 10, channel.get("settleBy") or "", align="center")
         put(ws, row, 11, channel.get("note") or "", align="left")
         heights(ws, [row - 2, row], 18)

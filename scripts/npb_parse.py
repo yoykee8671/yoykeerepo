@@ -1406,6 +1406,15 @@ def parse_scan(sheets, channel, warnings, meta, hint=None, period=None, date_bas
                     break
             if seen:
                 break
+        # 신고·요약 자료를 판매내역으로 올린 경우가 흔하다. 머리글만 봐도
+        # 알 수 있으니 "표를 못 찾았다" 로 끝내지 않고 그 사실을 알려 준다.
+        summaryish = [w for w in ("신고", "총 매출", "과세매출", "면세매출",
+                                  "정산 합계", "합계 금액") if any(w in s for s in seen)]
+        if summaryish:
+            warnings.append(
+                "[%s] 품목 내역이 아니라 신고·요약 자료로 보입니다 (%s 같은 열만 있음)."
+                " 판매내역 파일을 올려 주세요." % (channel, ", ".join(summaryish[:2]))
+            )
         warnings.append(
             "[%s] 상품·수량 컬럼이 있는 표를 찾지 못했습니다. 읽은 머리글: %s"
             % (channel, ", ".join(seen) or "(없음)")

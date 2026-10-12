@@ -174,23 +174,37 @@ const NPB_SCREENS = [
 // 서버의 npbComputeLine 과 같은 규칙으로 계산한다. 화면이 단가×수량만 쓰면
 // 파일에서 읽은 금액을 쓰는 채널(네이버·쿠팡)에서 워크시트와 정산서가 서로
 // 다른 숫자를 말하게 된다.
+// 채널별 끝자리 처리. 서버(npbRound)와 같은 규칙이어야 워크시트와 저장된
+// 정산이 1원씩 갈리지 않는다.
+function npbRoundBy(value, mode) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return 0;
+  if (mode === "round") return Math.round(n);
+  if (mode === "ceil") return Math.ceil(n);
+  if (mode === "floor") return Math.floor(n);
+  return n;
+}
+
 function npbRowMath(row) {
   const qty = Number(row.qty || 0);
   const ea = Number(row.eaPerUnit || 1) || 1;
   const src = row.source || {};
   const has = (v) => v !== undefined && v !== null && v !== "";
-  const list = has(src.listAmount) ? Number(src.listAmount) : Number(row.listPrice || 0) * qty * ea;
+  const mode = String(row.rounding || "");
+  const r = (v) => npbRoundBy(v, mode);
+  const list = r(has(src.listAmount) ? Number(src.listAmount) : Number(row.listPrice || 0) * qty * ea);
   // 기준가(=salePrice)가 있고 수량이 있으면 매출은 그 곱이다. 서버와 같은 규칙.
-  const revenue = Number(row.salePrice || 0) > 0 && qty > 0
+  const revenue = r(Number(row.salePrice || 0) > 0 && qty > 0
     ? Number(row.salePrice) * qty
-    : (has(src.saleAmount) ? Number(src.saleAmount) : Number(row.salePrice || 0) * qty);
+    : (has(src.saleAmount) ? Number(src.saleAmount) : Number(row.salePrice || 0) * qty));
   if (has(src.settleAmount)) {
-    const settle = Number(src.settleAmount);
+    const settle = r(src.settleAmount);
     return { revenue, fee: revenue - settle, settle, list, fromFile: true };
   }
   const fee = has(src.feeAmount)
-    ? Number(src.feeAmount)
-    : Math.round(revenue * Number(row.feeRate || 0));
+    ? r(src.feeAmount)
+    : (mode ? npbRoundBy(revenue * Number(row.feeRate || 0), mode)
+      : Math.round(revenue * Number(row.feeRate || 0)));
   return { revenue, fee, settle: revenue - fee, list, fromFile: has(src.saleAmount) };
 }
 
@@ -202,6 +216,16 @@ const NPB_ENTRY_MODES = [
   ["review", "파싱에서 수정", "검수표에서 행별로 고친 뒤 [확정/반영] 을 누릅니다."],
   ["worksheet", "워크시트에서 수정", "일단 반영하고 워크시트에서 고칩니다."],
   ["summary", "합계만 기재", "품목 내역 없이 채널 합계만 워크시트에 적습니다. 파일은 근거로만 남습니다."]
+];
+
+// 채널별 끝자리 처리. 판매처 정산서가 소수로 오는 채널이 있어 받는 쪽 표와
+// 1원씩 어긋난다. 기본값은 "그대로" 라서, 켜지 않은 채널과 이미 확정한 달의
+// 금액은 이 설정이 생겼다고 달라지지 않는다.
+const NPB_ROUNDING_MODES = [
+  ["", "그대로"],
+  ["round", "반올림"],
+  ["ceil", "올림"],
+  ["floor", "내림"]
 ];
 
 const NPB_WS_ORDER = [
@@ -6153,6 +6177,9 @@ function npbBuildWorksheet(config, lines) {
         // 3팩·5팩 줄의 정가가 3배·5배로 부푼다. 서버도 1 로 둔다.
         eaPerUnit: 1,
         tier: tierLabel,
+        // 끝자리 처리는 저장된 줄의 값이 먼저다 — 확정한 달은 확정 당시의
+        // 기준으로 계산되어야 한다.
+        rounding: String(stLine?.rounding ?? channel.rounding ?? ""),
         // 업로드로 들어온 원본을 그대로 들고 있는다. 저장할 때 이걸 되돌려주지
         // 않으면 파일에서 읽은 금액이 통째로 날아간다.
         source: stLine || null
@@ -6173,6 +6200,7 @@ function npbBuildWorksheet(config, lines) {
         qty: Number(line.qty ?? line.qtyEa ?? 0),
         eaPerUnit: Number(line.eaPerUnit ?? 1),
         tier: line.tier || "",
+        rounding: String(line.rounding ?? channel.rounding ?? ""),
         extra: true,
         source: line
       });
@@ -8103,15 +8131,20 @@ function renderNpbChannels() {
           ${NPB_ENTRY_MODES.map(([value, label]) =>
             `<option value="${value}" ${(c.entryMode || "review") === value ? "selected" : ""}>${label}</option>`).join("")}
         </select></td>
+        <td><select data-npb-ch="${i}" data-npb-cfield="rounding"
+              title="판매처 정산서가 소수로 오는 채널만 설정하세요. 이미 확정한 달은 확정 당시 기준으로 그대로 계산됩니다.">
+          ${NPB_ROUNDING_MODES.map(([value, label]) =>
+            `<option value="${value}" ${(c.rounding || "") === value ? "selected" : ""}>${label}</option>`).join("")}
+        </select></td>
         <td><button class="danger icon-btn" data-npb-ch-del="${i}" aria-label="삭제" title="삭제">×</button></td>
       </tr>`)
-    .join("") || `<tr><td colspan="11" class="empty">등록된 채널이 없습니다.</td></tr>`;
+    .join("") || `<tr><td colspan="12" class="empty">등록된 채널이 없습니다.</td></tr>`;
   return `
     <section class="panel">
       <div class="panel-head"><h2>채널 설정</h2><span class="muted">${channels.length}개</span></div>
       <div class="table-wrap">
         <table class="npb-channels-table">
-          <thead><tr><th>코드</th><th>이름</th><th>계산방식</th><th>판매가</th><th>수수료율</th><th>공급가</th><th>아키타입</th><th>파일명 키워드</th><th>정산주체</th><th>업로드 반영</th><th></th></tr></thead>
+          <thead><tr><th>코드</th><th>이름</th><th>계산방식</th><th>판매가</th><th>수수료율</th><th>공급가</th><th>아키타입</th><th>파일명 키워드</th><th>정산주체</th><th>업로드 반영</th><th>끝자리</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
@@ -8814,6 +8847,9 @@ function npbWorksheetLines() {
         qtyEa: Number(row.qty || 0),
         eaPerUnit: Number(row.eaPerUnit || 1),
         tier: row.tier || "",
+        // 그 줄이 어느 끝자리 규칙으로 계산됐는지 함께 저장한다 — 나중에 채널
+        // 설정을 바꿔도 이미 확정한 달의 금액이 달라지지 않는다.
+        rounding: String(row.rounding ?? source.rounding ?? ""),
         manualFields: row.manualFields || source.manualFields || []
       });
     }

@@ -828,7 +828,12 @@ export function buildNpbNamespace() {
       shippingNote: "컬리배송", note: "직접발행 (정산서 전달)" },
     { code: "picky_sparkpet", name: "sparkpet", feeRate: 0.35, settleBy: "픽키파크",
       filenameKeywords: ["스파크펫", "sparkpet"], dateBasis: "월 정산서 기준",
-      shippingNote: "자체배송", note: "직접발행 (정산서 전달)" },
+      shippingNote: "자체배송",
+      // 스파크펫 위탁판매내역에는 다른 브랜드(도톤·베럴즈) 품목이 함께 온다.
+      // 픽키 정산에 들어갈 것은 필바이츠뿐이라 올릴 때 걸러낸다 — 뺀 줄은
+      // 업로드 경고로 알려 준다.
+      excludeKeywords: ["도톤", "베럴즈"],
+      note: "직접발행 (정산서 전달)" },
     { code: "picky_pharmasquare", name: "파마스퀘어", feeRate: 0.45, settleBy: "픽키파크",
       filenameKeywords: ["파마스퀘어", "엘피네트웍스"], dateBasis: "월 정산서 기준",
       shippingNote: "자체배송", manualEntry: true,
@@ -2844,29 +2849,55 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
 // 매출=salePrice*qty, 공제=round(매출*feeRate), 정산=매출-공제. margin_supply
 // (매입, 공급가 고정): 매출=판매가*qty, 정산=공급가*qty, 공제=매출-정산.
 // eaPerUnit affects 정가/총수량 only; salePrice is already per order/bundle.
+// 채널별 끝자리 처리. 판매처 정산서가 소수로 오는 채널이 있어(스파크펫
+// 1,089,049.1 / 공제 381,167.15) 받는 쪽 표와 1원씩 어긋난다. 어느 쪽으로
+// 맞출지는 거래처마다 다르므로 채널 설정에서 고른다.
+//
+// 기본값은 "안 함" 이다 — 켜지 않은 채널은 지금과 똑같이 계산되므로 이미
+// 확정한 달의 금액이 설정 추가만으로 달라지지 않는다.
+export const NPB_ROUNDING_MODES = [
+  { value: "", label: "그대로 (소수 유지)" },
+  { value: "round", label: "반올림" },
+  { value: "ceil", label: "올림" },
+  { value: "floor", label: "내림" }
+];
+
+export function npbRound(value, mode) {
+  const n = number(value);
+  if (!Number.isFinite(n)) return 0;
+  if (mode === "round") return Math.round(n);
+  if (mode === "ceil") return Math.ceil(n);
+  if (mode === "floor") return Math.floor(n);
+  return n;
+}
+
 export function npbComputeLine(line) {
   const qty = number(line.qty);
   const ea = number(line.eaPerUnit, 1) || 1;
-  const listTotal = line.listAmount != null
+  const mode = String(line.rounding || "");
+  const r = (v) => npbRound(v, mode);
+  const listTotal = r(line.listAmount != null
     ? number(line.listAmount)
-    : number(line.listPrice) * qty * ea;
+    : number(line.listPrice) * qty * ea);
   if (line.calcType === "margin_supply") {
-    const saleTotal = line.saleAmount != null ? number(line.saleAmount) : number(line.salePrice) * qty;
-    const settleTotal = line.settleAmount != null
+    const saleTotal = r(line.saleAmount != null ? number(line.saleAmount) : number(line.salePrice) * qty);
+    const settleTotal = r(line.settleAmount != null
       ? number(line.settleAmount)
-      : number(line.supplyPrice) * qty;
+      : number(line.supplyPrice) * qty);
     return { listTotal, saleTotal, feeTotal: saleTotal - settleTotal, settleTotal };
   }
-  const saleTotal = line.saleAmount != null ? number(line.saleAmount) : number(line.salePrice) * qty;
+  const saleTotal = r(line.saleAmount != null ? number(line.saleAmount) : number(line.salePrice) * qty);
   // 정산금이 파일에 있으면 공제는 역산한다 — 매출·공제·정산 셋이 서로 안 맞는
   // 정산서가 나가는 것이 가장 나쁜 결과다.
   if (line.settleAmount != null) {
-    const settleTotal = number(line.settleAmount);
+    const settleTotal = r(line.settleAmount);
     return { listTotal, saleTotal, feeTotal: saleTotal - settleTotal, settleTotal };
   }
+  // 요율로 낸 공제는 설정이 없어도 원 단위로 떨어뜨린다 (전부터 그랬다).
   const feeTotal = line.feeAmount != null
-    ? number(line.feeAmount)
-    : Math.round(saleTotal * number(line.feeRate));
+    ? r(line.feeAmount)
+    : (mode ? npbRound(saleTotal * number(line.feeRate), mode)
+      : Math.round(saleTotal * number(line.feeRate)));
   return { listTotal, saleTotal, feeTotal, settleTotal: saleTotal - feeTotal };
 }
 
@@ -3861,6 +3892,9 @@ export function npbEnrichLine(line, channels, products, promoRates) {
     if (manual.has(field) && line[field] != null) enriched[field] = number(line[field]);
   }
   if (!channel) return enriched;
+  // 확정된 달은 확정 당시의 설정으로 계산해야 한다 — 저장된 값이 있으면
+  // 채널 설정보다 그쪽이 우선이다.
+  enriched.rounding = line.rounding != null ? String(line.rounding) : String(channel.rounding || "");
   enriched.calcType = line.calcType || channel.calcType || "rate_on_sale";
   let tierPrice = null;
   if (Array.isArray(channel.tiers) && line.tier) {
@@ -4193,8 +4227,40 @@ async function runNpbParse(base64, fileName, channel, block = null, opts = {}) {
 //     집계 기간을 나눠 적는다
 //   - 계산서를 픽키파크가 직접 발행하는 채널과 우프가 발행하는 채널의
 //     정산합계를 갈라 적는다
+// 상품표 전체(상품 × 묶음)를 정산서 순서대로. 판매데이터 시트는 안 팔린
+// 품목도 0 으로 세운다 — 줄 위치가 매달 같아야 지난달과 나란히 놓고 볼 수
+// 있다 (브랜드가 쓰던 양식이 그렇게 되어 있다).
+function npbBrandSkuRows(db, brandId) {
+  const products = (db.npb?.products || []).filter(
+    (p) => npbSameBrand(p.brandId, brandId) && p.active !== false
+  );
+  const out = [];
+  for (const product of products) {
+    const tiers = Array.isArray(product.packTiers) && product.packTiers.length
+      ? product.packTiers
+      : [{ tier: "1개", ea: 1 }];
+    for (const tier of tiers) {
+      const ea = Math.max(1, number(tier.ea, 1));
+      out.push({
+        key: `${product.id}|${ea}`,
+        productKey: product.id,
+        label: `${product.name}${ea > 1 ? ` × ${ea}` : ""}`
+      });
+    }
+  }
+  return out;
+}
+
+// 저장된 줄이 상품표의 어느 칸인지. 묶음 수는 multiplier 가 정본이고, 없으면
+// tier 의 숫자를 읽는다(예전 줄).
+function npbSkuRowKey(line) {
+  const ea = Math.max(1, number(line.multiplier, 0) || npbTierMultiplier(line.tier) || 1);
+  return `${line.productKey || ""}|${ea}`;
+}
+
 function npbBuildPickySpec(db, settlement) {
   const brand = npbGetBrand(db, settlement.brand);
+  const skuRows = npbBrandSkuRows(db, settlement.brand);
   const allChannels = db.npb?.channels || [];
   const period = settlement.period || {};
   const byCode = new Map();
@@ -4248,6 +4314,27 @@ function npbBuildPickySpec(db, settlement) {
         note: line.note || ""
       };
     });
+    // 상품표 순서로 줄을 세우고, 안 팔린 품목은 0 으로 채운다. 상품표에 없는
+    // 줄(아직 매칭 안 된 판매처 상품 등)은 뒤에 그대로 붙인다 — 숨기면 합계와
+    // 줄의 합이 안 맞아 보인다.
+    const byKey = new Map();
+    const extras = [];
+    for (const row of rows) {
+      const key = row.productKey ? npbSkuRowKey(row) : "";
+      if (!key || !skuRows.some((s) => s.key === key)) { extras.push(row); continue; }
+      const prev = byKey.get(key);
+      if (!prev) { byKey.set(key, row); continue; }
+      // 같은 칸에 여러 줄이 떨어지면 더한다 (판매처 이름이 둘로 와도 한 품목).
+      for (const field of ["qty", "listTotal", "shipping", "discount",
+        "saleTotal", "feeTotal", "settleTotal"]) {
+        prev[field] = number(prev[field]) + number(row[field]);
+      }
+    }
+    const padded = skuRows.map((sku) => byKey.get(sku.key) || {
+      label: sku.label, qty: 0, listTotal: 0, shipping: 0, discount: 0,
+      saleTotal: 0, feeRate: number(meta.feeRate), feeTotal: 0, settleTotal: 0, note: ""
+    });
+
     const settleBy = meta.settleBy || "우프";
     const bucket = bySettleBy.get(settleBy) || { sale: 0, fee: 0, settle: 0 };
     bucket.sale += totals.sale;
@@ -4263,9 +4350,12 @@ function npbBuildPickySpec(db, settlement) {
       feeLabel: meta.feeNote || (meta.feeRate != null ? number(meta.feeRate) : ""),
       // 요율이 하나로 정해진 채널은 공제액을 엑셀에서 수식으로 묶는다.
       feeRate: meta.feeNote ? 0 : number(meta.feeRate),
+      // 엑셀 수식도 화면과 같은 끝자리 규칙을 따라야 한다. 안 그러면 셀을
+      // 눌러 검산할 때 화면 숫자와 1원씩 달라 보인다.
+      rounding: String(meta.rounding || ""),
       settleBy,
       note: meta.note || "",
-      rows,
+      rows: [...padded, ...extras],
       totals
     });
   }
