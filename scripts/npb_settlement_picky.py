@@ -45,6 +45,14 @@ DETAIL_HEADERS = [
 ]
 
 
+def _num(v):
+    """숫자로 못 읽는 값(빈칸·'품목별상이' 같은 글자)은 0 으로 본다."""
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def put(ws, row, col, value, *, font=None, fill=None, fmt=None, align=None, border=True):
     cell = ws.cell(row=row, column=col, value=value)
     if font:
@@ -88,6 +96,9 @@ GREY_FILL = PatternFill("solid", fgColor="FFF2F2F2")   # 표 머리
 PARTY_FILL = PatternFill("solid", fgColor="FFFBE3D6")
 
 
+SHEET_NAME = "'채널별 정산 합계'"
+
+
 def build_summary(ws, spec):
     widths(ws, {"A": 3.7, "B": 14.5, "C": 16.2, "D": 21.7, "F": 17.5,
                 "L": 13.3, "M": 44.5, "N": 8.7, "O": 8.5})
@@ -112,10 +123,16 @@ def build_summary(ws, spec):
         put(ws, 5, 2 + i, label, font=font, fill=fill, align="center")
 
     rollup = spec.get("rollup") or {}
+    # 채널 합계 시트의 요약 칸을 가리킨다. 값으로 박으면 채널 표를 고쳤을 때
+    # 정산서가 따라오지 않아 두 장의 숫자가 어긋난다.
+    anchors = spec.get("_pickyAnchors") or {}
+    ref = lambda key, fb: (f"={SHEET_NAME}!{anchors[key]}" if anchors.get(key)
+                           else rollup.get(fb, 0))
     put(ws, 6, 2, spec.get("issueBasisDate") or "", font=F10B, align="center")
     put(ws, 6, 3, spec.get("periodRange") or "", font=F9B, align="center")
-    for i, key in enumerate(["listTotal", "realSaleTotal", "feeTotal", "settleTotal"]):
-        put(ws, 6, 4 + i, rollup.get(key, 0), font=F9B, fmt=MONEY, align="center")
+    for i, (akey, fb) in enumerate([("list", "listTotal"), ("sale", "realSaleTotal"),
+                                    ("fee", "feeTotal"), ("settle", "settleTotal")]):
+        put(ws, 6, 4 + i, ref(akey, fb), font=F9B, fmt=MONEY, align="center")
 
     put(ws, 8, 2, "매출계산서발행", font=F8B, align="left", border=False)
     ws.merge_cells("B8:C8")
@@ -130,9 +147,10 @@ def build_summary(ws, spec):
 
     row = 10
     put(ws, row, 2, "정산합계", font=F8, align="center")
-    put(ws, row, 3, rollup.get("realSaleTotal", 0), font=F8B, fmt=MONEY, align="center")
-    put(ws, row, 4, rollup.get("feeTotal", 0), font=F8, fmt=MONEY, align="center")
-    put(ws, row, 5, rollup.get("settleTotal", 0), font=F8B, fmt=MONEY, align="center")
+    # 위 [판매내역 종합] 줄을 그대로 가리킨다.
+    put(ws, row, 3, "=E6", font=F8B, fmt=MONEY, align="center")
+    put(ws, row, 4, "=F6", font=F8, fmt=MONEY, align="center")
+    put(ws, row, 5, "=G6", font=F8B, fmt=MONEY, align="center")
     put(ws, row, 6, "", border=True)
     ws.merge_cells("F10:J10")
     for col in range(6, 11):
@@ -145,17 +163,20 @@ def build_summary(ws, spec):
                 "픽키파크에서 A 매출을 기타매출로 신고 하시면 됩니다.",
     }
     # 픽키파크 → 우프 순으로 적는다 (6월 정산서와 같은 순서).
-    parties = sorted(
-        spec.get("settleParties") or [],
-        key=lambda p: 0 if p.get("party") == "픽키파크" else 1,
-    )
-    for party in parties:
-        name = party.get("party") or ""
+    # 주체는 채널 시트에서 그대로 끌어온다. spec 에 따로 담아 두면 채널 표와
+    # 어긋날 수 있고, 어느 쪽이 맞는지 알 수 없게 된다.
+    party_cells = (anchors.get("parties") or {})
+    names = sorted(party_cells, key=lambda x: 0 if x == "픽키파크" else 1)
+    for name in names:
+        cells = party_cells[name]
         fill = PARTY_FILL if name == "우프" else None
         put(ws, row, 2, f"{name} 정산", font=F8, fill=fill, align="center")
-        put(ws, row, 3, party.get("sale", 0), font=F8B, fill=fill, fmt=MONEY, align="center")
-        put(ws, row, 4, party.get("fee", 0), font=F8, fill=fill, fmt=MONEY, align="center")
-        put(ws, row, 5, party.get("settle", 0), font=F8B, fill=fill, fmt=MONEY, align="center")
+        for i, key in enumerate(["sale", "fee", "settle"]):
+            formula = "=" + "+".join(
+                f"{SHEET_NAME}!{c}" for c in cells[key].split("+"))
+            put(ws, row, 3 + i, formula,
+                font=F8 if key == "fee" else F8B,
+                fill=fill, fmt=MONEY, align="center")
         cell = put(ws, row, 6, notes.get(name, ""), font=F8)
         cell.alignment = Alignment(vertical="center", wrap_text=True)
         ws.merge_cells(start_row=row, start_column=6, end_row=row, end_column=10)
@@ -180,6 +201,7 @@ def build_channel_totals(ws, spec):
     put(ws, 2, 2, f"정산기간 {spec.get('periodRange') or ''}", font=BOLD, border=False)
 
     row = 4
+    rows_by_channel = []
     for channel in spec.get("channels") or []:
         put(ws, row, 2, channel.get("name") or "", font=BOLD, fill=SUB_FILL)
         basis = channel.get("dateBasis") or ""
@@ -198,38 +220,88 @@ def build_channel_totals(ws, spec):
         else:
             put(ws, row, 4, totals.get("shipping", 0), fmt=MONEY)
         put(ws, row, 5, totals.get("discount", 0), fmt=MONEY)
-        put(ws, row, 6, totals.get("sale", 0), fmt=MONEY)
+        # 최종결제 = 정가 - 할인 (+ 배송비 결제분). 값으로 박으면 위 칸을
+        # 고쳤을 때 따라오지 않아 받는 쪽이 검산할 수 없다.
+        sale_f = f"=C{row}-E{row}" if ship_note else f"=C{row}-E{row}+D{row}"
+        put(ws, row, 6, sale_f, fmt=MONEY)
         fee_cell(ws, row, 7, channel.get("feeLabel"))
-        put(ws, row, 8, totals.get("fee", 0), fmt=MONEY)
-        put(ws, row, 9, totals.get("settle", 0), fmt=MONEY)
+        # 공제율이 숫자인 채널만 수식으로 묶는다. '품목별상이'·'네이버기준'
+        # 처럼 글자가 오는 채널은 계산된 금액을 그대로 받는다.
+        rate = channel.get("feeRate")
+        if isinstance(rate, (int, float)) and rate:
+            put(ws, row, 8, f"=F{row}*G{row}", fmt=MONEY)
+        else:
+            put(ws, row, 8, totals.get("fee", 0), fmt=MONEY)
+        put(ws, row, 9, f"=F{row}-H{row}", fmt=MONEY)
         put(ws, row, 10, channel.get("settleBy") or "", align="center")
         put(ws, row, 11, channel.get("note") or "", align="left")
+        rows_by_channel.append({
+            "row": row,
+            "settleBy": channel.get("settleBy") or "",
+            # 매출이 없는 채널은 숨긴다. 지우지 않는 이유는 다음 달에 되살릴 때
+            # 채널 목록이 그대로 있어야 하기 때문이다.
+            "empty": not any(_num(totals.get(k)) for k in ("list", "sale", "fee", "settle")),
+            "first": row - 2,
+        })
         row += 2
 
-    rollup = spec.get("rollup") or {}
+    # 채널 합계를 한 줄로 모은다. 아래 요약과 정산서가 이 줄을 가리키므로,
+    # 어느 한쪽만 따로 계산되어 숫자가 어긋나는 일이 없다.
+    def col_sum(letter):
+        cells = [f"{letter}{r['row']}" for r in rows_by_channel]
+        return "=" + "+".join(cells) if cells else 0
+
+    total_row = row
+    for letter, col in (("C", 3), ("E", 5), ("F", 6), ("H", 8), ("I", 9)):
+        put(ws, total_row, col, col_sum(letter), font=BOLD, fmt=MONEY)
+    row += 2
+
     put(ws, row, 11, "VAT 포함", font=SMALL, align="right", border=False)
     row += 1
     summary = [
-        ("소비자정가합계", rollup.get("listTotal", 0), "소비자 정상가 기준 판매 합계"),
-        ("할인합계", rollup.get("discountTotal", 0),
-         "프로모션할인 / 대량구매할인 / 사업자할인 등"),
-        ("최종결제액 합계", rollup.get("realSaleTotal", 0),
-         "소비자정가합계 - 할인합계 + 배송비 결제분"),
-        ("공제합계", rollup.get("feeTotal", 0),
-         "거래수수료 / 카드사 등 결제 PG 수수료"),
-        ("정산합계", rollup.get("settleTotal", 0),
-         "최종결제액 합계 - 공제합계 = 정산합계"),
+        ("소비자정가합계", f"=C{total_row}", "소비자 정상가 기준 판매 합계"),
+        ("할인합계", f"=E{total_row}", "프로모션할인 / 대량구매할인 / 사업자할인 등"),
+        ("최종결제액 합계", f"=F{total_row}", "소비자정가합계 - 할인합계 + 배송비 결제분"),
+        ("공제합계", f"=H{total_row}", "거래수수료 / 카드사 등 결제 PG 수수료"),
+        ("정산합계", f"=I{total_row}", "최종결제액 합계 - 공제합계 = 정산합계"),
     ]
-    for label, amount, note in summary:
-        put(ws, row, 2, label, font=BOLD, fill=SUB_FILL)
-        put(ws, row, 3, amount, fmt=MONEY)
-        put(ws, row, 4, note, align="left", border=False)
+    anchors = {}
+    for key, (label, formula, note) in zip(
+            ["list", "discount", "sale", "fee", "settle"], summary):
+        put(ws, row, 8, label, font=BOLD, fill=SUB_FILL)
+        put(ws, row, 9, formula, fmt=MONEY)
+        put(ws, row, 11, note, align="left", border=False)
+        anchors[key] = f"I{row}"
         row += 1
-    for party in sorted(spec.get("settleParties") or [],
-                        key=lambda p: 0 if p.get("party") == "우프" else 1):
-        put(ws, row, 2, f"정산합계({party.get('party')})", font=BOLD, fill=TOTAL_FILL)
-        put(ws, row, 3, party.get("settle", 0), fmt=MONEY, fill=TOTAL_FILL)
+
+    # 정산 주체별 합계. 어떤 채널은 우프가 계산서를 발행하고, 어떤 채널은
+    # 업체가 픽키파크로 직접 발행한다 -- 그 둘을 갈라 적어야 한다.
+    by_party = {}
+    for r in rows_by_channel:
+        by_party.setdefault(r["settleBy"] or "우프", []).append(r["row"])
+    for party in sorted(by_party, key=lambda x: 0 if x == "우프" else 1):
+        put(ws, row, 8, f"정산합계({party})", font=BOLD, fill=TOTAL_FILL)
+        put(ws, row, 9, "=" + "+".join(f"I{r}" for r in by_party[party]),
+            fmt=MONEY, fill=TOTAL_FILL)
         row += 1
+    # 정산서가 주체별 A매출·B공제·C정산을 적으려면 칸 주소가 필요하다.
+    anchors["parties"] = {
+        party: {
+            "sale": "+".join(f"F{r}" for r in rows),
+            "fee": "+".join(f"H{r}" for r in rows),
+            "settle": "+".join(f"I{r}" for r in rows),
+        }
+        for party, rows in by_party.items()
+    }
+
+    # 그 달에 매출이 없던 채널은 블록째 숨긴다.
+    for r in rows_by_channel:
+        if not r["empty"]:
+            continue
+        for rr in range(r["first"], r["row"] + 1):
+            ws.row_dimensions[rr].hidden = True
+
+    spec["_pickyAnchors"] = anchors
 
 
 # ------------------------------------------------- 채널별 판매데이터 정리
@@ -291,9 +363,11 @@ def build_source_sheet(ws, source):
 
 def build(spec, path):
     wb = Workbook()
-    build_summary(wb.active, spec)
     wb.active.title = "정산서"
+    # 채널 합계를 먼저 그린다 -- 정산서가 그 칸을 수식으로 가리키므로 어느
+    # 행에 찍혔는지 알아야 참조를 쓸 수 있다.
     build_channel_totals(wb.create_sheet("채널별 정산 합계"), spec)
+    build_summary(wb["정산서"], spec)
     build_channel_detail(wb.create_sheet("채널별 판매데이터 정리"), spec)
     # 올린 채널 파일을 DB) 시트로 뒤에 붙인다. 시트 이름에 못 쓰는 글자는 뺀다.
     used = set(wb.sheetnames)
