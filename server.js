@@ -4168,16 +4168,23 @@ function npbBuildPickySpec(db, settlement) {
     byCode.get(code).push(line);
   }
 
+  // 그 달에 매출이 없던 채널도 표에 남긴다 — 엑셀에서 줄만 숨기므로 다음 달에
+  // 되살릴 때 채널 목록이 그대로 있고, 받는 쪽도 빠진 채널을 알아볼 수 있다.
+  const brandChannels = allChannels
+    .filter((item) => item.brandId === settlement.brand)
+    .sort((a, b) => number(a.sortOrder, 999) - number(b.sortOrder, 999));
   const order = new Map(allChannels.map((c, i) => [c.code, number(c.sortOrder, i)]));
-  const codes = [...byCode.keys()].sort(
-    (a, b) => number(order.get(a), 999) - number(order.get(b), 999)
-  );
+  const codes = [...new Set([
+    ...brandChannels.map((item) => item.code),
+    // 브랜드 채널 목록에 없는 코드로 올라온 내역도 빠뜨리지 않는다.
+    ...[...byCode.keys()].sort((a, b) => number(order.get(a), 999) - number(order.get(b), 999))
+  ])];
 
   const channels = [];
   const bySettleBy = new Map();
   for (const code of codes) {
     const meta = allChannels.find((item) => item.code === code) || {};
-    const lines = byCode.get(code);
+    const lines = byCode.get(code) || [];
     const totals = { qty: 0, list: 0, shipping: 0, discount: 0, sale: 0, fee: 0, settle: 0 };
     const rows = lines.map((line) => {
       const computed = npbComputeLine(line);
@@ -4218,6 +4225,8 @@ function npbBuildPickySpec(db, settlement) {
       shippingNote: meta.shippingNote || "",
       // 요율이 품목마다 다른 채널은 숫자 대신 그 사실을 적는다.
       feeLabel: meta.feeNote || (meta.feeRate != null ? number(meta.feeRate) : ""),
+      // 요율이 하나로 정해진 채널은 공제액을 엑셀에서 수식으로 묶는다.
+      feeRate: meta.feeNote ? 0 : number(meta.feeRate),
       settleBy,
       note: meta.note || "",
       rows,
