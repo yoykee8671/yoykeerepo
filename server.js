@@ -3084,19 +3084,61 @@ function npbMatchChannels(channels, fileName) {
   return hits;
 }
 
+// 정산 하나를 계산할 때 쓰는 기준값 묶음 — 실비 단가(costConfig), 채널
+// 설정(수수료율·끝자리·계산방식), 상품표 정가.
+//
+// **확정(발행)한 달은 그때의 기준으로만 계산한다.** 지금까지는 매번 브랜드
+// 설정에서 읽었기 때문에, 실비 단가나 수수료율을 고치면 이미 보낸 과거 정산서의
+// 금액까지 소급해 달라졌다. 발주서가 발행자 정보를 스냅샷으로 들고 있는 것과
+// 같은 방식으로, 확정 시점의 기준을 그 정산에 박아 둔다.
+function npbBases(db, settlement) {
+  const brand = npbGetBrand(db, settlement.brand);
+  const snap = settlement?.bases;
+  if (snap && settlement.status === "final") {
+    return {
+      brand,
+      costConfig: snap.costConfig || {},
+      channels: Array.isArray(snap.channels) ? snap.channels : [],
+      products: Array.isArray(snap.products) ? snap.products : [],
+      snapshot: true
+    };
+  }
+  return {
+    brand,
+    costConfig: brand?.costConfig || {},
+    channels: (db.npb?.channels || []).filter(
+      (c) => !brand || String(c.brandId).toLowerCase() === String(brand.id).toLowerCase()
+    ),
+    products: (db.npb?.products || []).filter(
+      (p) => !brand || npbSameBrand(p.brandId, brand.id)
+    ),
+    snapshot: false
+  };
+}
+
+// 확정 시점의 기준을 그대로 떠 둔다. 금액에 닿는 값만 고르지 않고 통째로
+// 담는다 — 어느 칸이 금액에 닿는지는 코드가 바뀌면서 달라지고, 그때 스냅샷에
+// 빠진 칸이 있으면 조용히 과거가 흔들린다.
+function npbSnapshotBases(db, settlement) {
+  const live = npbBases(db, { ...settlement, status: "", bases: null });
+  return {
+    takenAt: now(),
+    costConfig: structuredClone(live.costConfig),
+    channels: structuredClone(live.channels),
+    products: structuredClone(live.products)
+  };
+}
+
 // 라인에 채널 단가·수수료를 채우고 합계·물류비·이익배분까지 다시 계산한다.
 // 업로드와 워크시트 저장이 같은 경로를 쓰도록 함수로 뺐다 — 업로드 후 사람이
 // [저장(계산)] 을 눌러야 숫자가 맞는 것이 병목이었다.
 // 생략한 값은 저장된 값을 그대로 쓰므로, 인자 없이 불러도 안전하다.
 function npbRecompute(db, settlement, opts = {}) {
-  const brand = npbGetBrand(db, settlement.brand);
-  const costConfig = brand?.costConfig || {};
-  const npbChannels = (db.npb?.channels || []).filter(
-    (c) => !brand || String(c.brandId).toLowerCase() === String(brand.id).toLowerCase()
-  );
-  const npbProducts = (db.npb?.products || []).filter(
-    (p) => !brand || npbSameBrand(p.brandId, brand.id)
-  );
+  const bases = npbBases(db, settlement);
+  const brand = bases.brand;
+  const costConfig = bases.costConfig;
+  const npbChannels = bases.channels;
+  const npbProducts = bases.products;
   // 합계만 적는 채널은 줄이 하나여야 한다. 품목 방식으로 쓰다가 합계 방식으로
   // 바꾸면 예전 품목 줄이 그대로 남아, 합계와 함께 두 번 더해진다.
   //
@@ -3289,7 +3331,10 @@ function npbNextMonthEnd(periodMonth) {
 }
 
 function npbBuildInvoice(db, settlement, type) {
-  const brand = npbGetBrand(db, settlement.brand);
+  // 실비 청구서도 확정 시점의 단가로 그려야 한다. 단가표가 그대로 실려 나가는
+  // 문서라, 설정을 고친 뒤 다시 받으면 이미 보낸 청구서와 숫자가 갈린다.
+  const invoiceBases = npbBases(db, settlement);
+  const brand = invoiceBases.brand;
   const meta = NPB_INVOICE_TYPES[type];
   if (!meta) throw new Error("알 수 없는 청구 유형입니다.");
   const items = [];
@@ -3297,7 +3342,7 @@ function npbBuildInvoice(db, settlement, type) {
   // 올린 출고내역 원본까지 한 파일에 담는다. 값은 전부 브랜드 설정에서 온다.
   let logisticsSheet = null;
   if (type === "logistics") {
-    const cfg = brand?.costConfig || {};
+    const cfg = invoiceBases.costConfig;
     const breakdown = settlement.logistics?.breakdown || [];
     for (const row of breakdown) {
       if (!number(row.count) && !number(row.amount)) continue;
@@ -3360,7 +3405,7 @@ function npbBuildInvoice(db, settlement, type) {
       items.push({ label: item.medium, count: 0, unit: 0, amount: number(item.amount), note: item.period || "" });
     }
   }
-  const cfg = brand?.costConfig || {};
+  const cfg = invoiceBases.costConfig;
   const total = items.reduce((sum, item) => sum + number(item.amount), 0);
   return {
     id: crypto.randomBytes(8).toString("hex"),
@@ -4237,12 +4282,9 @@ async function runNpbParse(base64, fileName, channel, block = null, opts = {}) {
 // 상품표 전체(상품 × 묶음)를 정산서 순서대로. 판매데이터 시트는 안 팔린
 // 품목도 0 으로 세운다 — 줄 위치가 매달 같아야 지난달과 나란히 놓고 볼 수
 // 있다 (브랜드가 쓰던 양식이 그렇게 되어 있다).
-function npbBrandSkuRows(db, brandId) {
-  const products = (db.npb?.products || []).filter(
-    (p) => npbSameBrand(p.brandId, brandId) && p.active !== false
-  );
+function npbBrandSkuRows(products) {
   const out = [];
-  for (const product of products) {
+  for (const product of products.filter((p) => p.active !== false)) {
     const tiers = Array.isArray(product.packTiers) && product.packTiers.length
       ? product.packTiers
       : [{ tier: "1개", ea: 1 }];
@@ -4266,9 +4308,10 @@ function npbSkuRowKey(line) {
 }
 
 function npbBuildPickySpec(db, settlement) {
-  const brand = npbGetBrand(db, settlement.brand);
-  const skuRows = npbBrandSkuRows(db, settlement.brand);
-  const allChannels = db.npb?.channels || [];
+  const bases = npbBases(db, settlement);
+  const brand = bases.brand;
+  const skuRows = npbBrandSkuRows(bases.products);
+  const allChannels = bases.channels;
   const period = settlement.period || {};
   const byCode = new Map();
   for (const line of settlement.lines || []) {
@@ -4440,11 +4483,7 @@ function npbSheetLayout(meta) {
 // closing 인데 정산서는 기초·입고·출고·기말을 각각 전체/정상/불용으로 나눠
 // 적는다. 이름이 어긋나 있어서 재고가 통째로 빈칸으로 나갔다.
 function npbXlsxInventory(db, settlement) {
-  const products = new Map(
-    (db.npb?.products || [])
-      .filter((p) => npbSameBrand(p.brandId, settlement.brand))
-      .map((p) => [p.id, p])
-  );
+  const products = new Map(npbBases(db, settlement).products.map((p) => [p.id, p]));
   return (settlement.inventory || []).map((row) => {
     const key = String(row.productKey || row.productId || "");
     const product = products.get(key);
@@ -4498,11 +4537,12 @@ function npbXlsxChannelSheets(db, settlement) {
     if (number(line.qty) > 0) sold.add(line.channelCode || line.channel);
   }
   const sheets = [];
+  const basesChannels = npbBases(db, settlement).channels;
   for (const [code, upload] of Object.entries(settlement.uploads || {})) {
     if (!sold.has(code) || upload.disabled) continue;
     const rows = Array.isArray(upload.rawRows) ? upload.rawRows : [];
     if (!rows.length) continue;
-    const meta = (db.npb?.channels || []).find((c) => c.code === code);
+    const meta = basesChannels.find((c) => c.code === code);
     sheets.push({
       // 시트 이름은 31자 제한이 있고 : \ / ? * [ ] 를 못 쓴다.
       name: `DB)${String(meta?.name || code).replace(/[:\\/?*[\]]/g, " ")}`.slice(0, 31),
@@ -4513,10 +4553,13 @@ function npbXlsxChannelSheets(db, settlement) {
 }
 
 function npbBuildXlsxSpec(db, settlement) {
-  const brand = npbGetBrand(db, settlement.brand);
-  const costConfig = brand?.costConfig || {};
+  // 확정한 달은 확정 당시의 기준으로 그려야 한다. 설정을 고친 뒤 다시
+  // 내려받았을 때 이미 보낸 정산서와 숫자가 달라지면 안 된다.
+  const bases = npbBases(db, settlement);
+  const brand = bases.brand;
+  const costConfig = bases.costConfig;
   const period = settlement.period || {};
-  const allChannels = db.npb?.channels || [];
+  const allChannels = bases.channels;
   const byCode = new Map();
   for (const line of settlement.lines || []) {
     const code = line.channelCode || line.channel || "unknown";
@@ -8836,11 +8879,32 @@ async function routeApi(req, res, url) {
     }
 
     if (action === "finalize" && method === "POST") {
+      // 확정 시점의 기준(실비 단가·채널 수수료·상품표 정가)을 떠 둔다. 이후
+      // 설정을 바꿔도 이 달의 금액은 달라지지 않는다 — 이미 보낸 정산서와
+      // 화면이 갈리는 것이 가장 나쁜 결과다.
+      //
+      // 순서가 중요하다: 기준을 먼저 박고 그 기준으로 한 번 다시 계산해야,
+      // 저장된 숫자가 스냅샷으로 계산한 결과와 정확히 같아진다.
+      settlement.bases = npbSnapshotBases(db, settlement);
       settlement.status = "final";
       settlement.issuedAt = now();
+      const finalized = npbRecompute(db, settlement);
       settlement.updatedAt = now();
       await writeDb(db);
-      sendJson(res, 200, { settlement });
+      sendJson(res, 200, { settlement, rollup: finalized.rollup });
+      return;
+    }
+
+    // 확정을 풀면 다시 지금의 기준으로 계산된다. 떠 둔 기준은 지워야 한다 —
+    // 남겨 두면 설정을 고쳐도 반영이 안 되는 이유를 알 수 없다.
+    if (action === "reopen" && method === "POST") {
+      settlement.status = "draft";
+      delete settlement.bases;
+      delete settlement.issuedAt;
+      const reopened = npbRecompute(db, settlement);
+      settlement.updatedAt = now();
+      await writeDb(db);
+      sendJson(res, 200, { settlement, rollup: reopened.rollup });
       return;
     }
 

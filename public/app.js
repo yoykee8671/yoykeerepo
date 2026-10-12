@@ -8283,7 +8283,12 @@ function renderNpbPreview() {
       </div>` : ""}
       <div class="panel-body toolbar">
         <button class="primary" data-npb-download="${h(n.currentKey)}">엑셀 다운로드</button>
-        <button data-npb-finalize>정산 확정</button>
+        ${n.current?.status === "final"
+          ? `<button data-npb-reopen>확정 해제</button>
+             <span class="muted">확정 시점의 기준(실비 단가·수수료율·정가)으로 고정됩니다${
+               n.current?.bases?.takenAt ? ` · ${h(String(n.current.bases.takenAt).slice(0, 10))}` : ""}</span>`
+          : `<button data-npb-finalize>정산 확정</button>
+             <span class="muted">확정하면 그때의 기준이 이 달에 고정되어, 나중에 설정을 바꿔도 금액이 달라지지 않습니다.</span>`}
       </div>
     </section>
     ${splitEnabled ? "" : renderNpbSettleBy()}`;
@@ -9368,10 +9373,24 @@ function bindNpbPreview() {
       });
       await npbReloadSettlements();
       await npbLoadDetail(n.currentKey);
-      showToast("정산을 확정했습니다.");
+      showToast("정산을 확정했습니다. 이 달의 기준이 고정됩니다.");
       renderApp();
     } catch (error) {
       showToast(error.message || "확정 실패", "error");
+    }
+  });
+  app.querySelector("[data-npb-reopen]")?.addEventListener("click", async () => {
+    if (!confirm("확정을 해제하면 지금의 기준(실비 단가·수수료율·정가)으로 다시 계산됩니다. 금액이 달라질 수 있습니다. 해제할까요?")) return;
+    try {
+      await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/reopen`, {
+        method: "POST"
+      });
+      await npbReloadSettlements();
+      await npbLoadDetail(n.currentKey);
+      showToast("확정을 해제했습니다. 지금의 기준으로 다시 계산했습니다.");
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "확정 해제 실패", "error");
     }
   });
 }
