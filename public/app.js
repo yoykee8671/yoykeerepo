@@ -762,7 +762,7 @@ function renderApp() {
         </div>
         <nav class="nav">
           ${tabs.map(([key, label]) => `
-            <button data-tab="${key}" class="${state.tab === key ? "active" : ""}">${label}</button>
+            <button data-tab="${key}" class="${state.tab === key ? "active" : ""}">${label}${key === "productsync" ? renderPsNavDot() : ""}</button>
             ${state.tab === key ? renderTabSubmenu(key) : ""}
           `).join("")}
         </nav>
@@ -800,6 +800,7 @@ function renderApp() {
     renderLogin();
   });
   bindCurrentTab();
+  startPsBadgePolling();
 }
 
 // 대분류에 하위 메뉴가 있으면 사이드바에서 그 아래로 펼친다. 대분류마다
@@ -10187,4 +10188,75 @@ function bindProductSync() {
       showToast(error.message, "error");
     }
   });
+}
+
+
+// --- 상품동기화 메뉴 빨간 점 -------------------------------------------------
+// 자동 확인 등으로 새로 생긴 변경(반영할 항목·본사 변경 알림·신상품)이 마지막으로
+// 메뉴를 본 뒤에 생겼으면 메뉴 옆에 점을 찍는다. 본 시각은 이 브라우저에 계정별로 둔다.
+const PS_BADGE_POLL_MS = 5 * 60 * 1000;
+let psBadgeTimer = null;
+
+function psSeenKey() {
+  return `wooofpay_ps_seen_${state.admin?.id || ""}`;
+}
+
+function psSeenAt() {
+  try {
+    return localStorage.getItem(psSeenKey()) || "";
+  } catch {
+    return "";
+  }
+}
+
+function markPsSeen() {
+  try {
+    localStorage.setItem(psSeenKey(), new Date().toISOString());
+  } catch {
+    // 저장이 막힌 브라우저에서는 점이 계속 보일 수 있다 — 기능에는 지장 없다.
+  }
+}
+
+function psDotVisible() {
+  const badge = state.psBadge;
+  if (!badge || state.tab === "productsync") return false;
+  const pending = (badge.actionCount || 0) + (badge.noticeCount || 0) + (badge.candidateCount || 0);
+  return pending > 0 && Boolean(badge.latestChangeAt) && badge.latestChangeAt > psSeenAt();
+}
+
+function renderPsNavDot() {
+  if (!psDotVisible()) return "";
+  const b = state.psBadge;
+  const parts = [];
+  if (b.actionCount) parts.push(`반영할 항목 ${b.actionCount}건`);
+  if (b.noticeCount) parts.push(`본사 변경 알림 ${b.noticeCount}건`);
+  if (b.candidateCount) parts.push(`신상품 후보 ${b.candidateCount}개`);
+  return `<span class="nav-dot" title="새 변경사항이 있습니다 — ${h(parts.join(", "))}" aria-label="새 변경사항 있음"></span>`;
+}
+
+// 화면 전체를 다시 그리지 않고 메뉴 버튼의 점만 고친다(입력 중인 폼을 지우지 않게).
+function refreshPsNavDot() {
+  const button = app.querySelector('[data-tab="productsync"]');
+  if (!button) return;
+  button.querySelector(".nav-dot")?.remove();
+  const dot = renderPsNavDot();
+  if (dot) button.insertAdjacentHTML("beforeend", dot);
+}
+
+async function loadPsBadge() {
+  if (!state.admin || !can("productsync", "view")) return;
+  try {
+    state.psBadge = await api("/api/product-sync/badge");
+    if (state.tab === "productsync") markPsSeen();
+    refreshPsNavDot();
+  } catch {
+    // 점은 보조 안내일 뿐이라 실패해도 조용히 넘어간다.
+  }
+}
+
+function startPsBadgePolling() {
+  if (state.tab === "productsync") markPsSeen();
+  if (psBadgeTimer || !state.admin || !can("productsync", "view")) return;
+  loadPsBadge();
+  psBadgeTimer = setInterval(loadPsBadge, PS_BADGE_POLL_MS);
 }
