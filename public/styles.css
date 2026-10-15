@@ -2259,3 +2259,8 @@ a.button:hover {
 .ps-plain { list-style: none; padding: 0; margin: 8px 0; }
 .ps-plain li { padding: 4px 0; border-bottom: 1px dashed var(--line); }
 .ps-inline { display: inline-flex; align-items: center; gap: 6px; font-weight: 400; }
+.ps-datefilter { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ps-datefilter input { width: auto; }
+.ps-runbar + .ps-runbar { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.ps-table td.ps-opt { font-weight: 600; white-space: nowrap; }
+.ps-table td.ps-change { white-space: nowrap; }

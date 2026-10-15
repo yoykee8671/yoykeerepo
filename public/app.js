@@ -18,7 +18,10 @@ const state = {
     linkSearch: null,
     candidateNames: {},
     showIgnored: false,
-    showUnlinked: false
+    showUnlinked: false,
+    // 신상품 후보 등록일 기간 (비우면 설정의 "최근 며칠")
+    candFrom: "",
+    candTo: ""
   },
   brands: [],
   requests: [],
@@ -9358,7 +9361,7 @@ const PS_ISSUE_LABELS = {
 const PS_NOTICE_LABELS = { name_changed: "상품명 변경", image_changed: "대표이미지 변경", options_changed: "옵션 구성 변경" };
 const PS_HISTORY_LABELS = {
   run: "확인 실행", apply: "반영", apply_failed: "반영 실패", dismiss: "무시", link: "연결", link_update: "연결 수정",
-  unlink: "연결 해제", register: "신규 등록", settings: "설정"
+  unlink: "연결 해제", register: "신규 등록", settings: "설정", scan: "신상품 찾기"
 };
 
 function psState() {
@@ -9521,21 +9524,62 @@ function renderPsRunBar() {
   const last = detail?.lastRun;
   const running = psState().jobs.run?.status === "running" || Boolean(detail?.running);
   const lastText = last
-    ? `마지막 확인 ${psFmtTime(last.at)} (${last.trigger === "schedule" ? "자동" : h(last.by || "수동")}) ·
-       본사 ${money.format(last.collectedCount || 0)}개 · 우프 ${money.format(last.wooofChecked || 0)}개 비교
+    ? `마지막 재고 확인 ${psFmtTime(last.at)} (${last.trigger === "schedule" ? "자동" : h(last.by || "수동")}) ·
+       본사 연결 상품 ${money.format(last.collectedCount || 0)}개 · 우프 ${money.format(last.wooofChecked || 0)}개 비교
+       ${last.durationMs ? ` · ${Math.max(1, Math.round(last.durationMs / 1000))}초` : ""}
        ${last.failedCount ? ` · <span style="color:var(--red)">본사 읽기 실패 ${last.failedCount}개</span>` : ""}
        ${last.wooofError ? `<br><span style="color:var(--red)">우프 조회 실패: ${h(last.wooofError)}</span>` : ""}`
-    : "아직 확인한 적이 없습니다.";
+    : "아직 재고를 확인한 적이 없습니다.";
   return `<div class="ps-runbar">
     <div><strong>${h(detail?.name || "")}</strong> <a href="${h(detail?.baseUrl || "#")}" target="_blank" rel="noreferrer" class="muted">${h(detail?.baseUrl || "")} ↗</a>
-      <div class="muted">${lastText}</div></div>
+      <div class="muted">${lastText}</div>
+      <div class="muted">우프와 연결된 상품만 본사에서 다시 읽어 비교합니다. 매일 ${h((psState().overview?.runHoursKst || []).join("·"))}시 자동.</div></div>
     <div class="ps-runbar-actions">
       ${renderPsJob("run")}
       ${can("productsync", "apply")
-        ? `<button class="primary" data-ps-run ${running ? "disabled" : ""}>${running ? "확인 중…" : "지금 확인하기"}</button>`
+        ? `<button class="primary" data-ps-run="stock" ${running ? "disabled" : ""}>${running ? "확인 중…" : "재고 확인하기"}</button>`
         : ""}
     </div>
   </div>`;
+}
+
+function renderPsScanBar() {
+  const detail = psState().detail;
+  const last = detail?.lastScan;
+  const running = psState().jobs.scan?.status === "running" || Boolean(detail?.scanning);
+  const lastText = last
+    ? `마지막 신상품 찾기 ${psFmtTime(last.at)} (${last.trigger === "schedule" ? "자동" : h(last.by || "수동")}) ·
+       본사 진열 ${money.format(last.listedCount || 0)}개 · 새로 읽음 ${money.format(last.fetchedCount || 0)}개
+       ${last.failedCount ? ` · <span style="color:var(--red)">읽기 실패 ${last.failedCount}개</span>` : ""}`
+    : "아직 본사 상품 목록을 읽은 적이 없습니다. 첫 실행은 본사 전체를 읽어서 1~2분 걸립니다.";
+  return `<div class="ps-runbar">
+    <div><div class="muted">${lastText}</div>
+      <div class="muted">본사 진열 목록을 훑고, 처음 보는 상품만 상세를 읽습니다. 매일 1회 자동.</div></div>
+    <div class="ps-runbar-actions">
+      ${renderPsJob("scan")}
+      ${can("productsync", "apply")
+        ? `<button class="primary" data-ps-run="scan" ${running ? "disabled" : ""}>${running ? "찾는 중…" : "신상품 찾기"}</button>`
+        : ""}
+    </div>
+  </div>`;
+}
+
+function psDefaultCandFrom() {
+  const days = Number(psState().detail?.recentDays) || 92;
+  return new Date(Date.now() + 9 * 3600000 - days * 86400000).toISOString().slice(0, 10);
+}
+
+function psCandidates() {
+  const ps = psState();
+  const from = ps.candFrom || psDefaultCandFrom();
+  const to = ps.candTo || "9999-12-31";
+  return (ps.detail?.unlinked || [])
+    .filter((u) => u.listed && !u.ignored)
+    .filter((u) => {
+      const date = u.registeredAt || String(u.firstSeenAt || "").slice(0, 10);
+      return date && date >= from && date <= to;
+    })
+    .sort((a, b) => String(b.registeredAt).localeCompare(String(a.registeredAt)) || b.sourceNo - a.sourceNo);
 }
 
 function psFilteredIssues() {
@@ -9570,14 +9614,17 @@ function renderPsIssues() {
     const [label, cls] = PS_ISSUE_LABELS[issue.type] || [issue.type, "ps-gray"];
     const sameProduct = lastProduct === issue.wooofProductNo;
     lastProduct = issue.wooofProductNo;
+    // 같은 상품의 옵션이 이어지면 상품명을 흐리게 다시 적는다("〃"만 두면 빈 줄처럼 보인다).
     return `<tr class="${sameProduct ? "ps-cont" : ""}">
       <td>${issue.action && canApply ? `<input type="checkbox" data-ps-issue="${h(issue.key)}" ${selected.has(issue.key) ? "checked" : ""}>` : ""}</td>
       <td><span class="ps-badge ${cls}">${h(label)}</span></td>
-      <td>${sameProduct ? `<span class="muted">〃</span>` : `<a href="${psWooofUrl(issue.wooofProductNo)}" target="_blank" rel="noreferrer">${h(issue.productName)}</a>
-        <div class="muted">우프 ${h(issue.wooofProductNo)} · 본사 <a href="${h(`${detail.baseUrl}/product/detail.html?product_no=${issue.sourceNo}`)}" target="_blank" rel="noreferrer">${h(issue.sourceNo)}</a>${issue.sourceFilter ? ` (${h(issue.sourceFilter)})` : ""}</div>`}</td>
-      <td>${h(issue.optionLabel || issue.wooofOptionLabel || "")}</td>
-      <td>${issue.from !== undefined ? `${h(psFmtValue(issue.from))} → <strong>${h(psFmtValue(issue.to))}</strong>` : ""}
+      <td class="ps-opt">${h(issue.optionLabel || issue.wooofOptionLabel || "-")}</td>
+      <td class="ps-change">${issue.from !== undefined ? `${h(psFmtValue(issue.from))} → <strong>${h(psFmtValue(issue.to))}</strong>` : ""}
         <div class="muted">${h(issue.message)}</div></td>
+      <td>${sameProduct
+        ? `<span class="muted">${h(issue.productName)}</span>`
+        : `<a href="${psWooofUrl(issue.wooofProductNo)}" target="_blank" rel="noreferrer">${h(issue.productName)}</a>
+        <div class="muted">우프 ${h(issue.wooofProductNo)} · 본사 <a href="${h(`${detail.baseUrl}/product/detail.html?product_no=${issue.sourceNo}`)}" target="_blank" rel="noreferrer">${h(issue.sourceNo)}</a>${issue.sourceFilter ? ` (${h(issue.sourceFilter)})` : ""}</div>`}</td>
     </tr>`;
   }).join("");
   const notices = detail.notices || [];
@@ -9592,12 +9639,12 @@ function renderPsIssues() {
           `<button class="ps-chip ${ps.issueFilter === key ? "active" : ""}" data-ps-filter="${key}">${label} <span>${n}</span></button>`).join("")}</div>
       </div>
       <div class="panel-body">
-        ${!detail.lastRun ? `<p class="muted">아직 확인 결과가 없습니다. <b>지금 확인하기</b>를 누르면 본사 상품을 읽고 우프와 비교합니다 (1~3분).</p>`
+        ${!detail.lastRun ? `<p class="muted">아직 확인 결과가 없습니다. <b>재고 확인하기</b>를 누르면 우프와 연결된 본사 상품을 읽고 비교합니다.</p>`
           : !issues.length ? `<p class="muted">이 조건에 해당하는 항목이 없습니다.${ps.issueFilter === "action" ? " 우프가 본사와 같습니다." : ""}</p>`
             : `<div class="table-wrap" style="max-height:560px"><table class="ps-table">
               <thead><tr>
                 <th>${canApply && actionable.length ? `<input type="checkbox" data-ps-issue-all ${actionable.every((i) => selected.has(i.key)) ? "checked" : ""}>` : ""}</th>
-                <th>구분</th><th>우프 상품</th><th>옵션</th><th>우프 → 본사 기준</th>
+                <th>구분</th><th>옵션</th><th>우프 → 본사 기준</th><th>우프 상품</th>
               </tr></thead><tbody>${rows}</tbody></table></div>`}
         ${canApply && all.length ? `<div class="toolbar">
           ${renderPsJob("apply")}
@@ -9629,7 +9676,7 @@ function renderPsIssues() {
 function renderPsCandidates() {
   const ps = psState();
   const detail = ps.detail || {};
-  const candidates = detail.candidates || [];
+  const candidates = psCandidates();
   const canApply = can("productsync", "apply");
   const registering = ps.jobs.register?.status === "running";
   const prefix = detail.namePrefix ? `${detail.namePrefix} ` : "";
@@ -9662,17 +9709,28 @@ function renderPsCandidates() {
   const ignored = (detail.unlinked || []).filter((u) => u.ignored);
   return `
     <section class="panel">
-      <div class="panel-head"><h2>신상품 후보 <span class="muted">${candidates.length}개</span></h2></div>
+      <div class="panel-body">${renderPsScanBar()}</div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>신상품 후보 <span class="muted">${candidates.length}개</span></h2>
+        <div class="ps-datefilter">
+          <label class="muted">본사 등록일</label>
+          <input type="date" data-ps-cand-from value="${h(ps.candFrom || psDefaultCandFrom())}">
+          <span class="muted">~</span>
+          <input type="date" data-ps-cand-to value="${h(ps.candTo)}">
+          ${ps.candFrom || ps.candTo ? `<button class="ghost" data-ps-cand-reset>기본(최근 ${h(detail.recentDays || 92)}일)</button>` : ""}
+        </div>
+      </div>
       <div class="panel-body">
         <p class="muted">
-          기준: 우프에 연결되지 않은 본사 상품 중 본사 등록일(상세이미지 날짜로 추정)이 최근 ${h(detail.recentDays || 92)}일 이내인 것.
+          기준: 우프에 연결되지 않은 본사 진열 상품 중 본사 등록일(상세이미지 날짜로 추정)이 위 기간 안인 것.
           등록하면 <b>미진열</b>로 올라가고, 판매가는 본사 정가, 옵션 추가금·품절은 본사와 같게, 공급사·카테고리·원산지·공급가 비율은 기존 MUNIKUND 상품에서 복사합니다.
           흰 배경 누끼 썸네일은 #${h(detail.thumbnailMultiply || "F7F7F7")} multiply 처리합니다.
         </p>
         ${renderPsJob("register")}
         ${ps.jobs.register?.status === "done" && ps.jobs.register.result ? renderPsRegisterResult(ps.jobs.register.result) : ""}
-        ${!detail.lastRun ? `<p class="muted">먼저 <b>확인 필요</b> 화면에서 <b>지금 확인하기</b>를 실행하세요.</p>`
-          : candidates.length ? `<div class="ps-cards">${cards}</div>` : `<p class="muted">새로 등록할 상품이 없습니다.</p>`}
+        ${!detail.lastScan && !(detail.unlinked || []).length ? `<p class="muted">위의 <b>신상품 찾기</b>를 먼저 실행하세요.</p>`
+          : candidates.length ? `<div class="ps-cards">${cards}</div>` : `<p class="muted">이 기간에 새로 등록할 상품이 없습니다.</p>`}
         ${ignored.length ? `<details style="margin-top:12px"><summary class="muted">등록 안 함으로 넘긴 상품 ${ignored.length}개</summary>
           <ul class="ps-plain">${ignored.map((u) => `<li>${h(u.sourceNo)} ${h(u.name)} ${canApply ? `<button class="ghost" data-ps-unignore="${h(u.sourceNo)}">되돌리기</button>` : ""}</li>`).join("")}</ul>
         </details>` : ""}
@@ -9871,12 +9929,15 @@ function bindProductSync() {
   const sourcePath = `/api/product-sync/sources/${encodeURIComponent(ps.sourceId)}`;
 
   on("[data-ps-reload]", "click", () => loadProductSync());
-  on("[data-ps-run]", "click", async () => {
+  on("[data-ps-run]", "click", async (event) => {
+    const mode = event.currentTarget.dataset.psRun === "scan" ? "scan" : "stock";
     try {
-      const { job } = await api(`${sourcePath}/run`, { method: "POST" });
+      const { job } = await api(`${sourcePath}/run`, { method: "POST", body: { mode } });
       watchProductSyncJob(job, {
         onDone: (done) => {
-          if (done.status === "done") showToast(`확인 완료 — 확인필요 ${done.result?.issueCount ?? 0}건`);
+          if (done.status !== "done") return;
+          if (mode === "scan") showToast(`신상품 찾기 완료 — 처음 본 상품 ${done.result?.newCount ?? 0}개`);
+          else showToast(`재고 확인 완료 — 확인필요 ${done.result?.issueCount ?? 0}건`);
         }
       });
     } catch (error) {
@@ -9951,6 +10012,19 @@ function bindProductSync() {
   });
 
   // 신상품
+  on("[data-ps-cand-from]", "change", (event) => {
+    ps.candFrom = event.currentTarget.value;
+    renderApp();
+  });
+  on("[data-ps-cand-to]", "change", (event) => {
+    ps.candTo = event.currentTarget.value;
+    renderApp();
+  });
+  on("[data-ps-cand-reset]", "click", () => {
+    ps.candFrom = "";
+    ps.candTo = "";
+    renderApp();
+  });
   on("[data-ps-cand-name]", "input", (event) => {
     ps.candidateNames[event.currentTarget.dataset.psCandName] = event.currentTarget.value;
   });
