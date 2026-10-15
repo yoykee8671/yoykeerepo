@@ -41,5 +41,6 @@ services:
         sync: false
       # 기본은 읽기 전용. 주문 상태 쓰기를 켤 때만
       # mall.read_order,mall.write_order 로 바꾸고 재연결한다.
+      # 상품동기화는 mall.read_product,mall.write_product 도 필요하다.
       - key: CAFE24_SCOPE
         sync: false

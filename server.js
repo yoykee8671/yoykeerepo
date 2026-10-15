@@ -14,6 +14,7 @@ import { reconcile } from "./lib/clobe-reconcile.mjs";
 import * as cafe24 from "./lib/cafe24-api.mjs";
 import { cafe24OrdersToRows, compareRows } from "./lib/cafe24-rows.mjs";
 import { buildRequestDrafts, findShippedAwaiting } from "./lib/cafe24-collect.mjs";
+import { createProductSyncService } from "./lib/product-sync-service.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -4578,7 +4579,10 @@ const MENU_REGISTRY = [
   // 쓴다. 권한을 없애면 기존에 막아 둔 계정이 갑자기 열린다.
   { key: "reconcile", label: "주문매칭(클로브)", actions: ["view", "apply"] },
   { key: "npb", label: "npb정산", actions: ["view", "edit"] },
-  { key: "procurement", label: "거래관리", actions: ["view", "create", "edit", "delete"] }
+  { key: "procurement", label: "거래관리", actions: ["view", "create", "edit", "delete"] },
+  // 공급사 상품 동기화. "실행·반영"은 우프 카페24 상품(재고·가격)을 실제로 바꾸고
+  // 신규 상품을 등록한다.
+  { key: "productsync", label: "상품동기화", actions: ["view", "apply"] }
 ];
 
 const ACTION_LABELS = {
@@ -4604,7 +4608,7 @@ function defaultPermissions(role) {
     // operator 등 그 외 등급은 권한 기능을 켜기 전과 똑같이 둔다.
     // 연동 메뉴는 막혀 있었고, 관리자 메뉴는 목록 조회만 열려 있었다
     // (GET /api/admins 에는 검사가 없었고 생성·수정·삭제만 막혀 있었다).
-    if (menu.key === "reconcile" || menu.key === "pipeline") all[menu.key] = [];
+    if (menu.key === "reconcile" || menu.key === "pipeline" || menu.key === "productsync") all[menu.key] = [];
     else if (menu.key === "admins") all[menu.key] = ["view"];
     else all[menu.key] = [...menu.actions];
   }
@@ -5687,6 +5691,152 @@ function buildRequestFromDraft(db, brand, draft) {
     createdAt: now(),
     updatedAt: now()
   };
+}
+
+// --- 공급사 상품 동기화 ----------------------------------------------------
+// 판단·저장·실행은 lib/product-sync-service.mjs 에 있다. 여기서는 카페24 토큰과
+// 저장소를 넘겨 주고 라우트만 잇는다.
+const productSync = createProductSyncService({
+  pgPool,
+  dataDir: DATA_DIR,
+  scriptPath: path.join(__dirname, "scripts", "product_image.py"),
+  withCafe24: async (run) => {
+    if (!cafe24.cafe24Configured()) throw new Error("카페24 연동 환경변수가 설정되지 않았습니다.");
+    const db = await readDb();
+    if (!db.cafe24 || typeof db.cafe24 !== "object") db.cafe24 = buildCafe24Namespace();
+    return withCafe24Token(db, run);
+  },
+  api: cafe24,
+  log: console
+});
+
+function productSyncError(res, error) {
+  sendJson(res, error.status || 500, { error: error.message });
+}
+
+async function routeProductSync(req, res, url, actor, db) {
+  const pathname = url.pathname;
+  const method = req.method || "GET";
+  const writing = method !== "GET";
+  if (!requirePermission(actor, res, "productsync", writing ? "apply" : "view",
+    writing ? "상품동기화 실행·반영 권한이 없습니다." : "상품동기화 권한이 없습니다.")) return;
+  const actorInfo = { id: actor.id, name: actor.name || actor.email || "" };
+  const audit = async (summary, entityId) => {
+    try {
+      addAudit(db, actor, "update", "product_sync", entityId || "", summary, null, null);
+      await writeDb(db);
+    } catch (error) {
+      // 감사 로그 저장 충돌로 작업 자체를 막지는 않는다.
+      if (error.status !== 409) console.error(`[product-sync] audit failed: ${error.message}`);
+    }
+  };
+  try {
+    if (pathname === "/api/product-sync" && method === "GET") {
+      sendJson(res, 200, {
+        ...(await productSync.overview()),
+        cafe24: cafe24PublicState(db),
+        cafe24Scope: cafe24.CAFE24_SCOPE,
+        productScope: /mall\.write_product/.test(cafe24.CAFE24_SCOPE)
+      });
+      return;
+    }
+    if (pathname === "/api/product-sync/wooof-search" && method === "GET") {
+      sendJson(res, 200, { products: await productSync.searchWooof(url.searchParams.get("q") || "") });
+      return;
+    }
+    const jobMatch = pathname.match(/^\/api\/product-sync\/jobs\/([^/]+)$/);
+    if (jobMatch && method === "GET") {
+      const job = productSync.getJob(decodeURIComponent(jobMatch[1]));
+      if (!job) {
+        sendJson(res, 404, { error: "작업을 찾을 수 없습니다. 서버가 다시 시작됐을 수 있습니다." });
+        return;
+      }
+      sendJson(res, 200, { job });
+      return;
+    }
+    const m = pathname.match(/^\/api\/product-sync\/sources\/([^/]+)(\/.*)?$/);
+    if (!m) {
+      sendJson(res, 404, { error: "Not found" });
+      return;
+    }
+    const sourceId = decodeURIComponent(m[1]);
+    const rest = m[2] || "";
+    if (rest === "" && method === "GET") {
+      sendJson(res, 200, await productSync.sourceDetail(sourceId));
+      return;
+    }
+    if (rest === "/run" && method === "POST") {
+      const job = productSync.startRun(sourceId, { trigger: "manual", actorName: actorInfo.name });
+      sendJson(res, 202, { job });
+      return;
+    }
+    if (rest === "/apply" && method === "POST") {
+      const body = await readBody(req);
+      // 화면에서 본 값(fingerprint)을 같이 받는다. 서버는 쓰기 직전에 다시 비교해서
+      // 이 값과 같을 때만 쓴다.
+      const items = (Array.isArray(body.items) ? body.items : [])
+        .map((item) => ({ key: String(item?.key || ""), fingerprint: String(item?.fingerprint ?? "") }))
+        .filter((item) => item.key);
+      if (!items.length) {
+        sendJson(res, 400, { error: "반영할 항목을 고르세요." });
+        return;
+      }
+      const job = productSync.startApply(sourceId, items, actorInfo);
+      await audit(`상품동기화 반영 ${items.length}건 (${sourceId})`, sourceId);
+      sendJson(res, 202, { job });
+      return;
+    }
+    if (rest === "/dismiss" && method === "POST") {
+      const body = await readBody(req);
+      sendJson(res, 200, await productSync.dismissIssues(sourceId, (body.keys || []).map(String), actorInfo));
+      return;
+    }
+    if (rest === "/notices/clear" && method === "POST") {
+      const body = await readBody(req);
+      sendJson(res, 200, await productSync.clearNotices(sourceId, (body.ids || []).map(String)));
+      return;
+    }
+    if (rest === "/settings" && method === "PUT") {
+      const body = await readBody(req);
+      const result = await productSync.updateSettings(sourceId, body, actorInfo);
+      await audit(`상품동기화 설정 변경 (${sourceId})`, sourceId);
+      sendJson(res, 200, result);
+      return;
+    }
+    if (rest === "/links" && method === "POST") {
+      const body = await readBody(req);
+      const result = await productSync.saveLink(sourceId, body.wooofProductNo, body, actorInfo);
+      await audit(`상품동기화 연결 저장: 우프 ${body.wooofProductNo} ↔ 본사 ${body.sourceNo}`, String(body.wooofProductNo));
+      sendJson(res, 200, { check: result });
+      return;
+    }
+    const linkMatch = rest.match(/^\/links\/(\d+)(\/check)?$/);
+    if (linkMatch && method === "DELETE" && !linkMatch[2]) {
+      const result = await productSync.removeLink(sourceId, linkMatch[1], actorInfo);
+      await audit(`상품동기화 연결 해제: 우프 ${linkMatch[1]}`, linkMatch[1]);
+      sendJson(res, 200, result);
+      return;
+    }
+    if (linkMatch && linkMatch[2] && method === "GET") {
+      sendJson(res, 200, { check: await productSync.checkLink(sourceId, linkMatch[1]) });
+      return;
+    }
+    const candMatch = rest.match(/^\/candidates\/(\d+)\/(ignore|register)$/);
+    if (candMatch && method === "POST") {
+      const body = await readBody(req);
+      if (candMatch[2] === "ignore") {
+        sendJson(res, 200, await productSync.setIgnored(sourceId, candMatch[1], body.ignored !== false, actorInfo));
+        return;
+      }
+      const job = productSync.startRegister(sourceId, candMatch[1], { productName: body.productName }, actorInfo);
+      await audit(`상품동기화 신규 등록 시작: 본사 ${candMatch[1]}`, candMatch[1]);
+      sendJson(res, 202, { job });
+      return;
+    }
+    sendJson(res, 404, { error: "Not found" });
+  } catch (error) {
+    productSyncError(res, error);
+  }
 }
 
 // --- Cafe24 Admin API integration ---------------------------------------
@@ -7219,6 +7369,11 @@ async function routeApi(req, res, url) {
     }
     if (updated.length) await writeDb(db);
     sendJson(res, 200, { updated, updatedCount: updated.length });
+    return;
+  }
+
+  if (pathname === "/api/product-sync" || pathname.startsWith("/api/product-sync/")) {
+    await routeProductSync(req, res, url, actor, db);
     return;
   }
 
@@ -9412,4 +9567,8 @@ if (isMainModule) {
   };
   startKeepAlive(cafe24KeepAlive);
   startKeepAlive(clobeKeepAlive);
+  // 공급사 상품 동기화 — 매일 09시·17시(한국시간) 이후 첫 확인 때 한 번씩 돈다.
+  // 로컬 개발 서버에서는 기본으로 끈다(PRODUCT_SYNC_SCHEDULE=on 으로 켤 수 있다).
+  const syncSchedule = String(process.env.PRODUCT_SYNC_SCHEDULE || (process.env.NODE_ENV === "production" ? "on" : "off")).toLowerCase();
+  if (syncSchedule === "on") productSync.startSchedule();
 }
