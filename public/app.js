@@ -9356,7 +9356,8 @@ const PS_ISSUE_LABELS = {
   variant_unmatched: ["우프 옵션 짝 없음", "ps-yellow"],
   wooof_missing: ["우프 상품 없음", "ps-yellow"],
   source_unreadable: ["본사 읽기 실패", "ps-gray"],
-  filter_empty: ["옵션 필터 확인", "ps-yellow"]
+  filter_empty: ["옵션 필터 확인", "ps-yellow"],
+  option_text: ["옵션명", "ps-blue"]
 };
 const PS_NOTICE_LABELS = { name_changed: "상품명 변경", image_changed: "대표이미지 변경", options_changed: "옵션 구성 변경" };
 const PS_HISTORY_LABELS = {
@@ -9724,7 +9725,8 @@ function renderPsCandidates() {
       <div class="panel-body">
         <p class="muted">
           기준: 우프에 연결되지 않은 본사 진열 상품 중 본사 등록일(상세이미지 날짜로 추정)이 위 기간 안인 것.
-          등록하면 <b>미진열</b>로 올라가고, 판매가는 본사 정가, 옵션 추가금·품절은 본사와 같게, 공급사·카테고리·원산지·공급가 비율은 기존 MUNIKUND 상품에서 복사합니다.
+          등록하면 <b>미진열</b>로 올라가고 <b>기본몰에서만 판매</b>합니다(다른 쇼핑몰은 판매 안 함). 판매가는 본사 정가, 옵션 추가금·품절은 본사와 같게,
+          공급사·원산지·공급가 비율은 기존 MUNIKUND 상품에서 복사하고, 분류는 기존 상품들의 <b>공통 분류(브랜드관 등)만</b> 넣습니다 — 상품 종류별 분류는 직접 지정하세요.
           흰 배경 누끼 썸네일은 #${h(detail.thumbnailMultiply || "F7F7F7")} multiply 처리합니다.
         </p>
         ${renderPsJob("register")}
