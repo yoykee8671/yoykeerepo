@@ -97,6 +97,22 @@ GOOGLE_APPS_SCRIPT_WEBHOOK_URL (선택)
 
 5. Render 웹 서비스 시작 후 `/api/health` 확인
 
+## 상품동기화 (공급사 공식몰 ↔ 우프 카페24)
+
+입점 브랜드의 공식몰(카페24로 만든 사이트)을 하루 2회(09시·17시) 읽어, 우프에 연결된 상품의
+품절·재입고·판매가·옵션 추가금이 본사와 다르면 `상품동기화 > 확인 필요`에 올립니다. 골라서
+**우프에 반영**을 누르면 카페24 품목 재고(품절=0, 재입고=설정 수량)·가격을 바꿉니다.
+최근 3개월 안에 본사에 올라온 신상품은 `신상품 등록`에서 미진열로 등록합니다
+(흰 배경 누끼 썸네일은 #F7F7F7 multiply).
+
+- 첫 대상: MUNIKUND (munikund.com). 기존 우프 상품 72개 연결표는 `lib/product-sync-seed.mjs`
+- 필요 권한: `CAFE24_SCOPE` 에 `mall.read_product,mall.write_product` 추가 + 카페24 재연결
+- 코드: `lib/brand-source-cafe24.mjs`(본사 수집), `lib/product-sync.mjs`(비교),
+  `lib/product-register.mjs`(신규 등록), `lib/product-sync-service.mjs`(저장·작업·스케줄),
+  `scripts/product_image.py`(이미지)
+- 저장: `app_state` 테이블의 별도 행 `product_sync` (메인 상태와 분리)
+- 자세한 내용: [docs/product-sync.md](docs/product-sync.md)
+
 ## Google Sheets 연동
 
 자세한 설정은 [docs/google-sheets-archive.md](docs/google-sheets-archive.md)를 참고하세요.
