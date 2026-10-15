@@ -7387,7 +7387,14 @@ async function routeApi(req, res, url) {
   // --- Cafe24 Admin API endpoints -----------------------------------------
   // Order data and a delegated credential — owner/manager only, same as clobe.
   if (pathname.startsWith("/api/cafe24/")) {
-    if (!requirePermission(actor, res, "pipeline", "view", "카페24 연동 권한이 없습니다.")) return;
+    // 연결(상태·연결·콜백)은 상품동기화 실행 권한으로도 할 수 있다 — 같은 토큰을
+    // 두 메뉴가 같이 쓴다. 해제와 주문 조회는 주문매칭 권한만.
+    const connectOnly = ["/api/cafe24/status", "/api/cafe24/connect", "/api/cafe24/callback"].includes(pathname);
+    const allowed = can(actor, "pipeline", "view") || (connectOnly && can(actor, "productsync", "apply"));
+    if (!allowed) {
+      sendJson(res, 403, { error: "카페24 연동 권한이 없습니다." });
+      return;
+    }
     if (!db.cafe24 || typeof db.cafe24 !== "object") db.cafe24 = buildCafe24Namespace();
   }
 
@@ -7404,7 +7411,10 @@ async function routeApi(req, res, url) {
     try {
       const redirectUri = cafe24RedirectUri(req);
       const state = cafe24.createState();
-      cafe24PendingAuth.set(state, { redirectUri, actorId: actor.id, createdAt: Date.now() });
+      const connectBody = await readBody(req).catch(() => ({}));
+      // 연결을 시작한 화면으로 돌아가게 한다(주문매칭 / 상품동기화).
+      const returnTab = connectBody?.returnTo === "productsync" ? "productsync" : "";
+      cafe24PendingAuth.set(state, { redirectUri, actorId: actor.id, createdAt: Date.now(), returnTab });
       for (const [key, value] of cafe24PendingAuth) {
         if (Date.now() - value.createdAt > CLOBE_AUTH_TTL_MS) cafe24PendingAuth.delete(key);
       }
@@ -7421,7 +7431,7 @@ async function routeApi(req, res, url) {
     const pending = cafe24PendingAuth.get(state);
     cafe24PendingAuth.delete(state);
     const fail = (reason) => {
-      res.writeHead(302, { location: `/?cafe24=error&reason=${encodeURIComponent(reason)}` });
+      res.writeHead(302, { location: `/?cafe24=error&reason=${encodeURIComponent(reason)}${pending?.returnTab ? `&tab=${pending.returnTab}` : ""}` });
       res.end();
     };
     if (url.searchParams.get("error")) return void fail(url.searchParams.get("error"));
@@ -7440,7 +7450,7 @@ async function routeApi(req, res, url) {
       db.cafe24.connectedAt = now();
       addAudit(db, actor, "update", "cafe24", "connection", `카페24 연동 연결 (${db.cafe24.mallId})`, null, cafe24PublicState(db));
       await writeDb(db);
-      res.writeHead(302, { location: "/?cafe24=connected" });
+      res.writeHead(302, { location: `/?cafe24=connected${pending.returnTab ? `&tab=${pending.returnTab}` : ""}` });
       res.end();
     } catch (error) {
       fail(error.message);

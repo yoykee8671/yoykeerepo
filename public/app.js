@@ -585,7 +585,7 @@ async function init() {
   const clobeResult = params.get("clobe");
   const cafe24Result = params.get("cafe24");
   if (clobeResult || cafe24Result) {
-    state.tab = "reconcile";
+    state.tab = params.get("tab") === "productsync" ? "productsync" : "reconcile";
     const reason = params.get("reason") || "";
     const label = clobeResult ? "클로브ai" : "카페24";
     const result = clobeResult || cafe24Result;
@@ -9503,8 +9503,8 @@ function renderPsConnection() {
   const c = ov.cafe24 || {};
   const problems = [];
   if (!c.configured) problems.push("카페24 연동 환경변수(CAFE24_MALL_ID 등)가 서버에 없습니다.");
-  else if (!c.connected) problems.push("카페24가 연결되어 있지 않습니다. 주문매칭 화면에서 카페24를 연결하세요.");
-  else if (c.expired) problems.push("카페24 연결이 만료됐습니다. 주문매칭 화면에서 다시 연결하세요.");
+  else if (!c.connected) problems.push("카페24가 연결되어 있지 않습니다. 아래 버튼으로 연결하세요.");
+  else if (c.expired) problems.push("카페24 연결이 만료됐습니다. 아래 버튼으로 다시 연결하세요.");
   if (!ov.productScope) {
     problems.push(`카페24 상품 권한이 없습니다 (현재 요청 권한: ${h(ov.cafe24Scope || "-")}). 아래 순서로 켜 주세요:
       <ol class="ps-steps">
@@ -9514,10 +9514,18 @@ function renderPsConnection() {
         <li>주문매칭 화면에서 카페24 <b>다시 연결</b></li>
       </ol>`);
   }
-  if (!problems.length) return "";
+  const canConnect = c.configured && can("productsync", "apply");
+  const connectButton = canConnect
+    ? `<button class="${problems.length ? "primary" : ""}" data-ps-cafe24-connect>${c.connected ? "카페24 다시 연결" : "카페24 연결"}</button>`
+    : "";
+  if (!problems.length) {
+    return `<div class="ps-conn muted">카페24 연결됨${c.mallId ? ` (${h(c.mallId)})` : ""}${c.connectedAt ? ` · ${psFmtTime(c.connectedAt)} 연결` : ""}
+      ${c.refreshTokenExpiresAt ? ` · 갱신 기한 ${h(String(c.refreshTokenExpiresAt).slice(0, 10))}` : ""} ${connectButton}</div>`;
+  }
   return `<section class="panel ps-warn"><div class="panel-body">
     <strong>우프(카페24) 쪽 확인·반영이 아직 안 됩니다.</strong> 본사 수집과 신상품 후보는 지금도 볼 수 있습니다.
     <ul>${problems.map((p) => `<li>${p}</li>`).join("")}</ul>
+    ${connectButton ? `<div class="toolbar">${connectButton}</div>` : ""}
   </div></section>`;
 }
 
@@ -9932,6 +9940,14 @@ function bindProductSync() {
   const sourcePath = `/api/product-sync/sources/${encodeURIComponent(ps.sourceId)}`;
 
   on("[data-ps-reload]", "click", () => loadProductSync());
+  on("[data-ps-cafe24-connect]", "click", async () => {
+    try {
+      const { authorizeUrl } = await api("/api/cafe24/connect", { method: "POST", body: { returnTo: "productsync" } });
+      window.location.href = authorizeUrl;
+    } catch (error) {
+      showToast(error.message || "카페24 연결 준비 실패", "error");
+    }
+  });
   on("[data-ps-run]", "click", async (event) => {
     const mode = event.currentTarget.dataset.psRun === "scan" ? "scan" : "stock";
     try {

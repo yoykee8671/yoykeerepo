@@ -2265,3 +2265,4 @@ a.button:hover {
 .ps-table td.ps-opt { font-weight: 600; white-space: nowrap; }
 .ps-table td.ps-change { white-space: nowrap; }
 .nav-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #e5484d; margin-left: 6px; vertical-align: middle; position: relative; top: -1px; }
+.ps-conn { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: -4px 0 12px; font-size: 13px; }
