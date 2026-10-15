@@ -5766,7 +5766,10 @@ async function routeProductSync(req, res, url, actor, db) {
       return;
     }
     if (rest === "/run" && method === "POST") {
-      const job = productSync.startRun(sourceId, { trigger: "manual", actorName: actorInfo.name });
+      const body = await readBody(req);
+      // stock = 연결된 상품 재고 확인(빠름), scan = 본사 진열 목록에서 신상품 찾기
+      const mode = body.mode === "scan" ? "scan" : "stock";
+      const job = productSync.startRun(sourceId, { trigger: "manual", actorName: actorInfo.name, mode });
       sendJson(res, 202, { job });
       return;
     }
