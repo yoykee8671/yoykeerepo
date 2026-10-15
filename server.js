@@ -5740,6 +5740,10 @@ async function routeProductSync(req, res, url, actor, db) {
       });
       return;
     }
+    if (pathname === "/api/product-sync/badge" && method === "GET") {
+      sendJson(res, 200, await productSync.badge());
+      return;
+    }
     if (pathname === "/api/product-sync/wooof-search" && method === "GET") {
       sendJson(res, 200, { products: await productSync.searchWooof(url.searchParams.get("q") || "") });
       return;

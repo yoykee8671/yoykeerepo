@@ -2264,3 +2264,4 @@ a.button:hover {
 .ps-runbar + .ps-runbar { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .ps-table td.ps-opt { font-weight: 600; white-space: nowrap; }
 .ps-table td.ps-change { white-space: nowrap; }
+.nav-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #e5484d; margin-left: 6px; vertical-align: middle; position: relative; top: -1px; }
