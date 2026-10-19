@@ -4728,11 +4728,13 @@ function sanitizePurchaseOrderLineItems(raw) {
   return source
     .map((item) => {
       const quantity = Math.max(0, number(item.quantity));
-      const unitPrice = Math.max(0, number(item.unitPrice));
+      // 거래명세서·세금계산서 관례대로 금액은 전부 1원 단위 정수로 저장한다 —
+      // 소수점이 섞여 들어와도 여기서 반올림되어 표기·합계에 소수점이 없다.
+      const unitPrice = Math.round(Math.max(0, number(item.unitPrice)));
       // 부가세 포함 단가는 입력값을 그대로 보존한다 — 공급가에서 10%를 다시
       // 붙여 계산하면 포함가로 입력한 금액과 1원이 어긋날 수 있다. 값이 없는
       // (이 필드가 생기기 전의) 품목만 공급가 기준으로 되살린다.
-      const grossUnitPrice = Math.max(0, number(item.grossUnitPrice))
+      const grossUnitPrice = Math.round(Math.max(0, number(item.grossUnitPrice)))
         || unitPrice + Math.round(unitPrice * 0.1);
       return {
         id: item.id || id("poline"),
@@ -4740,7 +4742,7 @@ function sanitizePurchaseOrderLineItems(raw) {
         itemCode: String(item.itemCode || "").trim(),
         itemName: String(item.itemName || "").trim(),
         spec: String(item.spec || "").trim(),
-        consumerPrice: Math.max(0, number(item.consumerPrice)),
+        consumerPrice: Math.round(Math.max(0, number(item.consumerPrice))),
         quantity,
         unit: String(item.unit || "").trim(),
         unitPrice,
@@ -9098,8 +9100,9 @@ async function routeApi(req, res, url) {
       itemCode: String(body.itemCode || "").trim(),
       category: String(body.category || "").trim(),
       orderUnit: String(body.orderUnit || "").trim(),
-      basePrice: number(body.basePrice),
-      consumerPrice: number(body.consumerPrice),
+      // prices are kept at whole won, as on trade documents and tax invoices
+      basePrice: Math.round(number(body.basePrice)),
+      consumerPrice: Math.round(number(body.consumerPrice)),
       leadTimeDays: number(body.leadTimeDays),
       note: String(body.note || "").trim(),
       isActive: body.isActive !== false,
@@ -9125,8 +9128,8 @@ async function routeApi(req, res, url) {
     for (const key of ["partnerId", "itemName", "itemCode", "category", "orderUnit", "note"]) {
       if (key in body) material[key] = String(body[key] || "").trim();
     }
-    if ("basePrice" in body) material.basePrice = number(body.basePrice);
-    if ("consumerPrice" in body) material.consumerPrice = number(body.consumerPrice);
+    if ("basePrice" in body) material.basePrice = Math.round(number(body.basePrice));
+    if ("consumerPrice" in body) material.consumerPrice = Math.round(number(body.consumerPrice));
     if ("leadTimeDays" in body) material.leadTimeDays = number(body.leadTimeDays);
     if ("isActive" in body) material.isActive = body.isActive !== false && body.isActive !== "false";
     material.updatedAt = now();

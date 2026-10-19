@@ -247,7 +247,8 @@ function npbProductId(key) {
 }
 
 const app = document.querySelector("#app");
-const money = new Intl.NumberFormat("ko-KR");
+// 금액은 거래명세서·세금계산서 관례대로 항상 1원 단위 정수로만 표기한다.
+const money = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 0 });
 // Amount helpers: parse a possibly comma-formatted string to a number, and
 // format a number with thousands separators for display in money inputs.
 function parseAmount(value) {
@@ -5162,15 +5163,19 @@ function renderPurchaseOrderForm() {
 // 품목의 부가세 포함 단가. grossUnitPrice가 없는(이 필드 이전에 저장된)
 // 품목은 공급가에 10%를 붙여 되살린다 — 서버 sanitize와 같은 규칙.
 function poItemGrossUnitPrice(item) {
-  const gross = Number(item.grossUnitPrice) || 0;
+  const gross = Math.round(Number(item.grossUnitPrice) || 0);
   if (gross > 0) return gross;
-  const supply = Number(item.unitPrice) || 0;
+  const supply = Math.round(Number(item.unitPrice) || 0);
   return supply + Math.round(supply * 0.1);
 }
 
 // 문서의 금액 기준(priceMode)에 따라 그 줄의 표시 단가/합계를 고른다.
 function poItemDisplayPrices(item, priceMode) {
-  const unitPrice = priceMode === "gross" ? poItemGrossUnitPrice(item) : Number(item.unitPrice) || 0;
+  // 단가·합계는 1원 단위 정수로만 다룬다 — 이 규칙 이전에 소수점으로
+  // 저장된 품목도 여기서 반올림되어 소수점 없이 표기된다.
+  const unitPrice = priceMode === "gross"
+    ? poItemGrossUnitPrice(item)
+    : Math.round(Number(item.unitPrice) || 0);
   return { unitPrice, totalPrice: Math.round((Number(item.quantity) || 0) * unitPrice) };
 }
 
@@ -5378,9 +5383,9 @@ function bindPurchaseOrders() {
 
   // 공급가가 비어 있고 합계만 적혀 있으면 합계에서 거꾸로 계산한다.
   const resolveUnitPrice = (fallback) => {
-    if (priceInput && priceInput.value !== "") return Math.max(0, Number(priceInput.value) || 0);
+    if (priceInput && priceInput.value !== "") return Math.round(Math.max(0, Number(priceInput.value) || 0));
     if (grossInput && grossInput.value !== "") return supplyFromGross(Number(grossInput.value) || 0);
-    return Math.max(0, Number(fallback) || 0);
+    return Math.round(Math.max(0, Number(fallback) || 0));
   };
 
   if (priceInput && vatInput && grossInput) {
@@ -5390,7 +5395,7 @@ function bindPurchaseOrders() {
         grossInput.value = "";
         return;
       }
-      const supply = Math.max(0, Number(priceInput.value) || 0);
+      const supply = Math.round(Math.max(0, Number(priceInput.value) || 0));
       const vat = Math.round(supply * 0.1);
       vatInput.value = String(vat);
       grossInput.value = String(supply + vat);
@@ -5401,7 +5406,7 @@ function bindPurchaseOrders() {
         vatInput.value = "";
         return;
       }
-      const gross = Math.max(0, Number(grossInput.value) || 0);
+      const gross = Math.round(Math.max(0, Number(grossInput.value) || 0));
       const supply = supplyFromGross(gross);
       priceInput.value = String(supply);
       // 세액을 따로 10%로 다시 구하지 않고 차액으로 둔다 — 그래야 거래처가
@@ -5438,13 +5443,13 @@ function bindPurchaseOrders() {
     // 포함 단가는 합계 칸에 적힌 값을 그대로 보존한다 — 공급가에서 10%를
     // 다시 붙이면 입력한 포함가와 1원이 어긋날 수 있다.
     const grossUnitPrice = grossInput && grossInput.value !== ""
-      ? Math.max(0, Number(grossInput.value) || 0)
+      ? Math.round(Math.max(0, Number(grossInput.value) || 0))
       : unitPrice + Math.round(unitPrice * 0.1);
     // 상품코드·소비자정가는 직접 입력이 우선, 비어 있으면 카탈로그 값.
     const itemCode = codeInput.value.trim() || material?.itemCode || "";
     const consumerPrice = consumerInput.value !== ""
-      ? Math.max(0, Number(consumerInput.value) || 0)
-      : Number(material?.consumerPrice) || 0;
+      ? Math.round(Math.max(0, Number(consumerInput.value) || 0))
+      : Math.round(Number(material?.consumerPrice) || 0);
     const newItemId = cryptoRandomId();
     const items = getLineItems();
     items.push({

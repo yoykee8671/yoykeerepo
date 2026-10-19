@@ -644,12 +644,15 @@ def write_values(ws, doc_type, layout, spec, delivery=()):
         name_val = item.get("itemName", "")
         spec_val = item.get("spec", "")
         code_val = item.get("itemCode", "")
-        consumer_price = item.get("consumerPrice") or 0
+        # 거래명세서·세금계산서 관례대로 모든 금액은 1원 단위 정수로만 적는다
+        # -- 소수점이 섞인 값이 저장돼 있어도(이 규칙 이전 데이터) 반올림한다.
+        consumer_price = _round_half_up(item.get("consumerPrice") or 0)
         quantity = item.get("quantity") or 0
-        supply_price = item.get("unitPrice") or 0
+        supply_price = _round_half_up(item.get("unitPrice") or 0)
         # 포함 단가는 저장된 값을 그대로 쓴다(입력 시점의 1원 단위까지 보존).
         # 이 필드가 없는 옛 발주서는 공급가에서 10%를 붙여 되살린다.
-        gross_price = item.get("grossUnitPrice") or (supply_price + _round_half_up(supply_price * 0.1))
+        gross_price = _round_half_up(item.get("grossUnitPrice") or 0) \
+            or (supply_price + _round_half_up(supply_price * 0.1))
         unit_price = gross_price if gross_mode else supply_price
         line_total = _round_half_up(quantity * unit_price)
         shown_sum += line_total
@@ -667,8 +670,9 @@ def write_values(ws, doc_type, layout, spec, delivery=()):
         ws.cell(row=r, column=6, value=quantity)
         ws.cell(row=r, column=7, value=unit_price)
         # line total is a formula, never a stored number, so editing qty/price
-        # in Excel recalculates it live.
-        ws.cell(row=r, column=8, value=f"=F{r}*G{r}")
+        # in Excel recalculates it live. ROUND keeps it at whole won even if
+        # someone types a fractional qty/price into the workbook later.
+        ws.cell(row=r, column=8, value=f"=ROUND(F{r}*G{r},0)")
 
         lines = max(
             _wrapped_line_count(code_val, COLUMN_WIDTHS[1]),
