@@ -3977,6 +3977,7 @@ function tradeDocSpecFromPurchaseOrder(db, po) {
         }
       : {},
     lineItems: po.lineItems,
+    priceMode: po.priceMode || "supply",
     deliveryPlace: po.deliveryPlace,
     subtotal: po.subtotal,
     vat: po.vat,
@@ -4728,18 +4729,42 @@ function sanitizePurchaseOrderLineItems(raw) {
     .map((item) => {
       const quantity = Math.max(0, number(item.quantity));
       const unitPrice = Math.max(0, number(item.unitPrice));
+      // 부가세 포함 단가는 입력값을 그대로 보존한다 — 공급가에서 10%를 다시
+      // 붙여 계산하면 포함가로 입력한 금액과 1원이 어긋날 수 있다. 값이 없는
+      // (이 필드가 생기기 전의) 품목만 공급가 기준으로 되살린다.
+      const grossUnitPrice = Math.max(0, number(item.grossUnitPrice))
+        || unitPrice + Math.round(unitPrice * 0.1);
       return {
         id: item.id || id("poline"),
         materialId: String(item.materialId || "").trim(),
+        itemCode: String(item.itemCode || "").trim(),
         itemName: String(item.itemName || "").trim(),
         spec: String(item.spec || "").trim(),
+        consumerPrice: Math.max(0, number(item.consumerPrice)),
         quantity,
         unit: String(item.unit || "").trim(),
         unitPrice,
+        grossUnitPrice,
         totalPrice: Math.round(quantity * unitPrice)
       };
     })
     .filter((item) => item.itemName);
+}
+
+// 문서의 금액 기준(priceMode)에 따라 합계를 구한다. supply(부가세 별도)는
+// 공급가 합에서 부가세를 얹고, gross(부가세 포함)는 포함가 합이 곧 총액이라
+// 공급가액을 거꾸로 산출한다 — 어느 쪽이든 사용자가 입력한 기준 금액이
+// 1원도 틀어지지 않는 방향으로 반올림한다.
+function purchaseOrderTotals(lineItems, priceMode) {
+  if (priceMode === "gross") {
+    const total = lineItems.reduce(
+      (sum, item) => sum + Math.round(item.quantity * item.grossUnitPrice), 0);
+    const subtotal = Math.round(total / 1.1);
+    return { subtotal, vat: total - subtotal, total };
+  }
+  const subtotal = lineItems.reduce((sum, item) => sum + item.totalPrice, 0);
+  const vat = Math.round(subtotal * 0.1);
+  return { subtotal, vat, total: subtotal + vat };
 }
 
 // 납품장소는 거래처와 달리 발주서 저장 시점의 스냅샷으로만 남는다 — 재사용
@@ -8885,6 +8910,10 @@ async function routeApi(req, res, url) {
       depositorName: String(body.depositorName || "").trim(),
       orderMethod: String(body.orderMethod || "").trim(),
       invoiceTiming: String(body.invoiceTiming || "").trim(),
+      // 발주서 단가를 공급가(부가세 별도) 기준으로 쓸지, 부가세 포함가
+      // 기준으로 쓸지의 이 거래처 기본값 — 문서 작성 시 자동 선택되고
+      // 문서별로 바꿀 수 있다.
+      priceMode: body.priceMode === "gross" ? "gross" : "supply",
       contactName: String(body.contactName || "").trim(),
       contactPhone: String(body.contactPhone || "").trim(),
       contactEmail: String(body.contactEmail || "").trim(),
@@ -8920,6 +8949,7 @@ async function routeApi(req, res, url) {
       if (key in body) partner[key] = String(body[key] || "").trim();
     }
     if (!partnerCategories.has(partner.category)) partner.category = "production";
+    if ("priceMode" in body) partner.priceMode = body.priceMode === "gross" ? "gross" : "supply";
     if ("attachments" in body) {
       partner.attachments = Array.isArray(body.attachments)
         ? body.attachments.map((item) => String(item || "").trim()).filter(Boolean)
@@ -9069,6 +9099,7 @@ async function routeApi(req, res, url) {
       category: String(body.category || "").trim(),
       orderUnit: String(body.orderUnit || "").trim(),
       basePrice: number(body.basePrice),
+      consumerPrice: number(body.consumerPrice),
       leadTimeDays: number(body.leadTimeDays),
       note: String(body.note || "").trim(),
       isActive: body.isActive !== false,
@@ -9095,6 +9126,7 @@ async function routeApi(req, res, url) {
       if (key in body) material[key] = String(body[key] || "").trim();
     }
     if ("basePrice" in body) material.basePrice = number(body.basePrice);
+    if ("consumerPrice" in body) material.consumerPrice = number(body.consumerPrice);
     if ("leadTimeDays" in body) material.leadTimeDays = number(body.leadTimeDays);
     if ("isActive" in body) material.isActive = body.isActive !== false && body.isActive !== "false";
     material.updatedAt = now();
@@ -9225,13 +9257,17 @@ async function routeApi(req, res, url) {
     const docType = tradeDocTypes.has(body.docType) ? body.docType : "purchase_order";
     const orderDate = dateOnly(body.orderDate) || now().slice(0, 10);
     const lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
-    const subtotal = lineItems.reduce((sum, item) => sum + item.totalPrice, 0);
-    const vat = Math.round(subtotal * 0.1);
+    // 금액 기준: 요청에 없으면 거래처 기본값, 그것도 없으면 공급가 기준.
+    const priceMode = body.priceMode === "gross" || body.priceMode === "supply"
+      ? body.priceMode
+      : (partner.priceMode === "gross" ? "gross" : "supply");
+    const { subtotal, vat, total } = purchaseOrderTotals(lineItems, priceMode);
     const po = {
       id: id("po"),
       docType,
       docNo: nextPurchaseOrderDocNo(db, orderDate, docType),
       partnerId: partner.id,
+      priceMode,
       orderDate,
       // 양식마다 뜻이 다른 두 번째 날짜 — 발주서는 납기일, 견적서는 유효기간,
       // 청구서는 지급기일. 거래명세서는 쓰지 않는다.
@@ -9243,7 +9279,7 @@ async function routeApi(req, res, url) {
       deliveryPlace: sanitizeDeliveryPlace(body.deliveryPlace),
       subtotal,
       vat,
-      total: subtotal + vat,
+      total,
       note: String(body.note || "").trim(),
       createdAt: now(),
       updatedAt: now()
@@ -9292,11 +9328,16 @@ async function routeApi(req, res, url) {
     }
     if ("deliveryPlace" in body) po.deliveryPlace = sanitizeDeliveryPlace(body.deliveryPlace);
     if ("note" in body) po.note = String(body.note || "").trim();
-    if ("lineItems" in body) {
-      po.lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
-      po.subtotal = po.lineItems.reduce((sum, item) => sum + item.totalPrice, 0);
-      po.vat = Math.round(po.subtotal * 0.1);
-      po.total = po.subtotal + po.vat;
+    if ("priceMode" in body && (body.priceMode === "gross" || body.priceMode === "supply")) {
+      po.priceMode = body.priceMode;
+    }
+    if ("lineItems" in body) po.lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
+    // 품목이 바뀌었든 금액 기준만 바뀌었든 합계는 다시 구한다.
+    if ("lineItems" in body || "priceMode" in body) {
+      const totals = purchaseOrderTotals(po.lineItems, po.priceMode);
+      po.subtotal = totals.subtotal;
+      po.vat = totals.vat;
+      po.total = totals.total;
     }
     po.updatedAt = now();
     addAudit(db, actor, "update", "purchaseOrder", po.id, `${po.docNo} ${TRADE_DOC_LABELS[po.docType] || "발주서"} 수정`, before, po);
