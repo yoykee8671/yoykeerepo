@@ -12,7 +12,10 @@ route in server.js:
   "partner": {"name","businessName","businessNumber","representativeName","address",
               "contactName","contactEmail","invoiceEmail"},  # {} if the partner record
                                                               # was deleted
-  "lineItems": [{"itemName","spec","quantity","unit","unitPrice","totalPrice"}, ...],
+  "lineItems": [{"itemCode","itemName","spec","consumerPrice","quantity",
+                 "unitPrice","grossUnitPrice","totalPrice"}, ...],
+  "priceMode": "supply",  # | "gross" -- 단가 칸에 공급가(부가세 별도)를 쓸지
+                          # 부가세 포함가를 쓸지. 생략하면 supply(현행과 동일).
   "deliveryPlace": {"name","address","contactName","contactPhone","note"},  # all optional
   "subtotal": 0, "vat": 0, "total": 0,   # not used for display -- trade_doc_common
                                           # recomputes these as live Excel formulas from

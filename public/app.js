@@ -4472,6 +4472,13 @@ function renderPartnerForm() {
         <div><label>발주방식</label><input name="orderMethod" value="${h(p.orderMethod)}" placeholder="예: 메일, 개별요청"></div>
         <div><label>증빙구분(계산서 발행 시점)</label><input name="invoiceTiming" value="${h(p.invoiceTiming)}" placeholder="예: 입금 후 발행"></div>
       </div>
+      <div class="field">
+        <label>금액 기준 <span class="muted" style="font-weight:400">(발주서 단가 기본값 — 문서별로 변경 가능)</span></label>
+        <select name="priceMode">
+          <option value="supply" ${p.priceMode === "gross" ? "" : "selected"}>부가세 별도 (공급가 기준 — 생산처 일반)</option>
+          <option value="gross" ${p.priceMode === "gross" ? "selected" : ""}>부가세 포함 (제품가에 부가세 포함)</option>
+        </select>
+      </div>
       <div class="field two">
         <div><label>담당자명</label><input name="contactName" value="${h(p.contactName)}"></div>
         <div><label>담당자 연락처</label><input name="contactPhone" value="${h(p.contactPhone)}"></div>
@@ -4631,7 +4638,10 @@ function renderMaterialForm() {
         <div><label>발주단위</label><input name="orderUnit" value="${h(m.orderUnit)}" placeholder="예: 개, Roll, box"></div>
         <div><label>리드타임(일)</label><input name="leadTimeDays" type="number" min="0" value="${h(m.leadTimeDays || "")}"></div>
       </div>
-      <div class="field"><label>기본 공급가</label><input name="basePrice" type="number" min="0" value="${h(m.basePrice || "")}" placeholder="부가세 제외 금액"></div>
+      <div class="field two">
+        <div><label>기본 공급가</label><input name="basePrice" type="number" min="0" value="${h(m.basePrice || "")}" placeholder="부가세 제외 금액"></div>
+        <div><label>소비자정가</label><input name="consumerPrice" type="number" min="0" value="${h(m.consumerPrice || "")}" placeholder="선택 입력 — 발주서에 표기"></div>
+      </div>
       <div class="field"><label>메모</label><textarea name="note">${h(m.note)}</textarea></div>
       <div class="field"><label>사용 상태</label><select name="isActive"><option value="true" ${m.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${m.isActive === false ? "selected" : ""}>N</option></select></div>
       <div class="toolbar">
@@ -4899,6 +4909,10 @@ function renderPurchaseOrderPreviewOverlay(poId) {
   // 실제 엑셀과 같은 규칙 -- 견적서/청구서에는 납품장소를 싣지 않는다.
   const showDelivery = docType === "purchase_order" || docType === "statement";
   const deliveryFields = showDelivery ? deliveryPlaceFields(po.deliveryPlace) : [];
+  const priceMode = po.priceMode || "supply";
+  // 돈이 들어오는 양식(거래명세서/청구서)만 입금요청으로 이어진다 — 발주서는
+  // 우리가 지급하는 쪽이라 해당 없음.
+  const canHandoffToRequest = docType === "statement" || docType === "invoice";
   const closing = {
     purchase_order: "위와 같이 발주합니다.",
     quote: "위와 같이 견적합니다.",
@@ -4911,6 +4925,7 @@ function renderPurchaseOrderPreviewOverlay(poId) {
         <div class="po-preview-toolbar">
           <strong>${h(docLabel)} 미리보기 · ${h(po.docNo)}</strong>
           <div>
+            ${canHandoffToRequest ? `<button type="button" data-po-to-request="${po.id}">입금요청 생성</button>` : ""}
             <button class="primary" type="button" data-po-pdf="${po.id}">PDF 다운로드</button>
             <a href="/api/purchase-orders/${po.id}/excel"><button type="button">엑셀 다운로드</button></a>
             <button type="button" data-close-po-preview>닫기</button>
@@ -4950,18 +4965,22 @@ function renderPurchaseOrderPreviewOverlay(poId) {
             ${deliveryFields.map(([label, value]) => `<div class="po-doc-info-row"><span>${h(label)}</span>${h(value)}</div>`).join("")}
           </div>` : ""}
           <table class="po-doc-table">
-            <thead><tr><th>순번</th><th>품목명</th><th>규격</th><th>수량</th><th>단위</th><th>단가</th><th>공급가액</th></tr></thead>
+            <thead><tr><th>순번</th><th>상품코드</th><th>품목명</th><th>규격</th><th>소비자정가</th><th>수량</th><th>단가</th><th>공급가합계</th></tr></thead>
             <tbody>
-              ${items.map((item, i) => `
+              ${items.map((item, i) => {
+                const prices = poItemDisplayPrices(item, priceMode);
+                return `
                 <tr>
                   <td class="po-doc-center">${i + 1}</td>
+                  <td>${h(item.itemCode)}</td>
                   <td>${h(item.itemName)}</td>
                   <td>${h(item.spec)}</td>
+                  <td class="num">${item.consumerPrice ? money.format(item.consumerPrice) : ""}</td>
                   <td class="po-doc-center">${money.format(item.quantity || 0)}</td>
-                  <td class="po-doc-center">${h(item.unit)}</td>
-                  <td class="num">${money.format(item.unitPrice || 0)}</td>
-                  <td class="num po-doc-amount">${money.format(item.totalPrice || 0)}</td>
-                </tr>`).join("") || `<tr><td colspan="7" class="empty">추가된 품목이 없습니다.</td></tr>`}
+                  <td class="num">${money.format(prices.unitPrice)}</td>
+                  <td class="num po-doc-amount">${money.format(prices.totalPrice)}</td>
+                </tr>`;
+              }).join("") || `<tr><td colspan="8" class="empty">추가된 품목이 없습니다.</td></tr>`}
             </tbody>
           </table>
           <div class="po-doc-footer">
@@ -5024,6 +5043,9 @@ function renderPurchaseOrderForm() {
   const lineItems = Array.isArray(po.lineItems) ? po.lineItems : [];
   const docType = po.docType || state.procurement.formDocType || "purchase_order";
   const meta = tradeDocMeta(docType);
+  // 금액 기준: 문서에 저장된 값 > 수신처 거래처의 기본값 > 공급가 기준.
+  const selectedPartner = (state.partners || []).find((p) => p.id === po.partnerId);
+  const priceMode = po.priceMode || selectedPartner?.priceMode || "supply";
   return `
     <form class="form-grid" data-purchase-order-form>
       <div class="field two">
@@ -5041,12 +5063,21 @@ function renderPurchaseOrderForm() {
           </select>
         </div>
       </div>
-      <div class="field">
-        <label>수신처</label>
-        <select name="partnerId" required>
-          <option value="">거래처 선택</option>
-          ${partnerSelectOptionsForDoc(po.partnerId, meta.defaultCategory).join("")}
-        </select>
+      <div class="field two">
+        <div>
+          <label>수신처</label>
+          <select name="partnerId" required>
+            <option value="">거래처 선택</option>
+            ${partnerSelectOptionsForDoc(po.partnerId, meta.defaultCategory).join("")}
+          </select>
+        </div>
+        <div>
+          <label>금액 기준</label>
+          <select name="priceMode" data-po-price-mode>
+            <option value="supply" ${priceMode === "gross" ? "" : "selected"}>부가세 별도 (공급가)</option>
+            <option value="gross" ${priceMode === "gross" ? "selected" : ""}>부가세 포함</option>
+          </select>
+        </div>
       </div>
       <div class="field two">
         <div><label>${h(meta.dateLabel)}</label><input name="orderDate" type="date" value="${h(po.orderDate || new Date().toISOString().slice(0, 10))}"></div>
@@ -5088,12 +5119,17 @@ function renderPurchaseOrderForm() {
         <datalist id="po-material-options">
           ${(state.materials || []).map((m) => `<option value="${h(m.itemName)}">`).join("")}
         </datalist>
-        <div class="field three">
+        <div class="field four">
           <div><input data-po-item-name list="po-material-options" placeholder="원부자재명 (검색 또는 신규 입력)"></div>
+          <div><input data-po-item-code placeholder="상품코드 (카탈로그 매칭 시 자동)"></div>
           <div><input data-po-item-spec placeholder="규격"></div>
           <div><input data-po-item-qty type="number" min="1" value="1" placeholder="수량"></div>
         </div>
-        <div class="field three" style="margin-top:8px">
+        <div class="field four" style="margin-top:8px">
+          <div>
+            <label class="sub-label">소비자정가 (개당)</label>
+            <input data-po-item-consumer type="number" min="0" step="1" placeholder="선택 입력">
+          </div>
           <div>
             <label class="sub-label">공급가 (개당)</label>
             <input data-po-item-price type="number" min="0" step="1" placeholder="부가세 제외">
@@ -5112,8 +5148,8 @@ function renderPurchaseOrderForm() {
         </p>
         <button type="button" data-add-po-line-item style="margin-top:8px">품목 추가</button>
       </div>
-      <div data-po-line-items-table>${renderPurchaseOrderLineItems(lineItems)}</div>
-      <div data-po-summary>${renderPurchaseOrderSummary(lineItems)}</div>
+      <div data-po-line-items-table>${renderPurchaseOrderLineItems(lineItems, priceMode)}</div>
+      <div data-po-summary>${renderPurchaseOrderSummary(lineItems, priceMode)}</div>
       <div class="field"><label>메모</label><textarea name="note">${h(po.note)}</textarea></div>
       <div class="toolbar">
         <button class="primary" type="submit">${po.id ? "수정 저장" : "발주서 생성"}</button>
@@ -5123,22 +5159,41 @@ function renderPurchaseOrderForm() {
   `;
 }
 
-function renderPurchaseOrderLineItems(items) {
+// 품목의 부가세 포함 단가. grossUnitPrice가 없는(이 필드 이전에 저장된)
+// 품목은 공급가에 10%를 붙여 되살린다 — 서버 sanitize와 같은 규칙.
+function poItemGrossUnitPrice(item) {
+  const gross = Number(item.grossUnitPrice) || 0;
+  if (gross > 0) return gross;
+  const supply = Number(item.unitPrice) || 0;
+  return supply + Math.round(supply * 0.1);
+}
+
+// 문서의 금액 기준(priceMode)에 따라 그 줄의 표시 단가/합계를 고른다.
+function poItemDisplayPrices(item, priceMode) {
+  const unitPrice = priceMode === "gross" ? poItemGrossUnitPrice(item) : Number(item.unitPrice) || 0;
+  return { unitPrice, totalPrice: Math.round((Number(item.quantity) || 0) * unitPrice) };
+}
+
+function renderPurchaseOrderLineItems(items, priceMode) {
   if (!items.length) return `<div class="empty">추가된 품목이 없습니다.</div>`;
   return `
     <table class="line-items-table">
-      <thead><tr><th>작업</th><th>품목명</th><th>규격</th><th>수량</th><th>단위</th><th>공급가</th><th>공급가액</th></tr></thead>
+      <thead><tr><th>작업</th><th>상품코드</th><th>품목명</th><th>규격</th><th>소비자정가</th><th>수량</th><th>단가</th><th>공급가합계</th></tr></thead>
       <tbody>
-        ${items.map((item) => `
+        ${items.map((item) => {
+          const prices = poItemDisplayPrices(item, priceMode);
+          return `
           <tr data-po-line-row="${item.id}">
             <td><button type="button" class="danger icon-btn" data-remove-po-line-item="${item.id}" aria-label="삭제" title="삭제">×</button></td>
+            <td>${h(item.itemCode)}</td>
             <td>${h(item.itemName)}</td>
             <td>${h(item.spec)}</td>
+            <td>${item.consumerPrice ? money.format(item.consumerPrice) : ""}</td>
             <td>${h(item.quantity)}</td>
-            <td>${h(item.unit)}</td>
-            <td>${money.format(item.unitPrice)}</td>
-            <td>${money.format(item.totalPrice)}</td>
-          </tr>`).join("")}
+            <td>${money.format(prices.unitPrice)}</td>
+            <td>${money.format(prices.totalPrice)}</td>
+          </tr>`;
+        }).join("")}
       </tbody>
     </table>
   `;
@@ -5151,10 +5206,19 @@ function supplyFromGross(gross) {
   return Math.round(Math.max(0, Number(gross) || 0) / 1.1);
 }
 
-function renderPurchaseOrderSummary(items) {
-  const subtotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
-  const vat = Math.round(subtotal * 0.1);
-  const total = subtotal + vat;
+function renderPurchaseOrderSummary(items, priceMode) {
+  // 서버 purchaseOrderTotals와 같은 규칙 — 사용자가 입력한 기준 금액이
+  // 1원도 틀어지지 않는 방향으로 반올림한다.
+  let subtotal, vat, total;
+  if (priceMode === "gross") {
+    total = items.reduce((sum, item) => sum + poItemDisplayPrices(item, "gross").totalPrice, 0);
+    subtotal = Math.round(total / 1.1);
+    vat = total - subtotal;
+  } else {
+    subtotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
+    vat = Math.round(subtotal * 0.1);
+    total = subtotal + vat;
+  }
   return `
     <div class="line-items-summary">
       <span><b>공급가 합계</b> ${money.format(subtotal)}원</span>
@@ -5222,6 +5286,30 @@ function bindPurchaseOrders() {
   app.querySelectorAll("[data-po-pdf]").forEach((button) => {
     button.addEventListener("click", () => downloadTradeDocPdf(button, button.dataset.poPdf));
   });
+  // 거래명세서/청구서 금액을 그대로 입금요청 초안으로 넘긴다 — 파이프라인
+  // 확인 표가 쓰는 것과 같은 localStorage 다리. 브랜드는 요청 창에서 고른다.
+  app.querySelectorAll("[data-po-to-request]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const po = (state.purchaseOrders || []).find((item) => item.id === button.dataset.poToRequest);
+      if (!po) return;
+      const partner = (state.partners || []).find((p) => p.id === po.partnerId);
+      const draft = {
+        orderNo: po.docNo,
+        customerName: partner?.name || partner?.businessName || "",
+        quantity: (po.lineItems || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0),
+        depositAmount: po.total || 0,
+        productSalesAmount: po.total || 0,
+        notes: `${TRADE_DOC_LABELS[po.docType] || "발주서"} ${po.docNo} 금액 기준으로 생성`
+      };
+      try {
+        localStorage.setItem(DRAFT_PREFILL_KEY, JSON.stringify(draft));
+      } catch {
+        showToast("입금요청 창으로 넘기지 못했습니다.", "error");
+        return;
+      }
+      window.open("/?request-popup=1&draft-prefill=1", "wooofpay-request", "width=760,height=940,resizable=yes,scrollbars=yes");
+    });
+  });
   app.querySelector("[data-close-po-preview]")?.addEventListener("click", () => {
     state.procurement.previewPurchaseOrder = null;
     renderApp();
@@ -5253,13 +5341,26 @@ function bindPurchaseOrders() {
       });
     });
   };
+  const priceModeSelect = form.querySelector("[data-po-price-mode]");
+  const currentPriceMode = () => (priceModeSelect?.value === "gross" ? "gross" : "supply");
   const setLineItems = (items) => {
     lineItemsInput.value = JSON.stringify(items);
-    lineItemsSlot.innerHTML = renderPurchaseOrderLineItems(items);
-    if (summarySlot) summarySlot.innerHTML = renderPurchaseOrderSummary(items);
+    lineItemsSlot.innerHTML = renderPurchaseOrderLineItems(items, currentPriceMode());
+    if (summarySlot) summarySlot.innerHTML = renderPurchaseOrderSummary(items, currentPriceMode());
     bindPoLineItemRemovers();
   };
   bindPoLineItemRemovers();
+  // 금액 기준을 바꾸면 품목 표와 합계의 표시 금액이 달라지므로 다시 그린다.
+  priceModeSelect?.addEventListener("change", () => setLineItems(getLineItems()));
+  // 수신처를 바꾸면 그 거래처의 기본 금액 기준을 따라간다 — 이후에 다시
+  // 수동으로 바꾸는 것은 자유.
+  form.querySelector("[name=partnerId]")?.addEventListener("change", (event) => {
+    const partner = (state.partners || []).find((p) => p.id === event.target.value);
+    if (partner && priceModeSelect) {
+      priceModeSelect.value = partner.priceMode === "gross" ? "gross" : "supply";
+      setLineItems(getLineItems());
+    }
+  });
 
   // 거래처마다 단가를 주는 기준이 다르다 — 어떤 곳은 공급가(부가세 별도),
   // 어떤 곳은 합계(부가세 포함)로 준다. 둘 중 아는 쪽을 넣으면 나머지를
@@ -5309,38 +5410,69 @@ function bindPurchaseOrders() {
     });
   }
 
+  // 품목명이 카탈로그와 정확히 일치하면(datalist에서 고른 경우) 상품코드와
+  // 소비자정가를 바로 채워서, 추가하기 전에 눈으로 확인할 수 있게 한다.
+  const poItemNameInput = form.querySelector("[data-po-item-name]");
+  poItemNameInput?.addEventListener("input", () => {
+    const matched = (state.materials || []).find((m) => m.itemName.trim() === poItemNameInput.value.trim());
+    if (!matched) return;
+    const codeInput = form.querySelector("[data-po-item-code]");
+    const consumerInput = form.querySelector("[data-po-item-consumer]");
+    if (codeInput && !codeInput.value.trim()) codeInput.value = matched.itemCode || "";
+    if (consumerInput && consumerInput.value === "" && Number(matched.consumerPrice)) {
+      consumerInput.value = String(matched.consumerPrice);
+    }
+  });
+
   form.querySelector("[data-add-po-line-item]")?.addEventListener("click", async () => {
     const nameInput = form.querySelector("[data-po-item-name]");
+    const codeInput = form.querySelector("[data-po-item-code]");
     const specInput = form.querySelector("[data-po-item-spec]");
     const qtyInput = form.querySelector("[data-po-item-qty]");
+    const consumerInput = form.querySelector("[data-po-item-consumer]");
     const name = nameInput.value.trim();
     if (!name) return;
     const material = (state.materials || []).find((m) => m.itemName.trim() === name);
     const quantity = Math.max(1, Number(qtyInput.value) || 1);
     const unitPrice = resolveUnitPrice(material?.basePrice);
+    // 포함 단가는 합계 칸에 적힌 값을 그대로 보존한다 — 공급가에서 10%를
+    // 다시 붙이면 입력한 포함가와 1원이 어긋날 수 있다.
+    const grossUnitPrice = grossInput && grossInput.value !== ""
+      ? Math.max(0, Number(grossInput.value) || 0)
+      : unitPrice + Math.round(unitPrice * 0.1);
+    // 상품코드·소비자정가는 직접 입력이 우선, 비어 있으면 카탈로그 값.
+    const itemCode = codeInput.value.trim() || material?.itemCode || "";
+    const consumerPrice = consumerInput.value !== ""
+      ? Math.max(0, Number(consumerInput.value) || 0)
+      : Number(material?.consumerPrice) || 0;
     const newItemId = cryptoRandomId();
     const items = getLineItems();
     items.push({
       id: newItemId,
       materialId: material?.id || "",
+      itemCode,
       itemName: name,
       spec: specInput.value.trim(),
+      consumerPrice,
       quantity,
       unit: material?.orderUnit || "",
       unitPrice,
+      grossUnitPrice,
       totalPrice: Math.round(quantity * unitPrice)
     });
     setLineItems(items);
     nameInput.value = "";
+    codeInput.value = "";
     specInput.value = "";
     qtyInput.value = "1";
+    consumerInput.value = "";
     clearMoneyInputs();
     nameInput.focus();
     if (!material && confirm(`"${name}" 품목을 원부자재 카탈로그에 등록할까요?`)) {
       const partnerId = form.querySelector("[name=partnerId]").value;
       const created = await api("/api/materials", {
         method: "POST",
-        body: { itemName: name, orderUnit: "", basePrice: unitPrice, partnerId }
+        body: { itemName: name, itemCode, orderUnit: "", basePrice: unitPrice, consumerPrice, partnerId }
       });
       state.materials.push(created.material);
       // await 뒤에는 items가 stale할 수 있다(그 사이 사용자가 품목을 더
