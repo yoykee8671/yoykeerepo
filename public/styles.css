@@ -2096,6 +2096,14 @@ a.button:hover {
   color: #808080;
 }
 
+/* 납품장소 블록 -- 정보 블록과 품목 테이블 사이, 블록 전체를 굵은 선으로
+   두른다(실물 발주서의 형광 하이라이트 자리를 테두리가 대신한다). */
+.po-doc-delivery {
+  border: 2px solid #1a1a1a;
+  padding: 4px 12px;
+  margin: -8px 0 20px;
+}
+
 .po-doc-table {
   width: 100%;
   /* 아주 좁은 창에서 7열이 뭉개지지 않게 -- 대신 가로로 스크롤한다. */

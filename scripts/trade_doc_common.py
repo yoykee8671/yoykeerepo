@@ -46,6 +46,9 @@ AMOUNT_TINT = "DCE6F1"     # light-blue band over the amount column
 TOTAL_TINT = "DCE6F1"      # grand-total row / amount-in-words bar
 
 _THIN = Side(style="thin", color=BORDER_GRAY)
+# 납품장소 블록 전용 -- 그 블록만 "굵은 선 전체 테두리"로 둘러서 눈에 띄게
+# 한다(참고 실물 발주서에서 형광 하이라이트가 하던 역할).
+_MEDIUM = Side(style="medium", color="1A1A1A")
 BORDER_THIN_BOTTOM = Border(bottom=_THIN)
 BORDER_THIN_RIGHT = Border(right=_THIN)
 BORDER_BOX = Border(top=_THIN, bottom=_THIN, left=_THIN, right=_THIN)
@@ -139,9 +142,31 @@ def _doc_config(title, right_label, date_label, due_label, closing, show_deliver
         "left_fields": left,
         "right_fields": list(_ISSUER_FIELDS),
         "closing": closing,
-        "extra_note_label": "납품장소" if show_delivery else None,
-        "extra_note_key": "deliveryPlaceLine" if show_delivery else None,
+        "show_delivery": show_delivery,
     }
+
+
+# 납품장소 스냅샷을 "라벨 + 값" 줄 목록으로 편다 -- Notes에 한 줄로 합쳐
+# 넣는 대신, 정보 블록과 품목 테이블 사이의 전용 블록(굵은 테두리)에 필드별로
+# 보여준다. 값이 있는 필드만 줄이 된다. 이 필드가 구조화되기 전에 저장된
+# 옛 발주서의 문자열 형태는 '납품장소' 한 줄로 그대로 통과시킨다.
+DELIVERY_FIELD_LABELS = [
+    ("납품장소명", "name"),
+    ("주소", "address"),
+    ("담당자명", "contactName"),
+    ("전화번호", "contactPhone"),
+    ("배송메모", "note"),
+]
+
+
+def delivery_fields(delivery):
+    if isinstance(delivery, str):
+        return [("납품장소", delivery)] if delivery.strip() else []
+    if not isinstance(delivery, dict):
+        return []
+    return [(label, str(delivery[key]).strip())
+            for label, key in DELIVERY_FIELD_LABELS
+            if delivery.get(key) and str(delivery[key]).strip()]
 
 
 DOC_CONFIGS = {
@@ -264,16 +289,10 @@ def _numeric_width_for(max_value, base_width, padding=2):
 
 
 def _notes_lines(cfg, spec):
-    """Build the Notes-box text as a list of logical lines: the doc type's
-    extra note (e.g. PO's 납품장소) first, then the free-form note field."""
-    lines = []
-    if cfg.get("extra_note_label"):
-        extra_value = _get(spec, cfg["extra_note_key"])
-        if extra_value:
-            lines.append(f"{cfg['extra_note_label']}: {extra_value}")
-    if spec.get("note"):
-        lines.append(str(spec["note"]))
-    return lines
+    """Build the Notes-box text as a list of logical lines. 납품장소 is NOT
+    part of Notes anymore -- it gets its own bordered block between the
+    info blocks and the item table (see delivery_fields)."""
+    return [str(spec["note"])] if spec.get("note") else []
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +320,12 @@ class Layout:
         self.info_rows = 0  # set by compute_layout()
         self.info_row_end = 0
 
+        # 납품장소 블록(발주서/거래명세서만, 값이 있을 때만) -- 정보 블록과
+        # 품목 테이블 사이. 0이면 블록 없음.
+        self.delivery_rows = 0
+        self.delivery_row_start = 0
+        self.delivery_row_end = 0
+
         self.table_header_row = 0
         self.table_first_data_row = 0
         self.table_last_data_row = 0
@@ -317,18 +342,25 @@ class Layout:
         self.last_row = 0
 
 
-def compute_layout(item_count, info_rows, notes_rows=3):
+def compute_layout(item_count, info_rows, notes_rows=3, delivery_rows=0):
     """The single place that maps every section of a trade document to a
     row number. `info_rows` is max(len(left_fields), len(right_fields));
     `notes_rows` is how many grid rows the Notes box body needs to hold
-    its actual (already wrapped) text without clipping it -- both
-    computed by the caller before this runs, since they depend on the
-    content, not just the document type."""
+    its actual (already wrapped) text without clipping it; `delivery_rows`
+    is how many 납품장소 fields actually have values -- all computed by
+    the caller before this runs, since they depend on the content, not
+    just the document type."""
     layout = Layout(item_count)
     layout.info_rows = max(info_rows, 1)
     layout.info_row_end = layout.info_row_start + layout.info_rows - 1
 
-    layout.table_header_row = layout.info_row_end + 2
+    if delivery_rows:
+        layout.delivery_rows = delivery_rows
+        layout.delivery_row_start = layout.info_row_end + 2
+        layout.delivery_row_end = layout.delivery_row_start + delivery_rows - 1
+        layout.table_header_row = layout.delivery_row_end + 2
+    else:
+        layout.table_header_row = layout.info_row_end + 2
     layout.table_first_data_row = layout.table_header_row + 1
     layout.table_last_data_row = layout.table_first_data_row + layout.item_count - 1
 
@@ -356,7 +388,7 @@ def _merge(ws, r1, c1, r2, c2):
     ws.merge_cells(start_row=r1, start_column=c1, end_row=r2, end_column=c2)
 
 
-def apply_template(ws, doc_type, layout, issuer):
+def apply_template(ws, doc_type, layout, issuer, delivery=()):
     cfg = DOC_CONFIGS[doc_type]
     ws.sheet_view.showGridLines = False
     ws.page_setup.orientation = "portrait"
@@ -430,6 +462,28 @@ def apply_template(ws, doc_type, layout, issuer):
     # values (and how many lines they need) are known.
     for r in range(layout.info_row_start, layout.info_row_end + 1):
         ws.cell(row=r, column=3).border = BORDER_THIN_RIGHT
+
+    # --- delivery-place block (발주서/거래명세서) -------------------------
+    # 필드별 한 줄씩(납품장소명/주소/담당자명/전화번호/배송메모), 블록 전체를
+    # 굵은 선으로 두른다 -- 참고 실물 발주서의 하이라이트 자리를 테두리가
+    # 대신한다.
+    if layout.delivery_rows:
+        for offset, (label, _value) in enumerate(delivery):
+            r = layout.delivery_row_start + offset
+            lc = ws.cell(row=r, column=1, value=label)
+            lc.font = FONT_FIELD_LABEL
+            lc.alignment = LEFT
+            _merge(ws, r, 2, r, 7)
+            ws.cell(row=r, column=2).alignment = LEFT_WRAP
+        first, last = layout.delivery_row_start, layout.delivery_row_end
+        for r in range(first, last + 1):
+            for ci in range(1, 8):
+                ws.cell(row=r, column=ci).border = Border(
+                    top=_MEDIUM if r == first else None,
+                    bottom=_MEDIUM if r == last else None,
+                    left=_MEDIUM if ci == 1 else None,
+                    right=_MEDIUM if ci == 7 else None,
+                )
 
     # --- item table header ----------------------------------------------
     for ci, header in enumerate(TABLE_HEADERS, start=1):
@@ -520,7 +574,7 @@ def _get(spec, dotted_key):
     return node if node is not None else ""
 
 
-def write_values(ws, doc_type, layout, spec):
+def write_values(ws, doc_type, layout, spec, delivery=()):
     """Writes every value/formula, then sizes rows/columns to fit what was
     actually written. Returns the grand total (int won) so the caller can
     spell it out in the amount-in-words bar."""
@@ -548,6 +602,17 @@ def write_values(ws, doc_type, layout, spec):
 
     for r in range(layout.info_row_start, layout.info_row_end + 1):
         ws.row_dimensions[r].height = _row_height_for_lines(max(line_counts.get(r, 0), 1))
+
+    # delivery-place values (labels/merges/borders were drawn by the
+    # template phase; the value column is B:G merged, so it wraps against
+    # the full remaining width).
+    delivery_value_width = sum(COLUMN_WIDTHS[1:7])
+    for offset, (_label, value) in enumerate(delivery):
+        r = layout.delivery_row_start + offset
+        cell = ws.cell(row=r, column=2, value=value)
+        cell.font = FONT_FIELD_VALUE
+        ws.row_dimensions[r].height = _row_height_for_lines(
+            max(_wrapped_line_count(value, delivery_value_width), 1))
 
     items = spec.get("lineItems", [])
     subtotal = 0
@@ -627,10 +692,12 @@ def render(ws, doc_type, spec):
     info_rows = max(len(cfg["left_fields"]), len(cfg["right_fields"]))
     notes_box_width = sum(COLUMN_WIDTHS[0:3])
     notes_rows = max(3, _wrapped_line_count("\n".join(_notes_lines(cfg, spec)), notes_box_width))
+    delivery = delivery_fields(spec.get("deliveryPlace")) if cfg["show_delivery"] else []
 
-    layout = compute_layout(len(spec.get("lineItems", [])), info_rows, notes_rows)
-    apply_template(ws, doc_type, layout, spec.get("issuer", {}))
-    grand_total = write_values(ws, doc_type, layout, spec)
+    layout = compute_layout(len(spec.get("lineItems", [])), info_rows, notes_rows,
+                            delivery_rows=len(delivery))
+    apply_template(ws, doc_type, layout, spec.get("issuer", {}), delivery)
+    grand_total = write_values(ws, doc_type, layout, spec, delivery)
     # amount-in-words must be a literal string (Excel can't spell numbers in
     # Korean), computed here now that the actual grand total is known.
     ws.cell(row=layout.words_bar_row, column=1, value=amount_in_words_line(grand_total))

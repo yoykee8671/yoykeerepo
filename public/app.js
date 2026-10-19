@@ -4864,7 +4864,7 @@ function renderPurchaseOrderPreviewOverlay(poId) {
   const meta = tradeDocMeta(docType);
   // 실제 엑셀과 같은 규칙 -- 견적서/청구서에는 납품장소를 싣지 않는다.
   const showDelivery = docType === "purchase_order" || docType === "statement";
-  const deliveryLine = showDelivery ? deliveryPlaceDisplayLine(po.deliveryPlace) : "";
+  const deliveryFields = showDelivery ? deliveryPlaceFields(po.deliveryPlace) : [];
   const closing = {
     purchase_order: "위와 같이 발주합니다.",
     quote: "위와 같이 견적합니다.",
@@ -4911,6 +4911,10 @@ function renderPurchaseOrderPreviewOverlay(poId) {
               <div class="po-doc-info-row"><span>계좌</span>${h(issuer.bankInfo)}</div>
             </div>
           </div>
+          ${deliveryFields.length ? `
+          <div class="po-doc-delivery">
+            ${deliveryFields.map(([label, value]) => `<div class="po-doc-info-row"><span>${h(label)}</span>${h(value)}</div>`).join("")}
+          </div>` : ""}
           <table class="po-doc-table">
             <thead><tr><th>순번</th><th>품목명</th><th>규격</th><th>수량</th><th>단위</th><th>단가</th><th>공급가액</th></tr></thead>
             <tbody>
@@ -4929,7 +4933,7 @@ function renderPurchaseOrderPreviewOverlay(poId) {
           <div class="po-doc-footer">
             <div class="po-doc-notes">
               <div class="po-doc-notes-label">Notes</div>
-              <div class="po-doc-notes-body">${deliveryLine ? `납품장소: ${h(deliveryLine)}` : ""}${deliveryLine && po.note ? "<br>" : ""}${h(po.note || "").replace(/\n/g, "<br>")}</div>
+              <div class="po-doc-notes-body">${h(po.note || "").replace(/\n/g, "<br>")}</div>
             </div>
             <div class="po-doc-totals">
               <div class="po-doc-total-row"><span>총 공급가액</span><span class="num">${money.format(po.subtotal || 0)}</span></div>
@@ -4944,19 +4948,21 @@ function renderPurchaseOrderPreviewOverlay(poId) {
   `;
 }
 
-// deliveryPlace 스냅샷(구조화된 객체)과, 그 필드가 생기기 전 저장된 옛
-// 발주서의 문자열 형태를 둘 다 사람이 읽는 한 줄로 합친다 -- 엑셀 생성
-// 스크립트(purchase_order_excel.py)의 _delivery_place_line과 같은 규칙이다.
-function deliveryPlaceDisplayLine(delivery) {
-  if (typeof delivery === "string") return delivery;
-  if (!delivery || typeof delivery !== "object") return "";
-  const parts = [];
-  if (delivery.name) parts.push(delivery.name);
-  if (delivery.address) parts.push(delivery.address);
-  const contact = [delivery.contactName, delivery.contactPhone].filter(Boolean).join(" ");
-  if (contact) parts.push(`담당: ${contact}`);
-  if (delivery.note) parts.push(`메모: ${delivery.note}`);
-  return parts.join(" / ");
+// deliveryPlace 스냅샷을 [라벨, 값] 줄 목록으로 편다 -- 값이 있는 필드만.
+// 엑셀 생성 스크립트(trade_doc_common.py)의 delivery_fields와 같은 규칙이고,
+// 구조화 이전에 저장된 옛 발주서의 문자열 형태는 '납품장소' 한 줄로 통과한다.
+function deliveryPlaceFields(delivery) {
+  if (typeof delivery === "string") {
+    return delivery.trim() ? [["납품장소", delivery]] : [];
+  }
+  if (!delivery || typeof delivery !== "object") return [];
+  return [
+    ["납품장소명", delivery.name],
+    ["주소", delivery.address],
+    ["담당자명", delivery.contactName],
+    ["전화번호", delivery.contactPhone],
+    ["배송메모", delivery.note]
+  ].filter(([, value]) => value && String(value).trim());
 }
 
 function renderPurchaseOrderRow(item) {
