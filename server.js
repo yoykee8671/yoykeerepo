@@ -5741,6 +5741,8 @@ const PROBE_TARGETS = [
   { brand: "앤블랭크", label: "메인", url: "https://andblank.com/" },
   { brand: "앤블랭크", label: "상품 상세", url: "https://andblank.com/shop_view/?idx=817" },
   { brand: "앤블랭크", label: "전체 목록", url: "https://andblank.com/all" },
+  { brand: "앤블랭크", label: "사이트맵(상품 목록)", url: "https://andblank.com/sitemap.xml" },
+  { brand: "앤블랭크", label: "옵션 읽기", url: "https://andblank.com/shop/load_option.cm", form: { type: "prod", prod_idx: "817" } },
   { brand: "MUNIKUND(비교용)", label: "상품 상세", url: "https://munikund.com/product/detail.html?product_no=1693" }
 ];
 const PROBE_AGENTS = {
@@ -5748,13 +5750,20 @@ const PROBE_AGENTS = {
   bot: "Mozilla/5.0 (compatible; WooofPay-ProductSync/1.0; +https://pay.wooof.co.kr)"
 };
 
-async function probeOnce(url, userAgent) {
+async function probeOnce(url, userAgent, form = null) {
   const started = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
     const response = await fetch(url, {
-      headers: { "user-agent": userAgent, accept: "text/html,application/xhtml+xml", "accept-language": "ko-KR,ko;q=0.9" },
+      method: form ? "POST" : "GET",
+      body: form ? new URLSearchParams(form).toString() : undefined,
+      headers: {
+        "user-agent": userAgent,
+        accept: "text/html,application/xhtml+xml,application/json",
+        "accept-language": "ko-KR,ko;q=0.9",
+        ...(form ? { "content-type": "application/x-www-form-urlencoded; charset=UTF-8", "x-requested-with": "XMLHttpRequest" } : {})
+      },
       redirect: "follow",
       signal: controller.signal
     });
@@ -5764,7 +5773,7 @@ async function probeOnce(url, userAgent) {
       ms: Date.now() - started,
       bytes: text.length,
       blockedPage: /<title>\s*접근 제한\s*<\/title>|Access is restricted/i.test(text),
-      hasProductData: /"@type"\s*:\s*"Product"|SITE_SHOP_DETAIL\.initDetail|var product_name\s*=/.test(text),
+      hasProductData: /"@type"\s*:\s*"Product"|SITE_SHOP_DETAIL\.initDetail|var product_name\s*=|option_html|\/shop_view\//.test(text),
       title: (/<title>([^<]{0,80})<\/title>/i.exec(text)?.[1] || "").trim()
     };
   } catch (error) {
@@ -5778,7 +5787,8 @@ async function probeSupplierSites() {
   const results = [];
   for (const target of PROBE_TARGETS) {
     for (const [agent, ua] of Object.entries(PROBE_AGENTS)) {
-      results.push({ ...target, agent, ...(await probeOnce(target.url, ua)) });
+      const { form, ...shown } = target;
+      results.push({ ...shown, agent, ...(await probeOnce(target.url, ua, form)) });
       await new Promise((resolve) => setTimeout(resolve, 400));
     }
   }

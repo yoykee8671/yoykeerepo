@@ -9709,7 +9709,8 @@ function renderPsRunBar() {
        본사 연결 상품 ${money.format(last.collectedCount || 0)}개 · 우프 ${money.format(last.wooofChecked || 0)}개 비교
        ${last.durationMs ? ` · ${Math.max(1, Math.round(last.durationMs / 1000))}초` : ""}
        ${last.failedCount ? ` · <span style="color:var(--red)">본사 읽기 실패 ${last.failedCount}개</span>` : ""}
-       ${last.wooofError ? `<br><span style="color:var(--red)">우프 조회 실패: ${h(last.wooofError)}</span>` : ""}`
+       ${last.wooofError ? `<br><span style="color:var(--red)">우프 조회 실패: ${h(last.wooofError)}</span>` : ""}
+       ${last.blocked ? `<br><span style="color:var(--red)">본사 사이트가 잠시 막아서 ${money.format(last.remaining || 0)}개는 이번에 못 읽었습니다(지난 값으로 비교).</span>` : ""}`
     : "아직 재고를 확인한 적이 없습니다.";
   return `<div class="ps-runbar">
     <div><strong>${h(detail?.name || "")}</strong> <a href="${h(detail?.baseUrl || "#")}" target="_blank" rel="noreferrer" class="muted">${h(detail?.baseUrl || "")} ↗</a>
@@ -9731,8 +9732,9 @@ function renderPsScanBar() {
   const lastText = last
     ? `마지막 신상품 찾기 ${psFmtTime(last.at)} (${last.trigger === "schedule" ? "자동" : h(last.by || "수동")}) ·
        본사 진열 ${money.format(last.listedCount || 0)}개 · 새로 읽음 ${money.format(last.fetchedCount || 0)}개
-       ${last.failedCount ? ` · <span style="color:var(--red)">읽기 실패 ${last.failedCount}개</span>` : ""}`
-    : "아직 본사 상품 목록을 읽은 적이 없습니다. 첫 실행은 본사 전체를 읽어서 1~2분 걸립니다.";
+       ${last.failedCount ? ` · <span style="color:var(--red)">읽기 실패 ${last.failedCount}개</span>` : ""}
+       ${last.blocked ? `<br><span style="color:var(--red)">본사 사이트가 잠시 막아서 ${money.format(last.remaining || 0)}개를 못 읽었습니다. 30분~1시간 뒤 다시 누르면 남은 것부터 이어서 읽습니다.</span>` : ""}`
+    : "아직 본사 상품 목록을 읽은 적이 없습니다. 첫 실행은 본사 전체를 읽어서 몇 분(아임웹 브랜드는 10분 안팎) 걸립니다.";
   return `<div class="ps-runbar">
     <div><div class="muted">${lastText}</div>
       <div class="muted">본사 진열 목록을 훑고, 처음 보는 상품만 상세를 읽습니다. 매일 1회 자동.</div></div>
