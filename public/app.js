@@ -9507,7 +9507,7 @@ const PS_ISSUE_LABELS = {
 };
 const PS_NOTICE_LABELS = { name_changed: "상품명 변경", image_changed: "대표이미지 변경", options_changed: "옵션 구성 변경" };
 const PS_HISTORY_LABELS = {
-  run: "확인 실행", apply: "반영", apply_failed: "반영 실패", dismiss: "무시", link: "연결", link_update: "연결 수정",
+  run: "확인 실행", apply: "반영", auto_apply: "자동 반영", apply_failed: "반영 실패", dismiss: "무시", link: "연결", link_update: "연결 수정",
   unlink: "연결 해제", register: "신규 등록", settings: "설정", scan: "신상품 찾기"
 };
 
@@ -9801,7 +9801,8 @@ function renderPsIssues() {
       <td><span class="ps-badge ${cls}">${h(label)}</span></td>
       <td class="ps-opt">${h(issue.optionLabel || issue.wooofOptionLabel || "-")}</td>
       <td class="ps-change">${issue.from !== undefined ? `${h(psFmtValue(issue.from))} → <strong>${h(psFmtValue(issue.to))}</strong>` : ""}
-        <div class="muted">${h(issue.message)}</div></td>
+        <div class="muted">${h(issue.message)}</div>
+        ${issue.autoError ? `<div style="color:var(--red)">자동 변경 실패: ${h(issue.autoError)}</div>` : ""}</td>
       <td>${sameProduct
         ? `<span class="muted">${h(issue.productName)}</span>`
         : `<a href="${psWooofUrl(issue.wooofProductNo)}" target="_blank" rel="noreferrer">${h(issue.productName)}</a>
@@ -10447,7 +10448,9 @@ function bindProductSync() {
       const { check } = await api(`${sourcePath}/links`, { method: "POST", body });
       ps.linkForm = { ...ps.linkForm, saving: false, existing: true };
       ps.linkCheck = check || { error: "저장했지만 비교하지 못했습니다." };
-      showToast("연결을 저장했습니다.");
+      showToast(check?.autoOptionTexts?.applied
+        ? `연결을 저장했고, 바뀐 옵션명 ${check.autoOptionTexts.applied}개를 본사에 맞췄습니다.`
+        : "연결을 저장했습니다.");
       await loadProductSync({ silent: true });
     } catch (error) {
       ps.linkForm = { ...ps.linkForm, saving: false };
