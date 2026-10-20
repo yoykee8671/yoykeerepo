@@ -5737,6 +5737,65 @@ const productSync = createProductSyncService({
   log: console
 });
 
+const PROBE_TARGETS = [
+  { brand: "앤블랭크", label: "메인", url: "https://andblank.com/" },
+  { brand: "앤블랭크", label: "상품 상세", url: "https://andblank.com/shop_view/?idx=817" },
+  { brand: "앤블랭크", label: "전체 목록", url: "https://andblank.com/all" },
+  { brand: "MUNIKUND(비교용)", label: "상품 상세", url: "https://munikund.com/product/detail.html?product_no=1693" }
+];
+const PROBE_AGENTS = {
+  browser: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+  bot: "Mozilla/5.0 (compatible; WooofPay-ProductSync/1.0; +https://pay.wooof.co.kr)"
+};
+
+async function probeOnce(url, userAgent) {
+  const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(url, {
+      headers: { "user-agent": userAgent, accept: "text/html,application/xhtml+xml", "accept-language": "ko-KR,ko;q=0.9" },
+      redirect: "follow",
+      signal: controller.signal
+    });
+    const text = await response.text();
+    return {
+      status: response.status,
+      ms: Date.now() - started,
+      bytes: text.length,
+      blockedPage: /<title>\s*접근 제한\s*<\/title>|Access is restricted/i.test(text),
+      hasProductData: /"@type"\s*:\s*"Product"|SITE_SHOP_DETAIL\.initDetail|var product_name\s*=/.test(text),
+      title: (/<title>([^<]{0,80})<\/title>/i.exec(text)?.[1] || "").trim()
+    };
+  } catch (error) {
+    return { status: 0, ms: Date.now() - started, error: error.name === "AbortError" ? "시간 초과(15초)" : error.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function probeSupplierSites() {
+  const results = [];
+  for (const target of PROBE_TARGETS) {
+    for (const [agent, ua] of Object.entries(PROBE_AGENTS)) {
+      results.push({ ...target, agent, ...(await probeOnce(target.url, ua)) });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+  }
+  const andblank = results.filter((r) => r.brand === "앤블랭크");
+  const ok = andblank.filter((r) => r.status === 200 && !r.blockedPage);
+  return {
+    at: now(),
+    server: { region: process.env.RENDER_REGION || "", service: process.env.RENDER_SERVICE_NAME || "" },
+    verdict: ok.length === andblank.length
+      ? "열림 — 우리 서버에서 앤블랭크 페이지를 읽을 수 있습니다."
+      : ok.length
+        ? "일부만 열림 — 요청 방식에 따라 막힙니다."
+        : "막힘 — 우리 서버에서 앤블랭크 페이지가 차단됩니다.",
+    results
+  };
+}
+
 function productSyncError(res, error) {
   sendJson(res, error.status || 500, { error: error.message });
 }
@@ -5765,6 +5824,12 @@ async function routeProductSync(req, res, url, actor, db) {
         cafe24Scope: cafe24.CAFE24_SCOPE,
         productScope: /mall\.write_product/.test(cafe24.CAFE24_SCOPE)
       });
+      return;
+    }
+    // 접속 확인: 우리 서버에서 공급사 사이트가 열리는지(데이터센터 IP 차단 여부) 본다.
+    // 주소는 아래 목록으로 고정 — 아무 주소나 대신 열어 주는 통로가 되지 않게.
+    if (pathname === "/api/product-sync/probe" && method === "GET") {
+      sendJson(res, 200, await probeSupplierSites());
       return;
     }
     if (pathname === "/api/product-sync/badge" && method === "GET") {
