@@ -4,7 +4,9 @@ const state = {
   // 공급사 상품 동기화 (MUNIKUND 등). 화면은 renderProductSync 아래에 있다.
   productSync: {
     screen: "issues",
-    sourceId: "munikund",
+    sourceId: (() => {
+      try { return localStorage.getItem("wooofpay.productSync.source") || "munikund"; } catch { return "munikund"; }
+    })(),
     overview: null,
     detail: null,
     loading: false,
@@ -9565,7 +9567,7 @@ async function loadProductSync({ silent = false } = {}) {
     ps.selected = ps.selected.filter((key) => valid.has(key));
     // 서버가 다시 시작되기 전까지 돌던 작업을 이어서 지켜본다.
     for (const job of overview.jobs || []) {
-      if (job.status === "running" && !ps.jobs[job.kind]) watchProductSyncJob(job);
+      if (job.status === "running" && !ps.jobs[psJobKey(job)]) watchProductSyncJob(job);
     }
   } catch (error) {
     ps.error = error.message;
@@ -9576,14 +9578,25 @@ async function loadProductSync({ silent = false } = {}) {
   }
 }
 
+// 작업은 브랜드별로 따로 본다(뮤니쿤트 확인 중에 앤블랭크 화면이 그 진행을 보이지 않게).
+function psJobKey(job) {
+  return `${job.sourceId || ""}:${job.kind}`;
+}
+
+function psJob(kind) {
+  const ps = psState();
+  return ps.jobs[`${ps.sourceId}:${kind}`];
+}
+
 function watchProductSyncJob(job, { onDone } = {}) {
   const ps = psState();
-  ps.jobs[job.kind] = job;
+  const key = psJobKey(job);
+  ps.jobs[key] = job;
   if (state.tab === "productsync") renderApp();
   const tick = async () => {
     try {
       const { job: next } = await api(`/api/product-sync/jobs/${encodeURIComponent(job.id)}`);
-      ps.jobs[job.kind] = next;
+      ps.jobs[key] = next;
       if (next.status === "running") {
         if (state.tab === "productsync") renderApp();
         setTimeout(tick, 2000);
@@ -9593,13 +9606,13 @@ function watchProductSyncJob(job, { onDone } = {}) {
       if (onDone) onDone(next);
       await loadProductSync({ silent: true });
       setTimeout(() => {
-        if (ps.jobs[job.kind]?.id === next.id && next.status !== "running") {
-          delete ps.jobs[job.kind];
+        if (ps.jobs[key]?.id === next.id && next.status !== "running") {
+          delete ps.jobs[key];
           if (state.tab === "productsync") renderApp();
         }
       }, next.status === "failed" ? 15000 : 6000);
     } catch (error) {
-      ps.jobs[job.kind] = { ...job, status: "failed", error: error.message };
+      ps.jobs[key] = { ...job, status: "failed", error: error.message };
       if (state.tab === "productsync") renderApp();
     }
   };
@@ -9607,7 +9620,7 @@ function watchProductSyncJob(job, { onDone } = {}) {
 }
 
 function renderPsJob(kind) {
-  const job = psState().jobs[kind];
+  const job = psJob(kind);
   if (!job) return "";
   const pct = job.progress?.total ? Math.round((job.progress.done / job.progress.total) * 100) : null;
   if (job.status === "running") {
@@ -9625,7 +9638,7 @@ function renderProductSync() {
   const ps = psState();
   const detail = ps.detail;
   const head = pageHead("상품동기화",
-    "공급사 공식몰의 품절·재입고·가격을 우프와 비교해 맞추고, 신상품을 미진열로 등록합니다. 매일 09시·17시 자동 확인.");
+    "공급사 공식몰의 품절·재입고·가격을 우프와 비교해 맞추고, 신상품을 미진열로 등록합니다. 매일 09시 자동 확인.");
   if (!ps.loaded) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   if (ps.error && !detail) {
     return `${head}<section class="panel"><div class="panel-body"><p style="color:var(--red)">${h(ps.error)}</p>
@@ -9636,7 +9649,22 @@ function renderProductSync() {
     : screen === "links" ? renderPsLinks()
       : screen === "settings" ? renderPsSettings()
         : renderPsIssues();
-  return `${head}${renderPsConnection()}${body}`;
+  return `${head}${renderPsBrandTabs()}${renderPsConnection()}${body}`;
+}
+
+// 브랜드(공급사)마다 연결표·본사 상태·설정이 따로다. 탭으로 바꿔 본다.
+function renderPsBrandTabs() {
+  const ps = psState();
+  const sources = ps.overview?.sources || [];
+  if (sources.length < 2) return "";
+  return `<div class="ps-brands" role="tablist">${sources.map((src) => {
+    const dismissed = src.dismissed || {};
+    const count = (src.issues || []).filter((issue) => dismissed[issue.key] !== issue.fingerprint).length
+      + (src.candidates || []).length;
+    return `<button role="tab" class="${src.id === ps.sourceId ? "active" : ""}" data-ps-brand="${h(src.id)}">
+      ${h(src.name)}${src.platform === "imweb" ? ` <span class="muted">아임웹</span>` : ""}
+      ${count ? `<span class="ps-brand-count">${money.format(count)}</span>` : ""}</button>`;
+  }).join("")}</div>`;
 }
 
 // 카페24 연결·권한 안내. 상품 권한이 없으면 확인(읽기)부터 막힌다.
@@ -9675,7 +9703,7 @@ function renderPsConnection() {
 function renderPsRunBar() {
   const detail = psState().detail;
   const last = detail?.lastRun;
-  const running = psState().jobs.run?.status === "running" || Boolean(detail?.running);
+  const running = psJob("run")?.status === "running" || Boolean(detail?.running);
   const lastText = last
     ? `마지막 재고 확인 ${psFmtTime(last.at)} (${last.trigger === "schedule" ? "자동" : h(last.by || "수동")}) ·
        본사 연결 상품 ${money.format(last.collectedCount || 0)}개 · 우프 ${money.format(last.wooofChecked || 0)}개 비교
@@ -9699,7 +9727,7 @@ function renderPsRunBar() {
 function renderPsScanBar() {
   const detail = psState().detail;
   const last = detail?.lastScan;
-  const running = psState().jobs.scan?.status === "running" || Boolean(detail?.scanning);
+  const running = psJob("scan")?.status === "running" || Boolean(detail?.scanning);
   const lastText = last
     ? `마지막 신상품 찾기 ${psFmtTime(last.at)} (${last.trigger === "schedule" ? "자동" : h(last.by || "수동")}) ·
        본사 진열 ${money.format(last.listedCount || 0)}개 · 새로 읽음 ${money.format(last.fetchedCount || 0)}개
@@ -9801,7 +9829,7 @@ function renderPsIssues() {
               </tr></thead><tbody>${rows}</tbody></table></div>`}
         ${canApply && all.length ? `<div class="toolbar">
           ${renderPsJob("apply")}
-          <button class="primary" data-ps-apply ${selected.size && psState().jobs.apply?.status !== "running" ? "" : "disabled"}>선택 ${selected.size}건 우프에 반영</button>
+          <button class="primary" data-ps-apply ${selected.size && psJob("apply")?.status !== "running" ? "" : "disabled"}>선택 ${selected.size}건 우프에 반영</button>
           <button data-ps-dismiss ${selected.size ? "" : "disabled"}>선택 무시</button>
           <span class="muted">품절 = 재고 0(품절표시), 재입고 = 재고 ${h(detail.restockQuantity || 99)}. 무시한 항목은 값이 또 바뀔 때만 다시 뜹니다.</span>
         </div>` : ""}
@@ -9831,7 +9859,7 @@ function renderPsCandidates() {
   const detail = ps.detail || {};
   const candidates = psCandidates();
   const canApply = can("productsync", "apply");
-  const registering = ps.jobs.register?.status === "running";
+  const registering = psJob("register")?.status === "running";
   const prefix = detail.namePrefix ? `${detail.namePrefix} ` : "";
   const cards = candidates.map((c) => {
     const soldOptions = (c.options || []).filter((o) => !o.selling).length;
@@ -9882,7 +9910,7 @@ function renderPsCandidates() {
           흰 배경 누끼 썸네일은 #${h(detail.thumbnailMultiply || "F7F7F7")} multiply 처리합니다.
         </p>
         ${renderPsJob("register")}
-        ${ps.jobs.register?.status === "done" && ps.jobs.register.result ? renderPsRegisterResult(ps.jobs.register.result) : ""}
+        ${psJob("register")?.status === "done" && psJob("register").result ? renderPsRegisterResult(psJob("register").result) : ""}
         ${!detail.lastScan && !(detail.unlinked || []).length ? `<p class="muted">위의 <b>신상품 찾기</b>를 먼저 실행하세요.</p>`
           : candidates.length ? `<div class="ps-cards">${cards}</div>` : `<p class="muted">이 기간에 새로 등록할 상품이 없습니다.</p>`}
         ${ignored.length ? `<details style="margin-top:12px"><summary class="muted">등록 안 함으로 넘긴 상품 ${ignored.length}개</summary>
@@ -9919,9 +9947,13 @@ function renderPsLinks() {
   </tr>`).join("");
   return `
     ${form ? renderPsLinkForm() : ""}
+    ${renderPsSuggestions()}
     <section class="panel">
       <div class="panel-head"><h2>상품 연결표 <span class="muted">${links.length}개</span></h2>
-        ${canApply ? `<button class="primary" data-ps-link-new>연결 추가</button>` : ""}</div>
+        <div class="toolbar">
+          ${canApply ? `<button data-ps-suggest ${ps.suggest?.loading ? "disabled" : ""}>${ps.suggest?.loading ? "찾는 중…" : "우프 기존 상품 자동 연결 찾기"}</button>` : ""}
+          ${canApply ? `<button class="primary" data-ps-link-new>연결 추가</button>` : ""}
+        </div></div>
       <div class="panel-body">
         <p class="muted">우프 상품 하나가 본사 상품 하나에 대응합니다. 본사 한 상품(색상×사이즈)을 우프에서 색상별로 나눠 올렸으면 <b>옵션 필터</b>에 그 색상(예: M-Band Yellow)을 적습니다.
           옵션값 번역(Bloom Blue → 블룸 블루)은 설정의 번역표를 씁니다.</p>
@@ -9931,6 +9963,52 @@ function renderPsLinks() {
         ${renderPsUnlinked()}
       </div>
     </section>`;
+}
+
+const PS_CONFIDENCE = {
+  exact: ["이름 일치", "ps-green"],
+  option: ["옵션으로 나눔", "ps-green"],
+  similar: ["비슷한 이름", "ps-gray"]
+};
+
+function renderPsSuggestions() {
+  const ps = psState();
+  const sg = ps.suggest;
+  if (!sg || sg.sourceId !== ps.sourceId) return "";
+  if (sg.error) {
+    return `<section class="panel ps-warn"><div class="panel-body">${h(sg.error)} <button data-ps-suggest-close>닫기</button></div></section>`;
+  }
+  if (!sg.data) return "";
+  const d = sg.data;
+  const picked = sg.picked || new Set();
+  const rows = d.suggestions.map((s) => {
+    const [label, cls] = PS_CONFIDENCE[s.confidence] || PS_CONFIDENCE.similar;
+    return `<tr>
+      <td><input type="checkbox" data-ps-suggest-pick="${h(s.wooofProductNo)}" ${picked.has(s.wooofProductNo) ? "checked" : ""}></td>
+      <td><a href="${psWooofUrl(s.wooofProductNo)}" target="_blank" rel="noreferrer">${h(s.wooofProductNo)}</a></td>
+      <td>${h(s.wooofName)}${s.wooofDisplay === "F" ? ` <span class="ps-badge ps-gray">미진열</span>` : ""}</td>
+      <td><a href="${h(s.sourceUrl)}" target="_blank" rel="noreferrer">${h(s.sourceNo)}</a></td>
+      <td>${h(s.sourceName)}${s.sourceFilter ? `<div class="muted">옵션 필터: ${h(s.sourceFilter)}</div>` : ""}</td>
+      <td><span class="ps-badge ${cls}">${label}</span>${s.confidence === "similar" ? ` <span class="muted">${Math.round(s.score * 100)}%</span>` : ""}</td>
+    </tr>`;
+  }).join("");
+  return `<section class="panel" data-ps-suggest-panel>
+    <div class="panel-head"><h2>자동 연결 추천 <span class="muted">${d.suggestions.length}개</span></h2>
+      <div class="toolbar">
+        <button data-ps-suggest-close>닫기</button>
+        <button class="primary" data-ps-suggest-save ${picked.size && !sg.saving ? "" : "disabled"}>선택 ${picked.size}개 연결하고 재고 확인</button>
+      </div></div>
+    <div class="panel-body">
+      <p class="muted">우프에서 이름이 "${h(ps.detail?.namePrefix || "")}"로 시작하는 상품 ${money.format(d.wooofCount)}개를 본사 상품 ${money.format(d.sourceCount)}개와 이름으로 맞춰 봤습니다.
+        ${d.alreadyLinked ? `이미 연결된 ${money.format(d.alreadyLinked)}개는 뺐습니다.` : ""}
+        <b>이름 일치·옵션으로 나눔</b>은 미리 골라 두었고, <b>비슷한 이름</b>은 본사 링크를 열어 확인한 뒤 고르세요.</p>
+      ${!d.sourceCount ? `<p style="color:var(--red)">본사 상품을 아직 읽지 않았습니다. 신상품 등록 화면에서 <b>신상품 찾기</b>를 먼저 한 번 돌려 주세요.</p>` : ""}
+      ${rows ? `<div class="table-wrap" style="max-height:520px"><table class="ps-table">
+        <thead><tr><th><input type="checkbox" data-ps-suggest-all ${picked.size === d.suggestions.length ? "checked" : ""}></th><th>우프</th><th>우프 상품명</th><th>본사</th><th>본사 상품명</th><th>근거</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>` : ""}
+      ${d.unmatched.length ? `<details style="margin-top:12px"><summary class="muted">짝을 못 찾은 우프 상품 ${d.unmatched.length}개 (본사에서 내렸거나 이름이 많이 다름 — 필요하면 "연결 추가"로 직접)</summary>
+        <ul class="ps-plain">${d.unmatched.map((w) => `<li><a href="${psWooofUrl(w.wooofProductNo)}" target="_blank" rel="noreferrer">${h(w.wooofProductNo)}</a> ${h(w.wooofName)}</li>`).join("")}</ul></details>` : ""}
+    </div></section>`;
 }
 
 function renderPsUnlinked() {
@@ -10083,6 +10161,73 @@ function bindProductSync() {
   const sourcePath = `/api/product-sync/sources/${encodeURIComponent(ps.sourceId)}`;
 
   on("[data-ps-reload]", "click", () => loadProductSync());
+  on("[data-ps-brand]", "click", (event) => {
+    const next = event.currentTarget.dataset.psBrand;
+    if (!next || next === ps.sourceId) return;
+    ps.sourceId = next;
+    ps.selected = [];
+    ps.linkForm = null;
+    ps.detail = null;
+    try { localStorage.setItem("wooofpay.productSync.source", next); } catch {}
+    loadProductSync();
+  });
+  on("[data-ps-suggest]", "click", async () => {
+    const sourceId = ps.sourceId;
+    ps.suggest = { sourceId, loading: true };
+    renderApp();
+    try {
+      const data = await api(`${sourcePath}/link-suggestions`);
+      ps.suggest = {
+        sourceId,
+        data,
+        picked: new Set(data.suggestions.filter((s) => s.confidence !== "similar").map((s) => s.wooofProductNo))
+      };
+    } catch (error) {
+      ps.suggest = { sourceId, error: error.message };
+    }
+    renderApp();
+  });
+  on("[data-ps-suggest-close]", "click", () => {
+    ps.suggest = null;
+    renderApp();
+  });
+  on("[data-ps-suggest-pick]", "change", (event) => {
+    const no = Number(event.currentTarget.dataset.psSuggestPick);
+    if (event.currentTarget.checked) ps.suggest.picked.add(no);
+    else ps.suggest.picked.delete(no);
+    renderApp();
+  });
+  on("[data-ps-suggest-all]", "change", (event) => {
+    ps.suggest.picked = event.currentTarget.checked
+      ? new Set(ps.suggest.data.suggestions.map((s) => s.wooofProductNo))
+      : new Set();
+    renderApp();
+  });
+  on("[data-ps-suggest-save]", "click", async () => {
+    const sg = ps.suggest;
+    const items = sg.data.suggestions
+      .filter((s) => sg.picked.has(s.wooofProductNo))
+      .map((s) => ({ wooofProductNo: s.wooofProductNo, sourceNo: s.sourceNo, sourceFilter: s.sourceFilter, wooofName: s.wooofName }));
+    sg.saving = true;
+    renderApp();
+    try {
+      const result = await api(`${sourcePath}/links/bulk`, { method: "POST", body: { items } });
+      showToast(`${result.saved}개 연결했습니다. 이어서 재고 확인을 돌립니다.`);
+      ps.suggest = null;
+      if (result.job) {
+        watchProductSyncJob(result.job, {
+          onDone: (done) => {
+            if (done.status === "done") showToast(`재고 확인 완료 — 확인필요 ${done.result?.issueCount ?? 0}건`);
+          }
+        });
+      }
+      await loadProductSync({ silent: true });
+    } catch (error) {
+      sg.saving = false;
+      showToast(error.message, "error");
+      renderApp();
+    }
+  });
   on("[data-ps-cafe24-connect]", "click", async () => {
     try {
       const { authorizeUrl } = await api("/api/cafe24/connect", { method: "POST", body: { returnTo: "productsync" } });

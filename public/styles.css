@@ -2274,3 +2274,10 @@ a.button:hover {
 .ps-table td.ps-change { white-space: nowrap; }
 .nav-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #e5484d; margin-left: 6px; vertical-align: middle; position: relative; top: -1px; }
 .ps-conn { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: -4px 0 12px; font-size: 13px; }
+
+/* 상품동기화 브랜드 탭 */
+.ps-brands { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 12px; }
+.ps-brands button { border-radius: 999px; padding: 6px 14px; background: var(--panel, #fff); }
+.ps-brands button.active { background: var(--ink, #111); color: #fff; border-color: var(--ink, #111); }
+.ps-brands button.active .muted { color: rgba(255,255,255,.7); }
+.ps-brand-count { display: inline-block; min-width: 18px; margin-left: 4px; padding: 0 6px; border-radius: 999px; background: var(--red, #d33); color: #fff; font-size: 11px; line-height: 18px; text-align: center; }
