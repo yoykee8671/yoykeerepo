@@ -9704,7 +9704,7 @@ if (isMainModule) {
   };
   startKeepAlive(cafe24KeepAlive);
   startKeepAlive(clobeKeepAlive);
-  // 공급사 상품 동기화 — 매일 09시·17시(한국시간) 이후 첫 확인 때 한 번씩 돈다.
+  // 공급사 상품 동기화 — 매일 09시(한국시간) 이후 첫 확인 때 한 번씩 돈다.
   // 로컬 개발 서버에서는 기본으로 끈다(PRODUCT_SYNC_SCHEDULE=on 으로 켤 수 있다).
   const syncSchedule = String(process.env.PRODUCT_SYNC_SCHEDULE || (process.env.NODE_ENV === "production" ? "on" : "off")).toLowerCase();
   if (syncSchedule === "on") productSync.startSchedule();

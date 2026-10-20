@@ -9638,7 +9638,7 @@ function renderProductSync() {
   const ps = psState();
   const detail = ps.detail;
   const head = pageHead("상품동기화",
-    "공급사 공식몰의 품절·재입고·가격을 우프와 비교해 맞추고, 신상품을 미진열로 등록합니다. 매일 09시·17시 자동 확인.");
+    "공급사 공식몰의 품절·재입고·가격을 우프와 비교해 맞추고, 신상품을 미진열로 등록합니다. 매일 09시 자동 확인.");
   if (!ps.loaded) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   if (ps.error && !detail) {
     return `${head}<section class="panel"><div class="panel-body"><p style="color:var(--red)">${h(ps.error)}</p>
