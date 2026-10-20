@@ -5909,6 +5909,17 @@ async function routeProductSync(req, res, url, actor, db) {
       sendJson(res, 200, { check: result });
       return;
     }
+    if (rest === "/link-suggestions" && method === "GET") {
+      sendJson(res, 200, await productSync.linkSuggestions(sourceId));
+      return;
+    }
+    if (rest === "/links/bulk" && method === "POST") {
+      const body = await readBody(req);
+      const result = await productSync.saveLinks(sourceId, body.items, actorInfo);
+      await audit(`상품동기화 연결 ${result.saved}건 일괄 저장 (${sourceId})`, sourceId);
+      sendJson(res, 200, result);
+      return;
+    }
     const linkMatch = rest.match(/^\/links\/(\d+)(\/check)?$/);
     if (linkMatch && method === "DELETE" && !linkMatch[2]) {
       const result = await productSync.removeLink(sourceId, linkMatch[1], actorInfo);
