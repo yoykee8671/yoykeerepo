@@ -9866,7 +9866,7 @@ function renderPsCandidates() {
   const prefix = detail.namePrefix ? `${detail.namePrefix} ` : "";
   const cards = candidates.map((c) => {
     const soldOptions = (c.options || []).filter((o) => !o.selling).length;
-    const name = ps.candidateNames[c.sourceNo] ?? `${prefix}${c.name}`;
+    const name = ps.candidateNames[c.sourceNo] ?? (c.wooofName || `${prefix}${c.name}`);
     const optionText = (c.options || []).length
       ? `${(c.optionNames || []).join("×") || "옵션"} ${(c.options || []).length}개${soldOptions ? ` · 품절 ${soldOptions}` : ""}`
       : "단일상품";
