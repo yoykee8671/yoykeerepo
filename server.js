@@ -261,6 +261,15 @@ function normalizeSearchText(value) {
   return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+// Cafe24 화면에서 복사하거나 자동 추출한 주문번호에는 "첫주문" 같은 배지
+// 텍스트와 탭 문자가 딸려 온다. 번호 형식(YYYYMMDD-NNNNNNN)으로 시작하면
+// 번호만 남기고, 그 외 형식은 공백 정리만 한다.
+function normalizeOrderNo(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  const match = text.match(/^(\d{8}-\d{6,8})\b/);
+  return match ? match[1] : text;
+}
+
 function normalizeItemKey(itemCode, itemName) {
   return `${String(itemCode || "").trim().toLowerCase()}::${String(itemName || "").trim().toLowerCase()}`;
 }
@@ -1293,6 +1302,11 @@ function migrateDb(db) {
 
   for (const request of db.requests || []) {
     const brand = (db.brands || []).find((item) => item.id === request.brandId);
+    const cleanOrderNo = normalizeOrderNo(request.orderNo);
+    if (request.orderNo !== cleanOrderNo) {
+      request.orderNo = cleanOrderNo;
+      changed = true;
+    }
     touch(request, "productSalesAmount", number(request.depositAmount));
     touch(request, "baseShippingFee", number(request.shippingFee));
     touch(request, "extraShippingFee", 0);
@@ -5672,7 +5686,7 @@ function buildRequestFromDraft(db, brand, draft) {
     id: id("req"),
     brandId: brand.id,
     brandName: brand.name,
-    orderNo: String(draft.orderNo || "").trim(),
+    orderNo: normalizeOrderNo(draft.orderNo),
     customerName: String(draft.customerName || "").trim(),
     depositAmount: calc.depositAmount,
     productSalesAmount: calc.productSalesAmount,
@@ -6705,7 +6719,7 @@ async function routeApi(req, res, url) {
       id: id("req"),
       brandId: body.brandId || "",
       brandName: body.brandName || brand?.name || "",
-      orderNo: body.orderNo || "",
+      orderNo: normalizeOrderNo(body.orderNo),
       customerName: body.customerName || "",
       depositAmount: calc.depositAmount,
       productSalesAmount: calc.productSalesAmount,
@@ -6931,6 +6945,8 @@ async function routeApi(req, res, url) {
           request[key] = Math.max(0, Number(body[key] || 0));
         } else if (key === "overpaidAmount" || key === "creditUsedAmount" || key === "cancelledAmount" || key === "priorPaidAmount") {
           request[key] = Math.max(0, number(body[key]));
+        } else if (key === "orderNo") {
+          request[key] = normalizeOrderNo(body[key]);
         } else {
           request[key] = body[key];
         }
@@ -7341,7 +7357,7 @@ async function routeApi(req, res, url) {
     const skipped = [];
     for (const draft of drafts) {
       const brand = db.brands.find((item) => item.id === draft.brandId);
-      const orderNo = String(draft.orderNo || "").trim();
+      const orderNo = normalizeOrderNo(draft.orderNo);
       if (!brand || !orderNo) continue;
       // 미리보기와 적용 사이에 누군가 만들었을 수 있다.
       const exists = db.requests.some(
