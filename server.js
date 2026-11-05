@@ -3951,9 +3951,17 @@ export function npbEnrichLine(line, channels, products, promoRates) {
     && number(line.salePrice) > 0
     && number(line.salePrice) !== unitPrice;
   const fromUnitPrice = unitPrice > 0 && qty > 0 && !editedSale;
+  // 고친 줄도 매출은 기준가 × 수량이다. 예전 재계산이 unitPrice × 수량을
+  // saleAmount 에 manual 로 남겨 둔 줄이 있어, 그걸 그대로 두면 아래 manual
+  // 덮어쓰기가 고친 기준가를 도로 무시한다 — 워크시트는 1,018,095 를 보여 주는데
+  // 저장본은 1,034,000 이 되던 자리.
+  const fromSalePrice = editedSale && qty > 0;
   if (fromUnitPrice) {
     enriched.saleAmount = unitPrice * qty;
     enriched.salePrice = unitPrice;
+    delete enriched.settleAmount;
+  } else if (fromSalePrice) {
+    enriched.saleAmount = number(line.salePrice) * qty;
     delete enriched.settleAmount;
   }
   for (const field of ["listAmount", "saleAmount", "feeAmount", "settleAmount"]) {
@@ -3962,7 +3970,7 @@ export function npbEnrichLine(line, channels, products, promoRates) {
     // 값이 다음 재계산 때 line.saleAmount 로 돌아오므로, 그대로 되씌우면
     // 서버가 스스로 만든 값을 사람이 박은 값처럼 굳혀 버린다. 기준가로 낸
     // 매출은 그래서 되씌우지 않는다.
-    if (field === "saleAmount" && fromUnitPrice) continue;
+    if (field === "saleAmount" && (fromUnitPrice || fromSalePrice)) continue;
     if (manual.has(field) && line[field] != null) enriched[field] = number(line[field]);
   }
   if (!channel) return enriched;
