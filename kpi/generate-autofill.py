@@ -61,6 +61,19 @@ CHANNEL_MAP = {
     'label:BMW하모니': ('PBbrand', '외부채널 위탁몰'),
     'label:오버더센스': ('PBbrand', '외부채널 위탁몰'),
     'entity:오버더센스': ('PBbrand', '외부채널 위탁몰'),
+    # ── 2026-08~10 수확분 신규/미라벨 키 (10월은 clobe 라벨링 미완 → desc: 키로 등장) ──
+    'desc:네이버파이낸셜주식회': ('PBbrand', '스마트스토어/네이버'),
+    'desc:주식회사 무신사페': ('PBbrand', '외부채널 위탁몰'),
+    'desc:(주)이마트': ('PBbrand', '외부채널 위탁몰'),
+    'desc:(주)더블유컨셉코리아': ('PBbrand', '외부채널 위탁몰'),
+    'desc:(주)더즌': ('PBbrand', '컬리'),
+    'desc:(주)카카오': ('PBbrand', '외부채널 위탁몰'),
+    'desc:주식회사버킷플레이스': ('PBbrand', '외부채널 위탁몰'),
+    'desc:주식회사 몽슈슈(M': ('wooof', '입점브랜드 위탁'),
+    'entity:견생냥품': ('wooof', 'B2B/도매/벤더'),
+    'entity:산책': ('wooof', 'B2B/도매/벤더'),
+    'entity:지구상단': ('wooof', 'B2B/도매/벤더'),
+    'entity:LF': ('PBbrand', '외부채널 위탁몰'),
     # 리드메이트코리아(철수마켓) = 공구 플랫폼 정산 입금 (매입장 "공구 수수료" 거래처와 동일)
     'entity:리드메이트코리아': ('PBbrand', '공구'),
     "entity:생강이네(Ginger's": ('PBbrand', '외부채널 위탁몰'),
@@ -74,9 +87,14 @@ CHANNEL_MAP = {
     'label:대리점/벤더매출': ('wooof', 'B2B/도매/벤더'),
     'entity:제이엔씨': ('wooof', 'B2B/도매/벤더'),
     'entity:독클래스': ('wooof', 'B2B/도매/벤더'),
+    'desc:(주)독클래스': ('wooof', 'B2B/도매/벤더'),
     'entity:복댕이들의옷장': ('wooof', 'B2B/도매/벤더'),
     'entity:꾸순네': ('wooof', 'B2B/도매/벤더'),
-    'entity:소일베이커': ('wooof', 'B2B/도매/벤더'),
+    # 소일베이커 월 1.1M 고정 컨설팅비 (2026-10-30 대표 확정): 외주용역이지만 별도 배분
+    # (50% 회사 / 50% 3인 1/N, 방어선 무관) → kpi.html '외주용역 컨설팅' 칸(consult)으로 자동채움.
+    # CM에는 포함하지 않음 (이중계상 방지)
+    'entity:소일베이커': ('consult', '외주 컨설팅(소일베이커)'),
+    'desc:(주)소일베이커': ('consult', '외주 컨설팅(소일베이커)'),
     'entity:댕버랜드': ('wooof', 'B2B/도매/벤더'),
     'entity:두더지식물원': ('wooof', 'B2B/도매/벤더'),
     'entity:개구쟁이': ('wooof', 'B2B/도매/벤더'),
@@ -138,7 +156,10 @@ JASAMOL_SHEET = {
     '6': {'total': 5096005, 'gonggamcat': 0},
 }
 JASAMOL_ROW = '자사몰(카페24)'
-COSTS_JSON = os.path.join(BASE, 'costs-monthly.json')
+# costs-monthly-clobe.json: clobe 매입전표 기준 1~10월 (2026-10-29). 없으면 구 매입장 기준 파일로 폴백.
+COSTS_JSON = os.path.join(BASE, 'costs-monthly-clobe.json')
+if not os.path.exists(COSTS_JSON):
+    COSTS_JSON = os.path.join(BASE, 'costs-monthly.json')
 
 
 def add_field(entries, name, field, amount):
@@ -217,10 +238,20 @@ def main():
     for m, md in raw['months'].items():
         rows = {'wooof': {}, 'PBbrand': {}}
         picky = 0
+        consult = 0
         for key, agg in md.get('revenue', {}).items():
             amt = round(agg['sum'])
             if amt == 0:
                 continue
+            # 8월~: clobe에 '픽키파크대행' 라벨이 안 붙어 월 고정 대행료 2.2M이
+            # entity:픽키파크 합계에 섞임 → 대행료는 외주용역(회생재원)으로 분리, 잔액만 필바이츠
+            if key == 'entity:픽키파크' and int(m) >= 8:
+                agency = min(2200000, amt)
+                excluded_report.setdefault(m, {}).setdefault('픽키파크 대행(외주용역·회생재원)', 0)
+                excluded_report[m]['픽키파크 대행(외주용역·회생재원)'] += agency
+                amt -= agency
+                if amt <= 0:
+                    continue
             target = resolve_channel(key, m)
             if target is None:
                 rows['wooof'][UNMAPPED_ROW] = rows['wooof'].get(UNMAPPED_ROW, 0) + amt
@@ -230,6 +261,8 @@ def main():
             unit, row = target
             if unit == 'picky':
                 picky += amt
+            elif unit == 'consult':
+                consult += amt
             elif unit == 'exclude':
                 # 서비스용역 — KPI 공헌이익에서 제외, 리포트로만 노출
                 excluded_report.setdefault(m, {}).setdefault(row, 0)
@@ -265,6 +298,8 @@ def main():
 
         if picky:
             month_entry['picky'] = picky
+        if consult:
+            month_entry['consult'] = consult
         months_out[m] = month_entry
 
     payload = {
