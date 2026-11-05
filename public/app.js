@@ -8267,7 +8267,8 @@ function renderNpbPreview() {
       ${items.map(([label, value]) =>
         `<div class="fixed-card"><span>${label}</span><strong>${npbWon(value)}</strong></div>`).join("")}
     </div>`;
-  const splitRows = (ps?.parties || [])
+  // 저장된 profitSplit 은 파티 배열이다 ({parties} 로 감싸 오지 않는다).
+  const splitRows = (Array.isArray(ps) ? ps : ps?.parties || [])
     .map((p) => `
       <tr>
         <td>${h(p.party)}</td>
