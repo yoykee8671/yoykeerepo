@@ -3943,7 +3943,14 @@ export function npbEnrichLine(line, channels, products, promoRates) {
   // × 수량을 쓰므로, 여기서 갈리면 워크시트와 저장된 정산이 서로 다른 숫자를
   // 내놓는다.
   const unitPrice = number(line.unitPrice);
-  const fromUnitPrice = unitPrice > 0 && qty > 0;
+  // 워크시트에서 기준가를 고친 줄은 고친 값이 이겨야 한다. 손대지 않은 줄의
+  // salePrice 는 이전 계산이 unitPrice 로 채워 둘이 같다 — 다르면 사람이 고친
+  // 것이다. 여기서 unitPrice 로 되씌우면 화면(기준가×수량)과 저장된 정산이
+  // 갈려, 미리보기·정산서의 할인계가 0 으로 나온다.
+  const editedSale = line.salePrice != null
+    && number(line.salePrice) > 0
+    && number(line.salePrice) !== unitPrice;
+  const fromUnitPrice = unitPrice > 0 && qty > 0 && !editedSale;
   if (fromUnitPrice) {
     enriched.saleAmount = unitPrice * qty;
     enriched.salePrice = unitPrice;
