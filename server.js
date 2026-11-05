@@ -4609,6 +4609,9 @@ export function npbBuildXlsxSpec(db, settlement) {
   }
   const channels = [];
   for (const [code, lines] of byCode) {
+    // 그 달에 판매가 있는 채널만 싣는다 — 수량 0인 채널을 빈 블록으로 넣으면
+    // 시트가 길어지고 정작 볼 것을 찾기 어렵다. (DB)원본 시트도 같은 기준이다.)
+    if (!lines.some((line) => number(line.qty) > 0)) continue;
     const meta = allChannels.find((item) => item.code === code);
     channels.push({
       name: meta?.name || code,
