@@ -1573,6 +1573,41 @@ a.button:hover {
   min-width: 160px;
 }
 
+/* 거래관리 거래명세서 선택 가져오기 */
+.npb-tdoc {
+  border: 1px solid var(--border, #d9dde3);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.npb-tdoc-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-top: 1px solid #eef0f3;
+  cursor: pointer;
+  flex-wrap: wrap;
+}
+
+.npb-tdoc-row.imported {
+  opacity: 0.65;
+}
+
+.npb-tdoc-main {
+  min-width: 260px;
+}
+
+.npb-tdoc-amt {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.npb-tdoc select {
+  width: auto;
+  min-width: 140px;
+}
+
 /* npb 실비 유형별 입력 */
 .npb-ship-row {
   display: flex;
