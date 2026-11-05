@@ -5351,6 +5351,16 @@ function calculateSettlement(input, brand = {}) {
     depositAmount = adjustedProductSales - commissionAmount + shippingFee;
   }
 
+  // 최종입금액 수동 고정. 주문매칭으로 자동 계산한 건이라도 업체의 절사·반올림
+  // 방식이 우리 공식과 달라 몇십 원 어긋나는 일이 있고, 송금은 업체 청구액에
+  // 맞춰야 한다. 사람이 고쳐 둔 금액은 재계산이 와도 지지 않는다. 공식값은
+  // calcDepositAmount 로 함께 남겨, 화면이 차이를 보여주고 되돌릴 수 있게 한다.
+  const calcDepositAmount = depositAmount;
+  const depositAmountManual =
+    (input.depositAmountManual === true || input.depositAmountManual === "true")
+    && number(input.depositAmount) > 0;
+  if (depositAmountManual) depositAmount = number(input.depositAmount);
+
   const isDirect = settlementType === "direct_purchase";
   return {
     settlementType,
@@ -5366,6 +5376,8 @@ function calculateSettlement(input, brand = {}) {
     commissionAmount: isDirect ? 0 : commissionAmount,
     supplyAmount: isDirect ? 0 : supplyAmount,
     depositAmount,
+    depositAmountManual,
+    calcDepositAmount,
     receivableDeduction: isDirect ? 0 : (hasReceivable ? (settlementType === "prepay_supply" ? receivableMargin : Math.round(effectiveProductSalesAmount * number(brand.commissionRate) / 100) + Math.round(number(input.cancelledAmount) * (1 - number(brand.commissionRate) / 100))) : 0),
     lineItems: isDirect ? [] : lineItems
   };
@@ -7000,6 +7012,8 @@ async function routeApi(req, res, url) {
       orderNo: normalizeOrderNo(body.orderNo),
       customerName: body.customerName || "",
       depositAmount: calc.depositAmount,
+      depositAmountManual: calc.depositAmountManual,
+      calcDepositAmount: calc.calcDepositAmount,
       productSalesAmount: calc.productSalesAmount,
       baseShippingFee: calc.baseShippingFee,
       extraShippingFee: calc.extraShippingFee,
