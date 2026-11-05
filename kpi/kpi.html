@@ -209,6 +209,13 @@ td.warncell{color:var(--critical)!important}
       </div>
     </div>
 
+    <div class="card">
+      <h2>관리손익 (월) <span style="font-weight:400;font-size:13px;color:var(--muted)">사업 모델 기반 세분화 P&amp;L — 매출에서 공헌이익, 방어선 커버까지 단계별</span></h2>
+      <p class="desc">세무 신고용 손익이 아니라 경영 판단용입니다. 비율은 총 순매출 대비.</p>
+      <div class="tablescroll"><table class="plain" id="pnlTable" style="min-width:620px"></table></div>
+      <div class="ratebox" id="pnlChannels" style="line-height:1.8"></div>
+    </div>
+
     <div class="card" id="summaryCard" style="display:none">
       <h2>📋 이번 달 성과 요약 (직원 공유용)</h2>
       <div id="summaryBody"></div>
@@ -232,6 +239,17 @@ td.warncell{color:var(--critical)!important}
             <td><input type="text" id="pickySales" inputmode="numeric" style="width:140px;padding:7px 8px;border-radius:8px;text-align:right;border:1px solid var(--input-border);background:var(--input-bg);color:var(--ink)"></td></tr>
         <tr><td>매출의 10%</td><td id="picky10">0</td></tr>
         <tr class="em"><td>초과 보너스 (10% − 200만, 0 미만이면 0)</td><td id="pickyOver">0</td></tr>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>외주용역 컨설팅 (별도 배분)</h2>
+      <p class="desc">소일베이커 등 컨설팅비는 방어선·보너스 판정과 <b>무관하게</b> 매월 50%는 회사, 50%는 3인 균등(1/N) 배분합니다 (2026-10-30 대표 확정). 공헌이익(CM)에는 포함하지 않아 이중계상이 없습니다.</p>
+      <table class="plain" style="max-width:520px">
+        <tr><td>이번 달 컨설팅비 입금</td>
+            <td><input type="text" id="consultIn" inputmode="numeric" style="width:140px;padding:7px 8px;border-radius:8px;text-align:right;border:1px solid var(--input-border);background:var(--input-bg);color:var(--ink)"></td></tr>
+        <tr><td>회사 몫 (50%)</td><td id="consultCompany">0</td></tr>
+        <tr class="em"><td>직원 배분 (50% ÷ 3인, 1인당)</td><td id="consultPer">0</td></tr>
       </table>
     </div>
 
@@ -403,7 +421,7 @@ function mkRow(name){
 function defaultState(){
   var months={};
   MONTHS.forEach(function(m){
-    months[m]={rows:{wooof:defaultRows("wooof"),PBbrand:defaultRows("PBbrand")},picky:0,checks:{},autoCells:{}};
+    months[m]={rows:{wooof:defaultRows("wooof"),PBbrand:defaultRows("PBbrand")},picky:0,consult:0,checks:{},autoCells:{}};
   });
   return {
     meta:{onboardDismissed:false,lastBackup:""},
@@ -440,6 +458,7 @@ function load(){
       if(!s.months[m]) s.months[m]=d.months[m];
       if(!s.months[m].checks) s.months[m].checks={};
       if(!s.months[m].autoCells) s.months[m].autoCells={};
+      if(s.months[m].consult===undefined) s.months[m].consult=0;
     });
     s.meta=Object.assign(d.meta,s.meta||{});
     return s;
@@ -591,6 +610,8 @@ function renderInput(){
   buildUnitTable("PBbrand");
   var p=document.getElementById("pickySales");
   p.value=state.months[curMonth].picky?fmt(state.months[curMonth].picky):"";
+  var ci=document.getElementById("consultIn");
+  ci.value=state.months[curMonth].consult?fmt(state.months[curMonth].consult):"";
   renderChecks();
   document.getElementById("summaryCard").style.display="none";
   recalc();
@@ -710,6 +731,16 @@ document.getElementById("pickySales").addEventListener("input",function(){
 document.getElementById("pickySales").addEventListener("blur",function(){
   var v=num(this.value); this.value=v?fmt(v):"";
 });
+document.getElementById("consultIn").addEventListener("input",function(){
+  var md=state.months[curMonth];
+  md.consult=num(this.value);
+  var ac=md.autoCells||{};
+  if(ac["consult"]!==undefined&&num(this.value)!==num(ac["consult"])) delete ac["consult"];
+  save(); recalc();
+});
+document.getElementById("consultIn").addEventListener("blur",function(){
+  var v=num(this.value); this.value=v?fmt(v):"";
+});
 
 /* ───────────────── clobe 자동 채움 ─────────────────
    kpi-autofill.js 가 window.KPI_AUTOFILL 을 정의하면 활성화된다.
@@ -753,6 +784,12 @@ function applyAutofill(){
     if(cur===0||(md.autoCells["picky"]!==undefined&&cur===num(md.autoCells["picky"]))){
       md.picky=v; md.autoCells["picky"]=v; applied++;
     }else if(cur!==v) skipped.push("픽키도기 매출");
+  }
+  if(data.consult!==undefined&&data.consult!==null){
+    var ccur=num(md.consult), cval=num(data.consult);
+    if(ccur===0||(md.autoCells["consult"]!==undefined&&ccur===num(md.autoCells["consult"]))){
+      md.consult=cval; md.autoCells["consult"]=cval; applied++;
+    }else if(ccur!==cval) skipped.push("외주 컨설팅");
   }
   save(); renderInput();
   if(info){
@@ -861,6 +898,77 @@ function recalc(){
   /* 픽키도기 */
   setHtml("picky10",fmt(r.picky10));
   setHtml("pickyOver",fmt(r.pickyOver));
+  /* 외주 컨설팅 별도 배분 (방어선 무관, 50% 회사 / 50% 3인 균등) */
+  var cv=num(md.consult);
+  setHtml("consultCompany",fmt(cv*0.5));
+  setHtml("consultPer",fmt(cv*0.5/3));
+  renderPnl(r);
+}
+
+/* ───────────────── 관리손익 P&L (finnest식 세분화 단계 뷰) ─────────────────
+   입력 데이터를 바꾸지 않고 calcMonth 결과만 재배열해 보여준다. */
+function renderPnl(r){
+  var rev=r.rev;
+  function pct(v){return rev>0?(v/rev*100).toFixed(1)+"%":"—"}
+  function row(label,wv,bv,opt){
+    opt=opt||{};
+    wv=wv||0; bv=bv||0;           /* -0 표시 방지 */
+    var tot=wv+bv;
+    var sign=opt.minus?"(−) ":"";
+    var note=opt.note?'<span class="note">'+opt.note+'</span>':"";
+    return '<tr'+(opt.em?' class="em"':'')+'><td>'+sign+label+note+'</td>'+
+      '<td style="text-align:right">'+fmtCell(wv)+'</td>'+
+      '<td style="text-align:right">'+fmtCell(bv)+'</td>'+
+      '<td style="text-align:right;font-weight:600">'+fmtCell(tot)+'</td>'+
+      '<td style="text-align:right;color:var(--muted)">'+(opt.rate?pct(tot):"")+'</td></tr>';
+  }
+  function rowT(label,tot,opt){
+    opt=opt||{};
+    tot=tot||0;                   /* -0 표시 방지 */
+    var sign=opt.minus?"(−) ":"";
+    var note=opt.note?'<span class="note">'+opt.note+'</span>':"";
+    return '<tr'+(opt.em?' class="em"':'')+'><td>'+sign+label+note+'</td><td></td><td></td>'+
+      '<td style="text-align:right;font-weight:600">'+fmtCell(tot)+'</td>'+
+      '<td style="text-align:right;color:var(--muted)">'+(opt.rate?pct(tot):"")+'</td></tr>';
+  }
+  var w=r.w,b=r.b;
+  var h='<tr><th style="text-align:left">단계</th><th style="text-align:right">우프(입점)</th>'+
+        '<th style="text-align:right">PB</th><th style="text-align:right">합계</th>'+
+        '<th style="text-align:right">비율</th></tr>';
+  h+=row("순매출",w.net,b.net,{rate:true});
+  h+=row("수수료 (플랫폼·위탁·PG)",-w.fee,-b.fee,{});
+  h+=row("정산매출",w.settle,b.settle,{em:true,rate:true});
+  h+=row("상품원가",-w.cogs,-b.cogs,{});
+  h+=row("물류비",-w.logi,-b.logi,{});
+  h+=row("프로모션·반품·기타",-(w.promo+w.ret+w.etc),-(b.promo+b.ret+b.etc),{});
+  h+=row("공헌이익 CM1",w.cm1,b.cm1,{em:true,rate:true});
+  h+=row("광고비",-w.ad,-b.ad,{});
+  h+=row("공헌이익 CM2",w.cm2,b.cm2,{em:true,rate:true});
+  h+=rowT("1단선 커버 (월 비용+회생 부족분)",-r.bepLine,{minus:false,note:"고정비·회생 적립 감당선"});
+  h+=rowT("운영·회생 커버 후 잉여",r.totalCM2-r.bepLine,{em:true,rate:true,note:"영업이익 성격의 참고값"});
+  h+=rowT("목표버퍼 (판관비 "+num(state.settings.bufferPct)+"%)",-r.bufferAmt,{});
+  h+=rowT("2단선 초과 (스트레치 재원)",r.totalCM2-r.tier2Line,{em:true});
+  setHtml("pnlTable",h);
+  /* 채널별 CM2율 랭킹 — "이 채널, 팔수록 남는가?" */
+  var chans=[];
+  ["wooof","PBbrand"].forEach(function(unit){
+    state.months[curMonth].rows[unit].forEach(function(cr){
+      if(num(cr.net)<=0) return;
+      var c=calcRow(cr);
+      chans.push({name:cr.name,cm2:c.cm2,rate:c.cm2/num(cr.net)});
+    });
+  });
+  if(!chans.length){ setHtml("pnlChannels",""); return; }
+  chans.sort(function(a,b2){return b2.rate-a.rate});
+  function chTxt(c){
+    var col=c.cm2<0?"var(--critical)":"var(--goodtext)";
+    return '<span style="color:'+col+'">'+esc(c.name)+' '+(c.rate*100).toFixed(1)+'% ('+fmt(c.cm2)+')</span>';
+  }
+  var top=chans.slice(0,3).map(chTxt).join(" · ");
+  var losers=chans.filter(function(c){return c.cm2<0}).map(chTxt).join(" · ");
+  var ch='채널별 CM2율 상위: '+top;
+  if(losers) ch+='<br>⚠ 팔수록 손해(CM2 마이너스): '+losers;
+  setHtml("pnlChannels",ch);
 }
 function tile(label,val,dotColor,unit){
   if(unit===undefined) unit="원";
