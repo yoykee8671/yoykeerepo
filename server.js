@@ -14,6 +14,7 @@ import { reconcile } from "./lib/clobe-reconcile.mjs";
 import * as cafe24 from "./lib/cafe24-api.mjs";
 import { cafe24OrdersToRows, compareRows } from "./lib/cafe24-rows.mjs";
 import { buildRequestDrafts, findShippedAwaiting } from "./lib/cafe24-collect.mjs";
+import { createProductSyncService } from "./lib/product-sync-service.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -258,6 +259,15 @@ function dateOnly(value) {
 
 function normalizeSearchText(value) {
   return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+// Cafe24 화면에서 복사하거나 자동 추출한 주문번호에는 "첫주문" 같은 배지
+// 텍스트와 탭 문자가 딸려 온다. 번호 형식(YYYYMMDD-NNNNNNN)으로 시작하면
+// 번호만 남기고, 그 외 형식은 공백 정리만 한다.
+function normalizeOrderNo(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  const match = text.match(/^(\d{8}-\d{6,8})\b/);
+  return match ? match[1] : text;
 }
 
 function normalizeItemKey(itemCode, itemName) {
@@ -1297,6 +1307,11 @@ function migrateDb(db) {
 
   for (const request of db.requests || []) {
     const brand = (db.brands || []).find((item) => item.id === request.brandId);
+    const cleanOrderNo = normalizeOrderNo(request.orderNo);
+    if (request.orderNo !== cleanOrderNo) {
+      request.orderNo = cleanOrderNo;
+      changed = true;
+    }
     touch(request, "productSalesAmount", number(request.depositAmount));
     touch(request, "baseShippingFee", number(request.shippingFee));
     touch(request, "extraShippingFee", 0);
@@ -4077,6 +4092,7 @@ function tradeDocSpecFromPurchaseOrder(db, po) {
         }
       : {},
     lineItems: po.lineItems,
+    priceMode: po.priceMode || "supply",
     deliveryPlace: po.deliveryPlace,
     subtotal: po.subtotal,
     vat: po.vat,
@@ -4778,7 +4794,10 @@ const MENU_REGISTRY = [
   // 쓴다. 권한을 없애면 기존에 막아 둔 계정이 갑자기 열린다.
   { key: "reconcile", label: "주문매칭(클로브)", actions: ["view", "apply"] },
   { key: "npb", label: "npb정산", actions: ["view", "edit"] },
-  { key: "procurement", label: "거래관리", actions: ["view", "create", "edit", "delete"] }
+  { key: "procurement", label: "거래관리", actions: ["view", "create", "edit", "delete"] },
+  // 공급사 상품 동기화. "실행·반영"은 우프 카페24 상품(재고·가격)을 실제로 바꾸고
+  // 신규 상품을 등록한다.
+  { key: "productsync", label: "상품동기화", actions: ["view", "apply"] }
 ];
 
 const ACTION_LABELS = {
@@ -4804,7 +4823,7 @@ function defaultPermissions(role) {
     // operator 등 그 외 등급은 권한 기능을 켜기 전과 똑같이 둔다.
     // 연동 메뉴는 막혀 있었고, 관리자 메뉴는 목록 조회만 열려 있었다
     // (GET /api/admins 에는 검사가 없었고 생성·수정·삭제만 막혀 있었다).
-    if (menu.key === "reconcile" || menu.key === "pipeline") all[menu.key] = [];
+    if (menu.key === "reconcile" || menu.key === "pipeline" || menu.key === "productsync") all[menu.key] = [];
     else if (menu.key === "admins") all[menu.key] = ["view"];
     else all[menu.key] = [...menu.actions];
   }
@@ -4923,19 +4942,45 @@ function sanitizePurchaseOrderLineItems(raw) {
   return source
     .map((item) => {
       const quantity = Math.max(0, number(item.quantity));
-      const unitPrice = Math.max(0, number(item.unitPrice));
+      // 거래명세서·세금계산서 관례대로 금액은 전부 1원 단위 정수로 저장한다 —
+      // 소수점이 섞여 들어와도 여기서 반올림되어 표기·합계에 소수점이 없다.
+      const unitPrice = Math.round(Math.max(0, number(item.unitPrice)));
+      // 부가세 포함 단가는 입력값을 그대로 보존한다 — 공급가에서 10%를 다시
+      // 붙여 계산하면 포함가로 입력한 금액과 1원이 어긋날 수 있다. 값이 없는
+      // (이 필드가 생기기 전의) 품목만 공급가 기준으로 되살린다.
+      const grossUnitPrice = Math.round(Math.max(0, number(item.grossUnitPrice)))
+        || unitPrice + Math.round(unitPrice * 0.1);
       return {
         id: item.id || id("poline"),
         materialId: String(item.materialId || "").trim(),
+        itemCode: String(item.itemCode || "").trim(),
         itemName: String(item.itemName || "").trim(),
         spec: String(item.spec || "").trim(),
+        consumerPrice: Math.round(Math.max(0, number(item.consumerPrice))),
         quantity,
         unit: String(item.unit || "").trim(),
         unitPrice,
+        grossUnitPrice,
         totalPrice: Math.round(quantity * unitPrice)
       };
     })
     .filter((item) => item.itemName);
+}
+
+// 문서의 금액 기준(priceMode)에 따라 합계를 구한다. supply(부가세 별도)는
+// 공급가 합에서 부가세를 얹고, gross(부가세 포함)는 포함가 합이 곧 총액이라
+// 공급가액을 거꾸로 산출한다 — 어느 쪽이든 사용자가 입력한 기준 금액이
+// 1원도 틀어지지 않는 방향으로 반올림한다.
+function purchaseOrderTotals(lineItems, priceMode) {
+  if (priceMode === "gross") {
+    const total = lineItems.reduce(
+      (sum, item) => sum + Math.round(item.quantity * item.grossUnitPrice), 0);
+    const subtotal = Math.round(total / 1.1);
+    return { subtotal, vat: total - subtotal, total };
+  }
+  const subtotal = lineItems.reduce((sum, item) => sum + item.totalPrice, 0);
+  const vat = Math.round(subtotal * 0.1);
+  return { subtotal, vat, total: subtotal + vat };
 }
 
 // 납품장소는 거래처와 달리 발주서 저장 시점의 스냅샷으로만 남는다 — 재사용
@@ -5314,6 +5359,16 @@ function calculateSettlement(input, brand = {}) {
     depositAmount = adjustedProductSales - commissionAmount + shippingFee;
   }
 
+  // 최종입금액 수동 고정. 주문매칭으로 자동 계산한 건이라도 업체의 절사·반올림
+  // 방식이 우리 공식과 달라 몇십 원 어긋나는 일이 있고, 송금은 업체 청구액에
+  // 맞춰야 한다. 사람이 고쳐 둔 금액은 재계산이 와도 지지 않는다. 공식값은
+  // calcDepositAmount 로 함께 남겨, 화면이 차이를 보여주고 되돌릴 수 있게 한다.
+  const calcDepositAmount = depositAmount;
+  const depositAmountManual =
+    (input.depositAmountManual === true || input.depositAmountManual === "true")
+    && number(input.depositAmount) > 0;
+  if (depositAmountManual) depositAmount = number(input.depositAmount);
+
   const isDirect = settlementType === "direct_purchase";
   return {
     settlementType,
@@ -5329,6 +5384,8 @@ function calculateSettlement(input, brand = {}) {
     commissionAmount: isDirect ? 0 : commissionAmount,
     supplyAmount: isDirect ? 0 : supplyAmount,
     depositAmount,
+    depositAmountManual,
+    calcDepositAmount,
     receivableDeduction: isDirect ? 0 : (hasReceivable ? (settlementType === "prepay_supply" ? receivableMargin : Math.round(effectiveProductSalesAmount * number(brand.commissionRate) / 100) + Math.round(number(input.cancelledAmount) * (1 - number(brand.commissionRate) / 100))) : 0),
     lineItems: isDirect ? [] : lineItems
   };
@@ -5841,7 +5898,7 @@ function buildRequestFromDraft(db, brand, draft) {
     id: id("req"),
     brandId: brand.id,
     brandName: brand.name,
-    orderNo: String(draft.orderNo || "").trim(),
+    orderNo: normalizeOrderNo(draft.orderNo),
     customerName: String(draft.customerName || "").trim(),
     depositAmount: calc.depositAmount,
     productSalesAmount: calc.productSalesAmount,
@@ -5887,6 +5944,245 @@ function buildRequestFromDraft(db, brand, draft) {
     createdAt: now(),
     updatedAt: now()
   };
+}
+
+// --- 공급사 상품 동기화 ----------------------------------------------------
+// 판단·저장·실행은 lib/product-sync-service.mjs 에 있다. 여기서는 카페24 토큰과
+// 저장소를 넘겨 주고 라우트만 잇는다.
+const productSync = createProductSyncService({
+  pgPool,
+  dataDir: DATA_DIR,
+  scriptPath: path.join(__dirname, "scripts", "product_image.py"),
+  withCafe24: async (run) => {
+    if (!cafe24.cafe24Configured()) throw new Error("카페24 연동 환경변수가 설정되지 않았습니다.");
+    const db = await readDb();
+    if (!db.cafe24 || typeof db.cafe24 !== "object") db.cafe24 = buildCafe24Namespace();
+    return withCafe24Token(db, run);
+  },
+  api: cafe24,
+  log: console
+});
+
+const PROBE_TARGETS = [
+  { brand: "앤블랭크", label: "메인", url: "https://andblank.com/" },
+  { brand: "앤블랭크", label: "상품 상세", url: "https://andblank.com/shop_view/?idx=817" },
+  { brand: "앤블랭크", label: "전체 목록", url: "https://andblank.com/all" },
+  { brand: "앤블랭크", label: "사이트맵(상품 목록)", url: "https://andblank.com/sitemap.xml" },
+  { brand: "앤블랭크", label: "옵션 읽기", url: "https://andblank.com/shop/load_option.cm", form: { type: "prod", prod_idx: "817" } },
+  { brand: "MUNIKUND(비교용)", label: "상품 상세", url: "https://munikund.com/product/detail.html?product_no=1693" }
+];
+const PROBE_AGENTS = {
+  browser: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+  bot: "Mozilla/5.0 (compatible; WooofPay-ProductSync/1.0; +https://pay.wooof.co.kr)"
+};
+
+async function probeOnce(url, userAgent, form = null) {
+  const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(url, {
+      method: form ? "POST" : "GET",
+      body: form ? new URLSearchParams(form).toString() : undefined,
+      headers: {
+        "user-agent": userAgent,
+        accept: "text/html,application/xhtml+xml,application/json",
+        "accept-language": "ko-KR,ko;q=0.9",
+        ...(form ? { "content-type": "application/x-www-form-urlencoded; charset=UTF-8", "x-requested-with": "XMLHttpRequest" } : {})
+      },
+      redirect: "follow",
+      signal: controller.signal
+    });
+    const text = await response.text();
+    return {
+      status: response.status,
+      ms: Date.now() - started,
+      bytes: text.length,
+      blockedPage: /<title>\s*접근 제한\s*<\/title>|Access is restricted/i.test(text),
+      hasProductData: /"@type"\s*:\s*"Product"|SITE_SHOP_DETAIL\.initDetail|var product_name\s*=|option_html|\/shop_view\//.test(text),
+      title: (/<title>([^<]{0,80})<\/title>/i.exec(text)?.[1] || "").trim()
+    };
+  } catch (error) {
+    return { status: 0, ms: Date.now() - started, error: error.name === "AbortError" ? "시간 초과(15초)" : error.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function probeSupplierSites() {
+  const results = [];
+  for (const target of PROBE_TARGETS) {
+    for (const [agent, ua] of Object.entries(PROBE_AGENTS)) {
+      const { form, ...shown } = target;
+      results.push({ ...shown, agent, ...(await probeOnce(target.url, ua, form)) });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+  }
+  const andblank = results.filter((r) => r.brand === "앤블랭크");
+  const ok = andblank.filter((r) => r.status === 200 && !r.blockedPage);
+  return {
+    at: now(),
+    server: { region: process.env.RENDER_REGION || "", service: process.env.RENDER_SERVICE_NAME || "" },
+    verdict: ok.length === andblank.length
+      ? "열림 — 우리 서버에서 앤블랭크 페이지를 읽을 수 있습니다."
+      : ok.length
+        ? "일부만 열림 — 요청 방식에 따라 막힙니다."
+        : "막힘 — 우리 서버에서 앤블랭크 페이지가 차단됩니다.",
+    results
+  };
+}
+
+function productSyncError(res, error) {
+  sendJson(res, error.status || 500, { error: error.message });
+}
+
+async function routeProductSync(req, res, url, actor, db) {
+  const pathname = url.pathname;
+  const method = req.method || "GET";
+  const writing = method !== "GET";
+  if (!requirePermission(actor, res, "productsync", writing ? "apply" : "view",
+    writing ? "상품동기화 실행·반영 권한이 없습니다." : "상품동기화 권한이 없습니다.")) return;
+  const actorInfo = { id: actor.id, name: actor.name || actor.email || "" };
+  const audit = async (summary, entityId) => {
+    try {
+      addAudit(db, actor, "update", "product_sync", entityId || "", summary, null, null);
+      await writeDb(db);
+    } catch (error) {
+      // 감사 로그 저장 충돌로 작업 자체를 막지는 않는다.
+      if (error.status !== 409) console.error(`[product-sync] audit failed: ${error.message}`);
+    }
+  };
+  try {
+    if (pathname === "/api/product-sync" && method === "GET") {
+      sendJson(res, 200, {
+        ...(await productSync.overview()),
+        cafe24: cafe24PublicState(db),
+        cafe24Scope: cafe24.CAFE24_SCOPE,
+        productScope: /mall\.write_product/.test(cafe24.CAFE24_SCOPE)
+      });
+      return;
+    }
+    // 접속 확인: 우리 서버에서 공급사 사이트가 열리는지(데이터센터 IP 차단 여부) 본다.
+    // 주소는 아래 목록으로 고정 — 아무 주소나 대신 열어 주는 통로가 되지 않게.
+    if (pathname === "/api/product-sync/probe" && method === "GET") {
+      sendJson(res, 200, await probeSupplierSites());
+      return;
+    }
+    if (pathname === "/api/product-sync/badge" && method === "GET") {
+      sendJson(res, 200, await productSync.badge());
+      return;
+    }
+    if (pathname === "/api/product-sync/wooof-search" && method === "GET") {
+      sendJson(res, 200, { products: await productSync.searchWooof(url.searchParams.get("q") || "") });
+      return;
+    }
+    const jobMatch = pathname.match(/^\/api\/product-sync\/jobs\/([^/]+)$/);
+    if (jobMatch && method === "GET") {
+      const job = productSync.getJob(decodeURIComponent(jobMatch[1]));
+      if (!job) {
+        sendJson(res, 404, { error: "작업을 찾을 수 없습니다. 서버가 다시 시작됐을 수 있습니다." });
+        return;
+      }
+      sendJson(res, 200, { job });
+      return;
+    }
+    const m = pathname.match(/^\/api\/product-sync\/sources\/([^/]+)(\/.*)?$/);
+    if (!m) {
+      sendJson(res, 404, { error: "Not found" });
+      return;
+    }
+    const sourceId = decodeURIComponent(m[1]);
+    const rest = m[2] || "";
+    if (rest === "" && method === "GET") {
+      sendJson(res, 200, await productSync.sourceDetail(sourceId));
+      return;
+    }
+    if (rest === "/run" && method === "POST") {
+      const body = await readBody(req);
+      // stock = 연결된 상품 재고 확인(빠름), scan = 본사 진열 목록에서 신상품 찾기
+      const mode = body.mode === "scan" ? "scan" : "stock";
+      const job = productSync.startRun(sourceId, { trigger: "manual", actorName: actorInfo.name, mode });
+      sendJson(res, 202, { job });
+      return;
+    }
+    if (rest === "/apply" && method === "POST") {
+      const body = await readBody(req);
+      // 화면에서 본 값(fingerprint)을 같이 받는다. 서버는 쓰기 직전에 다시 비교해서
+      // 이 값과 같을 때만 쓴다.
+      const items = (Array.isArray(body.items) ? body.items : [])
+        .map((item) => ({ key: String(item?.key || ""), fingerprint: String(item?.fingerprint ?? "") }))
+        .filter((item) => item.key);
+      if (!items.length) {
+        sendJson(res, 400, { error: "반영할 항목을 고르세요." });
+        return;
+      }
+      const job = productSync.startApply(sourceId, items, actorInfo);
+      await audit(`상품동기화 반영 ${items.length}건 (${sourceId})`, sourceId);
+      sendJson(res, 202, { job });
+      return;
+    }
+    if (rest === "/dismiss" && method === "POST") {
+      const body = await readBody(req);
+      sendJson(res, 200, await productSync.dismissIssues(sourceId, (body.keys || []).map(String), actorInfo));
+      return;
+    }
+    if (rest === "/notices/clear" && method === "POST") {
+      const body = await readBody(req);
+      sendJson(res, 200, await productSync.clearNotices(sourceId, (body.ids || []).map(String)));
+      return;
+    }
+    if (rest === "/settings" && method === "PUT") {
+      const body = await readBody(req);
+      const result = await productSync.updateSettings(sourceId, body, actorInfo);
+      await audit(`상품동기화 설정 변경 (${sourceId})`, sourceId);
+      sendJson(res, 200, result);
+      return;
+    }
+    if (rest === "/links" && method === "POST") {
+      const body = await readBody(req);
+      const result = await productSync.saveLink(sourceId, body.wooofProductNo, body, actorInfo);
+      await audit(`상품동기화 연결 저장: 우프 ${body.wooofProductNo} ↔ 본사 ${body.sourceNo}`, String(body.wooofProductNo));
+      sendJson(res, 200, { check: result });
+      return;
+    }
+    if (rest === "/link-suggestions" && method === "GET") {
+      sendJson(res, 200, await productSync.linkSuggestions(sourceId));
+      return;
+    }
+    if (rest === "/links/bulk" && method === "POST") {
+      const body = await readBody(req);
+      const result = await productSync.saveLinks(sourceId, body.items, actorInfo);
+      await audit(`상품동기화 연결 ${result.saved}건 일괄 저장 (${sourceId})`, sourceId);
+      sendJson(res, 200, result);
+      return;
+    }
+    const linkMatch = rest.match(/^\/links\/(\d+)(\/check)?$/);
+    if (linkMatch && method === "DELETE" && !linkMatch[2]) {
+      const result = await productSync.removeLink(sourceId, linkMatch[1], actorInfo);
+      await audit(`상품동기화 연결 해제: 우프 ${linkMatch[1]}`, linkMatch[1]);
+      sendJson(res, 200, result);
+      return;
+    }
+    if (linkMatch && linkMatch[2] && method === "GET") {
+      sendJson(res, 200, { check: await productSync.checkLink(sourceId, linkMatch[1]) });
+      return;
+    }
+    const candMatch = rest.match(/^\/candidates\/(\d+)\/(ignore|register)$/);
+    if (candMatch && method === "POST") {
+      const body = await readBody(req);
+      if (candMatch[2] === "ignore") {
+        sendJson(res, 200, await productSync.setIgnored(sourceId, candMatch[1], body.ignored !== false, actorInfo));
+        return;
+      }
+      const job = productSync.startRegister(sourceId, candMatch[1], { productName: body.productName }, actorInfo);
+      await audit(`상품동기화 신규 등록 시작: 본사 ${candMatch[1]}`, candMatch[1]);
+      sendJson(res, 202, { job });
+      return;
+    }
+    sendJson(res, 404, { error: "Not found" });
+  } catch (error) {
+    productSyncError(res, error);
+  }
 }
 
 // --- Cafe24 Admin API integration ---------------------------------------
@@ -6721,9 +7017,11 @@ async function routeApi(req, res, url) {
       id: id("req"),
       brandId: body.brandId || "",
       brandName: body.brandName || brand?.name || "",
-      orderNo: body.orderNo || "",
+      orderNo: normalizeOrderNo(body.orderNo),
       customerName: body.customerName || "",
       depositAmount: calc.depositAmount,
+      depositAmountManual: calc.depositAmountManual,
+      calcDepositAmount: calc.calcDepositAmount,
       productSalesAmount: calc.productSalesAmount,
       baseShippingFee: calc.baseShippingFee,
       extraShippingFee: calc.extraShippingFee,
@@ -6947,6 +7245,8 @@ async function routeApi(req, res, url) {
           request[key] = Math.max(0, Number(body[key] || 0));
         } else if (key === "overpaidAmount" || key === "creditUsedAmount" || key === "cancelledAmount" || key === "priorPaidAmount") {
           request[key] = Math.max(0, number(body[key]));
+        } else if (key === "orderNo") {
+          request[key] = normalizeOrderNo(body[key]);
         } else {
           request[key] = body[key];
         }
@@ -7357,7 +7657,7 @@ async function routeApi(req, res, url) {
     const skipped = [];
     for (const draft of drafts) {
       const brand = db.brands.find((item) => item.id === draft.brandId);
-      const orderNo = String(draft.orderNo || "").trim();
+      const orderNo = normalizeOrderNo(draft.orderNo);
       if (!brand || !orderNo) continue;
       // 미리보기와 적용 사이에 누군가 만들었을 수 있다.
       const exists = db.requests.some(
@@ -7422,10 +7722,22 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  if (pathname === "/api/product-sync" || pathname.startsWith("/api/product-sync/")) {
+    await routeProductSync(req, res, url, actor, db);
+    return;
+  }
+
   // --- Cafe24 Admin API endpoints -----------------------------------------
   // Order data and a delegated credential — owner/manager only, same as clobe.
   if (pathname.startsWith("/api/cafe24/")) {
-    if (!requirePermission(actor, res, "pipeline", "view", "카페24 연동 권한이 없습니다.")) return;
+    // 연결(상태·연결·콜백)은 상품동기화 실행 권한으로도 할 수 있다 — 같은 토큰을
+    // 두 메뉴가 같이 쓴다. 해제와 주문 조회는 주문매칭 권한만.
+    const connectOnly = ["/api/cafe24/status", "/api/cafe24/connect", "/api/cafe24/callback"].includes(pathname);
+    const allowed = can(actor, "pipeline", "view") || (connectOnly && can(actor, "productsync", "apply"));
+    if (!allowed) {
+      sendJson(res, 403, { error: "카페24 연동 권한이 없습니다." });
+      return;
+    }
     if (!db.cafe24 || typeof db.cafe24 !== "object") db.cafe24 = buildCafe24Namespace();
   }
 
@@ -7442,7 +7754,10 @@ async function routeApi(req, res, url) {
     try {
       const redirectUri = cafe24RedirectUri(req);
       const state = cafe24.createState();
-      cafe24PendingAuth.set(state, { redirectUri, actorId: actor.id, createdAt: Date.now() });
+      const connectBody = await readBody(req).catch(() => ({}));
+      // 연결을 시작한 화면으로 돌아가게 한다(주문매칭 / 상품동기화).
+      const returnTab = connectBody?.returnTo === "productsync" ? "productsync" : "";
+      cafe24PendingAuth.set(state, { redirectUri, actorId: actor.id, createdAt: Date.now(), returnTab });
       for (const [key, value] of cafe24PendingAuth) {
         if (Date.now() - value.createdAt > CLOBE_AUTH_TTL_MS) cafe24PendingAuth.delete(key);
       }
@@ -7459,7 +7774,7 @@ async function routeApi(req, res, url) {
     const pending = cafe24PendingAuth.get(state);
     cafe24PendingAuth.delete(state);
     const fail = (reason) => {
-      res.writeHead(302, { location: `/?cafe24=error&reason=${encodeURIComponent(reason)}` });
+      res.writeHead(302, { location: `/?cafe24=error&reason=${encodeURIComponent(reason)}${pending?.returnTab ? `&tab=${pending.returnTab}` : ""}` });
       res.end();
     };
     if (url.searchParams.get("error")) return void fail(url.searchParams.get("error"));
@@ -7478,7 +7793,7 @@ async function routeApi(req, res, url) {
       db.cafe24.connectedAt = now();
       addAudit(db, actor, "update", "cafe24", "connection", `카페24 연동 연결 (${db.cafe24.mallId})`, null, cafe24PublicState(db));
       await writeDb(db);
-      res.writeHead(302, { location: "/?cafe24=connected" });
+      res.writeHead(302, { location: `/?cafe24=connected${pending.returnTab ? `&tab=${pending.returnTab}` : ""}` });
       res.end();
     } catch (error) {
       fail(error.message);
@@ -9047,6 +9362,10 @@ async function routeApi(req, res, url) {
       depositorName: String(body.depositorName || "").trim(),
       orderMethod: String(body.orderMethod || "").trim(),
       invoiceTiming: String(body.invoiceTiming || "").trim(),
+      // 발주서 단가를 공급가(부가세 별도) 기준으로 쓸지, 부가세 포함가
+      // 기준으로 쓸지의 이 거래처 기본값 — 문서 작성 시 자동 선택되고
+      // 문서별로 바꿀 수 있다.
+      priceMode: body.priceMode === "gross" ? "gross" : "supply",
       contactName: String(body.contactName || "").trim(),
       contactPhone: String(body.contactPhone || "").trim(),
       contactEmail: String(body.contactEmail || "").trim(),
@@ -9082,6 +9401,7 @@ async function routeApi(req, res, url) {
       if (key in body) partner[key] = String(body[key] || "").trim();
     }
     if (!partnerCategories.has(partner.category)) partner.category = "production";
+    if ("priceMode" in body) partner.priceMode = body.priceMode === "gross" ? "gross" : "supply";
     if ("attachments" in body) {
       partner.attachments = Array.isArray(body.attachments)
         ? body.attachments.map((item) => String(item || "").trim()).filter(Boolean)
@@ -9230,7 +9550,9 @@ async function routeApi(req, res, url) {
       itemCode: String(body.itemCode || "").trim(),
       category: String(body.category || "").trim(),
       orderUnit: String(body.orderUnit || "").trim(),
-      basePrice: number(body.basePrice),
+      // prices are kept at whole won, as on trade documents and tax invoices
+      basePrice: Math.round(number(body.basePrice)),
+      consumerPrice: Math.round(number(body.consumerPrice)),
       leadTimeDays: number(body.leadTimeDays),
       note: String(body.note || "").trim(),
       isActive: body.isActive !== false,
@@ -9256,7 +9578,8 @@ async function routeApi(req, res, url) {
     for (const key of ["partnerId", "itemName", "itemCode", "category", "orderUnit", "note"]) {
       if (key in body) material[key] = String(body[key] || "").trim();
     }
-    if ("basePrice" in body) material.basePrice = number(body.basePrice);
+    if ("basePrice" in body) material.basePrice = Math.round(number(body.basePrice));
+    if ("consumerPrice" in body) material.consumerPrice = Math.round(number(body.consumerPrice));
     if ("leadTimeDays" in body) material.leadTimeDays = number(body.leadTimeDays);
     if ("isActive" in body) material.isActive = body.isActive !== false && body.isActive !== "false";
     material.updatedAt = now();
@@ -9387,13 +9710,17 @@ async function routeApi(req, res, url) {
     const docType = tradeDocTypes.has(body.docType) ? body.docType : "purchase_order";
     const orderDate = dateOnly(body.orderDate) || now().slice(0, 10);
     const lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
-    const subtotal = lineItems.reduce((sum, item) => sum + item.totalPrice, 0);
-    const vat = Math.round(subtotal * 0.1);
+    // 금액 기준: 요청에 없으면 거래처 기본값, 그것도 없으면 공급가 기준.
+    const priceMode = body.priceMode === "gross" || body.priceMode === "supply"
+      ? body.priceMode
+      : (partner.priceMode === "gross" ? "gross" : "supply");
+    const { subtotal, vat, total } = purchaseOrderTotals(lineItems, priceMode);
     const po = {
       id: id("po"),
       docType,
       docNo: nextPurchaseOrderDocNo(db, orderDate, docType),
       partnerId: partner.id,
+      priceMode,
       orderDate,
       // 양식마다 뜻이 다른 두 번째 날짜 — 발주서는 납기일, 견적서는 유효기간,
       // 청구서는 지급기일. 거래명세서는 쓰지 않는다.
@@ -9405,7 +9732,7 @@ async function routeApi(req, res, url) {
       deliveryPlace: sanitizeDeliveryPlace(body.deliveryPlace),
       subtotal,
       vat,
-      total: subtotal + vat,
+      total,
       note: String(body.note || "").trim(),
       createdAt: now(),
       updatedAt: now()
@@ -9454,11 +9781,16 @@ async function routeApi(req, res, url) {
     }
     if ("deliveryPlace" in body) po.deliveryPlace = sanitizeDeliveryPlace(body.deliveryPlace);
     if ("note" in body) po.note = String(body.note || "").trim();
-    if ("lineItems" in body) {
-      po.lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
-      po.subtotal = po.lineItems.reduce((sum, item) => sum + item.totalPrice, 0);
-      po.vat = Math.round(po.subtotal * 0.1);
-      po.total = po.subtotal + po.vat;
+    if ("priceMode" in body && (body.priceMode === "gross" || body.priceMode === "supply")) {
+      po.priceMode = body.priceMode;
+    }
+    if ("lineItems" in body) po.lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
+    // 품목이 바뀌었든 금액 기준만 바뀌었든 합계는 다시 구한다.
+    if ("lineItems" in body || "priceMode" in body) {
+      const totals = purchaseOrderTotals(po.lineItems, po.priceMode);
+      po.subtotal = totals.subtotal;
+      po.vat = totals.vat;
+      po.total = totals.total;
     }
     po.updatedAt = now();
     addAudit(db, actor, "update", "purchaseOrder", po.id, `${po.docNo} ${TRADE_DOC_LABELS[po.docType] || "발주서"} 수정`, before, po);
@@ -9746,4 +10078,8 @@ if (isMainModule) {
   };
   startKeepAlive(cafe24KeepAlive);
   startKeepAlive(clobeKeepAlive);
+  // 공급사 상품 동기화 — 매일 09시(한국시간) 이후 첫 확인 때 한 번씩 돈다.
+  // 로컬 개발 서버에서는 기본으로 끈다(PRODUCT_SYNC_SCHEDULE=on 으로 켤 수 있다).
+  const syncSchedule = String(process.env.PRODUCT_SYNC_SCHEDULE || (process.env.NODE_ENV === "production" ? "on" : "off")).toLowerCase();
+  if (syncSchedule === "on") productSync.startSchedule();
 }

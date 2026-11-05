@@ -12,7 +12,10 @@ route in server.js:
   "partner": {"name","businessName","businessNumber","representativeName","address",
               "contactName","contactEmail","invoiceEmail"},  # {} if the partner record
                                                               # was deleted
-  "lineItems": [{"itemName","spec","quantity","unit","unitPrice","totalPrice"}, ...],
+  "lineItems": [{"itemCode","itemName","spec","consumerPrice","quantity",
+                 "unitPrice","grossUnitPrice","totalPrice"}, ...],
+  "priceMode": "supply",  # | "gross" -- 단가 칸에 공급가(부가세 별도)를 쓸지
+                          # 부가세 포함가를 쓸지. 생략하면 supply(현행과 동일).
   "deliveryPlace": {"name","address","contactName","contactPhone","note"},  # all optional
   "subtotal": 0, "vat": 0, "total": 0,   # not used for display -- trade_doc_common
                                           # recomputes these as live Excel formulas from
@@ -31,28 +34,6 @@ from openpyxl import Workbook
 from trade_doc_common import DOC_CONFIGS, render
 
 
-def _delivery_place_line(delivery):
-    """Join the delivery-place snapshot into one readable line. Accepts the
-    current object shape; a plain string passes through as-is for backward
-    compatibility with purchase orders saved before this field became
-    structured."""
-    if isinstance(delivery, str):
-        return delivery
-    if not isinstance(delivery, dict):
-        return ""
-    parts = []
-    if delivery.get("name"):
-        parts.append(delivery["name"])
-    if delivery.get("address"):
-        parts.append(delivery["address"])
-    contact = " ".join(x for x in [delivery.get("contactName"), delivery.get("contactPhone")] if x)
-    if contact:
-        parts.append(f"담당: {contact}")
-    if delivery.get("note"):
-        parts.append(f"메모: {delivery['note']}")
-    return " / ".join(parts)
-
-
 def _prepare_spec(spec):
     """Derive the flat fields trade_doc_common.DOC_CONFIGS references
     (dotted paths only reach real dict keys, never computed values) from
@@ -64,7 +45,8 @@ def _prepare_spec(spec):
     partner["contactLine"] = " ".join(
         x for x in [partner.get("contactName"), partner.get("contactEmail")] if x
     )
-    spec["deliveryPlaceLine"] = _delivery_place_line(spec.get("deliveryPlace"))
+    # deliveryPlace stays structured -- trade_doc_common renders it as its
+    # own bordered block (one labeled row per field), not a joined line.
     return spec
 
 

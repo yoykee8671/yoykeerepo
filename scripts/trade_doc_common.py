@@ -29,8 +29,17 @@ than assuming a fixed line count -- a cramped fixed box just moves the
 "where did the text get clipped" problem from column width to row height.
 """
 
+import math
+
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+
+
+def _round_half_up(value):
+    """Excel의 ROUND(), JS의 Math.round()와 같은 반올림(0.5는 올림).
+    파이썬 내장 round()는 은행가 반올림(0.5를 짝수로)이라 454.5 -> 454처럼
+    서버(JS)·엑셀 수식과 1원이 어긋난다 — 금액 계산은 전부 이걸 쓴다."""
+    return int(math.floor(value + 0.5))
 
 # ---------------------------------------------------------------------------
 # Style constants (colors, fonts, borders) -- shared by all three documents.
@@ -46,6 +55,9 @@ AMOUNT_TINT = "DCE6F1"     # light-blue band over the amount column
 TOTAL_TINT = "DCE6F1"      # grand-total row / amount-in-words bar
 
 _THIN = Side(style="thin", color=BORDER_GRAY)
+# 납품장소 블록 전용 -- 그 블록만 "굵은 선 전체 테두리"로 둘러서 눈에 띄게
+# 한다(참고 실물 발주서에서 형광 하이라이트가 하던 역할).
+_MEDIUM = Side(style="medium", color="1A1A1A")
 BORDER_THIN_BOTTOM = Border(bottom=_THIN)
 BORDER_THIN_RIGHT = Border(right=_THIN)
 BORDER_BOX = Border(top=_THIN, bottom=_THIN, left=_THIN, right=_THIN)
@@ -82,14 +94,17 @@ LEFT_TOP = Alignment(horizontal="left", vertical="top", wrap_text=True)
 MONEY_FMT = "#,##0;;\"-\""
 QTY_FMT = "#,##0;;\"-\""
 
-# 7-column item table shared by every document: 순번·품목명·규격·수량·단위·공급가·공급가액.
-# "공급가"는 개당 금액(부가세 제외), "공급가액"은 그 줄의 합(수량 x 공급가)이다.
-TABLE_HEADERS = ["순번", "품목명", "규격", "수량", "단위", "공급가", "공급가액"]
+# 8-column item table shared by every document:
+# 순번·상품코드·품목명·규격·소비자정가·수량·단가·공급가합계.
+# "단가"는 개당 금액, "공급가합계"는 그 줄의 합(단가 x 수량)이다. 단가가
+# 부가세 별도(공급가)인지 포함인지는 문서의 priceMode가 정한다 -- 생산처는
+# 보통 공급가 기준(supply), 제품가에 부가세가 포함된 업체는 포함 기준(gross).
+TABLE_HEADERS = ["순번", "상품코드", "품목명", "규격", "소비자정가", "수량", "단가", "공급가합계"]
 # Column A doubles as the item-table's 순번 column AND the left info-block's
 # field-label column ("사업자번호"/"유효기간"/"거래일자" are 5 Hangul glyphs
-# wide); column D doubles as the item-table's 수량 column AND the right
+# wide); column E doubles as the item-table's 소비자정가 column AND the right
 # info-block's field-label column -- both must be sized for the label use.
-COLUMN_WIDTHS = [10, 27, 10, 10, 8, 12, 14]
+COLUMN_WIDTHS = [10, 12, 26, 9, 11, 8, 11, 14]
 DEFAULT_ITEM_ROWS = 10
 
 # ---------------------------------------------------------------------------
@@ -139,9 +154,31 @@ def _doc_config(title, right_label, date_label, due_label, closing, show_deliver
         "left_fields": left,
         "right_fields": list(_ISSUER_FIELDS),
         "closing": closing,
-        "extra_note_label": "납품장소" if show_delivery else None,
-        "extra_note_key": "deliveryPlaceLine" if show_delivery else None,
+        "show_delivery": show_delivery,
     }
+
+
+# 납품장소 스냅샷을 "라벨 + 값" 줄 목록으로 편다 -- Notes에 한 줄로 합쳐
+# 넣는 대신, 정보 블록과 품목 테이블 사이의 전용 블록(굵은 테두리)에 필드별로
+# 보여준다. 값이 있는 필드만 줄이 된다. 이 필드가 구조화되기 전에 저장된
+# 옛 발주서의 문자열 형태는 '납품장소' 한 줄로 그대로 통과시킨다.
+DELIVERY_FIELD_LABELS = [
+    ("납품장소명", "name"),
+    ("주소", "address"),
+    ("담당자명", "contactName"),
+    ("전화번호", "contactPhone"),
+    ("배송메모", "note"),
+]
+
+
+def delivery_fields(delivery):
+    if isinstance(delivery, str):
+        return [("납품장소", delivery)] if delivery.strip() else []
+    if not isinstance(delivery, dict):
+        return []
+    return [(label, str(delivery[key]).strip())
+            for label, key in DELIVERY_FIELD_LABELS
+            if delivery.get(key) and str(delivery[key]).strip()]
 
 
 DOC_CONFIGS = {
@@ -264,16 +301,10 @@ def _numeric_width_for(max_value, base_width, padding=2):
 
 
 def _notes_lines(cfg, spec):
-    """Build the Notes-box text as a list of logical lines: the doc type's
-    extra note (e.g. PO's 납품장소) first, then the free-form note field."""
-    lines = []
-    if cfg.get("extra_note_label"):
-        extra_value = _get(spec, cfg["extra_note_key"])
-        if extra_value:
-            lines.append(f"{cfg['extra_note_label']}: {extra_value}")
-    if spec.get("note"):
-        lines.append(str(spec["note"]))
-    return lines
+    """Build the Notes-box text as a list of logical lines. 납품장소 is NOT
+    part of Notes anymore -- it gets its own bordered block between the
+    info blocks and the item table (see delivery_fields)."""
+    return [str(spec["note"])] if spec.get("note") else []
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +332,12 @@ class Layout:
         self.info_rows = 0  # set by compute_layout()
         self.info_row_end = 0
 
+        # 납품장소 블록(발주서/거래명세서만, 값이 있을 때만) -- 정보 블록과
+        # 품목 테이블 사이. 0이면 블록 없음.
+        self.delivery_rows = 0
+        self.delivery_row_start = 0
+        self.delivery_row_end = 0
+
         self.table_header_row = 0
         self.table_first_data_row = 0
         self.table_last_data_row = 0
@@ -317,18 +354,25 @@ class Layout:
         self.last_row = 0
 
 
-def compute_layout(item_count, info_rows, notes_rows=3):
+def compute_layout(item_count, info_rows, notes_rows=3, delivery_rows=0):
     """The single place that maps every section of a trade document to a
     row number. `info_rows` is max(len(left_fields), len(right_fields));
     `notes_rows` is how many grid rows the Notes box body needs to hold
-    its actual (already wrapped) text without clipping it -- both
-    computed by the caller before this runs, since they depend on the
-    content, not just the document type."""
+    its actual (already wrapped) text without clipping it; `delivery_rows`
+    is how many 납품장소 fields actually have values -- all computed by
+    the caller before this runs, since they depend on the content, not
+    just the document type."""
     layout = Layout(item_count)
     layout.info_rows = max(info_rows, 1)
     layout.info_row_end = layout.info_row_start + layout.info_rows - 1
 
-    layout.table_header_row = layout.info_row_end + 2
+    if delivery_rows:
+        layout.delivery_rows = delivery_rows
+        layout.delivery_row_start = layout.info_row_end + 2
+        layout.delivery_row_end = layout.delivery_row_start + delivery_rows - 1
+        layout.table_header_row = layout.delivery_row_end + 2
+    else:
+        layout.table_header_row = layout.info_row_end + 2
     layout.table_first_data_row = layout.table_header_row + 1
     layout.table_last_data_row = layout.table_first_data_row + layout.item_count - 1
 
@@ -356,7 +400,7 @@ def _merge(ws, r1, c1, r2, c2):
     ws.merge_cells(start_row=r1, start_column=c1, end_row=r2, end_column=c2)
 
 
-def apply_template(ws, doc_type, layout, issuer):
+def apply_template(ws, doc_type, layout, issuer, delivery=()):
     cfg = DOC_CONFIGS[doc_type]
     ws.sheet_view.showGridLines = False
     ws.page_setup.orientation = "portrait"
@@ -368,7 +412,7 @@ def apply_template(ws, doc_type, layout, issuer):
     ws.page_margins.right = 0.4
     ws.page_margins.top = 0.5
     ws.page_margins.bottom = 0.5
-    ws.print_area = f"A1:G{layout.last_row}"
+    ws.print_area = f"A1:H{layout.last_row}"
 
     for idx, width in enumerate(COLUMN_WIDTHS, start=1):
         ws.column_dimensions[get_column_letter(idx)].width = width
@@ -384,12 +428,12 @@ def apply_template(ws, doc_type, layout, issuer):
     issuer_name_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
     # --- doc number + title (top-right) -------------------------------
-    _merge(ws, layout.doc_no_row, 6, layout.doc_no_row, 7)
-    doc_no_cell = ws.cell(row=layout.doc_no_row, column=6)
+    _merge(ws, layout.doc_no_row, 7, layout.doc_no_row, 8)
+    doc_no_cell = ws.cell(row=layout.doc_no_row, column=7)
     doc_no_cell.font = FONT_DOC_NO
     doc_no_cell.alignment = RIGHT
 
-    _merge(ws, layout.title_row_start, 4, layout.title_row_end, 7)
+    _merge(ws, layout.title_row_start, 4, layout.title_row_end, 8)
     title_cell = ws.cell(row=layout.title_row_start, column=4, value=cfg["title"])
     title_cell.font = FONT_TITLE
     title_cell.alignment = Alignment(horizontal="right", vertical="center")
@@ -401,35 +445,59 @@ def apply_template(ws, doc_type, layout, issuer):
     _merge(ws, layout.section_label_row, 1, layout.section_label_row, 2)
     ws.cell(row=layout.section_label_row, column=2).border = BORDER_THIN_BOTTOM
 
-    right_label_cell = ws.cell(row=layout.section_label_row, column=4, value=cfg["right_label"])
+    right_label_cell = ws.cell(row=layout.section_label_row, column=5, value=cfg["right_label"])
     right_label_cell.font = FONT_SECTION_LABEL
     right_label_cell.border = BORDER_THIN_BOTTOM
-    _merge(ws, layout.section_label_row, 4, layout.section_label_row, 5)
-    ws.cell(row=layout.section_label_row, column=5).border = BORDER_THIN_BOTTOM
+    _merge(ws, layout.section_label_row, 5, layout.section_label_row, 6)
+    ws.cell(row=layout.section_label_row, column=6).border = BORDER_THIN_BOTTOM
 
     for offset, (label, _key) in enumerate(cfg["left_fields"]):
         r = layout.info_row_start + offset
         lc = ws.cell(row=r, column=1, value=label)
         lc.font = FONT_FIELD_LABEL
         lc.alignment = LEFT
+        # merge B:C for the value -- 상품코드 column alone is too narrow for
+        # a business name/address.
+        _merge(ws, r, 2, r, 3)
         ws.cell(row=r, column=2).alignment = LEFT_WRAP
-        ws.cell(row=r, column=3).border = BORDER_THIN_RIGHT  # vertical divider
+        ws.cell(row=r, column=4).border = BORDER_THIN_RIGHT  # vertical divider
 
     for offset, (label, _key) in enumerate(cfg["right_fields"]):
         r = layout.info_row_start + offset
-        lc = ws.cell(row=r, column=4, value=label)
+        lc = ws.cell(row=r, column=5, value=label)
         lc.font = FONT_FIELD_LABEL
         lc.alignment = LEFT
-        # merge E:G for the value -- a single narrow table column (E, sized
-        # for 단위) is nowhere near wide enough for a business name/address.
-        _merge(ws, r, 5, r, 7)
-        ws.cell(row=r, column=5).alignment = LEFT_WRAP
+        # merge F:H for the value, same reason as the left block.
+        _merge(ws, r, 6, r, 8)
+        ws.cell(row=r, column=6).alignment = LEFT_WRAP
 
     # divider continues down through any rows left blank on the shorter side.
     # Row heights are set per-row in write_values() once the actual field
     # values (and how many lines they need) are known.
     for r in range(layout.info_row_start, layout.info_row_end + 1):
-        ws.cell(row=r, column=3).border = BORDER_THIN_RIGHT
+        ws.cell(row=r, column=4).border = BORDER_THIN_RIGHT
+
+    # --- delivery-place block (발주서/거래명세서) -------------------------
+    # 필드별 한 줄씩(납품장소명/주소/담당자명/전화번호/배송메모), 블록 전체를
+    # 굵은 선으로 두른다 -- 참고 실물 발주서의 하이라이트 자리를 테두리가
+    # 대신한다.
+    if layout.delivery_rows:
+        for offset, (label, _value) in enumerate(delivery):
+            r = layout.delivery_row_start + offset
+            lc = ws.cell(row=r, column=1, value=label)
+            lc.font = FONT_FIELD_LABEL
+            lc.alignment = LEFT
+            _merge(ws, r, 2, r, 8)
+            ws.cell(row=r, column=2).alignment = LEFT_WRAP
+        first, last = layout.delivery_row_start, layout.delivery_row_end
+        for r in range(first, last + 1):
+            for ci in range(1, 9):
+                ws.cell(row=r, column=ci).border = Border(
+                    top=_MEDIUM if r == first else None,
+                    bottom=_MEDIUM if r == last else None,
+                    left=_MEDIUM if ci == 1 else None,
+                    right=_MEDIUM if ci == 8 else None,
+                )
 
     # --- item table header ----------------------------------------------
     for ci, header in enumerate(TABLE_HEADERS, start=1):
@@ -439,31 +507,32 @@ def apply_template(ws, doc_type, layout, issuer):
         c.alignment = CENTER
 
     for r in range(layout.table_first_data_row, layout.table_last_data_row + 1):
-        for ci in range(1, 8):
+        for ci in range(1, 9):
             cell = ws.cell(row=r, column=ci)
             cell.font = FONT_TABLE_CELL
             cell.border = BORDER_THIN_BOTTOM
-            if ci in (6, 7):
+            if ci in (5, 7, 8):   # 소비자정가·단가·공급가합계
                 cell.alignment = RIGHT
-            elif ci in (1, 4, 5):
+            elif ci in (1, 6):    # 순번·수량
                 cell.alignment = CENTER
-            else:  # 2 품목명, 3 규격 -- free text, must wrap or it clips
+            else:  # 2 상품코드, 3 품목명, 4 규격 -- free text, must wrap or it clips
                 cell.alignment = LEFT_WRAP
-        ws.cell(row=r, column=7).fill = FILL_AMOUNT_TINT
+        ws.cell(row=r, column=8).fill = FILL_AMOUNT_TINT
+        ws.cell(row=r, column=8).number_format = MONEY_FMT
         ws.cell(row=r, column=7).number_format = MONEY_FMT
-        ws.cell(row=r, column=6).number_format = MONEY_FMT
-        ws.cell(row=r, column=4).number_format = QTY_FMT
+        ws.cell(row=r, column=5).number_format = MONEY_FMT
+        ws.cell(row=r, column=6).number_format = QTY_FMT
 
     # --- notes box (bottom-left) -----------------------------------------
-    _merge(ws, layout.notes_label_row, 1, layout.notes_label_row, 3)
+    _merge(ws, layout.notes_label_row, 1, layout.notes_label_row, 4)
     notes_label = ws.cell(row=layout.notes_label_row, column=1, value="Notes")
     notes_label.font = FONT_NOTES_LABEL
     notes_label.fill = FILL_CHARCOAL
     notes_label.alignment = Alignment(horizontal="left", vertical="center", indent=1)
-    ws.cell(row=layout.notes_label_row, column=2).fill = FILL_CHARCOAL
-    ws.cell(row=layout.notes_label_row, column=3).fill = FILL_CHARCOAL
+    for ci in (2, 3, 4):
+        ws.cell(row=layout.notes_label_row, column=ci).fill = FILL_CHARCOAL
 
-    _merge(ws, layout.notes_body_row_start, 1, layout.notes_body_row_end, 3)
+    _merge(ws, layout.notes_body_row_start, 1, layout.notes_body_row_end, 4)
     notes_body = ws.cell(row=layout.notes_body_row_start, column=1)
     notes_body.font = FONT_NOTES_BODY
     notes_body.alignment = LEFT_TOP
@@ -475,13 +544,13 @@ def apply_template(ws, doc_type, layout, issuer):
         (layout.total_vat_row, "총 부가세", FONT_TOTAL_VALUE, FONT_TOTAL_LABEL, None),
         (layout.total_grand_row, "총 합계금액", FONT_GRAND_TOTAL_VALUE, FONT_GRAND_TOTAL_LABEL, FILL_TOTAL_TINT),
     ):
-        _merge(ws, label_row, 4, label_row, 5)
-        lc = ws.cell(row=label_row, column=4, value=label_text)
+        _merge(ws, label_row, 5, label_row, 6)
+        lc = ws.cell(row=label_row, column=5, value=label_text)
         lc.font = label_font
         lc.alignment = CENTER
         lc.border = BORDER_BOX
-        _merge(ws, label_row, 6, label_row, 7)
-        vc = ws.cell(row=label_row, column=6)
+        _merge(ws, label_row, 7, label_row, 8)
+        vc = ws.cell(row=label_row, column=7)
         vc.font = value_font
         vc.alignment = RIGHT
         vc.number_format = MONEY_FMT
@@ -491,14 +560,14 @@ def apply_template(ws, doc_type, layout, issuer):
             vc.fill = fill
 
     # --- amount-in-words bar ------------------------------------------
-    _merge(ws, layout.words_bar_row, 1, layout.words_bar_row, 7)
+    _merge(ws, layout.words_bar_row, 1, layout.words_bar_row, 8)
     words_cell = ws.cell(row=layout.words_bar_row, column=1)
     words_cell.font = FONT_WORDS_BAR
     words_cell.alignment = CENTER
     words_cell.fill = FILL_TOTAL_TINT
 
     # --- closing sentence -----------------------------------------------
-    _merge(ws, layout.closing_row, 1, layout.closing_row, 7)
+    _merge(ws, layout.closing_row, 1, layout.closing_row, 8)
     closing_cell = ws.cell(row=layout.closing_row, column=1, value=cfg["closing"])
     closing_cell.font = FONT_CLOSING
     closing_cell.alignment = CENTER
@@ -520,16 +589,17 @@ def _get(spec, dotted_key):
     return node if node is not None else ""
 
 
-def write_values(ws, doc_type, layout, spec):
+def write_values(ws, doc_type, layout, spec, delivery=()):
     """Writes every value/formula, then sizes rows/columns to fit what was
     actually written. Returns the grand total (int won) so the caller can
     spell it out in the amount-in-words bar."""
     cfg = DOC_CONFIGS[doc_type]
+    gross_mode = spec.get("priceMode") == "gross"
 
-    ws.cell(row=layout.doc_no_row, column=6, value=spec.get("docNo", ""))
+    ws.cell(row=layout.doc_no_row, column=7, value=spec.get("docNo", ""))
 
-    left_value_width = COLUMN_WIDTHS[1]
-    right_value_width = sum(COLUMN_WIDTHS[4:7])
+    left_value_width = sum(COLUMN_WIDTHS[1:3])
+    right_value_width = sum(COLUMN_WIDTHS[5:8])
     line_counts = {}
 
     for offset, (_label, key) in enumerate(cfg["left_fields"]):
@@ -542,18 +612,30 @@ def write_values(ws, doc_type, layout, spec):
     for offset, (_label, key) in enumerate(cfg["right_fields"]):
         r = layout.info_row_start + offset
         value = _get(spec, key)
-        cell = ws.cell(row=r, column=5, value=value)
+        cell = ws.cell(row=r, column=6, value=value)
         cell.font = FONT_FIELD_VALUE_BOLD if key == "issuer.businessName" else FONT_FIELD_VALUE
         line_counts[r] = max(line_counts.get(r, 0), _wrapped_line_count(value, right_value_width))
 
     for r in range(layout.info_row_start, layout.info_row_end + 1):
         ws.row_dimensions[r].height = _row_height_for_lines(max(line_counts.get(r, 0), 1))
 
+    # delivery-place values (labels/merges/borders were drawn by the
+    # template phase; the value column is B:G merged, so it wraps against
+    # the full remaining width).
+    delivery_value_width = sum(COLUMN_WIDTHS[1:8])
+    for offset, (_label, value) in enumerate(delivery):
+        r = layout.delivery_row_start + offset
+        cell = ws.cell(row=r, column=2, value=value)
+        cell.font = FONT_FIELD_VALUE
+        ws.row_dimensions[r].height = _row_height_for_lines(
+            max(_wrapped_line_count(value, delivery_value_width), 1))
+
     items = spec.get("lineItems", [])
-    subtotal = 0
+    shown_sum = 0   # sum of the 공급가합계 column as displayed (mode-dependent)
     max_unit_price = 0
     max_quantity = 0
     max_line_total = 0
+    max_consumer_price = 0
     for i in range(layout.item_count):
         r = layout.table_first_data_row + i
         if i >= len(items):
@@ -561,49 +643,75 @@ def write_values(ws, doc_type, layout, spec):
         item = items[i]
         name_val = item.get("itemName", "")
         spec_val = item.get("spec", "")
+        code_val = item.get("itemCode", "")
+        # 거래명세서·세금계산서 관례대로 모든 금액은 1원 단위 정수로만 적는다
+        # -- 소수점이 섞인 값이 저장돼 있어도(이 규칙 이전 데이터) 반올림한다.
+        consumer_price = _round_half_up(item.get("consumerPrice") or 0)
         quantity = item.get("quantity") or 0
-        unit_price = item.get("unitPrice") or 0
-        line_total = round(quantity * unit_price)
-        subtotal += line_total
+        supply_price = _round_half_up(item.get("unitPrice") or 0)
+        # 포함 단가는 저장된 값을 그대로 쓴다(입력 시점의 1원 단위까지 보존).
+        # 이 필드가 없는 옛 발주서는 공급가에서 10%를 붙여 되살린다.
+        gross_price = _round_half_up(item.get("grossUnitPrice") or 0) \
+            or (supply_price + _round_half_up(supply_price * 0.1))
+        unit_price = gross_price if gross_mode else supply_price
+        line_total = _round_half_up(quantity * unit_price)
+        shown_sum += line_total
         max_unit_price = max(max_unit_price, unit_price)
         max_quantity = max(max_quantity, quantity)
         max_line_total = max(max_line_total, line_total)
+        max_consumer_price = max(max_consumer_price, consumer_price)
 
         ws.cell(row=r, column=1, value=i + 1)
-        ws.cell(row=r, column=2, value=name_val)
-        ws.cell(row=r, column=3, value=spec_val)
-        ws.cell(row=r, column=4, value=quantity)
-        ws.cell(row=r, column=5, value=item.get("unit", ""))
-        ws.cell(row=r, column=6, value=unit_price)
+        ws.cell(row=r, column=2, value=code_val)
+        ws.cell(row=r, column=3, value=name_val)
+        ws.cell(row=r, column=4, value=spec_val)
+        if consumer_price:
+            ws.cell(row=r, column=5, value=consumer_price)
+        ws.cell(row=r, column=6, value=quantity)
+        ws.cell(row=r, column=7, value=unit_price)
         # line total is a formula, never a stored number, so editing qty/price
-        # in Excel recalculates it live.
-        ws.cell(row=r, column=7, value=f"=D{r}*F{r}")
+        # in Excel recalculates it live. ROUND keeps it at whole won even if
+        # someone types a fractional qty/price into the workbook later.
+        ws.cell(row=r, column=8, value=f"=ROUND(F{r}*G{r},0)")
 
         lines = max(
-            _wrapped_line_count(name_val, COLUMN_WIDTHS[1]),
-            _wrapped_line_count(spec_val, COLUMN_WIDTHS[2]),
+            _wrapped_line_count(code_val, COLUMN_WIDTHS[1]),
+            _wrapped_line_count(name_val, COLUMN_WIDTHS[2]),
+            _wrapped_line_count(spec_val, COLUMN_WIDTHS[3]),
             1,
         )
         if lines > 1:
             ws.row_dimensions[r].height = _row_height_for_lines(lines)
 
-    vat = round(subtotal * 0.1)
-    grand_total = subtotal + vat
-
-    supply_range = f"G{layout.table_first_data_row}:G{layout.table_last_data_row}"
-    ws.cell(row=layout.total_supply_row, column=6, value=f"=SUM({supply_range})")
-    ws.cell(row=layout.total_vat_row, column=6,
-            value=f"=ROUND(F{layout.total_supply_row}*0.1,0)")
-    ws.cell(row=layout.total_grand_row, column=6,
-            value=f"=F{layout.total_supply_row}+F{layout.total_vat_row}")
+    sum_range = f"H{layout.table_first_data_row}:H{layout.table_last_data_row}"
+    if gross_mode:
+        # 품목 합이 곧 부가세 포함 총액 -- 공급가액/부가세는 총액에서 역산한다.
+        grand_total = shown_sum
+        subtotal = _round_half_up(grand_total / 1.1)
+        ws.cell(row=layout.total_grand_row, column=7, value=f"=SUM({sum_range})")
+        ws.cell(row=layout.total_supply_row, column=7,
+                value=f"=ROUND(G{layout.total_grand_row}/1.1,0)")
+        ws.cell(row=layout.total_vat_row, column=7,
+                value=f"=G{layout.total_grand_row}-G{layout.total_supply_row}")
+    else:
+        subtotal = shown_sum
+        vat = _round_half_up(subtotal * 0.1)
+        grand_total = subtotal + vat
+        ws.cell(row=layout.total_supply_row, column=7, value=f"=SUM({sum_range})")
+        ws.cell(row=layout.total_vat_row, column=7,
+                value=f"=ROUND(G{layout.total_supply_row}*0.1,0)")
+        ws.cell(row=layout.total_grand_row, column=7,
+                value=f"=G{layout.total_supply_row}+G{layout.total_vat_row}")
 
     # A formula cell renders as "###..." exactly like a literal number does
-    # when its column is too narrow -- widen 공급가/공급가액 (and 수량, for a
-    # very large order) if the real data needs more room than the default.
-    qty_width = _numeric_width_for(max_quantity, COLUMN_WIDTHS[3], padding=1)
-    price_width = _numeric_width_for(max_unit_price, COLUMN_WIDTHS[5])
-    amount_width = _numeric_width_for(max(max_line_total, grand_total), COLUMN_WIDTHS[6])
-    for col_idx, width in ((4, qty_width), (6, price_width), (7, amount_width)):
+    # when its column is too narrow -- widen 단가/공급가합계/소비자정가 (and
+    # 수량, for a very large order) if the real data needs more room than the
+    # default.
+    qty_width = _numeric_width_for(max_quantity, COLUMN_WIDTHS[5], padding=1)
+    consumer_width = _numeric_width_for(max_consumer_price, COLUMN_WIDTHS[4])
+    price_width = _numeric_width_for(max_unit_price, COLUMN_WIDTHS[6])
+    amount_width = _numeric_width_for(max(max_line_total, grand_total), COLUMN_WIDTHS[7])
+    for col_idx, width in ((5, consumer_width), (6, qty_width), (7, price_width), (8, amount_width)):
         letter = get_column_letter(col_idx)
         if width > ws.column_dimensions[letter].width:
             ws.column_dimensions[letter].width = width
@@ -625,12 +733,14 @@ def render(ws, doc_type, spec):
     doc type)."""
     cfg = DOC_CONFIGS[doc_type]
     info_rows = max(len(cfg["left_fields"]), len(cfg["right_fields"]))
-    notes_box_width = sum(COLUMN_WIDTHS[0:3])
+    notes_box_width = sum(COLUMN_WIDTHS[0:4])
     notes_rows = max(3, _wrapped_line_count("\n".join(_notes_lines(cfg, spec)), notes_box_width))
+    delivery = delivery_fields(spec.get("deliveryPlace")) if cfg["show_delivery"] else []
 
-    layout = compute_layout(len(spec.get("lineItems", [])), info_rows, notes_rows)
-    apply_template(ws, doc_type, layout, spec.get("issuer", {}))
-    grand_total = write_values(ws, doc_type, layout, spec)
+    layout = compute_layout(len(spec.get("lineItems", [])), info_rows, notes_rows,
+                            delivery_rows=len(delivery))
+    apply_template(ws, doc_type, layout, spec.get("issuer", {}), delivery)
+    grand_total = write_values(ws, doc_type, layout, spec, delivery)
     # amount-in-words must be a literal string (Excel can't spell numbers in
     # Korean), computed here now that the actual grand total is known.
     ws.cell(row=layout.words_bar_row, column=1, value=amount_in_words_line(grand_total))
