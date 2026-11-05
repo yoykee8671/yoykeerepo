@@ -4764,6 +4764,7 @@ export function npbBuildXlsxSpec(db, settlement) {
       rows: lines.map((line) => {
         const listPrice = number(line.listPrice);
         const salePrice = number(line.salePrice);
+        const qty = number(line.qty);
         return {
           label: line.label || line.lineLabel || line.productKey || "",
           listPrice,
@@ -4773,8 +4774,20 @@ export function npbBuildXlsxSpec(db, settlement) {
           discountRate: listPrice > 0 ? Math.max(0, 1 - salePrice / listPrice) : 0,
           supplyPrice: number(meta?.supplyPrice) || salePrice,
           feeRate: number(line.feeRate),
-          qty: number(line.qty),
+          qty,
+          // 위탁·매입 표의 매출합계는 "정가×수량 − 차감" 수식이다. 스파크펫처럼
+          // 같은 품목이 기간·수량대마다 다른 할인율로 팔려 기준가(할인 반영
+          // 평균단가)로 들어온 줄은, 차감 칸이 비면 할인이 정산서에서 사라진다.
+          // 차감이 따로 없으면 (정가−기준가)×수량을 적는다 — 몽슈슈 행사 달
+          // 정답지(594,000−237,600=356,400)와 같은 표기이고, 수식 결과가
+          // 워크시트 매출(기준가×수량)과 같아진다.
+          // 확정한 달은 손대지 않는다 — 이미 보낸 정산서를 다시 내려받았을 때
+          // 숫자가 달라지면 안 된다 (8월은 할인 없이 발행됐다).
           promoDiscount: number(line.promoDiscount)
+            || (settlement.status !== "final"
+              && qty > 0 && salePrice > 0 && salePrice < listPrice
+              ? (listPrice - salePrice) * qty
+              : 0)
         };
       })
     });
