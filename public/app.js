@@ -8072,6 +8072,7 @@ function renderNpbInventorySection() {
   // 조회기준일은 파일에서 읽지 않는다 — 파일을 뽑은 시각과 어느 시점 재고로
   // 볼지는 다르므로 사람이 정한다.
   const stock = n.current?.stockFile || {};
+  const inout = n.current?.inoutFile || {};
   return `
     <section class="panel">
       <div class="panel-head">
@@ -8089,6 +8090,13 @@ function renderNpbInventorySection() {
         <span class="muted">${stock.fileName
           ? `${h(stock.fileName)} · ${money.format(stock.matched || 0)}/${money.format(stock.rowCount || 0)}건 반영`
           : "셀메이트 재고조회 CSV 를 고른 뒤 저장을 누르면 기초재고로 들어갑니다."}</span>
+        <label>입출고 내역 파일
+          <input type="file" accept=".csv" data-npb-inoutfile>
+        </label>
+        <button data-npb-inout-save>저장</button>
+        <span class="muted">${inout.fileName
+          ? `${h(inout.fileName)} · ${money.format(inout.rowCount || 0)}행 → 입고·출고 반영`
+          : "셀메이트 입출고내역 CSV 를 올리면 당월 입고·출고가 채워집니다."}</span>
       </div>
       <div class="table-wrap">
         <table class="npb-inventory-table">
@@ -8991,6 +8999,24 @@ function bindNpbWorksheet() {
       renderApp();
     } catch (error) {
       showToast(error.message || "기초재고를 저장하지 못했습니다.", "error");
+    }
+  });
+  app.querySelector("[data-npb-inout-save]")?.addEventListener("click", async () => {
+    const file = app.querySelector("[data-npb-inoutfile]")?.files?.[0];
+    if (!file) return showToast("입출고 내역 CSV 파일을 선택하세요.", "error");
+    try {
+      const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/inout-file`, {
+        method: "POST",
+        body: { fileBase64: await readFileAsBase64(file), fileName: file.name }
+      });
+      await npbLoadDetail(n.currentKey);
+      const warn = (res.warnings || []).join(" ");
+      showToast(warn
+        ? `입출고 ${res.inoutFile?.rowCount || 0}행 반영 · ${warn}`
+        : `입출고 ${res.inoutFile?.rowCount || 0}행 반영`, warn ? "error" : undefined);
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "입출고 내역을 저장하지 못했습니다.", "error");
     }
   });
   app.querySelector("[data-npb-inv-save]")?.addEventListener("click", async () => {

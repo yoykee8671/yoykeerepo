@@ -8638,6 +8638,74 @@ async function routeApi(req, res, url) {
       return;
     }
 
+    // 셀메이트 입출고내역(stk_inoutList) CSV 로 당월 입고·출고 수량을 채운다.
+    // 가격 칸(원가·판매단가 등)은 쓰지 않는다 — 수량만 상품에 매칭한다.
+    if (action === "inout-file" && method === "POST") {
+      const body = await readBody(req);
+      if (!body.fileBase64) { sendJson(res, 400, { error: "업로드할 파일이 없습니다." }); return; }
+      const buffer = Buffer.from(String(body.fileBase64).split(",").pop() || "", "base64");
+      let text = new TextDecoder("utf-8").decode(buffer);
+      if (text.includes("�")) text = new TextDecoder("euc-kr").decode(buffer);
+      const csvRows = parseCsv(text).filter((r) => r.some((c) => String(c || "").trim()));
+      if (csvRows.length < 2) { sendJson(res, 400, { error: "입출고 행을 읽지 못했습니다." }); return; }
+      const header = csvRows[0].map((c) => String(c || "").trim());
+      const objects = csvRows.slice(1).map((r) => {
+        const obj = {};
+        header.forEach((name, i) => { if (name) obj[name] = r[i]; });
+        return obj;
+      });
+      // 파일에 다른 달 날짜가 섞이면 그 달 수량까지 더해진다. 정산월 행만 쓰고
+      // 몇 건을 걸렀는지 알려준다.
+      const month = String(settlement.periodMonth || "");
+      const inMonth = objects.filter((row) => {
+        const day = String(row["입출고일자"] || "").slice(0, 7);
+        return !month || !day || day === month;
+      });
+      const skipped = objects.length - inMonth.length;
+      const brandProducts = (db.npb.products || []).filter(
+        (p) => npbSameBrand(p.brandId, settlement.brand) && p.active !== false
+      );
+      const derived = npbInventoryFromLogistics(inMonth, brandProducts);
+      const priorRows = new Map((settlement.inventory || []).map((r) => [r.productKey, r]));
+      settlement.inventory = brandProducts.map((p) => {
+        const kept = priorRows.get(p.id) || {};
+        const t = derived.totals.get(p.id) || { inbound: 0, outbound: 0 };
+        const open = number(kept.opening);
+        const nonSale = number(kept.nonSale);
+        return {
+          productKey: p.id,
+          name: p.name,
+          opening: open,
+          inbound: t.inbound,
+          outbound: t.outbound,
+          sold: npbSoldPieces(settlement, p.id),
+          nonSale,
+          closing: open + t.inbound - t.outbound
+        };
+      });
+      settlement.inoutFile = {
+        fileName: String(body.fileName || ""),
+        rowCount: inMonth.length,
+        matched: derived.totals.size,
+        uploadedAt: now()
+      };
+      const warnings = [];
+      if (skipped) warnings.push(`정산월(${month}) 밖 날짜 ${skipped}행은 제외했습니다.`);
+      if (derived.unmatched.length) {
+        warnings.push(`상품을 알 수 없는 항목 ${derived.unmatched.length}건: ${derived.unmatched.slice(0, 3).join(", ")}`);
+      }
+      const computed = npbRecompute(db, settlement);
+      await writeDb(db);
+      sendJson(res, 200, {
+        warnings,
+        inoutFile: settlement.inoutFile,
+        inventory: settlement.inventory,
+        rollup: computed.rollup,
+        settlement
+      });
+      return;
+    }
+
     // 조회기준일만 고칠 때. 파일을 다시 올릴 필요는 없다.
     if (action === "stock-asof" && method === "PUT") {
       const body = await readBody(req);
