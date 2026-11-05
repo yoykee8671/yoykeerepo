@@ -3749,6 +3749,18 @@ function npbResolveLines(lines, products, aliases, channelCode = "") {
       if (targets.length) { emit(line, targets, sourceName, alias.unitPrice); continue; }
     }
 
+    // 2.5) 우리 상품코드(SKU)가 그대로 실려 오면 규칙 없이 맞는다 — 거래관리
+    //      거래명세서가 그렇다. 사람이 정한 별칭(2)보다는 뒤에 둔다.
+    const rawCode = String(line.raw?.code || "").trim().toUpperCase();
+    const bySku = rawCode
+      ? (products || []).find((p) =>
+          (p.skuCodes || []).some((sku) => sku && rawCode.startsWith(String(sku).toUpperCase())))
+      : null;
+    if (bySku) {
+      emit(line, [{ productId: bySku.id, multiplier: 1 }], sourceName);
+      continue;
+    }
+
     // 3) 규칙이 없으면 사람에게 넘긴다. 이름 키워드로 짐작한 값은 화면의
     //    기본 선택으로만 쓴다 — 조용히 적용하면 틀려도 알아챌 수가 없다.
     const guess = npbMatchProduct(sourceName, products);
@@ -4254,6 +4266,138 @@ function npbPeriodMonth(settlement) {
 
 function npbFindSettlement(db, key) {
   return (db.npb?.settlements || []).find((item) => item.key === key) || null;
+}
+
+// 파일 업로드와 거래관리(거래명세서) 가져오기가 공유하는 마무리 단계.
+// 판매처 이름을 상품표·별칭으로 맞추고(npbResolveLines), 채널 규칙을 먹인 뒤
+// (npbEnrichLine), 검수표의 기준가 초기값을 채운다. 두 경로가 서로 다른 줄을
+// 만들면 같은 자료가 들어온 길에 따라 다른 정산이 되므로 한 곳에 둔다.
+function npbPrepareChannelLines(db, settlement, channelCode, brandChannels, inputLines, opts = {}) {
+  const uploadProducts = (db.npb.products || []).filter(
+    (p) => npbSameBrand(p.brandId, settlement.brand) && p.active !== false
+  );
+  const resolvedOut = npbResolveLines(
+    inputLines,
+    uploadProducts,
+    (db.npb.productAliases || []).filter((a) => npbSameBrand(a.brandId, settlement.brand)),
+    channelCode
+  );
+  let resolved = resolvedOut.resolved;
+  // 거래명세서(우리 양식)의 정산액은 거래처와 확정한 납품액 그 자체다. 채널의
+  // 수수료율로 다시 계산하면 명세서마다 다른 납품단가가 전부 무시되므로,
+  // 파일 금액을 사람이 적은 값과 같은 자격(manualFields)으로 싣는다.
+  // settleAmount 는 npbResolveLines 뒤에 싣는다 — 조합형 매칭이 한 줄을 여러
+  // 상품으로 가르면서 money 를 비율로 쪼개 주므로, 그 전에 실으면 같은 금액이
+  // 갈라진 줄마다 통째로 복사된다.
+  if (opts.settleFromMoney) {
+    resolved = resolved.map((line) => {
+      const settle = line.money?.settle;
+      if (settle == null) return line;
+      const manual = new Set(Array.isArray(line.manualFields) ? line.manualFields : []);
+      manual.add("settleAmount");
+      return { ...line, settleAmount: Math.round(number(settle)), manualFields: [...manual] };
+    });
+  }
+  const parsedLines = resolved
+    .map((line) => ({ ...line, channel: channelCode }))
+    .map((line) => npbEnrichLine(line, brandChannels, uploadProducts, settlement.promoRates))
+    .map((line) => {
+      // 기준가 초기값: 파일이 알려준 매출을 수량으로 나눈 실제 단가.
+      // 수량이 없는 자료(네이버)는 정가를 그대로 둔다.
+      const qty = number(line.qty);
+      let unit = qty > 0 && line.saleAmount != null
+        ? Math.round(number(line.saleAmount) / qty)
+        : number(line.listPrice);
+      // 묶음인데 파일의 단가가 낱개 값인 경우가 있다 — 카페24 B2B 는
+      // "수량=100개" 옵션에도 판매가 칸에 낱개 공급가를 적어 보내고
+      // 수량 칸에는 주문 건수를 적는다. 낱개 정가와 비슷한 값이면
+      // 묶음 단가로 환산한다.
+      const multiplier = Math.max(1, number(line.multiplier, 1));
+      if (multiplier > 1 && unit > 0) {
+        const base = number(line.listPrice) / multiplier;
+        const ratio = base > 0 ? unit / base : 0;
+        if (ratio >= 0.3 && ratio <= 1.5) unit *= multiplier;
+      }
+      // 지난번에 정한 기준가가 있으면 그것을 쓴다. 파일의 판매가 칸은
+      // 묶음 줄에서 낱개 값으로 오는 일이 잦아 그대로 믿을 수 없다.
+      // 값이 다르면 덮되 무엇이 달라졌는지는 남긴다 — 판매처가 말없이
+      // 공급가를 바꾼 것인지 사람이 봐야 한다.
+      const saved = line.savedUnitPrice;
+      if (saved != null && saved > 0) {
+        const changed = unit > 0 && unit !== saved
+          ? { from: saved, to: unit }
+          : null;
+        return { ...line, unitPrice: saved, priceChanged: changed };
+      }
+      return { ...line, unitPrice: unit };
+    });
+  return { parsedLines, unresolved: resolvedOut.unresolved };
+}
+
+// 거래관리의 거래명세서(purchaseOrders, docType=statement) 품목을 npb 업로드
+// 줄 모양으로 바꾼다. 양식의 공급가(단가)는 부가세 미포함이므로 정산액은
+// 부가세 포함 단가(grossUnitPrice) × 수량으로 싣는다 — 도톤 테일릿처럼
+// 22,000원 정가 상품이 9,460원(부가세포함)에 납품되는 채널은 이 금액이
+// 명세서마다 달라, 채널 수수료율이 아니라 문서 금액이 진실이다.
+function npbLinesFromTradeDocs(docs) {
+  const lines = [];
+  const rawRows = [];
+  for (const doc of docs) {
+    for (const item of doc.lineItems || []) {
+      const qty = number(item.quantity);
+      if (qty <= 0) continue;
+      const unitPrice = number(item.unitPrice);
+      const grossUnit = number(item.grossUnitPrice)
+        || unitPrice + Math.round(unitPrice * 0.1);
+      const consumer = number(item.consumerPrice);
+      lines.push({
+        label: item.itemName,
+        qtyEa: qty,
+        raw: {
+          sourceName: item.itemName,
+          code: item.itemCode || "",
+          option: item.spec || "",
+          docNo: doc.docNo,
+          docDate: doc.orderDate
+        },
+        money: {
+          // 소비자정가가 적혀 있으면 매출(기준가)은 그 값이다. 없으면
+          // 상품표 정가로 떨어진다 (npbEnrichLine).
+          list: consumer > 0 ? consumer * qty : null,
+          settle: grossUnit * qty
+        }
+      });
+      rawRows.push({
+        "문서번호": doc.docNo,
+        "거래일자": doc.orderDate,
+        "거래처": doc.partnerName || "",
+        "품목명": item.itemName,
+        "규격": item.spec || "",
+        "수량": qty,
+        "단가(공급가)": unitPrice,
+        "단가(부가세포함)": grossUnit,
+        "공급가합계": number(item.totalPrice),
+        "소비자정가": consumer || ""
+      });
+    }
+  }
+  return { lines, rawRows };
+}
+
+// 정산 채널과 거래관리 거래처를 잇는 추정. 채널명(괄호 앞부분)이나 파일명
+// 키워드가 거래처명에 들어 있으면 그 채널 문서로 본다 — 테일릿 채널과
+// "테일릿(주미스)" 거래처처럼. 틀려도 화면에서 채널을 직접 고르면 된다.
+function npbGuessChannelForPartner(brandChannels, partnerName) {
+  const name = npbNormalizeName(partnerName || "");
+  if (!name) return "";
+  for (const channel of brandChannels) {
+    const keys = [
+      String(channel.name || "").split("(")[0],
+      ...(channel.filenameKeywords || [])
+    ].map((k) => npbNormalizeName(k)).filter((k) => k.length >= 2);
+    if (keys.some((k) => name.includes(k))) return channel.code;
+  }
+  return "";
 }
 
 // Write the uploaded base64 to a temp file then run npb_parse.py, mirroring
@@ -8403,6 +8547,119 @@ async function routeApi(req, res, url) {
       return;
     }
 
+    // 거래관리에 발행해 둔 거래명세서를 파일 업로드 없이 바로 끌어온다.
+    // 테일릿처럼 wooofpay 에서 명세서를 발행하는 채널은 그 문서가 이미
+    // 정산 원자료다 — 엑셀로 내려받아 다시 올리게 할 이유가 없다.
+    if (action === "trade-docs" && method === "GET") {
+      const periodMonth = npbPeriodMonth(settlement);
+      const brandChannels = (db.npb.channels || []).filter(
+        (c) => npbSameBrand(c.brandId, settlement.brand)
+      );
+      // 이미 가져온 문서 표시 — 같은 문서를 두 번 넣는 사고를 화면에서 막는다.
+      const importedBy = new Map();
+      for (const [code, up] of Object.entries(settlement.uploads || {})) {
+        if (up?.source !== "tradeDocs") continue;
+        for (const docId of up.docIds || []) importedBy.set(docId, code);
+      }
+      const docs = (db.purchaseOrders || [])
+        .filter((po) => po.docType === "statement")
+        .filter((po) => String(po.orderDate || "").startsWith(periodMonth))
+        .sort((a, b) => (a.orderDate || "").localeCompare(b.orderDate || "")
+          || (a.docNo || "").localeCompare(b.docNo || ""))
+        .map((po) => {
+          const partner = (db.partners || []).find((item) => item.id === po.partnerId);
+          const partnerName = partner?.name || partner?.businessName || "";
+          return {
+            id: po.id,
+            docNo: po.docNo,
+            orderDate: po.orderDate,
+            partnerName,
+            channelGuess: npbGuessChannelForPartner(brandChannels, partnerName),
+            importedTo: importedBy.get(po.id) || "",
+            qtyTotal: (po.lineItems || []).reduce((sum, item) => sum + number(item.quantity), 0),
+            subtotal: number(po.subtotal),
+            total: number(po.total),
+            items: (po.lineItems || []).map((item) =>
+              `${item.itemName}${number(item.quantity) ? ` ×${number(item.quantity)}` : ""}`)
+          };
+        });
+      sendJson(res, 200, {
+        periodMonth,
+        docs,
+        channels: brandChannels.map((c) => ({ code: c.code, name: c.name }))
+      });
+      return;
+    }
+
+    if (action === "trade-docs" && method === "POST") {
+      const body = await readBody(req);
+      const channelCode = String(body.channel || "").trim();
+      const brandChannels = (db.npb.channels || []).filter(
+        (c) => npbSameBrand(c.brandId, settlement.brand)
+      );
+      const uploadChannel = npbFindChannel(brandChannels, channelCode);
+      if (!uploadChannel) {
+        sendJson(res, 400, { error: `${channelCode || "(없음)"} 는 이 브랜드의 채널이 아닙니다.` });
+        return;
+      }
+      const docIds = Array.isArray(body.docIds) ? body.docIds.map(String) : [];
+      if (!docIds.length) { sendJson(res, 400, { error: "가져올 거래명세서를 선택하세요." }); return; }
+      const docs = docIds
+        .map((docId) => (db.purchaseOrders || []).find((po) => po.id === docId))
+        .filter((po) => po && po.docType === "statement")
+        .map((po) => {
+          const partner = (db.partners || []).find((item) => item.id === po.partnerId);
+          return { ...po, partnerName: partner?.name || partner?.businessName || "" };
+        });
+      if (!docs.length) { sendJson(res, 404, { error: "거래명세서를 찾을 수 없습니다." }); return; }
+      const built = npbLinesFromTradeDocs(docs);
+      const warnings = [];
+      if (docs.length < docIds.length) {
+        warnings.push(`선택한 ${docIds.length}건 중 ${docIds.length - docs.length}건은 거래명세서가 아니거나 찾을 수 없어 뺐습니다.`);
+      }
+      if (!built.lines.length) {
+        sendJson(res, 400, { error: "선택한 거래명세서에 수량이 있는 품목이 없습니다." });
+        return;
+      }
+      // 명세서의 공급가(부가세 미포함)에 10% 를 더한 납품액이 그대로 정산액이
+      // 된다 (settleFromMoney). 매출은 소비자정가(없으면 상품표 정가) 기준.
+      const prepared = npbPrepareChannelLines(
+        db, settlement, channelCode, brandChannels, built.lines,
+        { settleFromMoney: true }
+      );
+      settlement.uploads[channelCode] = {
+        kind: "channel",
+        channel: channelCode,
+        source: "tradeDocs",
+        docIds: docs.map((doc) => doc.id),
+        fileName: `거래관리 명세서 ${docs.length}건 (${docs.map((doc) => doc.docNo).join(", ")})`,
+        rawRows: built.rawRows,
+        lines: prepared.parsedLines,
+        warnings,
+        layout: null,
+        layoutAlternatives: [],
+        columnMap: null,
+        uploadedAt: now(),
+        // 업로드와 같은 규칙 — 가져오기는 언제나 초안까지만이고, 채널별
+        // [반영] 을 눌러야 워크시트에 들어간다.
+        confirmed: false
+      };
+      delete settlement.uploads[channelCode].pendingRemove;
+      if (settlement.noSales) delete settlement.noSales[channelCode];
+      const computed = npbRecompute(db, settlement);
+      await writeDb(db);
+      sendJson(res, 200, {
+        kind: "channel",
+        channel: channelCode,
+        rows: prepared.parsedLines,
+        warnings,
+        unresolved: prepared.unresolved,
+        entryMode: uploadChannel.entryMode || "review",
+        rollup: computed.rollup
+      });
+      return;
+    }
+
     if (action === "upload" && method === "POST") {
       const body = await readBody(req);
       const kind = body.kind === "logistics" ? "logistics" : "channel";
@@ -8490,54 +8747,18 @@ async function routeApi(req, res, url) {
             if (hit) excluded.push(line.raw?.sourceName || line.label || "");
             return !hit;
           });
-          // 판매처 상품명을 상품표·별칭으로 맞춘다. 못 맞춘 것은 화면에서
-          // 한 번 지정하면 별칭으로 남아 다음부터 자동 인식된다.
-          const uploadProducts = (db.npb.products || []).filter(
-            (p) => npbSameBrand(p.brandId, settlement.brand) && p.active !== false
+          // 판매처 상품명을 상품표·별칭으로 맞추고 채널 규칙을 먹인다. 파서가
+          // 준 줄은 money 만 들고 있어서, 그대로 검수표에 뿌리면 기준가·수량·
+          // 금액이 전부 0 으로 보인다 (네이버 결제정산 파일은 수량·정가 열이
+          // 아예 없다). 서버가 정산에 쓰는 값과 같은 값을 보여줘야 고칠 수 있다.
+          // wooofpay 거래명세서 양식(parsed.meta.tradeDoc)이면 파일의 정산액을
+          // 확정값으로 싣는다 — 명세서마다 납품단가가 달라 수수료율 계산이
+          // 진실이 아니다.
+          const prepared = npbPrepareChannelLines(
+            db, settlement, channelCode, brandChannels, mappedLines,
+            { settleFromMoney: parsed.meta?.tradeDoc === true }
           );
-          const resolvedOut = npbResolveLines(
-            mappedLines,
-            uploadProducts,
-            (db.npb.productAliases || []).filter((a) => npbSameBrand(a.brandId, settlement.brand)),
-            channelCode
-          );
-          // 화면에 넘기기 전에 채널 규칙을 먹인다. 파서가 준 줄은 money 만 들고
-          // 있어서, 그대로 검수표에 뿌리면 기준가·수량·금액이 전부 0 으로 보인다
-          // (네이버 결제정산 파일은 수량·정가 열이 아예 없다). 서버가 정산에
-          // 쓰는 값과 같은 값을 보여줘야 고칠 수 있다.
-          const parsedLines = resolvedOut.resolved
-            .map((line) => ({ ...line, channel: channelCode }))
-            .map((line) => npbEnrichLine(line, brandChannels, uploadProducts, settlement.promoRates))
-            .map((line) => {
-              // 기준가 초기값: 파일이 알려준 매출을 수량으로 나눈 실제 단가.
-              // 수량이 없는 자료(네이버)는 정가를 그대로 둔다.
-              const qty = number(line.qty);
-              let unit = qty > 0 && line.saleAmount != null
-                ? Math.round(number(line.saleAmount) / qty)
-                : number(line.listPrice);
-              // 묶음인데 파일의 단가가 낱개 값인 경우가 있다 — 카페24 B2B 는
-              // "수량=100개" 옵션에도 판매가 칸에 낱개 공급가를 적어 보내고
-              // 수량 칸에는 주문 건수를 적는다. 낱개 정가와 비슷한 값이면
-              // 묶음 단가로 환산한다.
-              const multiplier = Math.max(1, number(line.multiplier, 1));
-              if (multiplier > 1 && unit > 0) {
-                const base = number(line.listPrice) / multiplier;
-                const ratio = base > 0 ? unit / base : 0;
-                if (ratio >= 0.3 && ratio <= 1.5) unit *= multiplier;
-              }
-              // 지난번에 정한 기준가가 있으면 그것을 쓴다. 파일의 판매가 칸은
-              // 묶음 줄에서 낱개 값으로 오는 일이 잦아 그대로 믿을 수 없다.
-              // 값이 다르면 덮되 무엇이 달라졌는지는 남긴다 — 판매처가 말없이
-              // 공급가를 바꾼 것인지 사람이 봐야 한다.
-              const saved = line.savedUnitPrice;
-              if (saved != null && saved > 0) {
-                const changed = unit > 0 && unit !== saved
-                  ? { from: saved, to: unit }
-                  : null;
-                return { ...line, unitPrice: saved, priceChanged: changed };
-              }
-              return { ...line, unitPrice: unit };
-            });
+          const parsedLines = prepared.parsedLines;
           // 올린 표를 그대로 보관한다. 정산서 뒤에 DB) 시트로 나가야 숫자가
           // 어느 자료에서 나왔는지 대조할 수 있다. 실패해도 업로드는 계속한다 —
           // 원본 보관이 안 된다고 정산을 막을 이유는 없다.
@@ -8577,7 +8798,7 @@ async function routeApi(req, res, url) {
             alternatives: matches.slice(1).map((m) => ({ code: m.code, name: m.name })),
             rows: parsedLines,
             warnings: npbUploadWarnings(parsed, uploadChannel, excluded),
-            unresolved: resolvedOut.unresolved,
+            unresolved: prepared.unresolved,
             layout: parsed.meta?.chosenBlock || null,
             layoutAlternatives: parsed.meta?.blocks || [],
             columnMap,

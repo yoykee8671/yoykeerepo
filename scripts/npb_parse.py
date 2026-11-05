@@ -1415,8 +1415,129 @@ def parse_generic(rows, channel, warnings):
     return parse_scan([("sheet1", rows or [])], channel, warnings, {})
 
 
+# wooofpay 거래관리(발주서/견적서/거래명세서/청구서)가 만드는 품목표의 머리글.
+# 네 양식이 같은 표를 쓰므로 하나만 알아보면 된다. "공급가합계" 는 다른
+# 채널 파일에 없는 이 양식 고유의 이름이라 오인식 위험이 낮다.
+TRADE_DOC_HEADERS = ("품목명", "수량", "단가", "공급가합계")
+TRADE_DOC_TOTAL_LABELS = ("총 공급가액", "총 부가세", "총 합계금액")
+
+
+def find_trade_doc_block(sheets):
+    """wooofpay 거래문서 품목표의 머리글 행을 찾는다. (시트명, rows, 행번호)."""
+    for sheet_name, rows in sheets or []:
+        for ri, row in enumerate(rows or []):
+            if row is None:
+                continue
+            cells = {norm(c) for c in row if norm(c)}
+            if all(h in cells for h in TRADE_DOC_HEADERS):
+                return sheet_name, rows, ri
+    return None
+
+
+def parse_trade_doc(found, channel, warnings, meta):
+    """wooofpay 거래관리 양식 (순번·상품코드·품목명·규격·소비자정가·수량·단가·
+    공급가합계). 공급가합계 칸과 총액 칸은 엑셀 수식이라, 내려받은 파일을
+    그대로 올리면 캐시값이 없어 None 으로 읽힌다 — 금액은 수량 × 단가로 직접
+    계산한다. 단가가 부가세 미포함(공급가)인지 포함인지는 문서에 안 적히므로,
+    총액 캐시가 있으면 품목 합과 대조해 가리고, 없으면 미포함으로 본다
+    (거래관리 기본값이 공급가 기준이다)."""
+    _sheet_name, rows, header_ri = found
+    meta["tradeDoc"] = True
+    idx = header_index(rows[header_ri])
+    ci_code = idx.get("상품코드")
+    ci_name = idx.get("품목명")
+    ci_spec = idx.get("규격")
+    ci_consumer = idx.get("소비자정가")
+    ci_qty = idx.get("수량")
+    ci_unit = idx.get("단가")
+
+    def cell(row, ci):
+        return row[ci] if ci is not None and ci < len(row) else None
+
+    items = []
+    supply_total = None
+    grand_total = None
+    for row in rows[header_ri + 1:]:
+        if row is None or all(x is None for x in row):
+            continue
+        labels = [norm(c) for c in row if norm(c)]
+        # 품목표 아래 합계 구역. 엑셀에서 한 번 저장된 파일은 수식 캐시가
+        # 남아 있어 여기서 총액을 읽을 수 있다.
+        if any(lab in TRADE_DOC_TOTAL_LABELS for lab in labels):
+            nums = [to_num(c) for c in row]
+            nums = [n for n in nums if n is not None]
+            value = nums[-1] if nums else None
+            if "총 공급가액" in labels:
+                supply_total = value
+            if "총 합계금액" in labels:
+                grand_total = value
+            continue
+        name = norm(cell(row, ci_name))
+        qty = to_int(cell(row, ci_qty))
+        if not name or qty <= 0:
+            continue
+        items.append({
+            "name": name,
+            "code": norm(cell(row, ci_code)),
+            "spec": norm(cell(row, ci_spec)),
+            "consumer": to_num(cell(row, ci_consumer)),
+            "qty": qty,
+            "unit": to_num(cell(row, ci_unit)),
+        })
+
+    agg = Aggregator()
+    if not items:
+        warnings.append("[%s] 거래명세서 양식이지만 수량이 있는 품목이 없습니다." % channel)
+        return agg.lines()
+
+    col_sum = sum(i["qty"] * (i["unit"] or 0) for i in items)
+    gross_mode = False
+    if grand_total and abs(col_sum - grand_total) <= 2:
+        gross_mode = True
+    elif supply_total and abs(col_sum - supply_total) <= 2:
+        gross_mode = False
+    else:
+        warnings.append(
+            "[%s] 단가를 공급가(부가세 미포함)로 보고 10%%를 더해 정산액을 계산했습니다. "
+            "부가세 포함 단가 문서면 검수표에서 정산액을 고쳐주세요." % channel
+        )
+
+    for item in items:
+        unit = item["unit"]
+        settle = None
+        if unit is not None:
+            # 서버 저장 규칙(단가 + 반올림한 10%)과 같은 식으로 포함단가를
+            # 만들어야 거래관리 직접 가져오기와 1원까지 같은 정산이 나온다.
+            gross_unit = unit if gross_mode else unit + int(unit * 0.1 + 0.5)
+            settle = gross_unit * item["qty"]
+        consumer = item["consumer"]
+        agg.add(
+            None,
+            orders=1,
+            ea=item["qty"],
+            ea_per_unit=1,
+            raw={
+                "sourceName": item["name"],
+                "productName": item["name"],
+                "option": item["spec"],
+                "code": item["code"],
+                "money": {
+                    "list": consumer * item["qty"] if consumer else None,
+                    "settle": settle,
+                },
+            },
+        )
+    return agg.lines()
+
+
 def parse(channel, sheets, warnings, meta, hint=None, period=None, date_basis=""):
     rows = sheets[0][1] if sheets else []
+    # wooofpay 거래관리에서 내려받은 거래명세서는 어느 채널로 올라오든 같은
+    # 표라, 채널 레시피보다 먼저 알아본다 — 테일릿(cafe24 레시피)으로 들어가면
+    # 머리글이 안 맞아 전부 미식별로 빠진다.
+    trade_doc = find_trade_doc_block(sheets)
+    if trade_doc:
+        return parse_trade_doc(trade_doc, channel, warnings, meta)
     if channel == "gongu":
         return parse_cafe24(rows, channel, warnings, is_gongu=True)
     if channel in ("cafe24", "b2b", "tailit"):
