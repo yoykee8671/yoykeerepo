@@ -1,0 +1,34 @@
+{
+  "_comment": "clobe 매입전표(journal ledger PURCHASE) 기준 분류 집계. 공급가액 = 부가세대급금(13500) 제외 차변 합, 원 단위. 카드매입 전표 포함. 분류 규칙: 유씨엘=doton / 공구+수수료=gonggu_fee / 세림통상·동광섬유·구구직물·태성산업·대하산업·엠 컴퍼니·삼보첨단소재·조은실업·예손침장=pb_jache(PB 원부자재·가공, 2026-10-29 대표 확정) / 테일릿=seonmaeip / 자체제작·베럴즈=pb_jache / '위탁 판매분'=witak / '선매입 판매분'=seonmaeip. 퀵물류 3/26·3/31 동일금액 두 건은 2월 물류비 반반 분할 지급(정상 매입). 10월은 기장 진행 중(10/13까지, 부분월).",
+  "coverage": "2026-01~2026-03",
+  "source": "clobe get_journal_ledger (2026-10-29 조회), raw: purchase-ledger-2026q1.jsonl",
+  "months": {
+    "1": {
+      "witak": 719585.0,
+      "seonmaeip": 6281993.0,
+      "pb_jache": 4416401.0,
+      "doton": 23716.0,
+      "gonggu_fee": 0.0,
+      "other": 7060497.0,
+      "total": 18502192.0
+    },
+    "2": {
+      "witak": 203345.0,
+      "seonmaeip": 2828213.0,
+      "pb_jache": 4875000.0,
+      "doton": 15716.0,
+      "gonggu_fee": 0.0,
+      "other": 9742310.0,
+      "total": 17664584.0
+    },
+    "3": {
+      "witak": 1297799.0,
+      "seonmaeip": 4565164.0,
+      "pb_jache": 4300850.0,
+      "doton": 0.0,
+      "gonggu_fee": 0.0,
+      "other": 10603911.0,
+      "total": 20767724.0
+    }
+  }
+}

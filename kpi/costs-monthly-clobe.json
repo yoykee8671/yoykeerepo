@@ -1,0 +1,97 @@
+{
+  "_comment": "clobe 매입전표(journal ledger PURCHASE) 기준 분류 집계. 공급가액 = 부가세대급금(13500) 제외 차변 합, 원 단위. 카드매입 전표 포함. 분류 규칙: 유씨엘=doton / 공구+수수료=gonggu_fee / 세림통상·동광섬유·구구직물·태성산업·대하산업·엠 컴퍼니·삼보첨단소재·조은실업·예손침장=pb_jache(PB 원부자재·가공, 2026-10-29 대표 확정) / 테일릿=seonmaeip / 자체제작·베럴즈=pb_jache / '위탁 판매분'=witak / '선매입 판매분'=seonmaeip. 퀵물류 3/26·3/31 동일금액 두 건은 2월 물류비 반반 분할 지급(정상 매입). 10월은 기장 진행 중(10/13까지, 부분월).",
+  "coverage": "2026-01~2026-10",
+  "source": "clobe get_journal_ledger (2026-10-29 조회), raw: purchase-ledger-2026q1.jsonl + purchase-ledger-2026m04-10.jsonl",
+  "months": {
+    "1": {
+      "witak": 719585.0,
+      "seonmaeip": 6281993.0,
+      "pb_jache": 4416401.0,
+      "doton": 23716.0,
+      "gonggu_fee": 0.0,
+      "other": 7060497.0,
+      "total": 18502192.0
+    },
+    "2": {
+      "witak": 203345.0,
+      "seonmaeip": 2828213.0,
+      "pb_jache": 4875000.0,
+      "doton": 15716.0,
+      "gonggu_fee": 0.0,
+      "other": 9742310.0,
+      "total": 17664584.0
+    },
+    "3": {
+      "witak": 1297799.0,
+      "seonmaeip": 4565164.0,
+      "pb_jache": 4300850.0,
+      "doton": 0.0,
+      "gonggu_fee": 0.0,
+      "other": 10603911.0,
+      "total": 20767724.0
+    },
+    "4": {
+      "witak": 1535388.0,
+      "seonmaeip": 2771144.0,
+      "pb_jache": 12423091.0,
+      "doton": 168865.0,
+      "gonggu_fee": 9761480.0,
+      "other": 13056909.0,
+      "total": 39716877.0
+    },
+    "5": {
+      "witak": 616875.0,
+      "seonmaeip": 2899351.0,
+      "pb_jache": 16700682.0,
+      "doton": 1055802.0,
+      "gonggu_fee": 7534799.0,
+      "other": 20186384.0,
+      "total": 48993893.0
+    },
+    "6": {
+      "witak": 1372404.0,
+      "seonmaeip": 3344897.0,
+      "pb_jache": 13677426.0,
+      "doton": 634695.0,
+      "gonggu_fee": 1761377.0,
+      "other": 11517036.0,
+      "total": 32307835.0
+    },
+    "7": {
+      "witak": 586208.0,
+      "seonmaeip": 1804760.0,
+      "pb_jache": 10582745.0,
+      "doton": 269365.0,
+      "gonggu_fee": 1680964.0,
+      "other": 12515137.0,
+      "total": 27439179.0
+    },
+    "8": {
+      "witak": 218291.0,
+      "seonmaeip": 1317161.0,
+      "pb_jache": 6883627.0,
+      "doton": 90085.0,
+      "gonggu_fee": 487881.0,
+      "other": 14887015.0,
+      "total": 23884060.0
+    },
+    "9": {
+      "witak": 96000.0,
+      "seonmaeip": 878687.0,
+      "pb_jache": 9823491.0,
+      "doton": 180400.0,
+      "gonggu_fee": 447328.0,
+      "other": 8230775.0,
+      "total": 19656681.0
+    },
+    "10": {
+      "witak": 0.0,
+      "seonmaeip": 15000.0,
+      "pb_jache": 3766800.0,
+      "doton": 0.0,
+      "gonggu_fee": 0.0,
+      "other": 472500.0,
+      "total": 4254300.0
+    }
+  }
+}
