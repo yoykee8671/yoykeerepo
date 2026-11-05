@@ -4766,31 +4766,29 @@ export function npbBuildXlsxSpec(db, settlement) {
       desc: meta?.note || "",
       rows: lines.map((line) => {
         const listPrice = number(line.listPrice);
-        const salePrice = number(line.salePrice);
         const qty = number(line.qty);
+        // 그 줄의 실매출(저장된 saleAmount)이 진실이다 — 정산 rollup·이익분배가
+        // 이 값으로 계산됐으므로, 시트의 매출합계도 이 값과 같아야 재다운로드가
+        // 정산서·워크시트와 어긋나지 않는다. saleAmount 가 없는 옛 줄만
+        // 기준가×수량으로 되돌린다. 확정 여부로 가르지 않는다 — 할인 없이 확정된
+        // 달(8월)은 saleAmount 가 정가×수량이라 차감이 저절로 0이 되고, 할인이
+        // 반영돼 확정된 달(9월)은 차감이 제대로 잡힌다.
+        const revenue = line.saleAmount != null
+          ? number(line.saleAmount)
+          : number(line.salePrice) * qty;
+        const unit = qty > 0 ? revenue / qty : number(line.salePrice);
         return {
           label: line.label || line.lineLabel || line.productKey || "",
           listPrice,
-          salePrice,
-          // 정가 대비 얼마나 깎였는지. 직매출 표의 '할인율' 칸이 이 값을 쓰고,
-          // 프로모션가는 거기서 수식으로 되돌린다.
-          discountRate: listPrice > 0 ? Math.max(0, 1 - salePrice / listPrice) : 0,
-          supplyPrice: number(meta?.supplyPrice) || salePrice,
+          // 직매출 '할인반영가'(E)·표시용 단가. 실매출을 수량으로 나눈 실단가다.
+          salePrice: unit,
+          discountRate: listPrice > 0 ? Math.max(0, 1 - unit / listPrice) : 0,
+          supplyPrice: number(meta?.supplyPrice) || unit,
           feeRate: number(line.feeRate),
           qty,
-          // 위탁·매입 표의 매출합계는 "정가×수량 − 차감" 수식이다. 스파크펫처럼
-          // 같은 품목이 기간·수량대마다 다른 할인율로 팔려 기준가(할인 반영
-          // 평균단가)로 들어온 줄은, 차감 칸이 비면 할인이 정산서에서 사라진다.
-          // 차감이 따로 없으면 (정가−기준가)×수량을 적는다 — 몽슈슈 행사 달
-          // 정답지(594,000−237,600=356,400)와 같은 표기이고, 수식 결과가
-          // 워크시트 매출(기준가×수량)과 같아진다.
-          // 확정한 달은 손대지 않는다 — 이미 보낸 정산서를 다시 내려받았을 때
-          // 숫자가 달라지면 안 된다 (8월은 할인 없이 발행됐다).
-          promoDiscount: number(line.promoDiscount)
-            || (settlement.status !== "final"
-              && qty > 0 && salePrice > 0 && salePrice < listPrice
-              ? (listPrice - salePrice) * qty
-              : 0)
+          // 위탁·매입 '프로모션차감'(H): 정가×수량 − 실매출. 매출합계 수식
+          // (=정가×수량−차감)이 실매출과 같아진다. 할인 없는 달은 0.
+          promoDiscount: Math.max(0, listPrice * qty - revenue)
         };
       })
     });
