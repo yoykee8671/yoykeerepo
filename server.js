@@ -4518,6 +4518,11 @@ function npbXlsxInventory(db, settlement) {
   return (settlement.inventory || []).map((row) => {
     const key = String(row.productKey || row.productId || "");
     const product = products.get(key);
+    // 출고(판매+비매출)는 입출고 내역 파일의 출고수량(outbound)을 쓴다.
+    // 판매 줄 수량(sold)을 쓰면 기말(기초+입고-출고)이 저장된 closing
+    // (기초+입고-outbound)과 어긋난다. 파일을 안 올린 옛 달만 sold 로 남는다.
+    const nonSale = number(row.nonSale);
+    const outbound = row.outbound != null ? number(row.outbound) : null;
     return {
       code: product?.barcode || "",
       name: row.name || product?.name || key,
@@ -4526,18 +4531,22 @@ function npbXlsxInventory(db, settlement) {
       openDead: 0,
       inIn: number(row.inbound),
       inReturn: 0,
-      outSold: number(row.sold),
-      outNonsale: number(row.nonSale),
+      outSold: outbound != null ? Math.max(0, outbound - nonSale) : number(row.sold),
+      outNonsale: nonSale,
       closeDead: 0
     };
   });
 }
 
-// DB)입출고목록. 업로드한 원장은 uploads.logistics.rows 에 있는데 spec 은
-// settlement.ledger 를 보고 있어서, 머리글만 있고 데이터가 0행으로 나갔다.
+// DB)입출고목록. 입출고는 실비/청구의 입출고 내역(inoutFile) 업로드가 원장이다.
+// 옛 달에는 없어진 업로드 탭의 입출고 원장(uploads.logistics)이 남아 있어
+// 그쪽을 그대로 쓴다 — 이미 발행한 정산서가 달라지면 안 된다.
 function npbXlsxLedger(db, settlement) {
-  const upload = settlement.uploads?.logistics;
-  const rows = Array.isArray(upload?.rows) ? upload.rows : [];
+  const inout = settlement.inoutFile;
+  const legacy = settlement.uploads?.logistics;
+  const rows = Array.isArray(inout?.rows) && inout.rows.length
+    ? inout.rows
+    : (Array.isArray(legacy?.rows) ? legacy.rows : []);
   if (!rows.length) return {};
   // 원장은 열 이름이 파일마다 조금씩 달라, 첫 행에서 본 순서를 그대로 쓴다.
   const headers = [...new Set(rows.flatMap((r) => Object.keys(r || {})))];
@@ -4550,8 +4559,9 @@ function npbXlsxLedger(db, settlement) {
     headers,
     rows: rows.map((r) => headers.map((h) => (r?.[h] === undefined ? null : r[h]))),
     summary: {
-      outCount: number(settlement.logistics?.counts?.small)
-        + number(settlement.logistics?.counts?.large),
+      // counts 값은 숫자(옛 모양) 또는 { count, amount } 둘 다 온다.
+      outCount: Object.values(settlement.logistics?.counts || {})
+        .reduce((sum, v) => sum + (typeof v === "object" ? number(v?.count) : number(v)), 0),
       items,
       totalIn: items.reduce((sum, it) => sum + it.inSum, 0),
       totalOut: items.reduce((sum, it) => sum + it.outSum, 0)
@@ -4583,7 +4593,7 @@ function npbXlsxChannelSheets(db, settlement) {
   return sheets;
 }
 
-function npbBuildXlsxSpec(db, settlement) {
+export function npbBuildXlsxSpec(db, settlement) {
   // 확정한 달은 확정 당시의 기준으로 그려야 한다. 설정을 고친 뒤 다시
   // 내려받았을 때 이미 보낸 정산서와 숫자가 달라지면 안 된다.
   const bases = npbBases(db, settlement);
@@ -4632,13 +4642,26 @@ function npbBuildXlsxSpec(db, settlement) {
     note: party.note || "",
     excluded: Boolean(party.excluded)
   }));
+  // 재고현황 머리글의 기준 일자. 기초재고는 조회기준일(stockFile.asOf, 보통
+  // 전월 말일), 입고·출고는 정산월 1일~말일, 기말재고는 정산월 말일이다.
+  // period 에 저장된 값이 있으면 그쪽이 이긴다 — 확정한 달의 표기를 지키려고.
+  const py = Number(period.year);
+  const pm = Number(period.month);
+  const lastDay = py && pm ? new Date(py, pm, 0).getDate() : 0;
+  const dotDate = (iso) => {
+    const m = String(iso || "").match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    return m ? `${m[1]}.${Number(m[2])}.${Number(m[3])}` : "";
+  };
+  const prevY = pm === 1 ? py - 1 : py;
+  const prevM = pm === 1 ? 12 : pm - 1;
+  const prevEnd = py && pm ? `${prevY}.${prevM}.${new Date(prevY, prevM, 0).getDate()}` : "";
   return {
     period: {
       year: period.year,
       month: period.month,
-      monthStart: period.monthStart || "",
-      range: period.range || "",
-      monthEnd: period.monthEnd || "",
+      monthStart: period.monthStart || dotDate(settlement.stockFile?.asOf) || prevEnd,
+      range: period.range || (lastDay ? `${py}.${pm}.1~${pm}.${lastDay}` : ""),
+      monthEnd: period.monthEnd || (lastDay ? `${py}.${pm}.${lastDay}` : ""),
       start: period.start || "",
       end: period.end || ""
     },
@@ -8405,7 +8428,13 @@ async function routeApi(req, res, url) {
 
     if (action === "upload" && method === "POST") {
       const body = await readBody(req);
-      const kind = body.kind === "logistics" ? "logistics" : "channel";
+      // 입출고 원장(물류) 업로드는 없앴다 — 파싱 검수가 제대로 돌지 않았고,
+      // 입출고는 실비/청구의 입출고 내역(stk_inoutList) 업로드로 일원화했다.
+      if (body.kind === "logistics") {
+        sendJson(res, 400, { error: "입출고 원장 업로드는 없어졌습니다. 실비/청구의 입출고 내역 파일 업로드를 사용하세요." });
+        return;
+      }
+      const kind = "channel";
       if (!body.fileBase64) { sendJson(res, 400, { error: "업로드할 파일이 없습니다." }); return; }
       // Files can't be read by openpyxl in two cases; give actionable messages
       // instead of a cryptic parse failure:
@@ -8582,50 +8611,6 @@ async function routeApi(req, res, url) {
             layoutAlternatives: parsed.meta?.blocks || [],
             columnMap,
             entryMode: uploadChannel?.entryMode || "review",
-            rollup: computed.rollup
-          });
-        } else {
-          const rows = await parseBankXlsxUpload(body.fileBase64, body.fileName);
-          settlement.uploads.logistics = {
-            kind,
-            fileName: body.fileName || "",
-            rows,
-            uploadedAt: now()
-          };
-          // 입출고 원장에서 상품별 입고·출고를 바로 채운다. 기초는 전월 마감을
-          // 이월하고, 마감 = 기초 + 입고 - 출고 로 계산한다.
-          const brandProducts = (db.npb.products || []).filter(
-            (p) => npbSameBrand(p.brandId, settlement.brand) && p.active !== false
-          );
-          const derived = npbInventoryFromLogistics(rows, brandProducts);
-          const opening = npbPriorClosing(db, settlement);
-          const priorRows = new Map((settlement.inventory || []).map((r) => [r.productKey, r]));
-          settlement.inventory = brandProducts.map((p) => {
-            const kept = priorRows.get(p.id) || {};
-            const t = derived.totals.get(p.id) || { inbound: 0, outbound: 0 };
-            const open = opening.has(p.id) ? opening.get(p.id) : number(kept.opening);
-            // 비매출(협찬·샘플)은 파일로 알 수 없어 입력값을 그대로 둔다.
-            const nonSale = number(kept.nonSale);
-            return {
-              productKey: p.id,
-              name: p.name,
-              opening: open,
-              inbound: t.inbound,
-              outbound: t.outbound,
-              sold: npbSoldPieces(settlement, p.id),
-              nonSale,
-              closing: open + t.inbound - t.outbound
-            };
-          });
-          const computed = npbRecompute(db, settlement);
-          await writeDb(db);
-          sendJson(res, 200, {
-            kind,
-            rows,
-            inventory: settlement.inventory,
-            warnings: derived.unmatched.length
-              ? [`상품을 알 수 없는 항목 ${derived.unmatched.length}건: ${derived.unmatched.slice(0, 3).join(", ")}`]
-              : [],
             rollup: computed.rollup
           });
         }
@@ -8997,10 +8982,12 @@ async function routeApi(req, res, url) {
       );
       const derived = npbInventoryFromLogistics(inMonth, brandProducts);
       const priorRows = new Map((settlement.inventory || []).map((r) => [r.productKey, r]));
+      // 기초재고 파일을 아직 안 올린 달은 전월 기말을 기초로 이월한다.
+      const carried = npbPriorClosing(db, settlement);
       settlement.inventory = brandProducts.map((p) => {
         const kept = priorRows.get(p.id) || {};
         const t = derived.totals.get(p.id) || { inbound: 0, outbound: 0 };
-        const open = number(kept.opening);
+        const open = kept.opening != null ? number(kept.opening) : number(carried.get(p.id));
         const nonSale = number(kept.nonSale);
         return {
           productKey: p.id,
@@ -9017,7 +9004,10 @@ async function routeApi(req, res, url) {
         fileName: String(body.fileName || ""),
         rowCount: inMonth.length,
         matched: derived.totals.size,
-        uploadedAt: now()
+        uploadedAt: now(),
+        // 정산서의 DB)입출고목록 시트에 이 행들을 그대로 싣는다. 집계만 남기면
+        // 받는 쪽이 입고·출고 수량의 근거를 따라갈 수 없다.
+        rows: inMonth.slice(0, 5000)
       };
       const warnings = [];
       if (skipped) warnings.push(`정산월(${month}) 밖 날짜 ${skipped}행은 제외했습니다.`);

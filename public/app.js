@@ -7617,15 +7617,6 @@ function renderNpbUpload() {
         </div>
       </div>
     </section>
-    <section class="panel">
-      <div class="panel-head"><h2>입출고 원장 (물류)</h2></div>
-      <div class="panel-body">
-        <div class="npb-upload-card">
-          <input type="file" accept=".csv,.xlsx,.xls" data-npb-upload-logistics>
-          <span class="muted">${uploads.logistics ? h(uploads.logistics.fileName || "업로드됨") : "미업로드"}</span>
-        </div>
-      </div>
-    </section>
     ${renderNpbReview()}
   `;
 }
@@ -8979,11 +8970,6 @@ function bindNpbUpload() {
     });
   });
 
-  app.querySelector("[data-npb-upload-logistics]")?.addEventListener("change", async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    await npbDoUpload({ kind: "logistics", file });
-  });
 }
 
 async function npbDoUpload({ kind, channel, file, preread, quiet = false }) {
@@ -9011,9 +8997,6 @@ async function npbDoUpload({ kind, channel, file, preread, quiet = false }) {
       if (kind === "channel" && code) {
         n.current.uploads = { ...(n.current.uploads || {}),
           [code]: { channel: code, fileName, lines: parsedRows, uploadedAt: new Date().toISOString() } };
-      } else if (kind === "logistics") {
-        n.current.uploads = { ...(n.current.uploads || {}),
-          logistics: { fileName, uploadedAt: new Date().toISOString() } };
       }
     }
     if (res.unresolved?.length) {
