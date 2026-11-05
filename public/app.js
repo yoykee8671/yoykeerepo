@@ -7487,6 +7487,46 @@ function renderNpbList() {
   `;
 }
 
+// 거래관리에 발행해 둔 거래명세서를 골라 채널 자료로 가져오는 선택표.
+// 명세서마다 납품단가가 다를 수 있어 전부 자동이 아니라 골라서 가져온다.
+function renderNpbTradeDocs() {
+  const n = state.npb;
+  const t = n.tradeDocs;
+  if (!t) return "";
+  const picked = new Set(t.picked || []);
+  const docs = t.docs || [];
+  const rows = docs.map((d) => `
+    <label class="npb-tdoc-row ${d.importedTo ? "imported" : ""}">
+      <input type="checkbox" data-npb-tdoc-pick="${h(d.id)}" ${picked.has(d.id) ? "checked" : ""}>
+      <span class="npb-tdoc-main">
+        <b>${h(d.orderDate || "")}</b> · ${h(d.docNo || "")} · ${h(d.partnerName || "(거래처 없음)")}
+        ${d.importedTo ? `<span class="badge ok">불러옴 → ${h(npbChannelName(d.importedTo))}</span>` : ""}
+      </span>
+      <span class="muted">${h((d.items || []).join(", "))}</span>
+      <span class="npb-tdoc-amt">공급가 ${npbWon(d.subtotal)} · 합계(VAT포함) ${npbWon(d.total)}</span>
+    </label>`).join("");
+  return `
+    <div class="npb-pending-wrap npb-tdoc">
+      <div class="toolbar">
+        <b>거래관리 명세서 — ${h(t.periodMonth || "")}</b>
+        <select data-npb-tdoc-channel>
+          ${(t.channels || []).map((c) =>
+            `<option value="${h(c.code)}" ${c.code === t.channel ? "selected" : ""}>${h(c.name)}</option>`).join("")}
+        </select>
+        <button class="primary" data-npb-tdoc-go ${picked.size ? "" : "disabled"}>
+          선택 ${picked.size}건 이 채널로 가져오기
+        </button>
+        <button class="ghost" data-npb-tdoc-close>닫기</button>
+      </div>
+      ${docs.length ? rows : `<p class="muted">이 정산 월(${h(t.periodMonth || "")})에 발행된 거래명세서가 없습니다.
+        거래관리에서 양식을 '거래명세서'로 저장해야 여기 보입니다.</p>`}
+      <p class="muted" style="margin:6px 0 0">
+        명세서의 공급가(부가세 미포함)에 10%를 더한 납품액이 정산액으로 들어가고,
+        매출은 소비자정가(없으면 상품표 정가) × 수량으로 잡습니다. 가져온 뒤 검수표에서 확인하세요.
+      </p>
+    </div>`;
+}
+
 function renderNpbUpload() {
   const n = state.npb;
   if (!n.currentKey) return npbNeedSelect();
@@ -7587,6 +7627,14 @@ function renderNpbUpload() {
             (채널 설정의 '파일명 키워드' 또는 채널명·코드 기준).
           </span>
         </div>
+        <div class="toolbar" style="margin-top:8px">
+          <button data-npb-tdoc-open>거래관리 명세서 불러오기</button>
+          <span class="muted">
+            wooofpay 거래관리에서 이 정산 월에 발행한 거래명세서를 파일 없이 바로 가져옵니다
+            (테일릿처럼 우리가 명세서를 발행하는 채널).
+          </span>
+        </div>
+        ${renderNpbTradeDocs()}
         ${waiting.length ? `<div class="npb-pending-wrap">
           <p style="color:var(--red);margin:0">
             <b>반영 대기 ${waiting.length}개 채널</b> — ${h(waiting.map((c) => c.name).join(", "))}.
@@ -8924,6 +8972,86 @@ function bindNpbUpload() {
     n.unresolved = [];
     n.aliasDraft = {};
     renderApp();
+  });
+  app.querySelector("[data-npb-tdoc-open]")?.addEventListener("click", async () => {
+    try {
+      const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/trade-docs`);
+      // 기본 채널: 거래처명으로 짐작한 채널 중 아직 안 가져온 문서가 있는 것.
+      const docs = res.docs || [];
+      const channel = docs.find((d) => d.channelGuess && !d.importedTo)?.channelGuess
+        || docs.find((d) => d.channelGuess)?.channelGuess
+        || (res.channels?.[0]?.code || "");
+      n.tradeDocs = {
+        ...res,
+        channel,
+        picked: docs
+          .filter((d) => !d.importedTo && (!d.channelGuess || d.channelGuess === channel))
+          .map((d) => d.id)
+      };
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "거래명세서 목록을 읽지 못했습니다.", "error");
+    }
+  });
+  app.querySelector("[data-npb-tdoc-close]")?.addEventListener("click", () => {
+    n.tradeDocs = null;
+    renderApp();
+  });
+  app.querySelector("[data-npb-tdoc-channel]")?.addEventListener("change", (e) => {
+    const t = n.tradeDocs;
+    if (!t) return;
+    t.channel = e.target.value;
+    // 채널을 바꾸면 그 채널로 짐작되는 문서로 선택을 다시 잡는다.
+    t.picked = (t.docs || [])
+      .filter((d) => !d.importedTo && (!d.channelGuess || d.channelGuess === t.channel))
+      .map((d) => d.id);
+    renderApp();
+  });
+  app.querySelectorAll("[data-npb-tdoc-pick]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const t = n.tradeDocs;
+      if (!t) return;
+      const docId = input.getAttribute("data-npb-tdoc-pick");
+      const picked = new Set(t.picked || []);
+      if (input.checked) picked.add(docId);
+      else picked.delete(docId);
+      t.picked = [...picked];
+      renderApp();
+    });
+  });
+  app.querySelector("[data-npb-tdoc-go]")?.addEventListener("click", async () => {
+    const t = n.tradeDocs;
+    if (!t || !(t.picked || []).length) return;
+    try {
+      const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/trade-docs`, {
+        method: "POST",
+        body: { channel: t.channel, docIds: t.picked }
+      });
+      const parsedRows = res.rows || [];
+      // 파일 업로드와 같은 흐름 — 워크시트로 바로 밀지 않고 검수표로 띄운다.
+      n.review = {
+        channel: res.channel,
+        rows: parsedRows.map((row) => ({ ...row, qty: Number(row.qty ?? row.qtyEa ?? 0) })),
+        warnings: res.warnings || []
+      };
+      if (res.unresolved?.length) {
+        const seen = new Set(n.unresolved.map((u) => u.sourceName));
+        n.unresolved = [...n.unresolved, ...res.unresolved.filter((u) => !seen.has(u.sourceName))];
+      }
+      n.tradeDocs = null;
+      showToast(
+        `${npbChannelName(res.channel)} 로 거래명세서를 가져왔습니다 — ${parsedRows.length}개 품목. ` +
+        `검수표에서 확인 후 [확정/반영] 을 눌러주세요.`
+      );
+      try {
+        await npbLoadDetail(n.currentKey);
+      } catch (error) {
+        showToast(`가져오기는 됐지만 화면을 새로 읽지 못했습니다: ${error.message}`, "error");
+      }
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "거래명세서 가져오기 실패", "error");
+    }
   });
   app.querySelector("[data-npb-upload-any]")?.addEventListener("change", async (e) => {
     const files = [...(e.target.files || [])];
