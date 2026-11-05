@@ -1374,7 +1374,11 @@ function renderRequestForm() {
         </div>
       </div>
       <div class="field two">
-        <div><label>업체 실 입금액</label><input name="depositAmount" type="text" readonly class="money-input" value="${h(formatAmount(item.depositAmount))}"></div>
+        <div>
+          <label>업체 실 입금액 <span class="muted" style="font-weight:400">(직접 고치면 그 금액으로 고정)</span></label>
+          <input name="depositAmount" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.depositAmount))}" data-manual="${item.depositAmountManual ? "1" : ""}">
+          <p class="muted" data-deposit-manual-hint style="margin:4px 0 0;display:none"></p>
+        </div>
         <div data-receivable-deduction-field style="${showReceivableFields ? "" : "display:none"}"><label data-receivable-deduction-label>${h(receivableLabel)}</label><input name="receivableDeduction" type="text" readonly class="money-input" value="${h(formatAmount(item.receivableDeduction))}"></div>
       </div>
       <div class="field two">
@@ -3283,6 +3287,12 @@ function bindRequests() {
     event.target.dataset.manual = "1";
     updateRequestCalculation(requestForm);
   });
+  // 최종입금액을 직접 고치면 수동 고정 — 업체 절사/반올림에 맞춰야 할 때.
+  // 칸을 비우면 자동계산으로 되돌아간다 (updateRequestCalculation 에서 해제).
+  requestForm.querySelector("[name='depositAmount']")?.addEventListener("input", (event) => {
+    event.target.dataset.manual = "1";
+    updateRequestCalculation(requestForm);
+  });
   requestForm.querySelector("[name='paidAmount']")?.addEventListener("input", (event) => {
     event.target.dataset.manual = "1";
   });
@@ -3323,6 +3333,11 @@ function bindRequests() {
     if (submitBtn?.disabled) return;
     if (submitBtn) submitBtn.disabled = true;
     const body = formObject(event.currentTarget);
+    // 최종입금액을 손으로 고쳤는지는 input 의 data-manual 에만 있다 — 서버가
+    // 재계산으로 덮지 않도록 플래그를 함께 보낸다.
+    const depositManualEl = event.currentTarget.querySelector("[name='depositAmount']");
+    body.depositAmountManual =
+      depositManualEl?.dataset.manual === "1" && parseAmount(depositManualEl.value || 0) > 0;
     const brand = state.brands.find((item) => item.id === body.brandId) || findBrandByInput(body.brandSearch);
     if (brand) body.brandName = brand.name;
     body.brandId = brand?.id || "";
@@ -3458,6 +3473,17 @@ function updateRequestCalculation(form) {
   } else {
     depositAmount = adjustedProductSales - commissionAmount + shippingFee;
   }
+  // 최종입금액 수동 고정 — 서버(calculateSettlement)와 같은 규칙. 고정된 동안은
+  // 이 값이 아래 모든 계산(실 지급액·기지급 안내 등)에 쓰이고, 비우면 해제된다.
+  const depositInputEl = form.querySelector("[name='depositAmount']");
+  let depositManual = depositInputEl?.dataset.manual === "1";
+  const manualDeposit = depositManual ? parseAmount(depositInputEl.value || 0) : 0;
+  if (depositManual && manualDeposit <= 0 && depositInputEl.value.trim() === "") {
+    depositManual = false;
+    depositInputEl.dataset.manual = "";
+  }
+  const calcDepositAmount = depositAmount;
+  if (depositManual && manualDeposit > 0) depositAmount = manualDeposit;
   const cancelledAmount = value("cancelledAmount");
   const receivableDeduction =
     settlementType === "prepay_debt"
@@ -3512,7 +3538,21 @@ function updateRequestCalculation(form) {
   if (supplyInput && lineItems.length) supplyInput.value = formatAmount(supplyAmount);
   if (baseShippingInput && !baseManual) baseShippingInput.value = formatAmount(baseShippingFee);
   if (totalShippingInput) totalShippingInput.value = formatAmount(shippingFee);
-  if (depositInput) depositInput.value = formatAmount(depositAmount);
+  // 수동 고정 중에는 입력 중인 값을 덮어쓰지 않는다. 대신 자동계산과의 차이를
+  // 바로 아래에 보여줘, 몇 원을 강제로 더/덜 보내는지 눈에 남긴다.
+  if (depositInput && !(depositManual && manualDeposit > 0)) depositInput.value = formatAmount(depositAmount);
+  const depositHint = form.querySelector("[data-deposit-manual-hint]");
+  if (depositHint) {
+    if (depositManual && manualDeposit > 0) {
+      const diff = depositAmount - calcDepositAmount;
+      depositHint.style.display = "";
+      depositHint.innerHTML = `수동 고정됨 — 자동계산 <strong>${money.format(calcDepositAmount)}원</strong>`
+        + (diff ? ` (${diff > 0 ? "+" : "−"}${money.format(Math.abs(diff))}원)` : " (차이 없음)")
+        + " · 칸을 비우면 자동계산으로 복귀";
+    } else {
+      depositHint.style.display = "none";
+    }
+  }
   if (deductionInput) deductionInput.value = formatAmount(receivableDeduction);
   const creditUsedAmount = value("creditUsedAmount");
   const priorPaidAmount = value("priorPaidAmount");
