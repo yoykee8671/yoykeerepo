@@ -1,0 +1,75 @@
+# wooofpay 맥미니 자가 호스팅 구성.
+# 사용법은 같은 폴더의 README.md 참고.
+name: wooofpay
+
+services:
+  app:
+    build:
+      context: ../..
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "4173"
+      # 같은 compose 안의 db 서비스를 쓴다. .env 의 DATABASE_URL 보다 우선한다.
+      DATABASE_URL: postgres://wooofpay:${POSTGRES_PASSWORD}@db:5432/wooofpay
+    # 맥미니 안에서 http://localhost:4173 으로 확인하는 용도.
+    # 외부 사용자는 Cloudflare Tunnel 로만 들어오므로 포트를 밖에 열지 않는다.
+    ports:
+      - "127.0.0.1:4173:4173"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4173/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: wooofpay
+      POSTGRES_USER: wooofpay
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wooofpay -d wooofpay"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # 매일 새벽 pg_dump 를 ./backups 에 떨군다. 보관: 일 14개 / 주 8개 / 월 6개.
+  backup:
+    image: prodrigestivill/postgres-backup-local:17
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: wooofpay
+      POSTGRES_USER: wooofpay
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      SCHEDULE: "@daily"
+      BACKUP_KEEP_DAYS: "14"
+      BACKUP_KEEP_WEEKS: "8"
+      BACKUP_KEEP_MONTHS: "6"
+    volumes:
+      - ./backups:/backups
+
+  # pay.wooof.co.kr 요청을 이 기계로 끌어오는 Cloudflare Tunnel.
+  # 터널의 Public Hostname 은 Cloudflare 대시보드에서 http://app:4173 으로 설정한다.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - app
+
+volumes:
+  pgdata:
