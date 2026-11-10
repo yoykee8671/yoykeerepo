@@ -732,6 +732,7 @@ function renderApp() {
     app.querySelector("[data-logout]").addEventListener("click", async () => {
       await api("/api/logout", { method: "POST" });
       state.admin = null;
+      clearEditing();
       renderLogin();
     });
     return;
@@ -743,6 +744,7 @@ function renderApp() {
     app.querySelector("[data-logout]").addEventListener("click", async () => {
       await api("/api/logout", { method: "POST" });
       state.admin = null;
+      clearEditing();
       renderLogin();
     });
     return;
@@ -760,6 +762,7 @@ function renderApp() {
     app.querySelector("[data-logout]").addEventListener("click", async () => {
       await api("/api/logout", { method: "POST" });
       state.admin = null;
+      clearEditing();
       renderLogin();
     });
     return;
@@ -947,6 +950,10 @@ function clearEditing() {
   state.editingRequest = null;
   state.editingBrand = null;
   state.editingAdmin = null;
+  // 관리자 폼의 임시 입력(비밀번호 포함)과 권한 체크도 함께 비운다. 남겨 두면
+  // 다른 탭에 갔다 오면 "관리자 입력" 폼에 앞서 고치던 사람의 값이 채워진다.
+  state.adminDraft = null;
+  state.editingPermissions = null;
   state.editingPriceEntry = null;
   state.editingPriceAlias = null;
   state.editingPromotionRule = null;
@@ -964,7 +971,12 @@ function renderCurrentTab() {
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
   if (state.tab === "settlement") return renderSettlement();
-  if (state.tab === "pipeline") return renderPipeline() + renderReconcile();
+  // 주문매칭 화면은 두 권한(주문매칭, 주문매칭(클로브))을 합친 곳이다. 체크된
+  // 쪽만 보여준다 — 한쪽만 받은 관리자에게 "권한 없음" 안내가 겹쳐 뜨지 않게.
+  if (state.tab === "pipeline") {
+    if (!can("pipeline")) return renderReconcile();
+    return renderPipeline() + (canUseClobe() ? renderReconcile() : "");
+  }
   if (state.tab === "reconcile") return renderPipeline() + renderReconcile();
   if (state.tab === "npb") return renderNpb();
   if (state.tab === "productsync") return renderProductSync();
@@ -2245,7 +2257,9 @@ function renderAdminRow(admin) {
 }
 
 function renderAdminForm() {
-  const a = state.editingAdmin || {};
+  // 체크박스·역할을 바꾸면 화면을 다시 그린다. 그때 입력 중이던 값(역할 포함)이
+  // 원래 값으로 되돌아가 역할 변경이 저장되지 않았다 — 고친 값을 먼저 쓴다.
+  const a = { ...(state.editingAdmin || {}), ...(state.adminDraft || {}) };
   return `
     <form class="form-grid" data-admin-form>
       <div class="field"><label>이름</label><input name="name" value="${h(a.name)}" required></div>
@@ -2254,7 +2268,7 @@ function renderAdminForm() {
         <div><label>역할</label><select name="role">${["owner", "manager", "operator", "viewer"].map((r) => `<option value="${r}" ${(a.role || "operator") === r ? "selected" : ""}>${r}</option>`).join("")}</select></div>
         <div><label>상태</label><select name="isActive"><option value="true" ${a.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${a.isActive === false ? "selected" : ""}>N</option></select></div>
       </div>
-      <div class="field"><label>비밀번호 ${state.editingAdmin ? "(변경 시에만 입력)" : ""}</label><input name="password" type="password" ${state.editingAdmin ? "" : "required"}></div>
+      <div class="field"><label>비밀번호 ${state.editingAdmin ? "(변경 시에만 입력)" : ""}</label><input name="password" type="password" value="${h(a.password || "")}" ${state.editingAdmin ? "" : "required"}></div>
       ${renderPermissionGrid(a)}
       <div class="toolbar">
         <button class="primary" type="submit">${state.editingAdmin ? "수정 저장" : "관리자 추가"}</button>
@@ -5665,12 +5679,15 @@ function bindPurchaseOrders() {
 function bindAdmins() {
   app.querySelector("[data-new-admin]").addEventListener("click", () => {
     state.editingAdmin = null;
+    state.editingPermissions = null;
+    state.adminDraft = null;
     renderApp();
   });
   app.querySelectorAll("[data-edit-admin]").forEach((button) => {
     button.addEventListener("click", () => {
       state.editingAdmin = state.admins.find((item) => item.id === button.dataset.editAdmin);
       state.editingPermissions = null;
+      state.adminDraft = null;
       renderApp();
     });
   });
@@ -5681,6 +5698,18 @@ function bindAdmins() {
       await refreshAndRender();
     });
   });
+  // 다시 그리기 전에 입력 중이던 이름·역할·상태·비밀번호를 붙잡아 둔다.
+  const saveAdminDraft = () => {
+    const form = app.querySelector("[data-admin-form]");
+    if (!form) return;
+    const draft = formObject(form);
+    state.adminDraft = {
+      name: draft.name,
+      role: draft.role,
+      isActive: draft.isActive === "true",
+      password: draft.password || ""
+    };
+  };
   // 체크박스를 그릴 때마다 폼을 통째로 다시 그리면 입력 중이던 값이 날아가므로,
   // 편집 중 권한은 state 에 따로 들고 다닌다.
   const currentPermissions = () => {
@@ -5704,6 +5733,7 @@ function bindAdmins() {
         if (action === "view") set.clear();
       }
       perms[menuKey] = [...set];
+      saveAdminDraft();
       state.editingPermissions = {
         role: app.querySelector("[data-admin-form] [name=role]")?.value || state.editingAdmin?.role || "operator",
         permissions: perms
@@ -5712,8 +5742,11 @@ function bindAdmins() {
     });
   });
   app.querySelector("[data-admin-form] [name=role]")?.addEventListener("change", (event) => {
-    // 등급을 바꾸면 그 등급의 기본 권한을 보여준다 — 이후 개별 조정은 그대로 가능.
-    state.editingPermissions = { role: event.target.value, permissions: null };
+    // 메뉴 권한은 역할이 아니라 체크박스로 정한다. 역할을 바꿔도 체크해 둔
+    // 권한은 그대로 둔다.
+    saveAdminDraft();
+    const kept = state.editingPermissions?.permissions || state.editingAdmin?.permissions || null;
+    state.editingPermissions = { role: event.target.value, permissions: kept ? currentPermissions() : null };
     renderApp();
   });
   app.querySelector("[data-admin-form]").addEventListener("submit", async (event) => {
@@ -5732,11 +5765,13 @@ function bindAdmins() {
     }
     state.editingAdmin = null;
     state.editingPermissions = null;
+    state.adminDraft = null;
     await refreshAndRender();
   });
   app.querySelector("[data-cancel-edit]")?.addEventListener("click", () => {
     state.editingAdmin = null;
     state.editingPermissions = null;
+    state.adminDraft = null;
     renderApp();
   });
 }
@@ -6659,8 +6694,10 @@ function can(menuKey, action = "view") {
   return Array.isArray(granted) && granted.includes(action);
 }
 
+// 클로브(은행 입금내역) 사용 여부. 역할이 아니라 관리자 화면에서 체크한
+// 메뉴 권한(주문매칭(클로브))을 따른다 — 서버의 /api/clobe/* 검사와 같다.
 function canUseClobe() {
-  return state.admin?.role === "owner" || state.admin?.role === "manager";
+  return can("reconcile");
 }
 
 // --- 반자동 파이프라인 ------------------------------------------------------
@@ -6671,12 +6708,12 @@ function renderPipeline() {
   const head = pageHead("주문매칭",
     "카페24 주문 수집 → 확인 → 입금매칭 → 카페24 반영. 단계마다 눌러서 진행합니다. "
     + "아래에서 클로브ai 은행 거래와 대사합니다.");
-  if (!canUseClobe()) {
-    return `${head}<section class="panel"><div class="panel-body"><p class="muted">이 메뉴는 오너 또는 매니저만 사용할 수 있습니다.</p></div></section>`;
+  if (!can("pipeline")) {
+    return `${head}<section class="panel"><div class="panel-body"><p class="muted">주문매칭 권한이 없습니다. 관리자 메뉴에서 권한을 받아 주세요.</p></div></section>`;
   }
   return `
     ${head}
-    ${renderClobeFreshness(p.scraping)}
+    ${canUseClobe() ? renderClobeFreshness(p.scraping) : ""}
     <section class="panel">
       <div class="panel-head"><h2>① 수집 — 카페24 주문에서 입금요청 만들기</h2></div>
       <div class="panel-body">
@@ -6865,7 +6902,7 @@ function renderReconcile() {
     "클로브ai의 은행 입금내역과 미입금 요청을 대조합니다. 제안된 매칭을 확인 후 입금완료 처리하세요."
   );
   if (!canUseClobe()) {
-    return `${head}<section class="panel"><div class="panel-body"><p class="muted">이 메뉴는 오너 또는 매니저만 사용할 수 있습니다.</p></div></section>`;
+    return `${head}<section class="panel"><div class="panel-body"><p class="muted">주문매칭(클로브) 권한이 없습니다. 관리자 메뉴에서 권한을 받아 주세요.</p></div></section>`;
   }
   if (c.loading || !c.status) {
     return `${head}<section class="panel"><div class="panel-body"><p class="muted">연동 상태를 불러오는 중…</p></div></section>`;
@@ -7231,6 +7268,15 @@ function bindPipeline() {
 
 function bindReconcile() {
   const c = state.clobe;
+  // 클로브 권한이 없으면 클로브 상태를 부르지 않는다. 부르면 403 이 나고
+  // status 가 계속 비어 있어 화면을 그릴 때마다 다시 요청하게 된다.
+  if (!canUseClobe()) {
+    if (!state.cafe24.status && !state.cafe24.requested) {
+      state.cafe24.requested = true;
+      loadCafe24Status().then(renderApp).catch(() => {});
+    }
+    return;
+  }
   if (!c.status && !c.loading) {
     c.loading = true;
     Promise.all([loadClobeStatus(), loadCafe24Status()]).finally(() => {
