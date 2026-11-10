@@ -3249,10 +3249,33 @@ export function npbInventoryFromLogistics(rows, products) {
     return npbMatchProduct(name, products)?.id || "";
   };
 
+  // 출고상세(셀메이트 ord_ordList)는 판매처 기준 주문수량과 별개로 실제로 빠진
+  // 재고를 재고매칭(1~4) 칸에 적는다. 5팩 주문은 주문수량 1, 재고매칭 5다.
+  // 세트는 칸마다 다른 상품이다. 칸을 각각 한 줄로 펼쳐 센다.
+  const expand = (row) => {
+    if (row["재고매칭(1)주문수량"] === undefined) return [row];
+    const slots = [];
+    for (let n = 1; n <= 4; n++) {
+      const qty = row[`재고매칭(${n})주문수량`];
+      if (qty === undefined || String(qty).trim() === "") continue;
+      slots.push({
+        바코드번호: row[`재고매칭(${n})바코드번호`] ?? "",
+        상품명: row[`재고매칭(${n})상품명`] ?? "",
+        주문수량: qty
+      });
+    }
+    // 재고매칭이 비면 셀메이트가 재고 상품을 못 붙인 주문이다. 판매처
+    // 주문수량으로 세면 5팩이 1개로 들어가니, 세지 않고 확인 대상으로 띄운다.
+    if (!slots.length) {
+      const name = String(row["판매처상품명"] ?? "").trim();
+      unmatched.add(name ? `${name} (재고매칭 없음)` : "재고매칭 없는 주문");
+    }
+    return slots;
+  };
+
   const totals = new Map();
   const unmatched = new Set();
-  for (const row of rows || []) {
-    if (!row || typeof row !== "object") continue;
+  for (const row of (rows || []).flatMap((r) => (r && typeof r === "object" ? expand(r) : []))) {
     const inbound = number(pick(row, ["입고수량"]));
     const hasLedger = pick(row, ["입고수량"]) !== undefined || pick(row, ["출고수량"]) !== undefined;
     const outbound = hasLedger
@@ -3271,6 +3294,25 @@ export function npbInventoryFromLogistics(rows, products) {
     totals.set(id, cur);
   }
   return { totals, unmatched: [...unmatched] };
+}
+
+// 입출고 행이 어느 달 것인지. 입출고 원장은 입출고일자, 출고상세는 출고일시를
+// 본다. 주문일자는 쓰지 않는다 — 말일 주문이 다음 달에 나가면 재고는 다음 달에
+// 빠진다. 날짜를 못 찾으면 "" 이고, 그 행은 거르지 않는다.
+export function npbLogisticsRowMonth(row) {
+  for (const key of ["입출고일자", "주문상품출고일시", "발송일자", "출고일자"]) {
+    const m = String(row?.[key] ?? "").trim().match(/^(\d{4})[-./](\d{1,2})/);
+    if (m) return `${m[1]}-${m[2].padStart(2, "0")}`;
+  }
+  return "";
+}
+
+// 셀메이트는 같은 내역을 CSV 로도, 진짜 엑셀(.xls/.xlsx)로도 내려준다.
+// 확장자만 믿지 않고 파일 앞부분(OLE/ZIP 서명)도 본다.
+export function npbIsSpreadsheetUpload(fileName, buffer) {
+  const head = buffer.subarray(0, 4).toString("hex");
+  if (head === "d0cf11e0" || head === "504b0304") return true;
+  return /\.(xlsx|xlsm|xls)$/i.test(String(fileName || ""));
 }
 
 // 출고내역 파일에서 출고 건수를 센다.
@@ -9188,30 +9230,52 @@ async function routeApi(req, res, url) {
       return;
     }
 
-    // 셀메이트 입출고내역(stk_inoutList) CSV 로 당월 입고·출고 수량을 채운다.
+    // 셀메이트 입출고내역(stk_inoutList) 또는 출고상세(ord_ordList)로 당월
+    // 입고·출고 수량을 채운다. 파일은 CSV 와 엑셀(.xls/.xlsx) 둘 다 받는다 —
+    // 셀메이트에서 내려받으면 .xls 로 오는데 CSV 만 받아서 올릴 수가 없었다.
     // 가격 칸(원가·판매단가 등)은 쓰지 않는다 — 수량만 상품에 매칭한다.
     if (action === "inout-file" && method === "POST") {
       const body = await readBody(req);
       if (!body.fileBase64) { sendJson(res, 400, { error: "업로드할 파일이 없습니다." }); return; }
-      const buffer = Buffer.from(String(body.fileBase64).split(",").pop() || "", "base64");
-      let text = new TextDecoder("utf-8").decode(buffer);
-      if (text.includes("�")) text = new TextDecoder("euc-kr").decode(buffer);
-      const csvRows = parseCsv(text).filter((r) => r.some((c) => String(c || "").trim()));
-      if (csvRows.length < 2) { sendJson(res, 400, { error: "입출고 행을 읽지 못했습니다." }); return; }
-      const header = csvRows[0].map((c) => String(c || "").trim());
-      const objects = csvRows.slice(1).map((r) => {
-        const obj = {};
-        header.forEach((name, i) => { if (name) obj[name] = r[i]; });
-        return obj;
-      });
+      const base64 = String(body.fileBase64).split(",").pop() || "";
+      const buffer = Buffer.from(base64, "base64");
+      let objects;
+      if (npbIsSpreadsheetUpload(body.fileName, buffer)) {
+        // 확장자가 틀려도(.csv 로 이름만 바뀐 엑셀) 내용 서명대로 읽는다.
+        const head = buffer.subarray(0, 4).toString("hex");
+        const ext = head === "d0cf11e0" ? ".xls" : head === "504b0304" ? ".xlsx" : path.extname(String(body.fileName || ""));
+        try {
+          objects = await parseBankXlsxUpload(base64, `upload${ext}`);
+        } catch (error) {
+          console.error("[npb] inout-file spreadsheet parse failed:", error.message);
+          sendJson(res, 400, { error: "엑셀 파일을 읽지 못했습니다. 셀메이트에서 받은 원본 파일인지 확인하세요." });
+          return;
+        }
+      } else {
+        let text = new TextDecoder("utf-8").decode(buffer);
+        if (text.includes("�")) text = new TextDecoder("euc-kr").decode(buffer);
+        const csvRows = parseCsv(text).filter((r) => r.some((c) => String(c || "").trim()));
+        const header = (csvRows[0] || []).map((c) => String(c || "").trim());
+        objects = csvRows.slice(1).map((r) => {
+          const obj = {};
+          header.forEach((name, i) => { if (name) obj[name] = r[i]; });
+          return obj;
+        });
+      }
+      objects = (objects || []).filter((row) => row && Object.values(row).some((v) => String(v ?? "").trim()));
+      if (!objects.length) { sendJson(res, 400, { error: "입출고 행을 읽지 못했습니다." }); return; }
       // 파일에 다른 달 날짜가 섞이면 그 달 수량까지 더해진다. 정산월 행만 쓰고
       // 몇 건을 걸렀는지 알려준다.
       const month = String(settlement.periodMonth || "");
+      // 출고상세에서 출고일시가 비면 아직 안 나간 주문이다 — 재고에서 빼지 않는다.
+      const isOrderDetail = (row) => row["재고매칭(1)주문수량"] !== undefined;
+      const unshipped = objects.filter((row) => isOrderDetail(row) && !npbLogisticsRowMonth(row)).length;
       const inMonth = objects.filter((row) => {
-        const day = String(row["입출고일자"] || "").slice(0, 7);
-        return !month || !day || day === month;
+        const day = npbLogisticsRowMonth(row);
+        if (!day) return !isOrderDetail(row);
+        return !month || day === month;
       });
-      const skipped = objects.length - inMonth.length;
+      const skipped = objects.length - inMonth.length - unshipped;
       const brandProducts = (db.npb.products || []).filter(
         (p) => npbSameBrand(p.brandId, settlement.brand) && p.active !== false
       );
@@ -9246,6 +9310,7 @@ async function routeApi(req, res, url) {
       };
       const warnings = [];
       if (skipped) warnings.push(`정산월(${month}) 밖 날짜 ${skipped}행은 제외했습니다.`);
+      if (unshipped) warnings.push(`출고일시가 없는(미출고) 주문 ${unshipped}행은 제외했습니다.`);
       if (derived.unmatched.length) {
         warnings.push(`상품을 알 수 없는 항목 ${derived.unmatched.length}건: ${derived.unmatched.slice(0, 3).join(", ")}`);
       }
