@@ -6577,8 +6577,19 @@ function npbWorksheetRollup() {
 
 // 서버 npbComputeShipping 과 같은 규칙. 유형 목록이 없는 예전 브랜드는
 // 소형/대형 단가로 자동 구성한다.
+// 서버 npbCostConfigForMonth 와 같은 규칙: 정산월에 맞는 실비 기준을 고른다.
+function npbCostConfigForMonth(cc, month) {
+  const periods = Array.isArray(cc?.periods) ? cc.periods : [];
+  const m = String(month || "");
+  const hit = m
+    ? periods.filter((p) => p && p.from && String(p.from) <= m)
+      .sort((a, b) => String(a.from).localeCompare(String(b.from))).pop()
+    : null;
+  return hit ? { ...cc, ...hit } : (cc || {});
+}
+
 function npbShipTypes() {
-  const cc = state.npb.config?.costConfig || {};
+  const cc = npbCostConfigForMonth(state.npb.config?.costConfig || {}, state.npb.current?.periodMonth);
   if (Array.isArray(cc.shipTypes) && cc.shipTypes.length) return cc.shipTypes;
   const pick = Number(cc.pickPack || 0);
   return [
@@ -7808,7 +7819,7 @@ function renderNpbExpenses() {
   // 확인할 방법이 없다.
   const shipParts = (row) => (row.manual ? [] : [
     ["택배운임비", Number(row.freight || 0)],
-    ["물류사용비", Number(row.handling || 0)]
+    [row.handlingLabel || "물류사용비", Number(row.handling || 0)]
   ].filter(([, price]) => price > 0));
 
   const shipRows = breakdown.map((row) => {
@@ -7817,7 +7828,7 @@ function renderNpbExpenses() {
       <tr class="npb-ship-detail">
         <td class="muted">└ ${label}</td>
         <td></td>
-        <td class="num muted">${money.format(row.count)}건</td>
+        <td class="num muted">${money.format(row.count)}${h(row.unitLabel || "건")}</td>
         <td class="num muted">${money.format(price)}</td>
         <td class="num muted">${money.format(price * Number(row.count || 0))}</td>
         <td></td>
@@ -7826,10 +7837,14 @@ function renderNpbExpenses() {
       <tr>
         <td>${h(row.label)}</td>
         <td>
-          <input type="file" accept=".csv,.xlsx" data-npb-shipfile="${h(row.key)}">
+          ${row.source
+            ? `<div class="muted">${h(breakdown.find((b) => b.key === row.source)?.label || row.source)} 파일에서 자동 계산 · 숫자는 고칠 수 있습니다.</div>`
+            : `<input type="file" accept=".csv,.xls,.xlsx" data-npb-shipfile="${h(row.key)}">
           ${file
-            ? `<div class="muted">${h(file.fileName)} · ${h(file.basisLabel)} 기준 ${money.format(file.autoCount)}건 (${money.format(file.rowCount)}행)</div>`
-            : `<div class="muted">출고내역 파일을 올리면 건수를 셉니다.</div>`}
+            ? (file.parcelCount
+              ? `<div class="muted">${h(file.fileName)} · 일반 ${money.format(file.parcelCount.parcels)}건 · 박스단위 ${money.format(file.parcelCount.boxParcels)}송장(${money.format(file.parcelCount.boxes)}박스) · 합포 ${money.format(file.parcelCount.extraUnits)}개 (${money.format(file.rowCount)}행)</div>`
+              : `<div class="muted">${h(file.fileName)} · ${h(file.basisLabel)} 기준 ${money.format(file.autoCount)}건 (${money.format(file.rowCount)}행)</div>`)
+            : `<div class="muted">출고내역 파일을 올리면 건수를 셉니다.</div>`}`}
         </td>
         <td><input class="num" type="number" min="0" data-npb-ship="${h(row.key)}" value="${h(row.count)}"></td>
         <td class="num">${row.manual ? "-" : money.format(Number(row.freight || 0) + Number(row.handling || 0))}</td>
@@ -9413,12 +9428,13 @@ function bindNpbWorksheet() {
       if (!file) return;
       const shipType = inp.getAttribute("data-npb-shipfile");
       try {
-        await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/shipping-file`, {
+        const res = await api(`/api/npb/settlements/${encodeURIComponent(n.currentKey)}/shipping-file`, {
           method: "POST",
           body: { shipType, fileBase64: await readFileAsBase64(file), fileName: file.name }
         });
         await npbLoadDetail(n.currentKey);
-        showToast("출고내역을 반영했습니다.");
+        const warn = (res.warnings || []).join(" ");
+        showToast(warn ? `출고내역을 반영했습니다. ${warn}` : "출고내역을 반영했습니다.", warn ? "error" : undefined);
         renderApp();
       } catch (error) {
         showToast(error.message || "출고내역을 읽지 못했습니다.", "error");

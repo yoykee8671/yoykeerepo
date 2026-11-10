@@ -607,6 +607,78 @@ function fullPermissions() {
   return all;
 }
 
+// 픽키 3PL 실비 기준 (2026-09 정산부터). 택배사가 CJ대한통운으로 바뀌고
+// 물류비가 1,300 → 800원, 합포비가 새로 생겼다.
+//
+// shipTypes 의 금액은 VAT 포함이다 — 청구서 합계가 "vat포함" 이고 기존
+// 유형(본사 3,300/550 등)도 그렇게 적혀 있다. 단가표(threePlTable)는 양식대로
+// VAT 별도 정가를 적는다.
+//
+// - 일반 택배는 합포를 포함해 모두 소형(2,500)으로 센다.
+// - 합포비: 한 송장에 2개 이상이면 1개를 넘는 수량 × 100원. 박스단위 출고는 제외.
+// - 박스단위 출고: 한 송장에 박스 입수(45g 100개, 180g 32개) 이상이면 박스로
+//   센다(올림). 박스당 중형 4,000 + 물류비 800.
+// - 용달 출고: 박스당 포장비(800)만. 용달 운송비 자체는 지금처럼 별도청구.
+const NPB_PICKY_LOGISTICS_2026_09 = {
+  from: "2026-09",
+  shipTypes: [
+    { key: "3pl", label: "3PL 출고 (택배·소형)", freight: 2750, handling: 880 },
+    { key: "3pl_box", label: "3PL 박스단위 출고 (중형)", freight: 4400, handling: 880,
+      source: "3pl", unitLabel: "박스" },
+    { key: "3pl_bundle", label: "합포비 (1개 초과분)", freight: 0, handling: 110,
+      source: "3pl", unitLabel: "개", handlingLabel: "합포비", itemCount: true },
+    { key: "3pl_truck", label: "용달 출고 포장비", freight: 0, handling: 880, unitLabel: "박스" },
+    { key: "hq", label: "본사 출고 (택배)", freight: 3300, handling: 550 },
+    { key: "quick", label: "용달/퀵", freight: 0, handling: 0, manual: true, excludeFromTotal: true }
+  ],
+  // 박스 입수. 상품명에 키워드가 들어 있으면 그 입수를 쓴다.
+  boxUnits: [
+    { keyword: "45g", units: 100 },
+    { keyword: "180g", units: 32 }
+  ],
+  threePlTable: [
+    { group: "3PL 단가표", item: "보관료", unitPrice: 4000, unit: "월/평당", note: "청구제외 / 한시적 무상제공" },
+    { group: "3PL 단가표", item: "입고비용", unitPrice: null, unit: "건", note: "청구제외 / 한시적 무상제공" },
+    { group: "3PL 단가표", item: "물류솔루션", unitPrice: 300000, unit: "월별", note: "청구제외 / 한시적 무상제공" },
+    { group: "3PL 단가표", item: "택배운임비", unitPrice: 2500, unit: "건", note: "CJ대한통운(소형)" },
+    { group: "3PL 단가표", item: "택배운임비", unitPrice: 4000, unit: "건", note: "CJ대한통운(중형이상) / 박스단위 출고" },
+    { group: "3PL 단가표", item: "추가운임(제주도서산간)", unitPrice: null,
+      unitPriceLabel: "3,000~4,000", unit: "건", note: "지역HUB별 상이" },
+    { group: "3PL 단가표", item: "물류비", unitPrice: 800, unit: "건",
+      note: "포장·부자재 등 기본단가 (박스단위·용달 출고는 박스당)" },
+    { group: "3PL 단가표", item: "합포비", unitPrice: 100, unit: "개",
+      note: "한 박스에 2개 이상 출고 시 1개 초과 수량에만 부과 / 박스단위 출고 제외" },
+    { group: "3PL 단가표", item: "박스단위 출고", unitPrice: 4800, unit: "박스",
+      note: "택배비 4,000 + 포장비 800 / 필바이츠 45g(5P) 100개입, 180g(20P) 32개입" },
+    { group: "본사출고", item: "택배운임비", unitPrice: 3000, unit: "건", note: "로젠택배(소형)" },
+    { group: "본사출고", item: "택배운임비", unitPrice: 4000, unit: "건", note: "로젠택배(중형이상)" },
+    { group: "본사출고", item: "추가운임(제주도서산간)", unitPrice: null,
+      unitPriceLabel: "3,000~4,000", unit: "건", note: "지역HUB별 상이" },
+    { group: "본사출고", item: "부자재(박스)", unitPrice: 500, unit: "건", note: "" },
+    { group: "본사출고", item: "", unitPrice: null, unit: "",
+      note: "본사출고시 보관료/입고비/물류솔루션비 등 없음" }
+  ],
+  invoiceFootnotes: [
+    "입고비용 및 보관비용은 현재 입출고 건수가 작아 청구에 포함하지 않으며, \n 운송실비(당사가 3PL 지불하는 택배사운임비 + 물류비 + 합포비) 청구기준만 그대로 기재합니다.",
+    "퀵/용달 등 별도 운송비 발생시에는 개별기재합니다. 용달 출고분은 박스당 포장비만 청구합니다."
+  ]
+};
+
+// 정산월에 맞는 실비 기준. periods 중 from 이 그 달 이하인 마지막 것을 기본
+// 설정 위에 얹는다. 달을 모르면 기본 설정 그대로다.
+export function npbCostConfigForMonth(costConfig, month) {
+  const cfg = costConfig || {};
+  const periods = Array.isArray(cfg.periods) ? cfg.periods : [];
+  const m = String(month || "");
+  const hit = m
+    ? periods.filter((p) => p && p.from && String(p.from) <= m)
+      .sort((a, b) => String(a.from).localeCompare(String(b.from))).pop()
+    : null;
+  if (!hit) return cfg;
+  const { from, ...override } = hit;
+  return { ...cfg, ...override, periodFrom: from };
+}
+
 // NPB (도톤 운영대행) namespace seed — brand DOTEON, products, channels, and
 // per-channel line templates. Stored under db.npb via readDb/writeDb (C2-blob).
 export function buildNpbNamespace() {
@@ -684,6 +756,10 @@ export function buildNpbNamespace() {
         { group: "본사출고", item: "", unitPrice: null, unit: "",
           note: "본사출고시 보관료/입고비/물류솔루션비 등 없음" }
       ],
+      // 정산월별로 바뀌는 실비 기준. from 이후 달은 위 값 대신 이 값을 쓴다.
+      // 지난달 정산·청구서가 새 단가로 다시 그려지면 안 되므로 덮어쓰지 않고
+      // 기간으로 나눈다.
+      periods: [NPB_PICKY_LOGISTICS_2026_09],
       // 비용집계 표 아래에 붙는 주석. 줄바꿈은 양식 그대로 둔다.
       invoiceFootnotes: [
         "입고비용 및 보관비용은 현재 입출고 건수가 작아 청구에 포함하지 않으며, \n 운송실비(당사가 3PL 지불하는 택배사운임비 + 물류사용비) 청구기준만 그대로 기재합니다.",
@@ -1589,6 +1665,12 @@ function migrateDb(db) {
         }
         if (!cfg.adCostSheetUrl && seeded.costConfig?.adCostSheetUrl) {
           cfg.adCostSheetUrl = seeded.costConfig.adCostSheetUrl;
+          changed = true;
+        }
+        // 정산월별 실비 기준(periods)은 없을 때만 채운다. 버전을 올려 양식 값을
+        // 통째로 다시 씌우면 화면에서 고친 단가표까지 덮여 지난달 청구서가 바뀐다.
+        if (!Array.isArray(cfg.periods) && Array.isArray(seeded.costConfig?.periods)) {
+          cfg.periods = seeded.costConfig.periods;
           changed = true;
         }
         if (!Array.isArray(cfg.threePlTable) || !cfg.threePlTable.length) {
@@ -2983,6 +3065,11 @@ export function npbComputeShipping(counts, costConfig) {
       key: t.key,
       label: t.label || t.key,
       manual: Boolean(t.manual),
+      // 합포비처럼 건이 아니라 개수로 세는 항목. 출고 건수 합계에는 넣지 않는다.
+      itemCount: Boolean(t.itemCount),
+      source: t.source || "",
+      unitLabel: t.unitLabel || "건",
+      handlingLabel: t.handlingLabel || "",
       // 용달·퀵처럼 건별 사정이 다른 운송은 합계에 넣지 않고 개별 기재한다.
       excludeFromTotal: Boolean(t.excludeFromTotal),
       count,
@@ -2994,7 +3081,7 @@ export function npbComputeShipping(counts, costConfig) {
   const counted = breakdown.filter((b) => !b.excludeFromTotal);
   return {
     total: counted.reduce((sum, b) => sum + b.amount, 0),
-    countTotal: counted.reduce((sum, b) => sum + b.count, 0),
+    countTotal: counted.filter((b) => !b.itemCount).reduce((sum, b) => sum + b.count, 0),
     // 합계에서 뺀 항목도 청구 근거로 남긴다.
     separateTotal: breakdown.filter((b) => b.excludeFromTotal).reduce((sum, b) => sum + b.amount, 0),
     breakdown
@@ -3120,7 +3207,8 @@ function npbBases(db, settlement) {
   }
   return {
     brand,
-    costConfig: brand?.costConfig || {},
+    // 실비 단가는 정산월마다 다를 수 있다(periods). 그 달 기준을 고른다.
+    costConfig: npbCostConfigForMonth(brand?.costConfig || {}, settlement?.periodMonth),
     channels: (db.npb?.channels || []).filter(
       (c) => !brand || String(c.brandId).toLowerCase() === String(brand.id).toLowerCase()
     ),
@@ -3296,6 +3384,66 @@ export function npbInventoryFromLogistics(rows, products) {
   return { totals, unmatched: [...unmatched] };
 }
 
+// 3PL 출고내역을 송장(=박스) 단위로 묶어 실비 항목별 수량을 센다.
+//
+// - 박스단위 출고: 송장 안에 박스 입수(boxUnits) 이상인 상품이 있으면 그
+//   송장은 박스로 센다. 상품별 ceil(수량 / 입수) 를 더한다. 합포비 없음.
+// - 그 밖의 송장은 일반 택배 1건이고, 재고 수량이 2개 이상이면 1개를 넘는
+//   수량만큼 합포비를 센다.
+// 재고 수량은 입출고 재고 집계와 같은 규칙(재고매칭 칸)으로 센다. 정산월이
+// 주어지면 다른 달 출고 행은 뺀다.
+export function npbCountParcels(rows, products, boxUnits, month = "") {
+  const list = (Array.isArray(rows) ? rows : []).filter((r) => r && typeof r === "object");
+  const sizeOf = (name) => {
+    const hit = (boxUnits || []).find((b) => b?.keyword && String(name || "").includes(b.keyword));
+    return hit ? number(hit.units) : 0;
+  };
+  const names = new Map((products || []).map((p) => [p.id, p.name]));
+  // 송장 칸 이름이 양식마다 조금씩 다르다("운송장 번호" 등). 공백을 빼고 찾는다.
+  const invoiceCol = (row) => Object.keys(row).find((k) => /송장번호/.test(k.replace(/\s+/g, "")));
+  const hasInvoiceCol = list.some((row) => invoiceCol(row));
+  const groups = new Map();
+  let skippedOtherMonth = 0;
+  let skippedUnshipped = 0;
+  list.forEach((row, i) => {
+    const m = npbLogisticsRowMonth(row);
+    if (month && m && m !== month) { skippedOtherMonth++; return; }
+    const col = invoiceCol(row);
+    const invoice = col ? String(row[col] ?? "").trim() : "";
+    // 송장이 없거나(송장 칸이 있는 양식) 출고상세인데 출고일시가 없으면 아직
+    // 안 나간 주문이다 — 건수·합포비에 넣지 않는다.
+    if ((hasInvoiceCol && !invoice) || (row["재고매칭(1)주문수량"] !== undefined && !m)) {
+      skippedUnshipped++;
+      return;
+    }
+    const key = invoice
+      || String(row["주문번호"] ?? row["판매처주문번호"] ?? "").trim()
+      || `#${i}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  });
+  let parcels = 0;
+  let boxes = 0;
+  let boxParcels = 0;
+  let extraUnits = 0;
+  const unmatched = new Set();
+  for (const groupRows of groups.values()) {
+    const { totals, unmatched: miss } = npbInventoryFromLogistics(groupRows, products);
+    miss.forEach((name) => unmatched.add(name));
+    const items = [...totals.entries()].map(([id, t]) => ({ qty: t.outbound, size: sizeOf(names.get(id)) }));
+    const isBox = items.some((it) => it.size && it.qty >= it.size);
+    if (isBox) {
+      boxParcels++;
+      boxes += items.reduce((sum, it) => sum + (it.size ? Math.ceil(it.qty / it.size) : 0), 0);
+      continue;
+    }
+    parcels++;
+    const units = items.reduce((sum, it) => sum + it.qty, 0);
+    extraUnits += Math.max(0, units - 1);
+  }
+  return { parcels, boxes, boxParcels, extraUnits, skippedOtherMonth, skippedUnshipped, unmatched: [...unmatched] };
+}
+
 // 입출고 행이 어느 달 것인지. 입출고 원장은 입출고일자, 출고상세는 출고일시를
 // 본다. 주문일자는 쓰지 않는다 — 말일 주문이 다음 달에 나가면 재고는 다음 달에
 // 빠진다. 날짜를 못 찾으면 "" 이고, 그 행은 거르지 않는다.
@@ -3408,7 +3556,11 @@ function npbBuildInvoice(db, settlement, type) {
         count: number(row.count),
         unit: row.manual ? 0 : number(row.freight) + number(row.handling),
         amount: number(row.amount),
-        note: row.manual ? "건별 실비" : `운임 ${number(row.freight).toLocaleString()} + 부자재/피킹 ${number(row.handling).toLocaleString()}`
+        note: row.manual
+          ? "건별 실비"
+          : row.handlingLabel && !number(row.freight)
+            ? `${row.handlingLabel} ${number(row.handling).toLocaleString()} × ${number(row.count).toLocaleString()}${row.unitLabel || "건"}`
+            : `운임 ${number(row.freight).toLocaleString()} + 부자재/피킹 ${number(row.handling).toLocaleString()}`
       });
     }
     // 합계는 3PL·본사만 센다. 용달/퀵은 건마다 사정이 달라 개별기재하고,
@@ -3434,7 +3586,8 @@ function npbBuildInvoice(db, settlement, type) {
       separateRows: separate.map((row) => ({
         label: row.label, count: number(row.count), amount: number(row.amount)
       })),
-      countTotal: counted.reduce((sum, row) => sum + number(row.count), 0),
+      // 합포비는 개수라 출고 건수 합계에 넣지 않는다.
+      countTotal: counted.filter((row) => !row.itemCount).reduce((sum, row) => sum + number(row.count), 0),
       subtotal,
       separateTotal,
       billed: subtotal + separateTotal,
@@ -3444,7 +3597,8 @@ function npbBuildInvoice(db, settlement, type) {
       // 올린 파일 그대로. 출고 유형마다 시트 한 장씩 나간다 — 파일을 안 올린
       // 유형도 빈 장으로 둔다. 장이 통째로 없으면 안 올린 것인지 0건인지
       // 구분이 안 된다.
-      sources: breakdown.map((row) => {
+      // 박스단위·합포비는 3PL 파일에서 함께 센 값이라 따로 올린 파일이 없다.
+      sources: breakdown.filter((row) => !row.source).map((row) => {
         const file = (settlement.shipFiles || {})[row.key] || {};
         return {
           shipType: row.key,
@@ -9361,14 +9515,42 @@ async function routeApi(req, res, url) {
           uploadedAt: now()
         };
         const counts = { ...(settlement.logistics?.counts || {}) };
-        const prev = counts[shipType];
-        const entry = prev && typeof prev === "object" ? { ...prev } : { count: number(prev) };
-        entry.count = counted.count;
-        counts[shipType] = entry;
+        const setCount = (key, count) => {
+          const prev = counts[key];
+          const entry = prev && typeof prev === "object" ? { ...prev } : { count: number(prev) };
+          entry.count = count;
+          counts[key] = entry;
+        };
+        setCount(shipType, counted.count);
+        // 이 파일에서 함께 세는 항목(박스단위·합포비)이 있는 기준이면 송장
+        // 단위로 다시 센다. 일반 택배 건수도 박스단위 송장을 뺀 값이 된다.
+        const bases = npbBases(db, settlement);
+        const derived = (bases.costConfig.shipTypes || []).filter((t) => t.source === shipType);
+        const warnings = [];
+        if (derived.length) {
+          const parcel = npbCountParcels(rows, bases.products, bases.costConfig.boxUnits,
+            String(settlement.periodMonth || ""));
+          setCount(shipType, parcel.parcels);
+          for (const t of derived) {
+            if (t.key.endsWith("_box")) setCount(t.key, parcel.boxes);
+            if (t.key.endsWith("_bundle")) setCount(t.key, parcel.extraUnits);
+          }
+          settlement.shipFiles[shipType].parcelCount = parcel;
+          if (parcel.skippedOtherMonth) {
+            warnings.push(`정산월(${settlement.periodMonth}) 밖 출고 ${parcel.skippedOtherMonth}행은 제외했습니다.`);
+          }
+          if (parcel.skippedUnshipped) {
+            warnings.push(`송장번호·출고일시가 없는(미출고) ${parcel.skippedUnshipped}행은 제외했습니다.`);
+          }
+          if (parcel.unmatched.length) {
+            warnings.push(`상품을 알 수 없어 합포 수량에서 빠진 항목 ${parcel.unmatched.length}건: ${parcel.unmatched.slice(0, 3).join(", ")}`);
+          }
+        }
         const computed = npbRecompute(db, settlement, { logistics: { counts } });
         await writeDb(db);
         sendJson(res, 200, {
           shipType,
+          warnings,
           file: settlement.shipFiles[shipType],
           logistics: computed.logistics,
           rollup: computed.rollup
