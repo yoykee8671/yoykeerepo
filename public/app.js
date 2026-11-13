@@ -837,6 +837,11 @@ function renderApp() {
   startPsBadgePolling();
 }
 
+// 우프코드(v2 통합 고유코드) 표시. 없으면 빈칸.
+function codeTag(item) {
+  return item?.code ? `<span class="code-tag">${h(item.code)}</span> ` : "";
+}
+
 // 대분류에 하위 메뉴가 있으면 사이드바에서 그 아래로 펼친다. 대분류마다
 // 하위 메뉴 목록과, 선택 상태를 들고 있는 state 키를 여기 한 곳에 적는다.
 const TAB_SUBMENUS = {
@@ -1596,7 +1601,7 @@ function renderPrices() {
                 <tr>
                   <td>${h(item.brandName)}</td>
                   <td>${h(item.itemCode)}</td>
-                  <td>${h(item.itemName)}</td>
+                  <td>${codeTag(item)}${h(item.itemName)}</td>
                   <td>${h(item.spec || item.unit || "")}</td>
                   <td>${money.format(Number(item.supplyPrice || 0))}원</td>
                   <td>${money.format(Number(item.originalPrice || item.consumerPrice || 0))}원</td>
@@ -1619,7 +1624,7 @@ function renderPrices() {
                   <tr>
                     <td>${h(item.brandName)}</td>
                     <td>${h(item.itemCode)}</td>
-                    <td>${h(item.itemName)}</td>
+                    <td>${codeTag(item)}${h(item.itemName)}</td>
                     <td>${money.format(Number(item.supplyPrice || 0))}원</td>
                     <td>${money.format(Number(item.originalPrice || item.consumerPrice || 0))}원</td>
                     <td>${money.format(Number(item.discountPrice || 0))}원</td>
@@ -1880,7 +1885,7 @@ function renderBrandRow(brand) {
   const share = `${location.origin}/share/${brand.shareToken}`;
   return `
     <tr>
-      <td>${brand.starred ? "★ " : ""}${h(brand.name)}</td>
+      <td>${codeTag(brand)}${brand.starred ? "★ " : ""}${h(brand.name)}</td>
       <td><span class="badge">${brand.type === "reference" ? "참고시트" : settlementLabel(brand.settlementType)}</span></td>
       <td>${money.format(brand.requestCount || 0)}건</td>
       <td>${brand.hasReceivable ? `${money.format(brand.receivableRemaining || 0)}원` : `${money.format(brand.totalAmount || 0)}원`}</td>
@@ -2046,6 +2051,22 @@ function renderBrandForm() {
         <div><label>사업자번호</label><input name="businessNumber" value="${h(b.businessNumber)}"></div>
       </div>
       <div class="field"><label>대표자명</label><input name="representativeName" value="${h(b.representativeName)}"></div>
+      <div class="field two">
+        <div>
+          <label>연결 거래처 <span class="muted" style="font-weight:400">(같은 회사면 연결)</span></label>
+          <select name="partnerCode">
+            <option value="">연결 안 함</option>
+            ${(state.partners || []).filter((p) => p.code).map((p) => `<option value="${h(p.code)}" ${b.partnerCode === p.code ? "selected" : ""}>${h(p.code)} · ${h(p.name)}</option>`).join("")}
+          </select>
+        </div>
+        <div>
+          <label>사업부 <span class="muted" style="font-weight:400">(손익·KPI 구분)</span></label>
+          <select name="businessUnit">
+            <option value="">미지정</option>
+            ${[["wooof", "우프(입점)"], ["pb", "PB"], ["npb", "NPB"], ["service", "용역"]].map(([k, l]) => `<option value="${k}" ${b.businessUnit === k ? "selected" : ""}>${l}</option>`).join("")}
+          </select>
+        </div>
+      </div>
       <div class="field">
         <label>입금계좌 <span class="muted" style="font-weight:400">(거래관리 &gt; 계좌관리 목록에서 선택 · 이체양식 기본값)</span></label>
         <select name="transferAccountId" data-brand-transfer-account>
@@ -2274,7 +2295,7 @@ function renderPermissionGrid(admin) {
 function renderAdminRow(admin) {
   return `
     <tr>
-      <td>${h(admin.name)}</td>
+      <td>${codeTag(admin)}${h(admin.name)}</td>
       <td>${h(admin.email)}</td>
       <td><span class="badge">${h(admin.role)}</span></td>
       <td>${admin.isActive ? "Y" : "N"}</td>
@@ -4602,7 +4623,7 @@ function renderPartners() {
 function renderPartnerRow(item) {
   return `
     <tr>
-      <td>${h(item.name)}<br><span class="muted">${PARTNER_CATEGORY_LABELS[item.category] || item.category}</span></td>
+      <td>${codeTag(item)}${h(item.name)}<br><span class="muted">${PARTNER_CATEGORY_LABELS[item.category] || item.category}</span></td>
       <td>${h(item.businessName)}</td>
       <td>${h(item.contactName)}${item.contactPhone ? ` · ${h(item.contactPhone)}` : ""}</td>
       <td>${h(item.orderMethod)}</td>
@@ -4774,7 +4795,7 @@ function renderMaterialRow(item) {
   const partner = (state.partners || []).find((p) => p.id === item.partnerId);
   return `
     <tr>
-      <td>${h(item.itemName)}${item.itemCode ? `<br><span class="muted" style="font-size:11px">${h(item.itemCode)}</span>` : ""}</td>
+      <td>${codeTag(item)}${h(item.itemName)}${item.itemCode ? `<br><span class="muted" style="font-size:11px">${h(item.itemCode)}</span>` : ""}</td>
       <td>${h(item.category)}</td>
       <td>${h(partner?.name || "")}</td>
       <td>${h(item.orderUnit)}</td>
@@ -4889,7 +4910,7 @@ function renderTransferAccounts() {
             <thead><tr><th>별칭</th><th>은행</th><th>계좌번호</th><th>예금주</th><th>연결 브랜드</th><th>작업</th></tr></thead>
             <tbody>${rows.map((acc) => `
               <tr>
-                <td>${h(acc.alias)}</td>
+                <td>${codeTag(acc)}${h(acc.alias)}</td>
                 <td>${h(acc.bankName)}</td>
                 <td><code>${h(acc.accountNumber)}</code></td>
                 <td>${h(acc.holder)}</td>
@@ -5010,7 +5031,7 @@ function renderDeliveryPlaces() {
 function renderDeliveryPlaceRow(item) {
   return `
     <tr>
-      <td>${h(item.name)}</td>
+      <td>${codeTag(item)}${h(item.name)}</td>
       <td>${h(item.address)}</td>
       <td>${h(item.contactName)}${item.contactPhone ? ` · ${h(item.contactPhone)}` : ""}</td>
       <td><div class="row-actions"><button data-edit-delivery-place="${item.id}">수정</button><button data-edit-procurement-popup="deliveryPlace" data-record-id="${item.id}">새 창</button><button class="danger icon-btn" data-delete-delivery-place="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>

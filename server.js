@@ -1719,6 +1719,8 @@ function migrateDb(db) {
     const cafe24Seed = buildCafe24Namespace();
     for (const key of Object.keys(cafe24Seed)) touch(db.cafe24, key, cafe24Seed[key]);
   }
+  // 우프코드 일괄 부여(처음 한 번). 이후에는 저장할 때마다 새 항목에 붙는다.
+  if (assignCodes(db) > 0) changed = true;
   return { db, changed };
 }
 
@@ -1802,7 +1804,80 @@ async function readDb() {
   return JSON.parse(await readFile(DB_PATH, "utf8"));
 }
 
+// ---------------------------------------------------------------------------
+// 우프코드 (v2 통합 고유코드). 브랜드·거래처·원부자재·납품지·관리자·단가표
+// 품목·입금계좌에 사람이 읽는 코드를 붙인다. 이름이 겹치거나 바뀌어도 연결은
+// 코드로 한다. 한 번 붙은 코드는 바뀌지 않고, 지운 코드도 다시 쓰지 않는다
+// (db.codeSeq 가 지금까지 쓴 가장 큰 번호를 기억한다).
+// 명세서·발주서는 이미 문서번호(docNo)가 있어 그것을 코드로 쓴다.
+// ---------------------------------------------------------------------------
+// 사업부(손익 단위). KPI 설계(kpi/DESIGN.md)·AI_CFO 지표정의와 같은 구분.
+export const BUSINESS_UNITS = {
+  wooof: "우프(입점)",
+  pb: "PB",
+  npb: "NPB",
+  service: "용역"
+};
+
+export const CODE_SCHEMES = [
+  { collection: "brands", prefix: "BR", width: 4, label: "브랜드" },
+  { collection: "partners", prefix: "PT", width: 4, label: "거래처" },
+  { collection: "materials", prefix: "MT", width: 4, label: "원부자재" },
+  { collection: "deliveryPlaces", prefix: "DP", width: 3, label: "납품지" },
+  { collection: "admins", prefix: "AD", width: 2, label: "관리자" },
+  // 단가표는 가격이 바뀔 때마다 줄이 새로 생긴다(가격 이력). 코드는 줄이 아니라
+  // 품목(같은 브랜드의 같은 상품코드, 없으면 같은 품목명)에 붙여 이력끼리 공유한다.
+  { collection: "priceEntries", prefix: "IT", width: 5, label: "단가표 품목",
+    groupKey: (e) => `${e.brandId || ""}|${String(e.itemCode || "").trim() || String(e.itemName || "").trim()}` },
+  { collection: "transferAccounts", prefix: "AC", width: 4, label: "입금계좌" }
+];
+
+// 코드가 없는 항목에 번호를 붙인다. 만든 순서(createdAt)대로 붙여 오래된
+// 것이 작은 번호를 갖는다. 붙인 개수를 돌려준다.
+export function assignCodes(db) {
+  if (!db.codeSeq || typeof db.codeSeq !== "object") db.codeSeq = {};
+  let assigned = 0;
+  for (const scheme of CODE_SCHEMES) {
+    const list = Array.isArray(db[scheme.collection]) ? db[scheme.collection] : [];
+    const pattern = new RegExp(`^${scheme.prefix}-(\\d+)$`);
+    let seq = number(db.codeSeq[scheme.prefix]);
+    for (const item of list) {
+      const m = String(item?.code || "").match(pattern);
+      if (m) seq = Math.max(seq, Number(m[1]));
+    }
+    const missing = list
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => item && typeof item === "object" && !pattern.test(String(item.code || "")))
+      .sort((a, b) => String(a.item.createdAt || "").localeCompare(String(b.item.createdAt || "")) || a.index - b.index);
+    // 같은 품목끼리 코드를 나눠 쓰는 경우, 이미 코드가 있는 형제의 코드를 쓴다.
+    const shared = new Map();
+    if (scheme.groupKey) {
+      for (const item of list) {
+        if (item && pattern.test(String(item.code || ""))) {
+          const key = scheme.groupKey(item);
+          if (!shared.has(key)) shared.set(key, item.code);
+        }
+      }
+    }
+    for (const { item } of missing) {
+      const key = scheme.groupKey ? scheme.groupKey(item) : null;
+      if (key && shared.has(key)) {
+        item.code = shared.get(key);
+      } else {
+        seq += 1;
+        item.code = `${scheme.prefix}-${String(seq).padStart(scheme.width, "0")}`;
+        if (key) shared.set(key, item.code);
+      }
+      assigned += 1;
+    }
+    db.codeSeq[scheme.prefix] = seq;
+  }
+  return assigned;
+}
+
 async function writeDb(db) {
+  // 어떤 경로로 만들어졌든(화면·엑셀 일괄·카페24 자동 생성) 저장 전에 코드를 붙인다.
+  assignCodes(db);
   if (pgPool) {
     await writePostgresDb(db);
     cachedDb = db;
@@ -7321,6 +7396,9 @@ async function routeApi(req, res, url) {
       bankLabel: String(body.bankLabel || "").trim(),
       transferAccountId: String(body.transferAccountId || "").trim(),
       withdrawMemo: String(body.withdrawMemo || "").trim(),
+      // v2: 같은 회사의 거래처(우프코드)와 손익을 나눌 사업부.
+      partnerCode: String(body.partnerCode || "").trim(),
+      businessUnit: BUSINESS_UNITS[body.businessUnit] ? body.businessUnit : "",
       priceBasis: body.priceBasis === "catalog" ? "catalog" : "cafe24",
       shareToken: crypto.randomBytes(12).toString("hex"),
       createdAt: now(),
@@ -7381,11 +7459,14 @@ async function routeApi(req, res, url) {
       "bankLabel",
       "transferAccountId",
       "withdrawMemo",
+      "partnerCode",
+      "businessUnit",
       "priceBasis"
     ]) {
       if (key in body) brand[key] = body[key];
     }
     if ("withdrawMemo" in body) brand.withdrawMemo = String(body.withdrawMemo || "").trim();
+    if ("businessUnit" in body && !BUSINESS_UNITS[brand.businessUnit]) brand.businessUnit = "";
     applyTransferAccount(db, brand);
     if ("autoCreateRequests" in body) {
       brand.autoCreateRequests = body.autoCreateRequests === true || body.autoCreateRequests === "true";
@@ -10015,7 +10096,7 @@ async function routeApi(req, res, url) {
   }
 
   const PARTNER_EXPORT_HEADERS = [
-    "ID", "분류", "거래처명", "상호명", "사업자등록번호", "대표자명", "주소",
+    "ID", "우프코드", "분류", "거래처명", "상호명", "사업자등록번호", "대표자명", "주소",
     "세금계산서 발행 메일", "은행", "계좌번호", "예금주명", "발주방식", "증빙구분",
     "담당자명", "담당자 연락처", "담당자 이메일", "메모", "사용상태"
   ];
@@ -10025,7 +10106,7 @@ async function routeApi(req, res, url) {
     // 기존 데이터가 딸려오면 오히려 지우는 품이 든다.
     const blank = url.searchParams.get("mode") === "blank";
     const rows = blank ? [] : (db.partners || []).map((p) => [
-      p.id, PARTNER_CATEGORY_LABELS[p.category] || p.category, p.name, p.businessName,
+      p.id, p.code || "", PARTNER_CATEGORY_LABELS[p.category] || p.category, p.name, p.businessName,
       p.businessNumber, p.representativeName, p.address, p.invoiceEmail, p.bankName,
       p.bankAccount, p.depositorName, p.orderMethod, p.invoiceTiming, p.contactName,
       p.contactPhone, p.contactEmail, p.note, p.isActive !== false ? "Y" : "N"
@@ -10179,14 +10260,14 @@ async function routeApi(req, res, url) {
   }
 
   const MATERIAL_EXPORT_HEADERS = [
-    "ID", "거래처명", "품목명", "코드(바코드)", "카테고리", "발주단위", "기본공급가", "리드타임(일)", "메모", "사용상태"
+    "ID", "우프코드", "거래처명", "품목명", "코드(바코드)", "카테고리", "발주단위", "기본공급가", "리드타임(일)", "메모", "사용상태"
   ];
 
   if (pathname === "/api/materials/export" && method === "GET") {
     const blank = url.searchParams.get("mode") === "blank";
     const partnerName = (partnerId) => (db.partners || []).find((p) => p.id === partnerId)?.name || "";
     const rows = blank ? [] : (db.materials || []).map((m) => [
-      m.id, partnerName(m.partnerId), m.itemName, m.itemCode || "", m.category, m.orderUnit,
+      m.id, m.code || "", partnerName(m.partnerId), m.itemName, m.itemCode || "", m.category, m.orderUnit,
       m.basePrice || "", m.leadTimeDays || "", m.note, m.isActive !== false ? "Y" : "N"
     ]);
     const buffer = await buildRowsXlsx("원부자재", MATERIAL_EXPORT_HEADERS, rows);
@@ -10673,11 +10754,11 @@ async function routeApi(req, res, url) {
     return;
   }
 
-  const DELIVERY_PLACE_EXPORT_HEADERS = ["ID", "납품지명", "주소", "담당자명", "전화번호", "메모"];
+  const DELIVERY_PLACE_EXPORT_HEADERS = ["ID", "우프코드", "납품지명", "주소", "담당자명", "전화번호", "메모"];
 
   if (pathname === "/api/delivery-places/export" && method === "GET") {
     const blank = url.searchParams.get("mode") === "blank";
-    const rows = blank ? [] : (db.deliveryPlaces || []).map((d) => [d.id, d.name, d.address, d.contactName, d.contactPhone, d.note]);
+    const rows = blank ? [] : (db.deliveryPlaces || []).map((d) => [d.id, d.code || "", d.name, d.address, d.contactName, d.contactPhone, d.note]);
     const buffer = await buildRowsXlsx("납품지", DELIVERY_PLACE_EXPORT_HEADERS, rows);
     sendBuffer(res, 200, buffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       { "content-disposition": contentDisposition(blank ? "납품지_양식.xlsx" : "납품지.xlsx") });
