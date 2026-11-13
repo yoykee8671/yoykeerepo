@@ -2369,3 +2369,8 @@ a.button:hover {
 .sales-stage { border-left: 3px solid #e2e8f0; padding: 6px 0 10px 12px; margin-bottom: 4px; }
 .sales-stage.done { border-left-color: #16a34a; }
 .sales-stage-title { font-weight: 600; margin-bottom: 4px; }
+
+/* v2 생산·재고 */
+.stock-table .num { text-align: right; white-space: nowrap; }
+.stock-need td { background: #fff7ed; }
+.stock-void td { text-decoration: line-through; }

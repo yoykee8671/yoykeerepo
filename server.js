@@ -19,6 +19,7 @@ import { createErpStore } from "./lib/erp-store.mjs";
 import * as payments from "./lib/payment-requests.mjs";
 import * as cashReport from "./lib/cash-report.mjs";
 import * as sales from "./lib/sales-orders.mjs";
+import * as inventory from "./lib/inventory.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -1749,6 +1750,14 @@ function migrateDb(db) {
     if (Array.isArray(perms.procurement) && perms.procurement.includes("view")) grant.push("view", "create", "edit");
     if (Array.isArray(perms.requests) && perms.requests.includes("pay")) grant.push("invoice", "receive");
     perms.sales = [...new Set(grant)];
+    changed = true;
+  }
+  // v2 생산·재고: 거래관리를 쓰던 사람에게 같은 범위로 연다.
+  for (const admin of db.admins || []) {
+    const perms = admin.permissions;
+    if (!perms || typeof perms !== "object" || Array.isArray(perms.stock)) continue;
+    const proc = Array.isArray(perms.procurement) ? perms.procurement : [];
+    perms.stock = proc.includes("view") ? (proc.includes("edit") ? ["view", "edit"] : ["view"]) : [];
     changed = true;
   }
   // v2 자금 메뉴: 입금완료 처리 권한자(경영지원)에게 열어 둔다.
@@ -5402,7 +5411,9 @@ const MENU_REGISTRY = [
   // v2 자금: 일일 자금보고·자금 일정(정기 나갈 돈/들어올 돈).
   { key: "cash", label: "자금", actions: ["view", "edit"] },
   // v2 판매: 주문접수 → 명세서 → 업체전달 → 청구·계산서 → 입금확인.
-  { key: "sales", label: "판매", actions: ["view", "create", "edit", "invoice", "receive"] }
+  { key: "sales", label: "판매", actions: ["view", "create", "edit", "invoice", "receive"] },
+  // v2 생산: 원부자재 재고·제품 구성(BOM)·생산 기록.
+  { key: "stock", label: "생산·재고", actions: ["view", "edit"] }
 ];
 
 const ACTION_LABELS = {
@@ -5436,6 +5447,7 @@ function defaultPermissions(role) {
     else if (menu.key === "payments") all[menu.key] = ["view", "create", "edit"];
     else if (menu.key === "cash") all[menu.key] = [];
     else if (menu.key === "sales") all[menu.key] = ["view", "create", "edit"];
+    else if (menu.key === "stock") all[menu.key] = ["view", "edit"];
     else if (menu.key === "admins") all[menu.key] = ["view"];
     else all[menu.key] = [...menu.actions];
   }
@@ -10631,6 +10643,196 @@ async function routeApi(req, res, url) {
     } catch (error) {
       sendJson(res, 500, { error: `${label} ${format === "pdf" ? "PDF " : ""}생성 실패: ${error.message}` });
     }
+    return;
+  }
+
+  // --- v2 생산·원부자재 재고 ----------------------------------------------------
+  if (pathname === "/api/stock" || pathname.startsWith("/api/stock/")) {
+    if (!requirePermission(actor, res, "stock", "view")) return;
+    const who = actor.name || actor.email || "";
+    const locations = [
+      { key: "HQ", name: "우프 창고" },
+      ...(db.partners || []).filter((p) => p.category === "production" && p.isActive !== false)
+        .map((p) => ({ key: p.id, name: p.name }))
+    ];
+    const qtyOf = (v) => Math.round(number(String(v ?? "").replace(/,/g, "")) * 1000) / 1000;
+    const loadAll = async () => {
+      const [moves, runs, products, settingsList] = await Promise.all([
+        erp.list("stockMoves"), erp.list("stockRuns"), erp.list("stockProducts"), erp.list("stockSettings")
+      ]);
+      return { moves, runs, products, settings: Object.fromEntries(settingsList.map((s) => [s.id, s])) };
+    };
+
+    if (pathname === "/api/stock" && method === "GET") {
+      const all = await loadAll();
+      const status = inventory.stockStatus({ materials: db.materials || [], ...all });
+      const producible = all.products.map((p) => ({
+        productId: p.id,
+        byLocation: locations.map((l) => ({ location: l.key, ...inventory.producible(p, all.moves, l.key) }))
+          .filter((x) => x.quantity > 0)
+      }));
+      sendJson(res, 200, {
+        status, producible, locations, moveTypes: inventory.MOVE_TYPES,
+        moves: all.moves.slice().sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")) || String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 300),
+        runs: all.runs, products: all.products, settings: all.settings
+      });
+      return;
+    }
+
+    if (!requirePermission(actor, res, "stock", "edit")) return;
+
+    // 입출고 기록. 이동은 보낸 곳/받은 곳 두 줄, 실사는 센 수량과의 차이로 저장한다.
+    if (pathname === "/api/stock/moves" && method === "POST") {
+      const body = await readBody(req);
+      const material = (db.materials || []).find((m) => m.id === body.materialId);
+      if (!material) { sendJson(res, 400, { error: "원부자재를 고르세요." }); return; }
+      const location = String(body.location || "").trim();
+      if (!locations.some((l) => l.key === location)) { sendJson(res, 400, { error: "보관처를 고르세요." }); return; }
+      const type = String(body.type || "");
+      const date = dateOnly(body.date) || kstToday();
+      const memo = String(body.memo || "").trim().slice(0, 300);
+      const base = { materialId: material.id, date, memo, createdAt: now(), createdBy: who };
+      const rows = [];
+      if (type === "move") {
+        const to = String(body.toLocation || "").trim();
+        if (!locations.some((l) => l.key === to) || to === location) { sendJson(res, 400, { error: "받는 보관처를 고르세요." }); return; }
+        const qty = qtyOf(body.qty);
+        if (qty <= 0) { sendJson(res, 400, { error: "수량을 입력하세요." }); return; }
+        const pair = id("mvpair");
+        rows.push({ ...base, id: id("mv"), type: "move_out", location, qty, pairId: pair });
+        rows.push({ ...base, id: id("mv"), type: "move_in", location: to, qty, pairId: pair });
+      } else if (type === "adjust") {
+        const counted = qtyOf(body.counted);
+        const current = inventory.stockByLocation(await erp.list("stockMoves"))[`${material.id}|${location}`] || 0;
+        const diff = Math.round((counted - current) * 1000) / 1000;
+        if (!diff) { sendJson(res, 400, { error: "센 수량이 지금 재고와 같습니다." }); return; }
+        rows.push({ ...base, id: id("mv"), type: "adjust", location, qty: diff, memo: memo || `실사 ${counted} (기존 ${current})` });
+      } else if (["in", "out"].includes(type)) {
+        const qty = qtyOf(body.qty);
+        if (qty <= 0) { sendJson(res, 400, { error: "수량을 입력하세요." }); return; }
+        rows.push({ ...base, id: id("mv"), type, location, qty, unitPrice: Math.max(0, number(body.unitPrice)) || undefined });
+      } else {
+        sendJson(res, 400, { error: "구분을 고르세요." });
+        return;
+      }
+      for (const r of rows) await erp.put("stockMoves", r);
+      sendJson(res, 201, { moves: rows });
+      return;
+    }
+
+    const voidMatch = pathname.match(/^\/api\/stock\/moves\/([^/]+)\/void$/);
+    if (voidMatch && method === "POST") {
+      const all = await erp.list("stockMoves");
+      const target = all.find((m) => m.id === voidMatch[1]);
+      if (!target) { sendJson(res, 404, { error: "기록을 찾을 수 없습니다." }); return; }
+      if (target.refType === "production") { sendJson(res, 400, { error: "생산투입은 생산 기록을 취소하세요." }); return; }
+      // 이동은 짝까지 함께 무른다.
+      for (const m of all.filter((x) => x.id === target.id || (target.pairId && x.pairId === target.pairId))) {
+        await erp.put("stockMoves", { ...m, voided: true, voidedAt: now(), voidedBy: who });
+      }
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    const settingMatch = pathname.match(/^\/api\/stock\/settings\/([^/]+)$/);
+    if (settingMatch && method === "PUT") {
+      const body = await readBody(req);
+      if (!(db.materials || []).some((m) => m.id === settingMatch[1])) { sendJson(res, 404, { error: "원부자재를 찾을 수 없습니다." }); return; }
+      const prior = (await erp.get("stockSettings", settingMatch[1])) || { id: settingMatch[1] };
+      const next = { ...prior, updatedAt: now() };
+      for (const key of ["safetyStock", "orderMultiple", "leadTimeDays"]) if (key in body) next[key] = Math.max(0, qtyOf(body[key]));
+      if ("unit" in body) next.unit = String(body.unit || "").trim().slice(0, 20);
+      if ("tracked" in body) next.tracked = body.tracked !== false && body.tracked !== "false";
+      await erp.put("stockSettings", next);
+      sendJson(res, 200, { setting: next });
+      return;
+    }
+
+    const productMatch = pathname.match(/^\/api\/stock\/products(?:\/([^/]+))?$/);
+    if (productMatch && (method === "POST" || method === "PUT")) {
+      const body = await readBody(req);
+      const prior = productMatch[1] ? await erp.get("stockProducts", productMatch[1]) : null;
+      if (productMatch[1] && !prior) { sendJson(res, 404, { error: "제품을 찾을 수 없습니다." }); return; }
+      const lines = (Array.isArray(body.lines) ? body.lines : [])
+        .map((l) => ({ materialId: String(l.materialId || ""), perUnit: Math.max(0, qtyOf(l.perUnit)), lossRate: Math.min(100, Math.max(0, qtyOf(l.lossRate))) }))
+        .filter((l) => l.materialId && l.perUnit > 0 && (db.materials || []).some((m) => m.id === l.materialId));
+      const rec = {
+        ...(prior || { id: id("bom"), createdAt: now() }),
+        name: String(body.name || prior?.name || "").trim().slice(0, 200),
+        unit: String(body.unit || prior?.unit || "개").trim().slice(0, 20),
+        lines,
+        memo: String(body.memo ?? prior?.memo ?? "").trim().slice(0, 500),
+        updatedAt: now()
+      };
+      if (!rec.name) { sendJson(res, 400, { error: "제품명을 입력하세요." }); return; }
+      if (!rec.lines.length) { sendJson(res, 400, { error: "원부자재를 한 줄 이상 넣으세요." }); return; }
+      await erp.put("stockProducts", rec);
+      sendJson(res, prior ? 200 : 201, { product: rec });
+      return;
+    }
+    if (productMatch && productMatch[1] && method === "DELETE") {
+      if ((await erp.list("stockRuns")).some((r) => r.productId === productMatch[1] && r.status !== "cancelled")) {
+        sendJson(res, 400, { error: "생산 기록이 있는 제품은 지울 수 없습니다." });
+        return;
+      }
+      await erp.remove("stockProducts", productMatch[1]);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // 생산 기록. 완료하면 BOM 대로 그 공장 재고에서 생산투입을 만든다.
+    if (pathname === "/api/stock/runs" && method === "POST") {
+      const body = await readBody(req);
+      const product = await erp.get("stockProducts", String(body.productId || ""));
+      if (!product) { sendJson(res, 400, { error: "제품을 고르세요." }); return; }
+      const location = String(body.location || "").trim();
+      if (!locations.some((l) => l.key === location)) { sendJson(res, 400, { error: "생산처를 고르세요." }); return; }
+      const quantity = Math.round(qtyOf(body.quantity));
+      if (quantity <= 0) { sendJson(res, 400, { error: "생산 수량을 입력하세요." }); return; }
+      const run = {
+        id: id("run"), productId: product.id, productName: product.name, location, quantity,
+        date: dateOnly(body.date) || kstToday(), status: body.status === "done" ? "done" : "planned",
+        memo: String(body.memo || "").trim().slice(0, 300), createdAt: now(), createdBy: who
+      };
+      await erp.put("stockRuns", run);
+      if (run.status === "done") {
+        for (const m of inventory.consumptionMoves(run, product)) await erp.put("stockMoves", { ...m, id: id("mv"), createdAt: now(), createdBy: who });
+      }
+      sendJson(res, 201, { run });
+      return;
+    }
+
+    const runAction = pathname.match(/^\/api\/stock\/runs\/([^/]+)\/(complete|cancel)$/);
+    if (runAction && method === "POST") {
+      const body = await readBody(req);
+      const run = await erp.get("stockRuns", runAction[1]);
+      if (!run) { sendJson(res, 404, { error: "생산 기록을 찾을 수 없습니다." }); return; }
+      if (runAction[2] === "complete") {
+        if (run.status !== "planned") { sendJson(res, 400, { error: "예정 상태만 완료할 수 있습니다." }); return; }
+        const product = await erp.get("stockProducts", run.productId);
+        if (!product) { sendJson(res, 400, { error: "제품 구성이 지워졌습니다." }); return; }
+        // 실제 생산 수량이 예정과 다르면 바꿔서 완료한다.
+        if (body.quantity) run.quantity = Math.max(1, Math.round(qtyOf(body.quantity)));
+        run.date = dateOnly(body.date) || kstToday();
+        run.status = "done";
+        run.completedAt = now();
+        for (const m of inventory.consumptionMoves(run, product)) await erp.put("stockMoves", { ...m, id: id("mv"), createdAt: now(), createdBy: who });
+      } else {
+        if (run.status === "done") {
+          for (const m of (await erp.list("stockMoves")).filter((x) => x.refType === "production" && x.refId === run.id)) {
+            await erp.put("stockMoves", { ...m, voided: true, voidedAt: now(), voidedBy: who });
+          }
+        }
+        run.status = "cancelled";
+        run.cancelledAt = now();
+      }
+      run.updatedAt = now();
+      await erp.put("stockRuns", run);
+      sendJson(res, 200, { run });
+      return;
+    }
+
+    sendJson(res, 404, { error: "지원하지 않는 요청입니다." });
     return;
   }
 

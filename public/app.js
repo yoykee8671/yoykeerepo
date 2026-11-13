@@ -777,6 +777,7 @@ function renderApp() {
     ["requests", "입금요청"],
     ["payments", "지급요청"],
     ["sales", "판매"],
+    ["stock", "생산·재고"],
     ["prices", "단가표"],
     ["brands", "브랜드"],
     ["procurement", "거래관리"],
@@ -982,6 +983,7 @@ function renderCurrentTab() {
   if (state.tab === "payments") return renderPayments();
   if (state.tab === "cash") return renderCash();
   if (state.tab === "sales") return renderSales();
+  if (state.tab === "stock") return renderStock();
   if (state.tab === "admins") return renderAdmins();
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
@@ -2460,6 +2462,7 @@ function bindCurrentTab() {
   if (state.tab === "payments") bindPayments();
   if (state.tab === "cash") bindCash();
   if (state.tab === "sales") bindSales();
+  if (state.tab === "stock") bindStock();
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
   if (state.tab === "settlement") bindSettlement();
@@ -11871,4 +11874,220 @@ function bindSales() {
       showToast(error.message || "처리하지 못했습니다.", "error");
     }
   }));
+}
+
+// ===========================================================================
+// v2 생산·재고 — 원부자재 재고 / 입출고 / 생산 기록 / 제품 구성(BOM)
+// ===========================================================================
+function stockState() {
+  if (!state.stock) state.stock = { screen: "status", data: null, loading: false, editingProduct: null, settingFor: "" };
+  return state.stock;
+}
+async function loadStock() {
+  const st = stockState();
+  st.loading = true;
+  try { st.data = await api("/api/stock"); } catch (error) { st.error = error.message; st.data = { status: [], moves: [], runs: [], products: [], locations: [], settings: {} }; } finally { st.loading = false; }
+}
+const qtyFmt = (n) => (Number(n || 0) % 1 ? Number(n).toLocaleString("ko-KR", { maximumFractionDigits: 3 }) : money.format(Number(n || 0)));
+
+function renderStock() {
+  const st = stockState();
+  const head = pageHead("생산·재고", "원부자재를 어디에 얼마나 넣었고, 생산에 얼마나 썼고, 얼마나 남았는지, 언제 얼마나 발주해야 하는지 봅니다.");
+  const tabs = `<div class="npb-subnav">${[["status", "재고현황"], ["moves", "입출고 기록"], ["runs", "생산 기록"], ["products", "제품 구성(BOM)"]].map(([k, l]) => `<button class="npb-subtab ${st.screen === k ? "active" : ""}" data-stock-screen="${k}">${l}</button>`).join("")}</div>`;
+  if (!st.data) return `${head}${tabs}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const body = { status: renderStockStatus, moves: renderStockMoves, runs: renderStockRuns, products: renderStockProducts }[st.screen] || renderStockStatus;
+  return `${head}${tabs}${body()}`;
+}
+
+const stockLoc = (key) => (stockState().data?.locations || []).find((l) => l.key === key)?.name || key;
+const matName = (id) => (state.materials || []).find((m) => m.id === id)?.itemName || id;
+const materialOptions = (cur) => (state.materials || []).filter((m) => m.isActive !== false)
+  .map((m) => `<option value="${m.id}" ${cur === m.id ? "selected" : ""}>${h(m.code ? `${m.code} · ` : "")}${h(m.itemName)}</option>`).join("");
+const locationOptions = (cur) => (stockState().data?.locations || []).map((l) => `<option value="${h(l.key)}" ${cur === l.key ? "selected" : ""}>${h(l.name)}</option>`).join("");
+
+function renderStockStatus() {
+  const st = stockState();
+  const d = st.data;
+  const need = d.status.filter((r) => r.needOrder);
+  const editing = st.settingFor ? (d.settings[st.settingFor] || {}) : null;
+  const products = d.products || [];
+  return `
+    ${need.length ? `<section class="fixed-summary"><div class="fixed-summary-title danger-text">발주 필요 ${need.length}건</div>
+      <div class="muted">${need.map((r) => `${h(r.name)} <strong>${qtyFmt(r.suggestOrder)}${h(r.unit)}</strong>`).join(" · ")}</div></section>` : ""}
+    ${products.length ? `<section class="fixed-summary"><div class="fixed-summary-title">지금 재고로 만들 수 있는 수량</div><div class="muted">
+      ${products.map((p) => { const x = (d.producible || []).find((y) => y.productId === p.id); const best = (x?.byLocation || []).sort((a, b) => b.quantity - a.quantity)[0];
+        return `${h(p.name)} <strong>${best ? `${money.format(best.quantity)}${h(p.unit || "개")}` : "0"}</strong>${best ? ` (${h(stockLoc(best.location))}, ${h(matName(best.limitedBy))} 기준)` : ""}`; }).join(" · ")}</div></section>` : ""}
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>재고현황</h2><span class="muted">${d.status.length}개 품목 · 입출고나 제품 구성에 쓰인 원부자재만 보여요</span></div>
+        <div class="table-wrap"><table class="stock-table">
+          <thead><tr><th>원부자재</th><th>보관처별</th><th>보유</th><th>쓸 예정</th><th>쓸 수 있음</th><th>안전재고</th><th>발주</th><th></th></tr></thead>
+          <tbody>${d.status.map((r) => `<tr class="${r.needOrder ? "stock-need" : ""}">
+            <td>${r.code ? `<span class="code-tag">${h(r.code)}</span>` : ""}${h(r.name)}</td>
+            <td class="muted" style="font-size:12px">${r.locations.map((l) => `${h(stockLoc(l.location))} ${qtyFmt(l.qty)}`).join("<br>") || "-"}</td>
+            <td class="num">${qtyFmt(r.onHand)}${h(r.unit)}</td><td class="num">${r.plannedUse ? qtyFmt(r.plannedUse) : ""}</td>
+            <td class="num"><strong>${qtyFmt(r.available)}</strong></td><td class="num">${r.safetyStock ? qtyFmt(r.safetyStock) : ""}</td>
+            <td>${r.needOrder ? `<span class="badge warn">발주 ${qtyFmt(r.suggestOrder)}${h(r.unit)}</span>` : ""}${r.leadTimeDays ? `<br><span class="muted" style="font-size:11px">리드타임 ${r.leadTimeDays}일</span>` : ""}</td>
+            <td>${can("stock", "edit") ? `<button data-stock-setting="${r.materialId}">설정</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="8" class="empty">아직 재고 기록이 없습니다. '입출고 기록'에서 입고부터 넣거나, '제품 구성'에 원부자재를 등록하세요.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>${editing ? `재고 설정 · ${h(matName(st.settingFor))}` : "재고 설정"}</h2></div>
+        <div class="panel-body">${editing ? `
+          <form class="form-grid" data-stock-setting-form>
+            <div class="field two"><div><label>재고단위</label><input name="unit" value="${h(editing.unit || "")}" placeholder="개 / m / kg"></div>
+              <div><label>안전재고</label><input name="safetyStock" inputmode="decimal" value="${h(editing.safetyStock ?? "")}"></div></div>
+            <div class="field two"><div><label>발주단위(묶음)</label><input name="orderMultiple" inputmode="decimal" value="${h(editing.orderMultiple ?? "")}" placeholder="예: 1000"></div>
+              <div><label>리드타임(일)</label><input name="leadTimeDays" inputmode="numeric" value="${h(editing.leadTimeDays ?? "")}"></div></div>
+            <p class="muted" style="font-size:12px">쓸 수 있는 양(보유 − 예정 생산에 쓸 양)이 안전재고 아래로 가면 '발주 필요'가 뜨고, 모자란 만큼을 발주단위로 올려 추천합니다.</p>
+            <div class="toolbar"><button class="primary" type="submit">저장</button><button type="button" data-stock-setting-close>닫기</button></div>
+          </form>` : `<p class="muted">표에서 '설정'을 누르면 안전재고·발주단위·리드타임을 정할 수 있습니다.</p>`}</div>
+      </div>
+    </section>`;
+}
+
+function renderStockMoves() {
+  const st = stockState();
+  const d = st.data;
+  const f = st.moveDraft || { type: "in", date: new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10) };
+  return `
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>입출고 기록</h2><span class="muted">최근 ${d.moves.length}건</span></div>
+        <div class="table-wrap"><table class="stock-table">
+          <thead><tr><th>날짜</th><th>구분</th><th>원부자재</th><th>보관처</th><th>수량</th><th>메모</th><th></th></tr></thead>
+          <tbody>${d.moves.map((m) => `<tr class="${m.voided ? "muted stock-void" : ""}">
+            <td>${h(String(m.date || "").slice(5))}</td><td>${h(d.moveTypes[m.type] || m.type)}</td><td>${h(matName(m.materialId))}</td>
+            <td>${h(stockLoc(m.location))}</td><td class="num">${["use", "out", "move_out"].includes(m.type) ? "−" : m.type === "adjust" && m.qty > 0 ? "+" : ""}${qtyFmt(Math.abs(m.qty))}</td>
+            <td class="wrap muted" style="font-size:12px">${h(m.memo || "")}${m.voided ? " (무름)" : ""}</td>
+            <td>${!m.voided && m.refType !== "production" && can("stock", "edit") ? `<button data-stock-void="${m.id}" title="이 기록 무르기">무르기</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="7" class="empty">기록이 없습니다.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>기록 추가</h2></div>
+        <div class="panel-body">${can("stock", "edit") ? `
+          <form class="form-grid" data-stock-move-form>
+            <div class="field two">
+              <div><label>구분</label><select name="type" data-stock-move-type>${[["in", "입고(구매·넣어줌)"], ["move", "이동(창고→공장 등)"], ["out", "반출·폐기"], ["adjust", "실사 조정"]].map(([k, l]) => `<option value="${k}" ${f.type === k ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+              <div><label>날짜</label><input type="date" name="date" value="${h(f.date || "")}"></div>
+            </div>
+            <div class="field"><label>원부자재</label><select name="materialId" required><option value="">선택</option>${materialOptions(f.materialId)}</select></div>
+            <div class="field two">
+              <div><label>${f.type === "move" ? "보내는 곳" : "보관처"}</label><select name="location" required>${locationOptions(f.location)}</select></div>
+              <div>${f.type === "move" ? `<label>받는 곳</label><select name="toLocation">${locationOptions(f.toLocation)}</select>`
+                : f.type === "adjust" ? `<label>센 수량(실제 남은 양)</label><input name="counted" inputmode="decimal" required>`
+                : `<label>수량</label><input name="qty" inputmode="decimal" required>`}</div>
+            </div>
+            ${f.type === "move" ? `<div class="field"><label>수량</label><input name="qty" inputmode="decimal" required></div>` : ""}
+            <div class="field"><label>메모</label><input name="memo" placeholder="예: 발주서 PO-… / 공장 실사"></div>
+            <div class="toolbar"><button class="primary" type="submit">기록</button></div>
+          </form>` : `<p class="muted">수정 권한이 없습니다.</p>`}</div>
+      </div>
+    </section>`;
+}
+
+function renderStockRuns() {
+  const st = stockState();
+  const d = st.data;
+  const products = d.products || [];
+  const runs = (d.runs || []).slice().sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+  const label = { planned: "예정", done: "완료", cancelled: "취소" };
+  return `
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>생산 기록</h2><span class="muted">완료하면 제품 구성대로 그 생산처 재고에서 자동으로 빠집니다</span></div>
+        <div class="table-wrap"><table class="stock-table">
+          <thead><tr><th>날짜</th><th>제품</th><th>수량</th><th>생산처</th><th>상태</th><th></th></tr></thead>
+          <tbody>${runs.map((r) => `<tr class="${r.status === "cancelled" ? "muted" : ""}">
+            <td>${h(r.date || "")}</td><td>${h(r.productName)}${r.memo ? `<br><span class="muted" style="font-size:11px">${h(r.memo)}</span>` : ""}</td>
+            <td class="num">${money.format(r.quantity)}</td><td>${h(stockLoc(r.location))}</td>
+            <td><span class="badge ${r.status === "planned" ? "warn" : r.status === "done" ? "" : "muted"}">${label[r.status] || r.status}</span></td>
+            <td><div class="row-actions">${can("stock", "edit") && r.status === "planned" ? `<button class="primary" data-stock-run="complete" data-id="${r.id}">생산 완료</button>` : ""}
+              ${can("stock", "edit") && r.status !== "cancelled" ? `<button data-stock-run="cancel" data-id="${r.id}">취소</button>` : ""}</div></td></tr>`).join("") || `<tr><td colspan="6" class="empty">생산 기록이 없습니다.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>생산 등록</h2></div>
+        <div class="panel-body">${!products.length ? `<p class="muted">먼저 '제품 구성(BOM)'에서 제품을 만드세요.</p>` : can("stock", "edit") ? `
+          <form class="form-grid" data-stock-run-form>
+            <div class="field"><label>제품</label><select name="productId" required>${products.map((p) => `<option value="${p.id}">${h(p.name)}</option>`).join("")}</select></div>
+            <div class="field two"><div><label>수량</label><input name="quantity" inputmode="numeric" required></div>
+              <div><label>생산처</label><select name="location">${locationOptions((d.locations || [])[1]?.key)}</select></div></div>
+            <div class="field two"><div><label>날짜</label><input type="date" name="date" value="${new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10)}"></div>
+              <div><label>상태</label><select name="status"><option value="planned">예정(재고 미차감)</option><option value="done">완료(바로 차감)</option></select></div></div>
+            <div class="field"><label>메모</label><input name="memo"></div>
+            <div class="toolbar"><button class="primary" type="submit">등록</button></div>
+          </form>` : ""}</div>
+      </div>
+    </section>`;
+}
+
+function renderStockProducts() {
+  const st = stockState();
+  const d = st.data;
+  const e = st.editingProduct || { name: "", unit: "개", lines: [{}, {}, {}] };
+  return `
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>제품 구성(BOM)</h2><span class="muted">완제품 1개를 만들 때 드는 원부자재와 손실률</span></div>
+        <div class="table-wrap"><table class="stock-table">
+          <thead><tr><th>제품</th><th>원부자재 (1${"개"}당)</th><th></th></tr></thead>
+          <tbody>${(d.products || []).map((p) => `<tr><td>${h(p.name)}</td>
+            <td class="muted" style="font-size:12px">${(p.lines || []).map((l) => `${h(matName(l.materialId))} ${qtyFmt(l.perUnit)}${l.lossRate ? ` (+손실 ${l.lossRate}%)` : ""}`).join("<br>")}</td>
+            <td>${can("stock", "edit") ? `<button data-stock-product-edit="${p.id}">수정</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="3" class="empty">등록된 제품이 없습니다. 예: 포포타올 = 스텝온 1 + 옆솜 2 + 앞솜 1</td></tr>`}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>${e.id ? "제품 수정" : "제품 추가"}</h2></div>
+        <div class="panel-body">${can("stock", "edit") ? `
+          <form class="form-grid" data-stock-product-form>
+            <div class="field two"><div><label>제품명</label><input name="name" value="${h(e.name || "")}" required placeholder="예: 필바이츠 45g (5P)"></div>
+              <div><label>단위</label><input name="unit" value="${h(e.unit || "개")}"></div></div>
+            <table class="sales-lines"><thead><tr><th>원부자재</th><th>1개당 수량</th><th>손실률%</th></tr></thead><tbody>
+              ${(e.lines || []).map((l, i) => `<tr><td><select data-bom-mat="${i}"><option value="">선택</option>${materialOptions(l.materialId)}</select></td>
+                <td><input data-bom-per="${i}" inputmode="decimal" value="${h(l.perUnit ?? "")}" style="width:80px"></td>
+                <td><input data-bom-loss="${i}" inputmode="decimal" value="${h(l.lossRate ?? "")}" style="width:60px"></td></tr>`).join("")}
+            </tbody></table>
+            <div class="toolbar"><button type="button" data-bom-add>줄 추가</button></div>
+            <p class="muted" style="font-size:12px">원부자재가 목록에 없으면 거래관리 &gt; 원부자재관리에서 먼저 등록하세요(우프코드가 붙습니다).</p>
+            <div class="toolbar"><button class="primary" type="submit">저장</button>${e.id ? `<button type="button" data-stock-product-cancel>취소</button>` : ""}</div>
+          </form>` : ""}</div>
+      </div>
+    </section>`;
+}
+
+function bindStock() {
+  const st = stockState();
+  if (!st.data && !st.loading) { loadStock().then(renderApp); return; }
+  const reload = async () => { await loadStock(); renderApp(); };
+  const run = async (fn, ok) => { try { await fn(); if (ok) showToast(ok); await reload(); } catch (error) { showToast(error.message || "처리하지 못했습니다.", "error"); } };
+  app.querySelectorAll("[data-stock-screen]").forEach((b) => b.addEventListener("click", () => { st.screen = b.dataset.stockScreen; renderApp(); }));
+  app.querySelectorAll("[data-stock-setting]").forEach((b) => b.addEventListener("click", () => { st.settingFor = b.dataset.stockSetting; renderApp(); }));
+  app.querySelector("[data-stock-setting-close]")?.addEventListener("click", () => { st.settingFor = ""; renderApp(); });
+  app.querySelector("[data-stock-setting-form]")?.addEventListener("submit", (e) => { e.preventDefault(); const body = formObject(e.currentTarget); run(() => api(`/api/stock/settings/${st.settingFor}`, { method: "PUT", body }), "저장했습니다."); });
+  app.querySelector("[data-stock-move-type]")?.addEventListener("change", (e) => { st.moveDraft = { ...formObject(e.target.form), type: e.target.value }; renderApp(); });
+  app.querySelector("[data-stock-move-form]")?.addEventListener("submit", (e) => { e.preventDefault(); const body = formObject(e.currentTarget); run(async () => { await api("/api/stock/moves", { method: "POST", body }); st.moveDraft = { type: body.type, date: body.date, location: body.location }; }, "기록했습니다."); });
+  app.querySelectorAll("[data-stock-void]").forEach((b) => b.addEventListener("click", () => { if (confirm("이 기록을 무를까요? (지워지지 않고 '무름'으로 남습니다)")) run(() => api(`/api/stock/moves/${b.dataset.stockVoid}/void`, { method: "POST", body: {} }), "무렀습니다."); }));
+  app.querySelector("[data-stock-run-form]")?.addEventListener("submit", (e) => { e.preventDefault(); const body = formObject(e.currentTarget); run(() => api("/api/stock/runs", { method: "POST", body }), body.status === "done" ? "생산을 기록하고 재고에서 뺐습니다." : "생산 예정을 등록했습니다."); });
+  app.querySelectorAll("[data-stock-run]").forEach((b) => b.addEventListener("click", () => {
+    const action = b.dataset.stockRun;
+    const body = {};
+    if (action === "complete") { const q = prompt("실제 생산 수량 (예정과 같으면 그대로)", (st.data.runs.find((r) => r.id === b.dataset.id) || {}).quantity); if (q === null) return; body.quantity = q; }
+    if (action === "cancel" && !confirm("이 생산 기록을 취소할까요? 완료된 생산이면 차감한 재고가 되돌아갑니다.")) return;
+    run(() => api(`/api/stock/runs/${b.dataset.id}/${action}`, { method: "POST", body }), "처리했습니다.");
+  }));
+  const readBom = () => {
+    const form = app.querySelector("[data-stock-product-form]");
+    const f = formObject(form);
+    const lines = [...form.querySelectorAll("[data-bom-mat]")].map((el) => ({ materialId: el.value, perUnit: form.querySelector(`[data-bom-per="${el.dataset.bomMat}"]`).value, lossRate: form.querySelector(`[data-bom-loss="${el.dataset.bomMat}"]`).value }));
+    return { ...(st.editingProduct || {}), ...f, lines };
+  };
+  app.querySelector("[data-bom-add]")?.addEventListener("click", () => { const p = readBom(); p.lines.push({}); st.editingProduct = p; renderApp(); });
+  app.querySelectorAll("[data-stock-product-edit]").forEach((b) => b.addEventListener("click", () => { const p = st.data.products.find((x) => x.id === b.dataset.stockProductEdit); st.editingProduct = p ? { ...p, lines: [...p.lines, {}] } : null; renderApp(); }));
+  app.querySelector("[data-stock-product-cancel]")?.addEventListener("click", () => { st.editingProduct = null; renderApp(); });
+  app.querySelector("[data-stock-product-form]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const p = readBom();
+    run(async () => { await api(p.id ? `/api/stock/products/${p.id}` : "/api/stock/products", { method: p.id ? "PUT" : "POST", body: { name: p.name, unit: p.unit, lines: p.lines } }); st.editingProduct = null; }, "저장했습니다.");
+  });
 }
