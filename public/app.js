@@ -774,6 +774,7 @@ function renderApp() {
   const tabs = [
     ["dashboard", "대시보드"],
     ["requests", "입금요청"],
+    ["payments", "지급요청"],
     ["prices", "단가표"],
     ["brands", "브랜드"],
     ["procurement", "거래관리"],
@@ -976,6 +977,7 @@ function renderCurrentTab() {
   if (state.tab === "prices") return renderPrices();
   if (state.tab === "brands") return renderBrands();
   if (state.tab === "procurement") return renderProcurement();
+  if (state.tab === "payments") return renderPayments();
   if (state.tab === "admins") return renderAdmins();
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
@@ -2451,6 +2453,7 @@ function bindCurrentTab() {
   if (state.tab === "prices") bindPrices();
   if (state.tab === "brands") bindBrands();
   if (state.tab === "procurement") bindProcurement();
+  if (state.tab === "payments") bindPayments();
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
   if (state.tab === "settlement") bindSettlement();
@@ -11125,4 +11128,304 @@ function startPsBadgePolling() {
   if (psBadgeTimer || !state.admin || !can("productsync", "view")) return;
   loadPsBadge();
   psBadgeTimer = setInterval(loadPsBadge, PS_BADGE_POLL_MS);
+}
+
+// ===========================================================================
+// v2 지급요청 — 채널톡 한 줄 요청 + 노션 결제요청 DB 를 대신한다.
+// ===========================================================================
+const PAYMENT_STATUS_BADGE = {
+  requested: "", confirmed: "ok", awaiting_approval: "warn", paid: "muted", on_hold: "warn", cancelled: "muted"
+};
+const PAYMENT_FILTERS = [
+  ["open", "처리 전", ["requested", "confirmed", "awaiting_approval"]],
+  ["paid", "처리완료", ["paid"]],
+  ["held", "보류·취소", ["on_hold", "cancelled"]],
+  ["all", "전체", null]
+];
+
+function paymentState() {
+  if (!state.payments) {
+    state.payments = { list: null, loading: false, filter: "open", q: "", editing: null, draft: null, selected: [] };
+  }
+  return state.payments;
+}
+
+async function loadPayments() {
+  const ps = paymentState();
+  ps.loading = true;
+  try {
+    const res = await api("/api/payments");
+    ps.list = res.payments || [];
+    ps.settings = res.settings || {};
+    ps.statuses = res.statuses || {};
+    ps.categories = res.categories || [];
+    ps.upcoming = res.upcoming || null;
+  } catch (error) {
+    ps.error = error.message;
+    ps.list = [];
+  } finally {
+    ps.loading = false;
+  }
+}
+
+function renderPayments() {
+  const ps = paymentState();
+  const head = pageHead("지급요청", "택배비·외주·생산비 등 선매입 외 결제 요청을 한곳에서 받고, 확인·처리하고, 영수증을 남깁니다.");
+  if (ps.list === null) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const statuses = ps.statuses || {};
+  const filter = PAYMENT_FILTERS.find(([k]) => k === ps.filter) || PAYMENT_FILTERS[0];
+  const q = String(ps.q || "").trim();
+  const rows = ps.list
+    .filter((p) => !filter[2] || filter[2].includes(p.status))
+    .filter((p) => !q || [p.code, p.title, p.payeeName, p.holder, p.accountNumber, p.memo].some((v) => String(v || "").includes(q)))
+    .sort((a, b) => String(a.plannedDate || a.dueDate || "9").localeCompare(String(b.plannedDate || b.dueDate || "9")) || String(b.createdAt).localeCompare(String(a.createdAt)));
+  const up = ps.upcoming || {};
+  const card = (label, amount, tone = "") => `<div class="fixed-card"><span>${label}</span><strong class="${tone}">${money.format(amount || 0)}원</strong></div>`;
+  const selectedTotal = ps.list.filter((p) => ps.selected.includes(p.id)).reduce((s, p) => s + Number(p.amount || 0), 0);
+  const actionsFor = (p) => {
+    const b = [];
+    if (["requested", "on_hold"].includes(p.status) && can("payments", "confirm")) b.push(`<button data-pay-act="confirm" data-id="${p.id}">확인</button>`);
+    if (p.status === "awaiting_approval" && can("payments", "approve")) b.push(`<button class="primary" data-pay-act="approve" data-id="${p.id}">허가</button>`);
+    if (p.status === "confirmed" && can("payments", "pay")) b.push(`<button class="primary" data-pay-act="pay" data-id="${p.id}">처리완료</button>`);
+    if (["requested", "confirmed", "awaiting_approval"].includes(p.status) && can("payments", "confirm")) b.push(`<button data-pay-act="hold" data-id="${p.id}">보류</button>`);
+    if (["on_hold", "cancelled", "paid"].includes(p.status) && can("payments", "confirm")) b.push(`<button data-pay-act="reopen" data-id="${p.id}">다시 요청</button>`);
+    if (can("payments", "edit")) b.push(`<button data-pay-edit="${p.id}">수정</button>`);
+    return b.join("");
+  };
+  const list = rows.map((p) => `
+    <tr>
+      <td><input type="checkbox" data-pay-select="${p.id}" ${ps.selected.includes(p.id) ? "checked" : ""}></td>
+      <td><span class="code-tag">${h(p.code)}</span><br><span class="badge ${PAYMENT_STATUS_BADGE[p.status] || ""}">${h(statuses[p.status] || p.status)}</span></td>
+      <td>${h(String(p.createdAt || "").slice(5, 10))}<br><span class="muted">${h(p.requestedBy?.name || "")}</span></td>
+      <td>${h(p.payeeName || p.holder || "")}<br><span class="muted" style="font-size:11px">${h(p.bankName || "")} ${h(p.accountNumber || "")}</span></td>
+      <td class="wrap">${h(p.title)}${p.memo ? `<br><span class="muted">${h(p.memo)}</span>` : ""}</td>
+      <td class="num"><strong>${money.format(p.amount || 0)}</strong></td>
+      <td>${p.plannedDate ? `예정 ${h(p.plannedDate.slice(5))}` : ""}${p.dueDate ? `<br><span class="muted">기한 ${h(p.dueDate.slice(5))}</span>` : ""}${p.paidAt ? `<br><span class="muted">지급 ${h(p.paidAt.slice(5))}</span>` : ""}</td>
+      <td>${h(p.category || "")}${p.withdrawAccount ? `<br><span class="muted" style="font-size:11px">${h(p.withdrawAccount)}</span>` : ""}</td>
+      <td>${(p.files || []).map((f) => `<a href="/api/payments/files/${h(f.id)}" target="_blank" rel="noreferrer">📎</a>`).join(" ")}
+        ${can("payments", "create") ? `<label class="file-mini" title="영수증·견적서 첨부">＋<input type="file" data-pay-file="${p.id}" hidden></label>` : ""}</td>
+      <td><div class="row-actions">${actionsFor(p)}</div></td>
+    </tr>`).join("") || `<tr><td colspan="10" class="empty">해당하는 지급요청이 없습니다.</td></tr>`;
+
+  return `
+    ${head}
+    <section class="fixed-summary">
+      <div class="fixed-summary-title">나갈 돈 (지급요청 기준 · ${h(up.start || "")} ~ ${h(up.end || "")})</div>
+      <div class="fixed-summary-grid">
+        ${card("기한 지남", up.overdueTotal, up.overdueTotal ? "danger-text" : "")}
+        ${card("오늘", up.todayTotal)}
+        ${card("7일 안", up.windowTotal)}
+        ${card("날짜 없음", up.undatedTotal)}
+      </div>
+    </section>
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head">
+          <div class="npb-subnav" style="margin:0">${PAYMENT_FILTERS.map(([k, l, st]) => `<button class="npb-subtab ${ps.filter === k ? "active" : ""}" data-pay-filter="${k}">${l} <span class="muted">${ps.list.filter((p) => !st || st.includes(p.status)).length}</span></button>`).join("")}</div>
+          <input data-pay-q placeholder="번호·내용·받는곳·계좌 검색" value="${h(q)}">
+        </div>
+        <div class="toolbar" style="padding:0 16px">
+          ${can("payments", "pay") ? `<button data-pay-transfer ${ps.selected.length ? "" : "disabled"}>하나은행 이체양식</button>` : ""}
+          <span class="muted">선택 ${ps.selected.length}건${ps.selected.length ? ` · ${money.format(selectedTotal)}원` : ""}</span>
+        </div>
+        <div class="table-wrap"><table class="payments-table">
+          <thead><tr><th></th><th>번호·상태</th><th>작성</th><th>받는 곳</th><th>내용</th><th>금액</th><th>일정</th><th>분류</th><th>영수증</th><th>처리</th></tr></thead>
+          <tbody>${list}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>${ps.editing ? `지급요청 수정 · ${h(ps.editing.code)}` : "새 지급요청"}</h2></div>
+        <div class="panel-body">${can("payments", ps.editing ? "edit" : "create") ? renderPaymentForm() : `<p class="muted">요청 권한이 없습니다.</p>`}</div>
+      </div>
+    </section>`;
+}
+
+function renderPaymentForm() {
+  const ps = paymentState();
+  const p = { ...(ps.editing || {}), ...(ps.draft || {}) };
+  const accounts = state.transferAccounts || [];
+  const opt = (list, cur) => list.map((x) => `<option value="${h(x)}" ${cur === x ? "selected" : ""}>${h(x)}</option>`).join("");
+  return `
+    ${ps.editing ? "" : `
+    <div class="field">
+      <label>빠른 입력 <span class="muted" style="font-weight:400">(채널톡에 쓰던 대로 붙여넣기)</span></label>
+      <textarea data-pay-quick rows="2" placeholder="예: 041302 04 196113 국민 김성준 로젠택배 8,000원 세림 택배 착불비"></textarea>
+      <div class="toolbar" style="margin-top:4px"><button type="button" data-pay-parse>칸 채우기</button></div>
+    </div>`}
+    <form class="form-grid" data-pay-form>
+      <div class="field"><label>내용</label><input name="title" value="${h(p.title || "")}" required placeholder="예: 세림 택배 착불비"></div>
+      <div class="field two">
+        <div><label>금액(원)</label><input name="amount" inputmode="numeric" value="${h(p.amount ? money.format(p.amount) : "")}" required></div>
+        <div><label>분류</label><select name="category"><option value="">선택</option>${opt(ps.categories || [], p.category)}</select></div>
+      </div>
+      <div class="field">
+        <label>받는 곳 <span class="muted" style="font-weight:400">(계좌관리 목록에서 고르거나 직접 입력)</span></label>
+        <input name="payeeName" list="pay-account-options" value="${h(p.payeeName || "")}" data-pay-payee>
+        <datalist id="pay-account-options">${accounts.map((a) => `<option value="${h(a.alias || a.holder)}">${h(a.bankName)} ${h(a.accountNumber)}</option>`).join("")}</datalist>
+      </div>
+      <div class="field two">
+        <div><label>은행</label><input name="bankName" value="${h(p.bankName || "")}"></div>
+        <div><label>계좌번호</label><input name="accountNumber" inputmode="numeric" value="${h(p.accountNumber || "")}"></div>
+      </div>
+      <div class="field two">
+        <div><label>예금주</label><input name="holder" value="${h(p.holder || "")}"></div>
+        <div><label>계산서</label><select name="invoice">${opt(["", "발행", "미발행", "영수증", "해당없음"], p.invoice || "")}</select></div>
+      </div>
+      <div class="field two">
+        <div><label>요청 입금기한</label><input type="date" name="dueDate" value="${h(p.dueDate || "")}"></div>
+        <div><label>입금예정일 <span class="muted" style="font-weight:400">(담당자)</span></label><input type="date" name="plannedDate" value="${h(p.plannedDate || "")}"></div>
+      </div>
+      <div class="field two">
+        <div><label>사업부</label><select name="businessUnit">${[["", "미지정"], ["wooof", "우프(입점)"], ["pb", "PB"], ["npb", "NPB"], ["service", "용역"]].map(([k, l]) => `<option value="${k}" ${p.businessUnit === k ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+        <div><label>사용 출금계좌</label><select name="withdrawAccount"><option value="">선택</option>${opt(ps.settings?.withdrawAccounts || [], p.withdrawAccount)}</select></div>
+      </div>
+      <div class="field two">
+        <div><label>출금통장표시</label><input name="withdrawMemo" value="${h(p.withdrawMemo || "")}" placeholder="비우면 받는 곳 이름"></div>
+        <div><label>입금통장표시</label><input name="depositMemo" value="${h(p.depositMemo || "")}"></div>
+      </div>
+      <div class="field"><label>메모 <span class="muted" style="font-weight:400">(당시 단가·기준 등)</span></label><textarea name="memo" rows="2">${h(p.memo || "")}</textarea></div>
+      ${ps.editing?.history?.length ? `<details><summary class="muted">처리 기록 ${ps.editing.history.length}건</summary>${ps.editing.history.map((x) => `<div class="muted" style="font-size:12px">${h(String(x.at).slice(0, 16).replace("T", " "))} · ${h(x.by)} · ${h(x.action)} ${x.note ? `· ${h(x.note)}` : ""}</div>`).join("")}</details>` : ""}
+      <div class="toolbar">
+        <button class="primary" type="submit">${ps.editing ? "수정 저장" : "요청 올리기"}</button>
+        ${ps.editing || ps.draft ? `<button type="button" data-pay-cancel>취소</button>` : ""}
+        ${ps.editing && can("payments", "delete") ? `<button type="button" class="danger" data-pay-delete="${ps.editing.id}">삭제</button>` : ""}
+      </div>
+    </form>`;
+}
+
+function bindPayments() {
+  const ps = paymentState();
+  if (ps.list === null && !ps.loading) {
+    loadPayments().then(renderApp);
+    return;
+  }
+  const reload = async () => { await loadPayments(); renderApp(); };
+  const formDraft = () => {
+    const form = app.querySelector("[data-pay-form]");
+    return form ? formObject(form) : {};
+  };
+  app.querySelectorAll("[data-pay-filter]").forEach((b) => b.addEventListener("click", () => { ps.filter = b.dataset.payFilter; renderApp(); }));
+  app.querySelector("[data-pay-q]")?.addEventListener("change", (e) => { ps.q = e.target.value; renderApp(); });
+  app.querySelectorAll("[data-pay-select]").forEach((box) => box.addEventListener("change", () => {
+    const set = new Set(ps.selected);
+    if (box.checked) set.add(box.dataset.paySelect); else set.delete(box.dataset.paySelect);
+    ps.selected = [...set];
+    renderApp();
+  }));
+  app.querySelector("[data-pay-parse]")?.addEventListener("click", async () => {
+    const text = app.querySelector("[data-pay-quick]")?.value || "";
+    if (!text.trim()) return;
+    try {
+      const { parsed } = await api("/api/payments/parse", { method: "POST", body: { text } });
+      ps.draft = { ...formDraft(), ...Object.fromEntries(Object.entries(parsed).filter(([, v]) => v)) };
+      renderApp();
+      showToast("칸을 채웠습니다. 확인 후 '요청 올리기'를 누르세요.");
+    } catch (error) {
+      showToast(error.message || "읽지 못했습니다.", "error");
+    }
+  });
+  // 계좌관리 목록에서 받는 곳을 고르면 은행·계좌·예금주를 채운다.
+  app.querySelector("[data-pay-payee]")?.addEventListener("change", (e) => {
+    const acc = (state.transferAccounts || []).find((a) => (a.alias || a.holder) === e.target.value);
+    if (!acc) return;
+    const form = e.target.closest("form");
+    form.querySelector("[name=bankName]").value = acc.bankName;
+    form.querySelector("[name=accountNumber]").value = acc.accountNumber;
+    form.querySelector("[name=holder]").value = acc.holder || "";
+  });
+  app.querySelector("[data-pay-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = formObject(event.currentTarget);
+    try {
+      if (ps.editing) await api(`/api/payments/${ps.editing.id}`, { method: "PUT", body });
+      else await api("/api/payments", { method: "POST", body });
+      showToast(ps.editing ? "수정했습니다." : "지급요청을 올렸습니다.");
+      ps.editing = null;
+      ps.draft = null;
+      await reload();
+    } catch (error) {
+      showToast(error.message || "저장하지 못했습니다.", "error");
+    }
+  });
+  app.querySelector("[data-pay-cancel]")?.addEventListener("click", () => { ps.editing = null; ps.draft = null; renderApp(); });
+  app.querySelectorAll("[data-pay-edit]").forEach((b) => b.addEventListener("click", () => {
+    ps.editing = ps.list.find((p) => p.id === b.dataset.payEdit) || null;
+    ps.draft = null;
+    renderApp();
+  }));
+  app.querySelector("[data-pay-delete]")?.addEventListener("click", async (e) => {
+    if (!confirm("이 지급요청을 삭제할까요? 첨부파일도 함께 지워집니다.")) return;
+    try {
+      await api(`/api/payments/${e.target.dataset.payDelete}`, { method: "DELETE" });
+      ps.editing = null;
+      await reload();
+    } catch (error) {
+      showToast(error.message || "삭제하지 못했습니다.", "error");
+    }
+  });
+  app.querySelectorAll("[data-pay-act]").forEach((b) => b.addEventListener("click", async () => {
+    const action = b.dataset.payAct;
+    const body = { action };
+    if (action === "pay") {
+      const rec = ps.list.find((p) => p.id === b.dataset.id);
+      const paidAt = prompt("지급일 (YYYY-MM-DD)", new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10));
+      if (paidAt === null) return;
+      body.paidAt = paidAt;
+      const acct = prompt(`사용 출금계좌\n${(ps.settings?.withdrawAccounts || []).join(", ")}`, rec?.withdrawAccount || "");
+      if (acct === null) return;
+      body.withdrawAccount = acct;
+    }
+    if (action === "hold") {
+      const note = prompt("보류 사유");
+      if (note === null) return;
+      body.note = note;
+    }
+    try {
+      const res = await api(`/api/payments/${b.dataset.id}/action`, { method: "POST", body });
+      const st = res.payment?.status;
+      showToast(st === "awaiting_approval" ? "확인했습니다. 고액이라 대표 허가가 필요합니다." : "처리했습니다.");
+      await reload();
+    } catch (error) {
+      showToast(error.message || "처리하지 못했습니다.", "error");
+    }
+  }));
+  app.querySelectorAll("[data-pay-file]").forEach((inp) => inp.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      await api(`/api/payments/${inp.dataset.payFile}/files`, {
+        method: "POST",
+        body: { fileBase64: await readFileAsBase64(file), fileName: file.name, type: file.type }
+      });
+      showToast("첨부했습니다.");
+      await reload();
+    } catch (error) {
+      showToast(error.message || "첨부하지 못했습니다.", "error");
+    }
+  }));
+  app.querySelector("[data-pay-transfer]")?.addEventListener("click", async () => {
+    try {
+      const res = await fetch("/api/payments/transfer-xlsx", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ids: ps.selected })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return showToast(err.error || "이체 양식을 만들지 못했습니다.", "error");
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `하나은행_이체등록_지급요청.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      showToast(error.message || "이체 양식을 만들지 못했습니다.", "error");
+    }
+  });
 }

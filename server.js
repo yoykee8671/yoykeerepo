@@ -15,6 +15,8 @@ import * as cafe24 from "./lib/cafe24-api.mjs";
 import { cafe24OrdersToRows, compareRows } from "./lib/cafe24-rows.mjs";
 import { buildRequestDrafts, findShippedAwaiting } from "./lib/cafe24-collect.mjs";
 import { createProductSyncService } from "./lib/product-sync-service.mjs";
+import { createErpStore } from "./lib/erp-store.mjs";
+import * as payments from "./lib/payment-requests.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -1266,6 +1268,9 @@ function buildInitialDb() {
 
 const MIGRATION_WRITE_ATTEMPTS = 5;
 
+// v2 레코드 저장소(지급요청 등). app_state 덩어리와 따로 한 건씩 저장한다.
+const erp = createErpStore({ pool: pgPool, dataDir: DATA_DIR });
+
 let ensureDbPromise = null;
 async function ensureDb() {
   if (!ensureDbPromise) ensureDbPromise = doEnsureDb();
@@ -1274,8 +1279,10 @@ async function ensureDb() {
 async function doEnsureDb() {
   if (pgPool) {
     await ensurePostgresDb();
+    await erp.init();
     return;
   }
+  await erp.init();
   await mkdir(DATA_DIR, { recursive: true });
   try {
     await stat(DB_PATH);
@@ -1719,6 +1726,19 @@ function migrateDb(db) {
     const cafe24Seed = buildCafe24Namespace();
     for (const key of Object.keys(cafe24Seed)) touch(db.cafe24, key, cafe24Seed[key]);
   }
+  // v2 지급요청 권한. 이미 권한을 저장한 관리자는 새 메뉴가 비어 있으므로,
+  // 입금요청 권한에 맞춰 한 번 채운다(요청자 → 요청, 입금완료 처리자 → 확인·처리).
+  for (const admin of db.admins || []) {
+    const perms = admin.permissions;
+    if (!perms || typeof perms !== "object" || Array.isArray(perms.payments)) continue;
+    const req = Array.isArray(perms.requests) ? perms.requests : [];
+    const grant = [];
+    if (req.includes("view")) grant.push("view", "create", "edit");
+    if (req.includes("pay")) grant.push("confirm", "pay");
+    perms.payments = grant;
+    changed = true;
+  }
+
   // 우프코드 일괄 부여(처음 한 번). 이후에는 저장할 때마다 새 항목에 붙는다.
   if (assignCodes(db) > 0) changed = true;
   return { db, changed };
@@ -1811,6 +1831,29 @@ async function readDb() {
 // (db.codeSeq 가 지금까지 쓴 가장 큰 번호를 기억한다).
 // 명세서·발주서는 이미 문서번호(docNo)가 있어 그것을 코드로 쓴다.
 // ---------------------------------------------------------------------------
+// --- v2 지급요청 도우미 ---
+const PAYMENT_SETTING_DEFAULTS = {
+  approvalThreshold: payments.DEFAULT_APPROVAL_THRESHOLD,
+  withdrawAccounts: payments.DEFAULT_WITHDRAW_ACCOUNTS
+};
+
+// 한국 시간 기준 오늘 (서버는 UTC 로 돈다).
+function kstToday() {
+  return new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+// 지급요청 번호: PR-YYMM-001 (한국 시간 기준 달). 지운 번호는 다시 쓰지 않도록
+// 그 달의 가장 큰 번호 다음을 쓴다.
+function nextPaymentCode(list, createdAt) {
+  const kst = new Date(new Date(createdAt).getTime() + 9 * 3600 * 1000).toISOString();
+  const prefix = `PR-${kst.slice(2, 4)}${kst.slice(5, 7)}-`;
+  const max = (list || []).reduce((m, p) => {
+    const code = String(p.code || "");
+    return code.startsWith(prefix) ? Math.max(m, Number(code.slice(prefix.length)) || 0) : m;
+  }, 0);
+  return `${prefix}${String(max + 1).padStart(3, "0")}`;
+}
+
 // 사업부(손익 단위). KPI 설계(kpi/DESIGN.md)·AI_CFO 지표정의와 같은 구분.
 export const BUSINESS_UNITS = {
   wooof: "우프(입점)",
@@ -5313,7 +5356,9 @@ const MENU_REGISTRY = [
   { key: "procurement", label: "거래관리", actions: ["view", "create", "edit", "delete"] },
   // 공급사 상품 동기화. "실행·반영"은 우프 카페24 상품(재고·가격)을 실제로 바꾸고
   // 신규 상품을 등록한다.
-  { key: "productsync", label: "상품동기화", actions: ["view", "apply"] }
+  { key: "productsync", label: "상품동기화", actions: ["view", "apply"] },
+  // v2 지급요청. 요청은 누구나, 확인·처리완료는 경영지원, 허가는 대표.
+  { key: "payments", label: "지급요청", actions: ["view", "create", "edit", "delete", "confirm", "approve", "pay"] }
 ];
 
 const ACTION_LABELS = {
@@ -5323,7 +5368,9 @@ const ACTION_LABELS = {
   delete: "삭제",
   pay: "입금완료 처리",
   export: "정산서 출력",
-  apply: "실행·반영"
+  apply: "실행·반영",
+  confirm: "확인",
+  approve: "허가(고액)"
 };
 
 // 권한을 손대기 전의 동작. manager 는 지금까지 owner 와 같았고 operator 는
@@ -5340,6 +5387,7 @@ function defaultPermissions(role) {
     // 연동 메뉴는 막혀 있었고, 관리자 메뉴는 목록 조회만 열려 있었다
     // (GET /api/admins 에는 검사가 없었고 생성·수정·삭제만 막혀 있었다).
     if (menu.key === "reconcile" || menu.key === "pipeline" || menu.key === "productsync") all[menu.key] = [];
+    else if (menu.key === "payments") all[menu.key] = ["view", "create", "edit"];
     else if (menu.key === "admins") all[menu.key] = ["view"];
     else all[menu.key] = [...menu.actions];
   }
@@ -10493,6 +10541,240 @@ async function routeApi(req, res, url) {
     } catch (error) {
       sendJson(res, 500, { error: `${label} ${format === "pdf" ? "PDF " : ""}생성 실패: ${error.message}` });
     }
+    return;
+  }
+
+  // --- v2 지급요청 ------------------------------------------------------------
+  // 채널톡 한 줄 요청과 노션 결제요청 DB 를 대신한다. 레코드는 erp 저장소에
+  // 한 건씩 저장한다(app_state 와 별도).
+  if (pathname === "/api/payments" || pathname.startsWith("/api/payments/")) {
+    if (!requirePermission(actor, res, "payments", "view")) return;
+    const settings = { ...PAYMENT_SETTING_DEFAULTS, ...((await erp.get("settings", "payments")) || {}) };
+    const findAccount = (num) => (db.transferAccounts || []).find((a) => a.accountNumber === normalizeAccountNumber(num));
+    const shape = (body, base = {}) => {
+      const out = { ...base };
+      for (const key of ["title", "payeeName", "partnerCode", "holder", "category", "businessUnit",
+        "withdrawAccount", "invoice", "orderNo", "memo", "withdrawMemo", "depositMemo"]) {
+        if (key in body) out[key] = String(body[key] ?? "").trim().slice(0, key === "memo" ? 2000 : 200);
+      }
+      if ("bankName" in body) out.bankName = payments.normalizeBankName(body.bankName);
+      if ("accountNumber" in body) out.accountNumber = normalizeAccountNumber(body.accountNumber);
+      if ("amount" in body) out.amount = Math.max(0, Math.round(number(String(body.amount).replace(/,/g, ""))));
+      for (const key of ["dueDate", "plannedDate"]) {
+        if (key in body) out[key] = dateOnly(body[key]) || "";
+      }
+      if (out.businessUnit && !BUSINESS_UNITS[out.businessUnit]) out.businessUnit = "";
+      return out;
+    };
+    const who = { id: actor.id, name: actor.name || actor.email || "" };
+    const log = (rec, action, from, to, note = "") => {
+      rec.history = [...(rec.history || []), { at: now(), by: who.name, action, from, to, note }].slice(-50);
+    };
+
+    if (pathname === "/api/payments" && method === "GET") {
+      const list = await erp.list("payments");
+      sendJson(res, 200, {
+        payments: list,
+        settings,
+        statuses: payments.PAYMENT_STATUSES,
+        categories: payments.PAYMENT_CATEGORIES,
+        upcoming: payments.upcomingPayments(list, kstToday(), 7)
+      });
+      return;
+    }
+
+    // 채널톡 한 줄을 칸으로 나눠 미리 보여 준다. 저장은 하지 않는다.
+    if (pathname === "/api/payments/parse" && method === "POST") {
+      const body = await readBody(req);
+      const parsed = payments.parseQuickPaymentText(body.text);
+      const account = parsed.accountNumber ? findAccount(parsed.accountNumber) : null;
+      if (account) {
+        parsed.bankName = parsed.bankName || account.bankName;
+        parsed.holder = parsed.holder || account.holder;
+        parsed.payeeName = account.alias || account.holder;
+      }
+      sendJson(res, 200, { parsed, matchedAccount: account || null });
+      return;
+    }
+
+    if (pathname === "/api/payments/settings" && method === "PUT") {
+      if (!requirePermission(actor, res, "payments", "approve", "설정은 허가 권한이 있어야 바꿀 수 있습니다.")) return;
+      const body = await readBody(req);
+      const next = { ...settings, id: "payments" };
+      if ("approvalThreshold" in body) next.approvalThreshold = Math.max(0, Math.round(number(body.approvalThreshold)));
+      if (Array.isArray(body.withdrawAccounts)) {
+        next.withdrawAccounts = body.withdrawAccounts.map((x) => String(x || "").trim()).filter(Boolean).slice(0, 50);
+      }
+      await erp.put("settings", next);
+      sendJson(res, 200, { settings: next });
+      return;
+    }
+
+    if (pathname === "/api/payments/transfer-xlsx" && method === "POST") {
+      if (!requirePermission(actor, res, "payments", "pay")) return;
+      const body = await readBody(req);
+      const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+      const all = await erp.list("payments");
+      const picked = ids.map((pid) => all.find((p) => p.id === pid)).filter(Boolean);
+      if (!picked.length) { sendJson(res, 400, { error: "선택한 지급요청이 없습니다." }); return; }
+      const bad = picked.filter((p) => !p.bankName || !p.accountNumber || !p.amount);
+      if (bad.length) {
+        sendJson(res, 400, { error: `은행·계좌·금액이 빠진 요청이 있습니다: ${bad.slice(0, 3).map((p) => p.code || p.title).join(", ")}` });
+        return;
+      }
+      const rows = picked.map((p) => ({
+        bank: p.bankName,
+        account: p.accountNumber,
+        amount: p.amount,
+        // 출금통장표시: 건별 값 → 받는 곳 이름 → 내용 앞부분
+        withdrawMemo: p.withdrawMemo || p.payeeName || p.holder || String(p.title || "").slice(0, 10),
+        depositMemo: p.depositMemo || ""
+      }));
+      try {
+        const file = await buildHanaTransferXlsx(rows);
+        const stamp = now().slice(0, 10).replace(/-/g, "");
+        sendBuffer(res, 200, file, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          { "content-disposition": contentDisposition(`하나은행_이체등록_지급요청_${stamp}.xlsx`) });
+      } catch (error) {
+        console.error("[payments] transfer-xlsx failed:", error.message);
+        sendJson(res, 500, { error: "이체 양식을 만들지 못했습니다." });
+      }
+      return;
+    }
+
+    const fileGet = pathname.match(/^\/api\/payments\/files\/([^/]+)$/);
+    if (fileGet && method === "GET") {
+      const file = await erp.getFile(fileGet[1]);
+      if (!file) { sendJson(res, 404, { error: "파일을 찾을 수 없습니다." }); return; }
+      sendBuffer(res, 200, file.buffer, file.type || "application/octet-stream",
+        { "content-disposition": contentDisposition(file.name || "file") });
+      return;
+    }
+
+    if (pathname === "/api/payments" && method === "POST") {
+      if (!requirePermission(actor, res, "payments", "create")) return;
+      const body = await readBody(req);
+      const rec = shape(body, { id: id("pay"), status: "requested", files: [], requestedBy: who, createdAt: now() });
+      if (!rec.title) { sendJson(res, 400, { error: "내용을 입력하세요." }); return; }
+      if (!rec.amount) { sendJson(res, 400, { error: "금액을 입력하세요." }); return; }
+      const account = rec.accountNumber ? findAccount(rec.accountNumber) : null;
+      if (account) {
+        rec.bankName ||= account.bankName;
+        rec.holder ||= account.holder;
+        rec.payeeName ||= account.alias || account.holder;
+      }
+      rec.code = nextPaymentCode(await erp.list("payments"), rec.createdAt);
+      rec.updatedAt = now();
+      log(rec, "create", "", "requested");
+      await erp.put("payments", rec);
+      sendJson(res, 201, { payment: rec });
+      return;
+    }
+
+    const actionMatch = pathname.match(/^\/api\/payments\/([^/]+)\/action$/);
+    if (actionMatch && method === "POST") {
+      const body = await readBody(req);
+      const rec = await erp.get("payments", actionMatch[1]);
+      if (!rec) { sendJson(res, 404, { error: "지급요청을 찾을 수 없습니다." }); return; }
+      const def = payments.PAYMENT_ACTIONS[body.action];
+      if (!def) { sendJson(res, 400, { error: "알 수 없는 처리입니다." }); return; }
+      if (!requirePermission(actor, res, "payments", def.permission)) return;
+      if (!def.from.includes(rec.status)) {
+        sendJson(res, 400, { error: `지금 상태(${payments.PAYMENT_STATUSES[rec.status]})에서는 할 수 없습니다.` });
+        return;
+      }
+      const from = rec.status;
+      let to = def.to;
+      if (body.action === "confirm") {
+        to = payments.statusAfterConfirm(rec.amount, settings.approvalThreshold);
+        rec.confirmedBy = who;
+        rec.confirmedAt = now();
+      }
+      if (body.action === "approve") { rec.approvedBy = who; rec.approvedAt = now(); }
+      if (body.action === "pay") {
+        rec.paidAt = dateOnly(body.paidAt) || kstToday();
+        rec.paidBy = who;
+        if (body.withdrawAccount) rec.withdrawAccount = String(body.withdrawAccount).trim();
+      }
+      if (body.action === "reopen") { delete rec.paidAt; delete rec.paidBy; }
+      rec.status = to;
+      rec.updatedAt = now();
+      log(rec, body.action, from, to, String(body.note || "").slice(0, 300));
+      await erp.put("payments", rec);
+      sendJson(res, 200, { payment: rec });
+      return;
+    }
+
+    const fileAdd = pathname.match(/^\/api\/payments\/([^/]+)\/files$/);
+    if (fileAdd && method === "POST") {
+      if (!requirePermission(actor, res, "payments", "create")) return;
+      const body = await readBody(req);
+      const rec = await erp.get("payments", fileAdd[1]);
+      if (!rec) { sendJson(res, 404, { error: "지급요청을 찾을 수 없습니다." }); return; }
+      const buffer = Buffer.from(String(body.fileBase64 || "").split(",").pop() || "", "base64");
+      if (!buffer.length) { sendJson(res, 400, { error: "파일이 비어 있습니다." }); return; }
+      if (buffer.length > 10 * 1024 * 1024) { sendJson(res, 400, { error: "파일은 10MB 까지 올릴 수 있습니다." }); return; }
+      const fileId = id("file");
+      const name = String(body.fileName || "첨부").slice(0, 200);
+      await erp.putFile({ id: fileId, ownerCollection: "payments", ownerId: rec.id, name, type: String(body.type || ""), buffer });
+      rec.files = [...(rec.files || []), { id: fileId, name, size: buffer.length, type: String(body.type || ""), at: now(), by: who.name }];
+      rec.updatedAt = now();
+      await erp.put("payments", rec);
+      sendJson(res, 200, { payment: rec });
+      return;
+    }
+
+    const fileDel = pathname.match(/^\/api\/payments\/([^/]+)\/files\/([^/]+)$/);
+    if (fileDel && method === "DELETE") {
+      if (!requirePermission(actor, res, "payments", "edit")) return;
+      const rec = await erp.get("payments", fileDel[1]);
+      if (!rec) { sendJson(res, 404, { error: "지급요청을 찾을 수 없습니다." }); return; }
+      if (!(rec.files || []).some((f) => f.id === fileDel[2])) { sendJson(res, 404, { error: "파일을 찾을 수 없습니다." }); return; }
+      rec.files = (rec.files || []).filter((f) => f.id !== fileDel[2]);
+      await erp.removeFile(fileDel[2]);
+      rec.updatedAt = now();
+      await erp.put("payments", rec);
+      sendJson(res, 200, { payment: rec });
+      return;
+    }
+
+    const one = pathname.match(/^\/api\/payments\/([^/]+)$/);
+    if (one && method === "PUT") {
+      if (!requirePermission(actor, res, "payments", "edit")) return;
+      const body = await readBody(req);
+      const rec = await erp.get("payments", one[1]);
+      if (!rec) { sendJson(res, 404, { error: "지급요청을 찾을 수 없습니다." }); return; }
+      // 처리완료된 건의 금액·계좌는 처리 권한자만 고친다(지급 기록이 흔들리지 않게).
+      if (rec.status === "paid" && ("amount" in body || "accountNumber" in body || "bankName" in body)
+        && !can(actor, "payments", "pay")) {
+        sendJson(res, 403, { error: "처리완료된 요청의 금액·계좌는 처리 권한자만 고칠 수 있습니다." });
+        return;
+      }
+      const next = shape(body, rec);
+      next.updatedAt = now();
+      if (rec.amount !== next.amount || rec.accountNumber !== next.accountNumber) {
+        log(next, "edit", rec.status, rec.status,
+          `금액 ${rec.amount}→${next.amount}, 계좌 ${rec.accountNumber || "-"}→${next.accountNumber || "-"}`);
+      }
+      await erp.put("payments", next);
+      sendJson(res, 200, { payment: next });
+      return;
+    }
+
+    if (one && method === "DELETE") {
+      if (!requirePermission(actor, res, "payments", "delete")) return;
+      const rec = await erp.get("payments", one[1]);
+      if (!rec) { sendJson(res, 404, { error: "지급요청을 찾을 수 없습니다." }); return; }
+      for (const f of rec.files || []) await erp.removeFile(f.id);
+      await erp.remove("payments", rec.id);
+      addAudit(db, actor, "delete", "payment", rec.id,
+        `지급요청 ${rec.code} 삭제 (${rec.title}, ${number(rec.amount).toLocaleString()}원)`, rec, null);
+      await writeDb(db);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    sendJson(res, 404, { error: "지원하지 않는 요청입니다." });
     return;
   }
 

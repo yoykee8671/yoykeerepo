@@ -2328,3 +2328,11 @@ a.button:hover {
   font: 11px/18px ui-monospace, SFMono-Regular, Menlo, monospace;
   vertical-align: 1px;
 }
+
+/* v2 지급요청 */
+.payments-table td { vertical-align: top; }
+.payments-table .num { text-align: right; white-space: nowrap; }
+.file-mini { display: inline-block; padding: 0 6px; border: 1px dashed #cbd5e1; border-radius: 4px; cursor: pointer; color: #64748b; }
+.danger-text { color: #c2410c; }
+.badge.warn { background: #fff4e5; color: #b45309; }
+.badge.muted { background: #f1f5f9; color: #64748b; }
