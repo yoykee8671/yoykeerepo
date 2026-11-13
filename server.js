@@ -25,6 +25,8 @@ const SETTLEMENT_SCRIPT = path.join(__dirname, "scripts", "settlement_excel.py")
 const PURCHASE_ORDER_SCRIPT = path.join(__dirname, "scripts", "purchase_order_excel.py");
 const XLSX_PARSE_SCRIPT = path.join(__dirname, "scripts", "xlsx_to_json.py");
 const ROWS_TO_XLSX_SCRIPT = path.join(__dirname, "scripts", "rows_to_xlsx.py");
+const HANA_ACCOUNTS_SCRIPT = path.join(__dirname, "scripts", "hana_accounts.py");
+const HANA_TRANSFER_SCRIPT = path.join(__dirname, "scripts", "hana_transfer_xlsx.py");
 const NPB_PARSE_SCRIPT = path.join(__dirname, "scripts", "npb_parse.py");
 const NPB_XLSX_SCRIPT = path.join(__dirname, "scripts", "npb_settlement_xlsx.py");
 const NPB_INVOICE_SCRIPT = path.join(__dirname, "scripts", "npb_invoice_xlsx.py");
@@ -1235,6 +1237,7 @@ function buildInitialDb() {
     materials: [],
     purchaseOrders: [],
     deliveryPlaces: [],
+    transferAccounts: [],
     requests,
     auditLogs: [
       {
@@ -1422,6 +1425,9 @@ function migrateDb(db) {
   touch(db, "materials", []);
   touch(db, "purchaseOrders", []);
   touch(db, "deliveryPlaces", []);
+  // 자주 쓰는 입금계좌(하나은행 목록). 브랜드가 여기서 계좌를 골라 이체등록
+  // 양식의 기본값으로 쓴다.
+  touch(db, "transferAccounts", []);
   // 발주서만 있던 시절에 저장된 문서는 docType이 없다 -- 전부 발주서로 본다.
   for (const po of db.purchaseOrders || []) {
     touch(po, "docType", "purchase_order");
@@ -2008,6 +2014,64 @@ async function parsePriceWorkbookUpload(body = {}) {
 // column list (Korean header <-> field key, ID always first for round-trip
 // matching on re-upload); everything else is one shared writer/reader.
 // ---------------------------------------------------------------------------
+
+// 하나은행 '자주쓰는입금계좌관리' 파일을 읽는다.
+async function parseHanaAccountsUpload(base64, fileName = "") {
+  const given = path.extname(String(fileName || "")).toLowerCase();
+  const ext = [".xlsx", ".xls"].includes(given) ? given : ".xlsx";
+  const tmpPath = path.join(os.tmpdir(), `wooofpay-accts-${crypto.randomBytes(8).toString("hex")}${ext}`);
+  try {
+    await writeFile(tmpPath, Buffer.from(base64, "base64"));
+    const { stdout } = await execFileAsync("python3", [HANA_ACCOUNTS_SCRIPT, "--input", tmpPath], {
+      cwd: __dirname,
+      maxBuffer: 20 * 1024 * 1024
+    });
+    const parsed = JSON.parse(stdout || "{}");
+    if (parsed.error) throw new Error(parsed.error);
+    return Array.isArray(parsed.accounts) ? parsed.accounts : [];
+  } finally {
+    await safeUnlink(tmpPath);
+  }
+}
+
+// 하나은행 다계좌이체(이체등록) 엑셀.
+async function buildHanaTransferXlsx(rows) {
+  const tmpBase = path.join(os.tmpdir(), `wooofpay-transfer-${crypto.randomBytes(8).toString("hex")}`);
+  const inputPath = `${tmpBase}.json`;
+  const outputPath = `${tmpBase}.xlsx`;
+  try {
+    await writeFile(inputPath, JSON.stringify(rows), "utf8");
+    await execFileAsync("python3", [HANA_TRANSFER_SCRIPT, "--input", inputPath, "--output", outputPath], {
+      cwd: __dirname,
+      maxBuffer: 20 * 1024 * 1024
+    });
+    return await readFile(outputPath);
+  } finally {
+    await safeUnlink(inputPath);
+    await safeUnlink(outputPath);
+  }
+}
+
+// 입금요청 한 건의 이체등록 줄. 은행·계좌는 브랜드 설정, 금액은 이번에 보낼
+// 금액(업체실입금 − 외상차감 − 기지급), 출금통장표시는 건별 값이 없으면 브랜드 기본값.
+function transferRowForRequest(db, request) {
+  const brand = db.brands.find((item) => item.id === request.brandId);
+  const amount = Math.max(0, Math.round(
+    number(request.depositAmount) - number(request.creditUsedAmount) - number(request.priorPaidAmount)
+  ));
+  const account = normalizeAccountNumber(brand?.bankAccount);
+  const memo = String(request.withdrawMemo ?? "").trim();
+  return {
+    requestId: request.id,
+    brandName: brand?.name || request.brandName || "",
+    orderNo: request.orderNo || "",
+    bank: String(brand?.bankName || "").trim(),
+    account,
+    amount,
+    withdrawMemo: memo || (brand ? brandWithdrawMemo(brand) : ""),
+    depositMemo: String(request.depositMemo || "").trim()
+  };
+}
 
 async function buildRowsXlsx(sheetName, headers, rows, notes = null) {
   const tmpBase = path.join(os.tmpdir(), `wooofpay-rows-${crypto.randomBytes(8).toString("hex")}`);
@@ -5265,10 +5329,32 @@ function brandSummary(db, brandId) {
   return { requestCount: requests.length, pendingCount: pending, totalAmount: total, receivableDeducted, receivableRemaining, creditBalance, latestCatalogCount };
 }
 
+// 계좌번호는 숫자만 남긴다. 은행 이체등록 양식은 하이픈·공백을 받지 않고,
+// 0 으로 시작하는 번호가 있어 숫자로 바꾸면 앞자리가 사라진다 — 문자열로 둔다.
+function normalizeAccountNumber(value) {
+  return String(value ?? "").replace(/\D/g, "");
+}
+
+// 브랜드가 계좌관리 목록에서 계좌를 골랐으면 은행·계좌·예금주를 그 계좌로 맞춘다.
+function applyTransferAccount(db, brand) {
+  const account = (db.transferAccounts || []).find((a) => a.id === brand.transferAccountId);
+  if (!account) return;
+  brand.bankName = account.bankName;
+  brand.bankAccount = account.accountNumber;
+  if (account.holder) brand.depositorName = account.holder;
+}
+
+// 출금통장표시(적요) 기본값. 브랜드에서 따로 정하지 않으면 "브랜드명+선매입".
+function brandWithdrawMemo(brand) {
+  const custom = String(brand?.withdrawMemo || "").trim();
+  return custom || `${String(brand?.name || "").trim()}선매입`;
+}
+
 function hydrateBrand(db, brand) {
   const activePromotions = getActivePromotionRules(db, brand.id);
   return {
     ...brand,
+    withdrawMemoDefault: brandWithdrawMemo(brand),
     ...brandSummary(db, brand.id),
     promotionSummary:
       activePromotions.length === 1
@@ -6297,6 +6383,8 @@ function buildRequestFromDraft(db, brand, draft) {
     sourceSheet: "카페24 자동수집",
     sourceRow: 0,
     requiredMemo: brand.requiredMemo || "",
+    withdrawMemo: brandWithdrawMemo(brand),
+    depositMemo: "",
     businessName: brand.businessName || "",
     businessNumber: brand.businessNumber || "",
     depositorName: brand.depositorName || "",
@@ -7231,12 +7319,15 @@ async function routeApi(req, res, url) {
       cafe24Supplier: String(body.cafe24Supplier || "").trim(),
       autoCreateRequests: body.autoCreateRequests === true || body.autoCreateRequests === "true",
       bankLabel: String(body.bankLabel || "").trim(),
+      transferAccountId: String(body.transferAccountId || "").trim(),
+      withdrawMemo: String(body.withdrawMemo || "").trim(),
       priceBasis: body.priceBasis === "catalog" ? "catalog" : "cafe24",
       shareToken: crypto.randomBytes(12).toString("hex"),
       createdAt: now(),
       updatedAt: now()
     };
     Object.assign(brand, normalizeShippingPolicy(body, brand));
+    applyTransferAccount(db, brand);
     if (!brand.name) {
       sendJson(res, 400, { error: "브랜드명은 필수입니다." });
       return;
@@ -7288,10 +7379,14 @@ async function routeApi(req, res, url) {
       "googleSheetUrl",
       "cafe24Supplier",
       "bankLabel",
+      "transferAccountId",
+      "withdrawMemo",
       "priceBasis"
     ]) {
       if (key in body) brand[key] = body[key];
     }
+    if ("withdrawMemo" in body) brand.withdrawMemo = String(body.withdrawMemo || "").trim();
+    applyTransferAccount(db, brand);
     if ("autoCreateRequests" in body) {
       brand.autoCreateRequests = body.autoCreateRequests === true || body.autoCreateRequests === "true";
     }
@@ -7418,6 +7513,10 @@ async function routeApi(req, res, url) {
       sourceSheet: body.sourceSheet || brand?.rawSheetName || brand?.name || "",
       sourceRow: Number(body.sourceRow || 0),
       requiredMemo: body.requiredMemo || brand?.requiredMemo || "",
+      // 은행 이체등록 양식에 들어갈 표시 내용. 출금통장표시는 브랜드 기본값,
+      // 입금통장표시는 비워 두는 것이 기본이다. 둘 다 건별로 고칠 수 있다.
+      withdrawMemo: "withdrawMemo" in body ? String(body.withdrawMemo || "").trim() : brandWithdrawMemo(brand),
+      depositMemo: String(body.depositMemo || "").trim(),
       businessName: body.businessName || brand?.businessName || "",
       businessNumber: body.businessNumber || brand?.businessNumber || "",
       depositorName: body.depositorName || brand?.depositorName || "",
@@ -7596,6 +7695,8 @@ async function routeApi(req, res, url) {
       "sourceSheet",
       "sourceRow",
       "requiredMemo",
+      "withdrawMemo",
+      "depositMemo",
       "businessName",
       "businessNumber",
       "depositorName",
@@ -7628,6 +7729,9 @@ async function routeApi(req, res, url) {
           request[key] = body[key];
         }
       }
+    }
+    for (const key of ["withdrawMemo", "depositMemo"]) {
+      if (key in body) request[key] = String(body[key] ?? "").trim().slice(0, 50);
     }
     const brand = db.brands.find((item) => item.id === request.brandId);
     const promotionContext = brand ? buildPromotionContext(
@@ -10307,6 +10411,181 @@ async function routeApi(req, res, url) {
       }
     } catch (error) {
       sendJson(res, 500, { error: `${label} ${format === "pdf" ? "PDF " : ""}생성 실패: ${error.message}` });
+    }
+    return;
+  }
+
+  // --- 자주 쓰는 입금계좌 (거래관리 > 계좌관리) -------------------------------
+  if (pathname === "/api/transfer-accounts" && method === "GET") {
+    sendJson(res, 200, { transferAccounts: db.transferAccounts || [] });
+    return;
+  }
+
+  // 하나은행에서 내려받은 목록으로 통째로 바꾼다. 계좌가 바뀌면 은행에서 목록을
+  // 다시 받아 올리는 흐름이라, 부분 병합보다 교체가 맞다. 같은 계좌번호는 id 를
+  // 이어받아 브랜드 연결이 끊기지 않게 한다.
+  if (pathname === "/api/transfer-accounts/import" && method === "POST") {
+    if (!requirePermission(actor, res, "procurement", "edit")) return;
+    const body = await readBody(req);
+    if (!body.fileBase64) { sendJson(res, 400, { error: "업로드할 파일이 없습니다." }); return; }
+    let parsed;
+    try {
+      parsed = await parseHanaAccountsUpload(String(body.fileBase64).split(",").pop(), body.fileName);
+    } catch (error) {
+      console.error("[transfer-accounts] import failed:", error.message);
+      sendJson(res, 400, { error: "계좌 목록 파일을 읽지 못했습니다. 하나은행 '자주쓰는입금계좌' 엑셀인지 확인하세요." });
+      return;
+    }
+    if (!parsed.length) { sendJson(res, 400, { error: "계좌를 한 건도 찾지 못했습니다." }); return; }
+    const before = db.transferAccounts || [];
+    const byNumber = new Map(before.map((a) => [a.accountNumber, a]));
+    const seen = new Set();
+    const next = [];
+    for (const row of parsed) {
+      const accountNumber = normalizeAccountNumber(row.accountNumber);
+      if (!accountNumber || seen.has(accountNumber)) continue;
+      seen.add(accountNumber);
+      const prior = byNumber.get(accountNumber);
+      next.push({
+        id: prior?.id || id("acct"),
+        bankName: String(row.bankName || "").trim(),
+        accountNumber,
+        alias: String(row.alias || "").trim(),
+        holder: String(row.holder || "").trim(),
+        registeredAt: String(row.registeredAt || "").trim(),
+        createdAt: prior?.createdAt || now(),
+        updatedAt: now()
+      });
+    }
+    const added = next.filter((a) => !byNumber.has(a.accountNumber)).length;
+    const removed = before.filter((a) => !seen.has(a.accountNumber)).length;
+    db.transferAccounts = next;
+    // 연결된 브랜드도 새 목록 값에 맞춘다. 목록에서 빠진 계좌는 연결만 푼다
+    // (브랜드에 적힌 은행·계좌번호는 그대로 남는다).
+    for (const brand of db.brands) {
+      if (!brand.transferAccountId) continue;
+      if (next.some((a) => a.id === brand.transferAccountId)) applyTransferAccount(db, brand);
+      else brand.transferAccountId = "";
+    }
+    addAudit(db, actor, "update", "transferAccount", "import",
+      `입금계좌 목록 업로드 (${next.length}건, 추가 ${added} · 빠짐 ${removed})`, { count: before.length }, { count: next.length });
+    await writeDb(db);
+    sendJson(res, 200, { transferAccounts: next, added, removed, total: next.length });
+    return;
+  }
+
+  if (pathname === "/api/transfer-accounts" && method === "POST") {
+    if (!requirePermission(actor, res, "procurement", "create")) return;
+    const body = await readBody(req);
+    const accountNumber = normalizeAccountNumber(body.accountNumber);
+    const bankName = String(body.bankName || "").trim();
+    if (!bankName || !accountNumber) { sendJson(res, 400, { error: "은행과 계좌번호는 필수입니다." }); return; }
+    if ((db.transferAccounts || []).some((a) => a.accountNumber === accountNumber)) {
+      sendJson(res, 409, { error: "이미 등록된 계좌번호입니다." });
+      return;
+    }
+    const account = {
+      id: id("acct"),
+      bankName,
+      accountNumber,
+      alias: String(body.alias || "").trim(),
+      holder: String(body.holder || "").trim(),
+      registeredAt: String(body.registeredAt || "").trim() || now().slice(0, 10),
+      createdAt: now(),
+      updatedAt: now()
+    };
+    if (!Array.isArray(db.transferAccounts)) db.transferAccounts = [];
+    db.transferAccounts.push(account);
+    addAudit(db, actor, "create", "transferAccount", account.id, `${account.alias || account.bankName} 입금계좌 등록`, null, account);
+    await writeDb(db);
+    sendJson(res, 201, { transferAccount: account });
+    return;
+  }
+
+  const transferAccountMatch = pathname.match(/^\/api\/transfer-accounts\/([^/]+)$/);
+  if (transferAccountMatch && method === "PUT") {
+    if (!requirePermission(actor, res, "procurement", "edit")) return;
+    const body = await readBody(req);
+    const account = (db.transferAccounts || []).find((a) => a.id === transferAccountMatch[1]);
+    if (!account) { sendJson(res, 404, { error: "계좌를 찾을 수 없습니다." }); return; }
+    const before = { ...account };
+    if ("accountNumber" in body) {
+      const accountNumber = normalizeAccountNumber(body.accountNumber);
+      if (!accountNumber) { sendJson(res, 400, { error: "계좌번호는 필수입니다." }); return; }
+      if ((db.transferAccounts || []).some((a) => a.id !== account.id && a.accountNumber === accountNumber)) {
+        sendJson(res, 409, { error: "이미 등록된 계좌번호입니다." });
+        return;
+      }
+      account.accountNumber = accountNumber;
+    }
+    for (const key of ["bankName", "alias", "holder", "registeredAt"]) {
+      if (key in body) account[key] = String(body[key] || "").trim();
+    }
+    account.updatedAt = now();
+    // 이 계좌를 쓰는 브랜드의 이체 정보도 같이 맞춘다.
+    for (const brand of db.brands) {
+      if (brand.transferAccountId !== account.id) continue;
+      brand.bankName = account.bankName;
+      brand.bankAccount = account.accountNumber;
+      if (account.holder) brand.depositorName = account.holder;
+      brand.updatedAt = now();
+    }
+    addAudit(db, actor, "update", "transferAccount", account.id, `${account.alias || account.bankName} 입금계좌 수정`, before, account);
+    await writeDb(db);
+    sendJson(res, 200, { transferAccount: account });
+    return;
+  }
+
+  if (transferAccountMatch && method === "DELETE") {
+    if (!requirePermission(actor, res, "procurement", "delete")) return;
+    const list = db.transferAccounts || [];
+    const index = list.findIndex((a) => a.id === transferAccountMatch[1]);
+    if (index === -1) { sendJson(res, 404, { error: "계좌를 찾을 수 없습니다." }); return; }
+    const [removed] = list.splice(index, 1);
+    for (const brand of db.brands) {
+      if (brand.transferAccountId === removed.id) brand.transferAccountId = "";
+    }
+    addAudit(db, actor, "delete", "transferAccount", removed.id, `${removed.alias || removed.bankName} 입금계좌 삭제`, removed, null);
+    await writeDb(db);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  // 선택한 입금요청을 하나은행 이체등록 양식으로 내려받는다.
+  if (pathname === "/api/requests/transfer-xlsx" && method === "POST") {
+    if (!requirePermission(actor, res, "requests", "pay", "입금완료 처리 권한이 있어야 이체 양식을 받을 수 있습니다.")) return;
+    const body = await readBody(req);
+    const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+    const picked = ids
+      .map((rid) => db.requests.find((item) => item.id === rid && item.status !== "deleted"))
+      .filter(Boolean);
+    if (!picked.length) { sendJson(res, 400, { error: "선택한 입금요청이 없습니다." }); return; }
+    const rows = picked.map((request) => transferRowForRequest(db, request));
+    const missing = rows.filter((row) => !row.bank || !row.account);
+    if (missing.length) {
+      const names = [...new Set(missing.map((row) => row.brandName || "(브랜드 없음)"))];
+      sendJson(res, 400, {
+        error: `입금계좌가 없는 브랜드가 있습니다: ${names.slice(0, 5).join(", ")}${names.length > 5 ? ` 외 ${names.length - 5}곳` : ""}. 브랜드 설정에서 계좌를 지정하세요.`,
+        missing: missing.map((row) => row.requestId)
+      });
+      return;
+    }
+    const zero = rows.filter((row) => !row.amount);
+    if (zero.length) {
+      sendJson(res, 400, { error: `입금액이 0원인 요청이 ${zero.length}건 있습니다: ${zero.slice(0, 3).map((r) => r.orderNo || r.brandName).join(", ")}` });
+      return;
+    }
+    try {
+      const file = await buildHanaTransferXlsx(rows);
+      addAudit(db, actor, "export", "request", "transfer-xlsx",
+        `하나은행 이체양식 ${rows.length}건 다운로드 (합계 ${rows.reduce((s, r) => s + r.amount, 0).toLocaleString()}원)`, null, { ids: rows.map((r) => r.requestId) });
+      await writeDb(db);
+      const stamp = now().slice(0, 10).replace(/-/g, "");
+      sendBuffer(res, 200, file, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        { "content-disposition": contentDisposition(`하나은행_이체등록_${stamp}.xlsx`) });
+    } catch (error) {
+      console.error("[transfer-xlsx] build failed:", error.message);
+      sendJson(res, 500, { error: "이체 양식을 만들지 못했습니다." });
     }
     return;
   }

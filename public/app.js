@@ -31,6 +31,7 @@ const state = {
   materials: [],
   purchaseOrders: [],
   deliveryPlaces: [],
+  transferAccounts: [],
   priceEntries: [],
   priceCatalog: [],
   aliasEntries: [],
@@ -148,6 +149,7 @@ const PROCUREMENT_SCREENS = [
   ["partners", "거래처관리"],
   ["materials", "원부자재관리"],
   ["deliveryPlaces", "납품지관리"],
+  ["accounts", "계좌관리"],
   ["orders", "명세서 발행"]
 ];
 
@@ -643,6 +645,8 @@ async function loadAll() {
     api("/api/purchase-orders"),
     api("/api/delivery-places")
   ]);
+  // 입금계좌 목록. 브랜드 설정의 계좌 선택과 계좌관리 화면이 쓴다.
+  state.transferAccounts = (await api("/api/transfer-accounts").catch(() => ({}))).transferAccounts || [];
   state.menus = menus.menus || [];
   state.actionLabels = menus.actionLabels || {};
   state.dashboard = dashboard;
@@ -1124,6 +1128,7 @@ function renderRequests() {
             </span>
             <button type="button" class="danger" data-delete-selected-requests ${state.selectedRequestIds.length ? "" : "disabled"}>선택 삭제</button>
             <button type="button" data-clear-selection ${state.selectedRequestIds.length ? "" : "disabled"}>선택 해제</button>
+            ${can("requests", "pay") ? `<button type="button" data-transfer-xlsx ${state.selectedRequestIds.length ? "" : "disabled"}>하나은행 이체양식</button>` : ""}
             <span class="muted">선택 ${state.selectedRequestIds.length}건</span>
             ${state.selectedRequestIds.length ? `<span class="muted">· 선택 합계 <strong class="amount-emphasis">${money.format(selectedTotal)}원</strong></span>` : ""}
           </div>
@@ -1415,6 +1420,16 @@ function renderRequestForm() {
       <div class="field">
         <label>주문 메모</label>
         <textarea name="notes" placeholder="해당 입금건에 대한 메모 (예: 통화 내용, 특이사항 등)">${h(item.notes || "")}</textarea>
+      </div>
+      <div class="field two">
+        <div>
+          <label>출금통장표시 <span class="muted" style="font-weight:400">(이체양식 · 비우면 브랜드 기본값)</span></label>
+          <input name="withdrawMemo" data-manual="${item.withdrawMemo ? "1" : ""}" oninput="this.dataset.manual='1'" value="${h(item.withdrawMemo ?? selectedBrand?.withdrawMemoDefault ?? "")}" placeholder="${h(selectedBrand?.withdrawMemoDefault || "브랜드명선매입")}">
+        </div>
+        <div>
+          <label>입금통장표시 <span class="muted" style="font-weight:400">(이체양식 · 기본 공란)</span></label>
+          <input name="depositMemo" value="${h(item.depositMemo || "")}">
+        </div>
       </div>
       <details class="fixed-summary collapsible-summary" ${
         Number(item.overpaidAmount || 0) > 0 || Number(item.creditUsedAmount || 0) > 0 || item.overpaidNote || item.creditUsedNote ? "open" : ""
@@ -2031,9 +2046,22 @@ function renderBrandForm() {
         <div><label>사업자번호</label><input name="businessNumber" value="${h(b.businessNumber)}"></div>
       </div>
       <div class="field"><label>대표자명</label><input name="representativeName" value="${h(b.representativeName)}"></div>
+      <div class="field">
+        <label>입금계좌 <span class="muted" style="font-weight:400">(거래관리 &gt; 계좌관리 목록에서 선택 · 이체양식 기본값)</span></label>
+        <select name="transferAccountId" data-brand-transfer-account>
+          <option value="">직접 입력</option>
+          ${(state.transferAccounts || []).slice()
+            .sort((x, y) => String(x.alias || "").localeCompare(String(y.alias || ""), "ko"))
+            .map((a) => `<option value="${h(a.id)}" ${b.transferAccountId === a.id ? "selected" : ""}>${h(a.alias || a.holder)} · ${h(a.bankName)} ${h(a.accountNumber)}</option>`).join("")}
+        </select>
+      </div>
       <div class="field two">
         <div><label>입금은행명</label><input name="bankName" value="${h(b.bankName)}"></div>
         <div><label>통장계좌번호</label><input name="bankAccount" value="${h(b.bankAccount)}"></div>
+      </div>
+      <div class="field">
+        <label>출금통장표시 기본값 <span class="muted" style="font-weight:400">(비우면 "${h((b.name || "브랜드명") + "선매입")}" · 입금요청마다 고칠 수 있음)</span></label>
+        <input name="withdrawMemo" value="${h(b.withdrawMemo || "")}" placeholder="${h((b.name || "브랜드명") + "선매입")}">
       </div>
       <div class="field"><label>계좌예금주명</label><input name="depositorName" value="${h(b.depositorName)}"></div>
       <div class="field two">
@@ -2715,6 +2743,34 @@ function bindRequests() {
   });
   app.querySelector("[data-mark-selected-paid]")?.addEventListener("click", async () => {
     await markRequestsPaid(state.selectedRequestIds, state.bulkPaidAt);
+  });
+  // 선택한 입금요청 → 하나은행 이체등록 엑셀.
+  app.querySelector("[data-transfer-xlsx]")?.addEventListener("click", async () => {
+    try {
+      const res = await fetch("/api/requests/transfer-xlsx", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ids: state.selectedRequestIds })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return showToast(err.error || "이체 양식을 만들지 못했습니다.", "error");
+      }
+      const blob = await res.blob();
+      const name = decodeURIComponent((res.headers.get("content-disposition") || "").match(/filename\*=UTF-8''([^;]+)/)?.[1] || "") || "하나은행_이체등록.xlsx";
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast(`${state.selectedRequestIds.length}건 이체양식을 받았습니다.`);
+    } catch (error) {
+      showToast(error.message || "이체 양식을 만들지 못했습니다.", "error");
+    }
   });
   app.querySelector("[data-clear-selection]")?.addEventListener("click", () => {
     state.selectedRequestIds = [];
@@ -3425,6 +3481,12 @@ function applyBrandDefaults(form, brand) {
   setValue("businessName", brand.businessName || "");
   setValue("businessNumber", brand.businessNumber || "");
   setValue("depositorName", brand.depositorName || "");
+  // 브랜드를 바꾸면 출금통장표시도 그 브랜드 기본값으로 바꾼다. 건별로 손댄
+  // 값(또는 이미 저장된 요청의 값)은 덮지 않는다.
+  const withdrawInput = form.querySelector("[name='withdrawMemo']");
+  if (withdrawInput && withdrawInput.dataset.manual !== "1") {
+    withdrawInput.value = brand.withdrawMemoDefault || `${brand.name || ""}선매입`;
+  }
   const baseShippingInput = form.querySelector("[name='baseShippingFee']");
   if (baseShippingInput) baseShippingInput.dataset.manual = "";
   updateRequestCalculation(form);
@@ -4103,6 +4165,27 @@ function bindBrands() {
       await refreshAndRender();
     });
   });
+  app.querySelector("[data-brand-transfer-account]")?.addEventListener("change", (event) => {
+    const account = (state.transferAccounts || []).find((a) => a.id === event.target.value);
+    if (!account) return;
+    const form = event.target.closest("[data-brand-form]");
+    const set = (name, value) => { const el = form?.querySelector(`[name='${name}']`); if (el) el.value = value; };
+    set("bankName", account.bankName);
+    set("bankAccount", account.accountNumber);
+    if (account.holder) set("depositorName", account.holder);
+  });
+  // 목록에서 계좌를 고른 동안은 은행·계좌번호를 손으로 못 고치게 한다 — 저장하면
+  // 서버가 고른 계좌 값으로 맞추므로, 입력해도 사라진다.
+  const lockBankFields = () => {
+    const form = app.querySelector("[data-brand-form]");
+    const picked = Boolean(form?.querySelector("[data-brand-transfer-account]")?.value);
+    for (const name of ["bankName", "bankAccount"]) {
+      const el = form?.querySelector(`[name='${name}']`);
+      if (el) el.readOnly = picked;
+    }
+  };
+  lockBankFields();
+  app.querySelector("[data-brand-transfer-account]")?.addEventListener("change", lockBankFields);
   app.querySelector("[data-brand-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = formObject(event.currentTarget);
@@ -4448,6 +4531,7 @@ function renderProcurement() {
   let body = "";
   if (p.screen === "materials") body = renderMaterials();
   else if (p.screen === "deliveryPlaces") body = renderDeliveryPlaces();
+  else if (p.screen === "accounts") body = renderTransferAccounts();
   else if (p.screen === "orders") body = renderPurchaseOrders();
   else body = renderPartners();
   return `
@@ -4484,6 +4568,7 @@ function bindProcurement() {
   });
   if (state.procurement.screen === "materials") bindMaterials();
   else if (state.procurement.screen === "deliveryPlaces") bindDeliveryPlaces();
+  else if (state.procurement.screen === "accounts") bindTransferAccounts();
   else if (state.procurement.screen === "orders") bindPurchaseOrders();
   else bindPartners();
 }
@@ -4775,6 +4860,124 @@ function bindMaterials() {
     state.procurement.editingMaterial = null;
     afterProcurementSave("material", editing ? "수정되었습니다." : "저장되었습니다.");
     await refreshAndRender();
+  });
+}
+
+function renderTransferAccounts() {
+  const q = String(state.procurement.accountQuery || "").trim();
+  const all = (state.transferAccounts || []).slice()
+    .sort((a, b) => String(a.alias || "").localeCompare(String(b.alias || ""), "ko"));
+  const rows = q
+    ? all.filter((a) => [a.alias, a.holder, a.bankName, a.accountNumber].some((v) => String(v || "").includes(q)))
+    : all;
+  const usedBy = (accountId) => state.brands.filter((b) => b.transferAccountId === accountId).map((b) => b.name);
+  const a = state.procurement.editingAccount || {};
+  return `
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>자주 쓰는 입금계좌</h2><span class="muted">${money.format(all.length)}개</span></div>
+        <div class="panel-body" style="padding-bottom:0">
+          <div class="toolbar">
+            <label>하나은행 목록 업로드 <input type="file" accept=".xlsx,.xls" data-account-import></label>
+            <input data-account-q placeholder="별칭·예금주·계좌번호 검색" value="${h(q)}">
+          </div>
+          <p class="muted">하나은행 '자주쓰는입금계좌관리'에서 내려받은 엑셀을 올리면 목록이 그 파일로 바뀝니다.
+            같은 계좌번호는 브랜드 연결이 그대로 유지됩니다.</p>
+        </div>
+        <div class="table-wrap">
+          <table class="accounts-table">
+            <thead><tr><th>별칭</th><th>은행</th><th>계좌번호</th><th>예금주</th><th>연결 브랜드</th><th>작업</th></tr></thead>
+            <tbody>${rows.map((acc) => `
+              <tr>
+                <td>${h(acc.alias)}</td>
+                <td>${h(acc.bankName)}</td>
+                <td><code>${h(acc.accountNumber)}</code></td>
+                <td>${h(acc.holder)}</td>
+                <td class="wrap">${h(usedBy(acc.id).join(", "))}</td>
+                <td><div class="row-actions"><button data-edit-account="${h(acc.id)}">수정</button><button class="danger icon-btn" data-delete-account="${h(acc.id)}" aria-label="삭제" title="삭제">×</button></div></td>
+              </tr>`).join("") || `<tr><td colspan="6" class="empty">등록된 계좌가 없습니다.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>${a.id ? "계좌 수정" : "계좌 추가"}</h2></div>
+        <div class="panel-body">
+          <form class="form-grid" data-account-form>
+            <div class="field"><label>별칭</label><input name="alias" value="${h(a.alias)}" placeholder="예: (주)안스펫"></div>
+            <div class="field two">
+              <div><label>은행</label><input name="bankName" value="${h(a.bankName)}" required placeholder="예: 기업은행"></div>
+              <div><label>계좌번호 <span class="muted" style="font-weight:400">(하이픈은 자동으로 뺍니다)</span></label><input name="accountNumber" value="${h(a.accountNumber)}" required inputmode="numeric"></div>
+            </div>
+            <div class="field"><label>예금주</label><input name="holder" value="${h(a.holder)}"></div>
+            <div class="toolbar">
+              <button class="primary" type="submit">${a.id ? "수정 저장" : "계좌 추가"}</button>
+              ${a.id ? `<button type="button" data-cancel-edit-account>취소</button>` : ""}
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>`;
+}
+
+function bindTransferAccounts() {
+  const reload = async () => {
+    state.transferAccounts = (await api("/api/transfer-accounts")).transferAccounts || [];
+    state.brands = (await api("/api/brands")).brands;
+    renderApp();
+  };
+  app.querySelector("[data-account-q]")?.addEventListener("change", (e) => {
+    state.procurement.accountQuery = e.target.value;
+    renderApp();
+  });
+  app.querySelector("[data-account-import]")?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!confirm(`'${file.name}' 내용으로 계좌 목록을 바꿀까요?`)) { e.target.value = ""; return; }
+    try {
+      const res = await api("/api/transfer-accounts/import", {
+        method: "POST",
+        body: { fileBase64: await readFileAsBase64(file), fileName: file.name }
+      });
+      showToast(`계좌 ${res.total}개로 바꿨습니다 (추가 ${res.added} · 빠짐 ${res.removed}).`);
+      await reload();
+    } catch (error) {
+      showToast(error.message || "계좌 목록을 올리지 못했습니다.", "error");
+    }
+  });
+  app.querySelectorAll("[data-edit-account]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.procurement.editingAccount = (state.transferAccounts || []).find((x) => x.id === btn.dataset.editAccount) || null;
+      renderApp();
+    });
+  });
+  app.querySelector("[data-cancel-edit-account]")?.addEventListener("click", () => {
+    state.procurement.editingAccount = null;
+    renderApp();
+  });
+  app.querySelectorAll("[data-delete-account]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("이 계좌를 목록에서 삭제할까요? 브랜드에 입력된 은행·계좌번호는 그대로 남습니다.")) return;
+      try {
+        await api(`/api/transfer-accounts/${btn.dataset.deleteAccount}`, { method: "DELETE" });
+        await reload();
+      } catch (error) {
+        showToast(error.message || "삭제하지 못했습니다.", "error");
+      }
+    });
+  });
+  app.querySelector("[data-account-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = formObject(event.currentTarget);
+    const editing = state.procurement.editingAccount;
+    try {
+      if (editing) await api(`/api/transfer-accounts/${editing.id}`, { method: "PUT", body });
+      else await api("/api/transfer-accounts", { method: "POST", body });
+      state.procurement.editingAccount = null;
+      showToast(editing ? "수정했습니다." : "추가했습니다.");
+      await reload();
+    } catch (error) {
+      showToast(error.message || "저장하지 못했습니다.", "error");
+    }
   });
 }
 
