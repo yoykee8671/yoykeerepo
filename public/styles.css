@@ -2374,3 +2374,10 @@ a.button:hover {
 .stock-table .num { text-align: right; white-space: nowrap; }
 .stock-need td { background: #fff7ed; }
 .stock-void td { text-decoration: line-through; }
+
+/* v2 확인 필요 */
+.setup-list { display: grid; gap: 10px; }
+.setup-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px 14px; }
+.setup-card.answered { opacity: .75; }
+.setup-card p { margin: 4px 0 8px; font-size: 13px; }
+.setup-kind { font-size: 11px; color: #1d4ed8; font-weight: 600; margin-bottom: 2px; }

@@ -789,8 +789,10 @@ function renderApp() {
     ["pipeline", "주문매칭"],
     ["settlement", "정산"],
     ["npb", "npb정산"],
-    ["productsync", "상품동기화"]
-  ].filter(([key]) => can(key, "view") || (key === "pipeline" && can("reconcile", "view")));
+    ["productsync", "상품동기화"],
+    ["setup", "확인 필요"]
+  ].filter(([key]) => can(key, "view") || (key === "pipeline" && can("reconcile", "view"))
+    || (key === "setup" && (state.admin?.role === "owner" || can("cash", "edit"))));
   app.innerHTML = `
     <div class="shell">
       <aside class="sidebar">
@@ -984,6 +986,7 @@ function renderCurrentTab() {
   if (state.tab === "cash") return renderCash();
   if (state.tab === "sales") return renderSales();
   if (state.tab === "stock") return renderStock();
+  if (state.tab === "setup") return renderSetup();
   if (state.tab === "admins") return renderAdmins();
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
@@ -2463,6 +2466,7 @@ function bindCurrentTab() {
   if (state.tab === "cash") bindCash();
   if (state.tab === "sales") bindSales();
   if (state.tab === "stock") bindStock();
+  if (state.tab === "setup") bindSetup();
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
   if (state.tab === "settlement") bindSettlement();
@@ -11473,11 +11477,11 @@ const cashDay = (d) => `${Number(d.slice(5, 7))}/${Number(d.slice(8, 10))}(${WEE
 function renderCash() {
   const cs = cashState();
   const head = pageHead("자금", "오늘과 7일 안에 들어올 돈·나갈 돈, 계좌 잔액을 한 장으로 봅니다. 매일 아침 이 화면을 보고 채널톡에 공유하세요.");
-  const tabs = `<div class="npb-subnav">${[["report", "일일 자금보고"], ["schedules", "자금 일정"]].map(([k, l]) => `<button class="npb-subtab ${cs.screen === k ? "active" : ""}" data-cash-screen="${k}">${l}</button>`).join("")}
+  const tabs = `<div class="npb-subnav">${[["report", "일일 자금보고"], ["schedules", "자금 일정"], ["receivables", "채권원장"]].map(([k, l]) => `<button class="npb-subtab ${cs.screen === k ? "active" : ""}" data-cash-screen="${k}">${l}</button>`).join("")}
     <span style="flex:1"></span>
     ${(cs.meta?.companies || [{ key: "wooof", name: "우프컴퍼니" }, { key: "betters", name: "베럴즈" }]).map((c) => `<button class="npb-subtab ${cs.company === c.key ? "active" : ""}" data-cash-company="${c.key}">${h(c.name)}</button>`).join("")}</div>`;
   if (!cs.data) return `${head}${tabs}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
-  return `${head}${tabs}${cs.screen === "schedules" ? renderCashSchedules() : renderCashReport()}`;
+  return `${head}${tabs}${cs.screen === "schedules" ? renderCashSchedules() : cs.screen === "receivables" ? renderReceivableLedger() : renderCashReport()}`;
 }
 
 function renderCashReport() {
@@ -11581,6 +11585,14 @@ function bindCash() {
   }
   const reload = async () => { await loadCash(); renderApp(); };
   app.querySelectorAll("[data-cash-screen]").forEach((b) => b.addEventListener("click", () => { cs.screen = b.dataset.cashScreen; renderApp(); }));
+  if (cs.screen === "receivables" && !cs.rec && !cs.recLoading) {
+    cs.recLoading = true;
+    api("/api/receivables").then((r) => { cs.rec = r.brands || []; }).catch(() => { cs.rec = []; }).finally(() => { cs.recLoading = false; renderApp(); });
+  }
+  app.querySelectorAll("[data-rec-open]").forEach((tr) => tr.addEventListener("click", async () => {
+    cs.recDetail = await api(`/api/receivables/${tr.dataset.recOpen}`);
+    renderApp();
+  }));
   app.querySelectorAll("[data-cash-company]").forEach((b) => b.addEventListener("click", async () => { cs.company = b.dataset.cashCompany; cs.editing = null; await reload(); }));
   app.querySelector("[data-cash-reload]")?.addEventListener("click", reload);
   app.querySelector("[data-cash-print]")?.addEventListener("click", () => window.print());
@@ -12090,4 +12102,101 @@ function bindStock() {
     const p = readBom();
     run(async () => { await api(p.id ? `/api/stock/products/${p.id}` : "/api/stock/products", { method: p.id ? "PUT" : "POST", body: { name: p.name, unit: p.unit, lines: p.lines } }); st.editingProduct = null; }, "저장했습니다.");
   });
+}
+
+// ===========================================================================
+// v2 확인 필요(질문함) — 시스템이 모르는 값을 질문으로 띄우고 답하면 적용한다.
+// ===========================================================================
+function setupState() {
+  if (!state.setup) state.setup = { list: null, loading: false, show: "open" };
+  return state.setup;
+}
+async function loadSetup() {
+  const ss = setupState();
+  ss.loading = true;
+  try { const res = await api("/api/setup/questions"); ss.list = res.questions || []; ss.brands = res.brands || []; }
+  catch (error) { ss.list = []; ss.error = error.message; } finally { ss.loading = false; }
+}
+const SETUP_KIND_LABEL = { "claim-base": "채권총액", "request-deduction": "채권차감액", "amount-mismatch": "금액 차이", "tab-brand": "시트 탭 연결", "zero-deduction": "차감 방식" };
+
+function renderSetup() {
+  const ss = setupState();
+  const head = pageHead("확인 필요", "시스템이 스스로 정할 수 없는 값을 질문으로 모았습니다. 답하면 바로 적용되고, 누가 언제 무엇으로 답했는지 남습니다.");
+  if (ss.list === null) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const open = ss.list.filter((q) => q.status !== "answered");
+  const done = ss.list.filter((q) => q.status === "answered");
+  const shown = ss.show === "open" ? open : done;
+  const byKind = {};
+  for (const q of open) byKind[q.kind] = (byKind[q.kind] || 0) + 1;
+  const card = (q) => `
+    <div class="setup-card ${q.status === "answered" ? "answered" : ""}">
+      <div class="setup-kind">${h(SETUP_KIND_LABEL[q.kind] || q.kind)}</div>
+      <strong>${h(q.title)}</strong>
+      <p class="muted">${h(q.detail || "")}</p>
+      ${q.status === "answered"
+        ? `<div class="muted">✓ ${h(q.answer?.applied || q.answer?.label || "")} · ${h(q.answeredBy || "")} ${h(String(q.answeredAt || "").slice(0, 10))}</div>`
+        : `<div class="toolbar">${(q.choices || []).map((c) => c.input === "brand"
+            ? `<select data-setup-brand="${h(q.id)}"><option value="">브랜드 선택</option>${(ss.brands || []).map((b) => `<option value="${h(b.id)}">${h(b.code ? `${b.code} · ` : "")}${h(b.name)}</option>`).join("")}</select><button data-setup-answer="${h(q.id)}" data-choice="${h(c.key)}">이 브랜드로</button>`
+            : c.input ? `<input data-setup-input="${h(q.id)}:${h(c.key)}" inputmode="decimal" placeholder="${c.input === "rate" ? "수수료율 %" : "금액"}" style="width:110px"><button data-setup-answer="${h(q.id)}" data-choice="${h(c.key)}">${h(c.label)}</button>`
+            : `<button class="${q.suggested === c.key ? "primary" : ""}" data-setup-answer="${h(q.id)}" data-choice="${h(c.key)}">${h(c.label)}</button>`).join("")}</div>`}
+    </div>`;
+  return `
+    ${head}
+    <div class="npb-subnav">
+      <button class="npb-subtab ${ss.show === "open" ? "active" : ""}" data-setup-show="open">남은 질문 <span class="muted">${open.length}</span></button>
+      <button class="npb-subtab ${ss.show === "done" ? "active" : ""}" data-setup-show="done">답한 질문 <span class="muted">${done.length}</span></button>
+      <span class="muted" style="align-self:center;margin-left:8px">${Object.entries(byKind).map(([k, n]) => `${SETUP_KIND_LABEL[k] || k} ${n}`).join(" · ")}</span>
+    </div>
+    <section class="setup-list">${shown.map(card).join("") || `<div class="panel"><div class="panel-body"><p class="muted">${ss.show === "open" ? "남은 질문이 없습니다." : "아직 답한 질문이 없습니다."}</p></div></div>`}</section>`;
+}
+
+function bindSetup() {
+  const ss = setupState();
+  if (ss.list === null && !ss.loading) { loadSetup().then(renderApp); return; }
+  app.querySelectorAll("[data-setup-show]").forEach((b) => b.addEventListener("click", () => { ss.show = b.dataset.setupShow; renderApp(); }));
+  app.querySelectorAll("[data-setup-answer]").forEach((b) => b.addEventListener("click", async () => {
+    const qid = b.dataset.setupAnswer;
+    const choice = b.dataset.choice;
+    const body = { choice };
+    const input = app.querySelector(`[data-setup-input="${CSS.escape(`${qid}:${choice}`)}"]`);
+    if (input) body.value = input.value;
+    const brandSel = app.querySelector(`[data-setup-brand="${CSS.escape(qid)}"]`);
+    if (brandSel) body.brandId = brandSel.value;
+    try {
+      const res = await api(`/api/setup/questions/${encodeURIComponent(qid)}/answer`, { method: "POST", body });
+      showToast(`적용했습니다: ${res.applied || ""}`);
+      await loadSetup();
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "적용하지 못했습니다.", "error");
+    }
+  }));
+}
+
+// 자금 > 채권원장
+function renderReceivableLedger() {
+  const cs = cashState();
+  if (!cs.rec) return `<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const detail = cs.recDetail;
+  return `
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>채권원장</h2><span class="muted">채권총액 − (옛 관리대장 이관 + 입금요청 차감 + 조정) = 잔액</span></div>
+        <div class="table-wrap"><table class="cash-table">
+          <thead><tr><th>브랜드</th><th>채권총액</th><th>차감 누계</th><th>잔액</th><th>이관 주문</th></tr></thead>
+          <tbody>${cs.rec.map((r) => `<tr data-rec-open="${h(r.brandId)}" style="cursor:pointer" class="${detail?.brand?.id === r.brandId ? "selected" : ""}">
+            <td>${r.code ? `<span class="code-tag">${h(r.code)}</span>` : ""}${h(r.name)}</td><td class="num">${money.format(r.base)}</td>
+            <td class="num">${money.format(r.deducted)}</td><td class="num"><strong>${money.format(r.balance)}</strong></td><td class="num">${r.legacyCount || ""}</td></tr>`).join("")}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>${detail ? h(detail.brand.name) : "내역"}</h2></div>
+        <div class="panel-body">${detail ? `
+          <p>채권총액 ${money.format(detail.ledger.base)} − 차감 ${money.format(detail.ledger.deducted)} = <strong>${money.format(detail.ledger.balance)}원</strong></p>
+          <div class="table-wrap" style="max-height:520px"><table class="cash-table"><thead><tr><th>날짜</th><th>구분</th><th>주문</th><th>차감</th><th>잔액</th></tr></thead><tbody>
+            ${detail.ledger.entries.slice().reverse().map((e) => `<tr><td>${h(String(e.date).slice(0, 10))}</td><td>${h(e.kind)}</td><td class="muted" style="font-size:12px">${h(e.orderNo || e.memo || "")}</td>
+              <td class="num">${money.format(e.amount)}</td><td class="num">${money.format(e.balance)}</td></tr>`).join("")}
+          </tbody></table></div>` : `<p class="muted">브랜드를 누르면 차감 내역이 보입니다.</p>`}</div>
+      </div>
+    </section>`;
 }

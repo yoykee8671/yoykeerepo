@@ -20,6 +20,7 @@ import * as payments from "./lib/payment-requests.mjs";
 import * as cashReport from "./lib/cash-report.mjs";
 import * as sales from "./lib/sales-orders.mjs";
 import * as inventory from "./lib/inventory.mjs";
+import * as legacy from "./lib/legacy-migration.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -5507,9 +5508,11 @@ function brandSummary(db, brandId) {
     0
   );
   const brand = db.brands.find((item) => item.id === brandId);
-  const receivableRemaining = Math.max(0, Number(brand?.receivableTotal || 0) - receivableDeducted);
+  // 옛 관리대장에서 이관한 주문의 차감(v2)도 함께 뺀다. 이관 때 브랜드에 합계를 적어 둔다.
+  const legacyDeducted = Number(brand?.legacyReceivableDeducted || 0);
+  const receivableRemaining = Math.max(0, Number(brand?.receivableTotal || 0) - receivableDeducted - legacyDeducted);
   const latestCatalogCount = getLatestPriceCatalog(db, brandId).length;
-  return { requestCount: requests.length, pendingCount: pending, totalAmount: total, receivableDeducted, receivableRemaining, creditBalance, latestCatalogCount };
+  return { requestCount: requests.length, pendingCount: pending, totalAmount: total, receivableDeducted: receivableDeducted + legacyDeducted, legacyDeducted, receivableRemaining, creditBalance, latestCatalogCount };
 }
 
 // 계좌번호는 숫자만 남긴다. 은행 이체등록 양식은 하이픈·공백을 받지 않고,
@@ -10643,6 +10646,150 @@ async function routeApi(req, res, url) {
     } catch (error) {
       sendJson(res, 500, { error: `${label} ${format === "pdf" ? "PDF " : ""}생성 실패: ${error.message}` });
     }
+    return;
+  }
+
+  // --- v2 확인 필요(질문함) + 옛 관리대장 이관 + 채권원장 -----------------------
+  if (pathname.startsWith("/api/setup/") || pathname === "/api/receivables" || pathname.startsWith("/api/receivables/")) {
+    const isOwner = actor.role === "owner";
+    const canAnswer = isOwner || can(actor, "cash", "edit");
+    const who = actor.name || actor.email || "";
+    const recomputeLegacy = async () => {
+      const legacy = await erp.list("legacyOrders");
+      const sums = {};
+      for (const o of legacy) sums[o.brandId] = (sums[o.brandId] || 0) + Number(o.receivableDeduction || 0);
+      for (const b of db.brands) b.legacyReceivableDeducted = Math.round(sums[b.id] || 0);
+    };
+
+    // 이관 실행(오너). 같은 주문은 같은 id 로 덮어써서 여러 번 돌려도 안전하다.
+    if (pathname === "/api/setup/migration/run" && method === "POST") {
+      if (!isOwner) { sendJson(res, 403, { error: "이관은 오너만 실행할 수 있습니다." }); return; }
+      const body = await readBody(req);
+      const plan = legacy.planMigration({
+        brands: db.brands.filter((b) => b.type === "brand"), requests: db.requests,
+        tabs: body.tabs || {}, creditors: Array.isArray(body.creditors) ? body.creditors : []
+      });
+      const stamp = now();
+      for (const o of plan.legacyOrders) await erp.put("legacyOrders", { ...o, importedAt: stamp });
+      for (const d of plan.autoDeletes) {
+        const r = db.requests.find((x) => x.id === d.requestId);
+        if (!r || r.status === "deleted") continue;
+        const before = { ...r };
+        r.status = "deleted";
+        r.deletedReason = `중복 정리(같은 주문번호·금액, ${d.keepId} 남김)`;
+        r.updatedAt = stamp;
+        addAudit(db, actor, "delete", "request", r.id, `${r.brandName} ${r.orderNo} 중복 정리`, before, r);
+      }
+      const existing = new Map((await erp.list("setupQuestions")).map((x) => [x.id, x]));
+      let added = 0;
+      for (const qn of plan.questions) {
+        if (existing.get(qn.id)?.status === "answered") continue; // 답한 질문은 다시 열지 않는다
+        await erp.put("setupQuestions", { ...qn, createdAt: existing.get(qn.id)?.createdAt || stamp, updatedAt: stamp });
+        added += existing.has(qn.id) ? 0 : 1;
+      }
+      await recomputeLegacy();
+      addAudit(db, actor, "update", "migration", "legacy-ledger",
+        `옛 관리대장 이관: 주문 ${plan.legacyOrders.length}건, 중복정리 ${plan.autoDeletes.length}건, 확인필요 ${plan.questions.length}건`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { imported: plan.legacyOrders.length, autoDeleted: plan.autoDeletes.length, questions: plan.questions.length, newQuestions: added, perBrand: plan.perBrand });
+      return;
+    }
+
+    if (pathname === "/api/setup/questions" && method === "GET") {
+      if (!canAnswer) { sendJson(res, 403, { error: "확인 필요 항목을 볼 권한이 없습니다." }); return; }
+      const list = (await erp.list("setupQuestions")).map(({ payload, ...q }) => ({ ...q, hasPayload: Boolean(payload) }));
+      sendJson(res, 200, { questions: list, brands: db.brands.filter((b) => b.type === "brand").map((b) => ({ id: b.id, name: b.name, code: b.code })) });
+      return;
+    }
+
+    const ans = pathname.match(/^\/api\/setup\/questions\/([^/]+)\/answer$/);
+    if (ans && method === "POST") {
+      if (!canAnswer) { sendJson(res, 403, { error: "답할 권한이 없습니다." }); return; }
+      const body = await readBody(req);
+      const qn = await erp.get("setupQuestions", decodeURIComponent(ans[1]));
+      if (!qn) { sendJson(res, 404, { error: "질문을 찾을 수 없습니다." }); return; }
+      const choice = (qn.choices || []).find((c) => c.key === body.choice);
+      if (!choice) { sendJson(res, 400, { error: "답을 고르세요." }); return; }
+      const amountInput = Math.round(number(String(body.value ?? "").replace(/,/g, "")));
+      let applied = "";
+      if (qn.kind === "claim-base") {
+        const brand = db.brands.find((b) => b.id === qn.subjectId);
+        if (!brand) { sendJson(res, 404, { error: "브랜드가 없습니다." }); return; }
+        const next = choice.key === "plan" ? choice.value : choice.key === "input" ? amountInput : null;
+        if (choice.key === "input" && !(next > 0)) { sendJson(res, 400, { error: "금액을 입력하세요." }); return; }
+        if (next != null) {
+          const before = { receivableTotal: brand.receivableTotal };
+          brand.receivableTotal = next;
+          brand.updatedAt = now();
+          addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 채권총액 ${number(before.receivableTotal).toLocaleString()} → ${next.toLocaleString()} (확인 필요 답변)`, before, { receivableTotal: next });
+          applied = `채권총액 ${next.toLocaleString()}원`;
+        } else applied = "유지";
+      } else if (qn.kind === "request-deduction") {
+        const r = db.requests.find((x) => x.id === qn.subjectId);
+        if (r && choice.key === "use-sheet") {
+          const before = { receivableDeduction: r.receivableDeduction };
+          r.receivableDeduction = choice.value;
+          r.updatedAt = now();
+          addAudit(db, actor, "update", "request", r.id, `${r.brandName} ${r.orderNo} 채권차감 ${choice.value.toLocaleString()}원 (확인 필요 답변)`, before, { receivableDeduction: choice.value });
+          applied = `차감 ${choice.value.toLocaleString()}원`;
+        } else applied = "유지";
+      } else if (qn.kind === "tab-brand") {
+        if (choice.key === "pick-brand") {
+          const brand = db.brands.find((b) => b.id === body.brandId);
+          if (!brand) { sendJson(res, 400, { error: "브랜드를 고르세요." }); return; }
+          const plan = legacy.planMigration({ brands: [{ ...brand, rawSheetName: qn.payload.tab }], requests: db.requests, tabs: { [qn.payload.tab]: { rows: qn.payload.rows } } });
+          for (const o of plan.legacyOrders) await erp.put("legacyOrders", { ...o, importedAt: now() });
+          applied = `${brand.name}에 ${plan.legacyOrders.length}건 이관`;
+        } else applied = "옮기지 않음";
+      } else if (qn.kind === "amount-mismatch") {
+        if (choice.key === "import-too") {
+          const brand = db.brands.find((b) => b.id === qn.payload.brandId);
+          const row = qn.payload.row;
+          const ded = brand?.hasReceivable ? Math.round(number(row.margin)) : 0;
+          await erp.put("legacyOrders", { id: `lg_${brand.id}_${String(row.orderNo).slice(0, 16)}_q`, brandId: brand.id, brandName: brand.name, tab: qn.payload.tab,
+            orderNo: row.orderNo, customer: row.customer, month: row.month, date: row.date, goodsAmount: Math.round(number(row.goods)), shippingFee: Math.round(number(row.ship)),
+            depositAmount: Math.round(number(row.paid)), margin: Math.round(number(row.margin)), receivableDeduction: ded, source: "2026_선매입 브랜드 관리대장", importedAt: now() });
+          applied = "시트 건도 이관";
+        } else applied = "wooofpay 건만 남김";
+      } else if (qn.kind === "zero-deduction") {
+        // 정산 방식 결정만 기록한다. 실제 재계산은 브랜드 정산 설정을 고친 뒤 '다시 계산'으로 한다.
+        applied = choice.key === "rate" ? `수수료율 ${number(body.value)}%로 차감 (재계산 대기)` : choice.label;
+      }
+      qn.status = "answered";
+      qn.answer = { choice: choice.key, label: choice.label, value: body.value ?? null, brandId: body.brandId || null, applied };
+      qn.answeredBy = who;
+      qn.answeredAt = now();
+      await erp.put("setupQuestions", qn);
+      await recomputeLegacy();
+      await writeDb(db);
+      sendJson(res, 200, { question: { ...qn, payload: undefined }, applied });
+      return;
+    }
+
+    // 채권원장: 채권 브랜드별 채권총액 − (이관 주문 + 입금요청 차감 + 조정) = 잔액
+    if (pathname === "/api/receivables" && method === "GET") {
+      if (!requirePermission(actor, res, "brands", "view")) return;
+      const [legacyOrders, adjustments] = await Promise.all([erp.list("legacyOrders"), erp.list("receivableAdjustments")]);
+      const rows = db.brands.filter((b) => b.hasReceivable).map((b) => {
+        const l = legacy.receivableLedger(b, { legacyOrders, requests: db.requests, adjustments });
+        return { brandId: b.id, code: b.code || "", name: b.name, base: l.base, deducted: l.deducted, balance: l.balance,
+          legacyCount: legacyOrders.filter((o) => o.brandId === b.id).length };
+      }).sort((a, b) => b.balance - a.balance);
+      sendJson(res, 200, { brands: rows });
+      return;
+    }
+    const recOne = pathname.match(/^\/api\/receivables\/([^/]+)$/);
+    if (recOne && method === "GET") {
+      if (!requirePermission(actor, res, "brands", "view")) return;
+      const brand = db.brands.find((b) => b.id === recOne[1]);
+      if (!brand) { sendJson(res, 404, { error: "브랜드를 찾을 수 없습니다." }); return; }
+      const [legacyOrders, adjustments] = await Promise.all([erp.list("legacyOrders"), erp.list("receivableAdjustments")]);
+      sendJson(res, 200, { brand: { id: brand.id, name: brand.name, code: brand.code }, ledger: legacy.receivableLedger(brand, { legacyOrders, requests: db.requests, adjustments }),
+        legacyOrders: legacyOrders.filter((o) => o.brandId === brand.id).sort((a, b) => String(b.date).localeCompare(String(a.date))) });
+      return;
+    }
+
+    sendJson(res, 404, { error: "지원하지 않는 요청입니다." });
     return;
   }
 
