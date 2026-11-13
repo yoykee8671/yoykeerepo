@@ -5605,16 +5605,52 @@ function sanitizePurchaseOrderLineItems(raw) {
 // 공급가 합에서 부가세를 얹고, gross(부가세 포함)는 포함가 합이 곧 총액이라
 // 공급가액을 거꾸로 산출한다 — 어느 쪽이든 사용자가 입력한 기준 금액이
 // 1원도 틀어지지 않는 방향으로 반올림한다.
-function purchaseOrderTotals(lineItems, priceMode) {
+export function purchaseOrderTotals(lineItems, priceMode) {
+  let totals;
   if (priceMode === "gross") {
     const total = lineItems.reduce(
       (sum, item) => sum + Math.round(item.quantity * item.grossUnitPrice), 0);
     const subtotal = Math.round(total / 1.1);
-    return { subtotal, vat: total - subtotal, total };
+    totals = { subtotal, vat: total - subtotal, total };
+  } else {
+    const subtotal = lineItems.reduce((sum, item) => sum + item.totalPrice, 0);
+    const vat = Math.round(subtotal * 0.1);
+    totals = { subtotal, vat, total: subtotal + vat };
   }
-  const subtotal = lineItems.reduce((sum, item) => sum + item.totalPrice, 0);
-  const vat = Math.round(subtotal * 0.1);
-  return { subtotal, vat, total: subtotal + vat };
+  allocateLineAmounts(lineItems, priceMode, totals);
+  return totals;
+}
+
+// 줄마다 공급가액·세액·합계를 적는다. 문서 합계가 원본이고, 줄 값은 그것을
+// 나눈 것이다 — 줄마다 따로 반올림하면 줄의 합이 문서 합계와 몇 원씩 어긋난다.
+// 끝전은 마지막 줄에서 맞춘다.
+//  - 포함가(gross): 줄 포함합계 = 수량 x 포함단가, 줄 공급가액 = 줄 포함합계 / 1.1
+//    (반올림), 세액 = 포함합계 - 공급가액. totalPrice 도 줄 공급가액으로 둔다
+//    (반올림한 공급단가 x 수량으로 두면 100,450 처럼 합계와 어긋나 보였다).
+//  - 별도(supply): 줄 공급가액 = 수량 x 단가, 세액 = 공급가액 x 10%.
+export function allocateLineAmounts(lineItems, priceMode, totals) {
+  if (!Array.isArray(lineItems) || !lineItems.length) return;
+  let supplyLeft = totals.subtotal;
+  let vatLeft = totals.vat;
+  lineItems.forEach((item, index) => {
+    const last = index === lineItems.length - 1;
+    let supply;
+    let vat;
+    if (priceMode === "gross") {
+      const gross = Math.round(item.quantity * item.grossUnitPrice);
+      supply = last ? supplyLeft : Math.round(gross / 1.1);
+      vat = last ? vatLeft : gross - supply;
+      item.totalPrice = supply;
+    } else {
+      supply = item.totalPrice;
+      vat = last ? vatLeft : Math.round(supply * 0.1);
+    }
+    item.supplyAmount = supply;
+    item.vatAmount = vat;
+    item.amount = supply + vat;
+    supplyLeft -= supply;
+    vatLeft -= vat;
+  });
 }
 
 // 납품장소는 거래처와 달리 발주서 저장 시점의 스냅샷으로만 남는다 — 재사용
