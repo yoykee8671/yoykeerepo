@@ -2352,3 +2352,20 @@ a.button:hover {
 @media print {
   .sidebar, .toolbar, .npb-subnav, details { display: none !important; }
 }
+
+/* v2 판매 */
+.sales-flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px; margin: 4px 0 12px; }
+.sales-step { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; text-align: left; min-width: 96px; cursor: pointer; }
+.sales-step.active { border-color: #1d4ed8; box-shadow: 0 0 0 1px #1d4ed8 inset; }
+.sales-step span { font-size: 12px; color: #64748b; }
+.sales-step strong { font-size: 18px; }
+.sales-step em { font-style: normal; font-size: 11px; }
+.sales-rec { margin-left: auto; cursor: default; }
+.sales-arrow { align-self: center; color: #94a3b8; }
+.sales-table tr[data-sales-open] { cursor: pointer; }
+.sales-table tr.selected td { background: #eff6ff; }
+.sales-table .num, .sales-lines .num { text-align: right; white-space: nowrap; }
+.sales-lines input { width: 100%; }
+.sales-stage { border-left: 3px solid #e2e8f0; padding: 6px 0 10px 12px; margin-bottom: 4px; }
+.sales-stage.done { border-left-color: #16a34a; }
+.sales-stage-title { font-weight: 600; margin-bottom: 4px; }

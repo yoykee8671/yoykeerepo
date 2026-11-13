@@ -776,6 +776,7 @@ function renderApp() {
     ["cash", "자금"],
     ["requests", "입금요청"],
     ["payments", "지급요청"],
+    ["sales", "판매"],
     ["prices", "단가표"],
     ["brands", "브랜드"],
     ["procurement", "거래관리"],
@@ -980,6 +981,7 @@ function renderCurrentTab() {
   if (state.tab === "procurement") return renderProcurement();
   if (state.tab === "payments") return renderPayments();
   if (state.tab === "cash") return renderCash();
+  if (state.tab === "sales") return renderSales();
   if (state.tab === "admins") return renderAdmins();
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
@@ -2457,6 +2459,7 @@ function bindCurrentTab() {
   if (state.tab === "procurement") bindProcurement();
   if (state.tab === "payments") bindPayments();
   if (state.tab === "cash") bindCash();
+  if (state.tab === "sales") bindSales();
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
   if (state.tab === "settlement") bindSettlement();
@@ -11479,7 +11482,7 @@ function renderCashReport() {
   const { report: r, accounts = [], fund, clobeError } = cs.data || {};
   if (!r) return `<section class="panel"><div class="panel-body"><p class="muted">${h(cs.error || "보고서를 만들지 못했습니다.")}</p></div></section>`;
   const itemRows = (items, dir) => items.filter((l) => l.direction === dir).map((l) => `
-    <tr><td>${l.overdue ? `<span class="badge warn">기한지남</span> ` : ""}${h(l.title)}<br><span class="muted" style="font-size:11px">${(() => { const src = { schedule: "자금일정", payment: "지급요청", request: "선매입" }[l.source] || ""; return h(l.category && l.category !== src ? `${l.category} · ${src}` : src); })()}</span></td>
+    <tr><td>${l.overdue ? `<span class="badge warn">기한지남</span> ` : ""}${h(l.title)}<br><span class="muted" style="font-size:11px">${(() => { const src = { schedule: "자금일정", payment: "지급요청", request: "선매입", sales: "받을 돈" }[l.source] || ""; return h(l.category && l.category !== src ? `${l.category} · ${src}` : src); })()}</span></td>
     <td class="num">${money.format(l.amount)}</td></tr>`).join("") || `<tr><td colspan="2" class="empty">없음</td></tr>`;
   return `
     ${clobeError ? `<p class="muted" style="margin:8px 0">⚠ 잔액: ${h(clobeError)}</p>` : ""}
@@ -11617,4 +11620,255 @@ function bindCash() {
       showToast(error.message || "저장하지 못했습니다.", "error");
     }
   });
+}
+
+// ===========================================================================
+// v2 판매 파이프라인 — 주문접수 → 명세서 → 업체전달 → 청구·계산서 → 입금확인
+// ===========================================================================
+function salesState() {
+  if (!state.sales) state.sales = { list: null, loading: false, filter: "open", selectedId: "", draft: null };
+  return state.sales;
+}
+
+async function loadSales() {
+  const ss = salesState();
+  ss.loading = true;
+  try {
+    const res = await api("/api/sales");
+    Object.assign(ss, { list: res.orders || [], meta: res });
+  } catch (error) {
+    ss.list = [];
+    ss.error = error.message;
+  } finally {
+    ss.loading = false;
+  }
+}
+
+// 품목 이름 → 최근 단가. 이 거래처에 예전에 낸 명세서에서 찾는다.
+function salesItemHints(partnerId) {
+  const map = new Map();
+  for (const po of state.purchaseOrders || []) {
+    if (po.docType !== "statement" || (partnerId && po.partnerId !== partnerId)) continue;
+    for (const li of po.lineItems || []) {
+      if (li.itemName && !map.has(li.itemName)) map.set(li.itemName, li);
+    }
+  }
+  for (const m of state.materials || []) {
+    if (m.itemName && !map.has(m.itemName)) map.set(m.itemName, { itemName: m.itemName, unitPrice: m.basePrice || 0, materialId: m.id });
+  }
+  return map;
+}
+
+// 서버와 같은 규칙: 거래처 기본값 → 지난 명세서 방식 → 부가세 별도.
+function salesGrossMode(partner) {
+  if (!partner) return false;
+  const mode = partner.priceMode || (state.purchaseOrders || []).find((p) => p.partnerId === partner.id && p.docType === "statement")?.priceMode;
+  return mode === "gross";
+}
+
+const SALES_NEXT_LABEL = { statement: "명세서 만들기", send: "업체 전달 표시", invoice: "청구·계산서 요청", issue: "계산서 발행 완료", receive: "입금 확인" };
+
+function renderSales() {
+  const ss = salesState();
+  const head = pageHead("판매", "주문이 들어오면 여기서 명세서 → 업체 전달 → 청구·계산서 → 입금 확인까지 한 번에 진행합니다.");
+  if (ss.list === null) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const meta = ss.meta || {};
+  const labels = meta.stageLabels || {};
+  const counts = {};
+  for (const o of ss.list) counts[o.stage] = (counts[o.stage] || 0) + 1;
+  const rec = meta.receivables || [];
+  const recTotal = rec.reduce((s, r) => s + r.remaining, 0);
+  const recOver = rec.filter((r) => r.overdue).reduce((s, r) => s + r.remaining, 0);
+  const filters = [["open", "진행 중"], ...(meta.stages || []), ["on_hold", "보류"], ["cancelled", "취소"], ["all", "전체"]];
+  const rows = ss.list
+    .filter((o) => ss.filter === "all" || (ss.filter === "open" ? !["paid", "cancelled"].includes(o.stage) : o.stage === ss.filter))
+    .sort((a, b) => String(b.orderDate || "").localeCompare(String(a.orderDate || "")) || String(b.createdAt).localeCompare(String(a.createdAt)));
+  return `
+    ${head}
+    <section class="sales-flow">
+      ${(meta.stages || []).map(([k, l], i) => `<button class="sales-step ${ss.filter === k ? "active" : ""}" data-sales-filter="${k}"><span>${i + 1}. ${l}</span><strong>${counts[k] || 0}</strong></button>`).join('<span class="sales-arrow">›</span>')}
+      <div class="sales-step sales-rec"><span>받을 돈</span><strong>${money.format(recTotal)}원</strong>${recOver ? `<em class="danger-text">기한지남 ${money.format(recOver)}원</em>` : ""}</div>
+    </section>
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head">
+          <div class="npb-subnav" style="margin:0">${filters.filter(([k]) => ["open", "on_hold", "cancelled", "all"].includes(k)).map(([k, l]) => `<button class="npb-subtab ${ss.filter === k ? "active" : ""}" data-sales-filter="${k}">${l}</button>`).join("")}</div>
+          ${can("sales", "create") ? `<button class="primary" data-sales-new>새 주문</button>` : ""}
+        </div>
+        <div class="table-wrap"><table class="sales-table">
+          <thead><tr><th>번호</th><th>주문일</th><th>거래처</th><th>내용</th><th>금액</th><th>단계</th><th>다음 할 일</th></tr></thead>
+          <tbody>${rows.map((o) => `<tr class="${ss.selectedId === o.id ? "selected" : ""}" data-sales-open="${o.id}">
+            <td><span class="code-tag">${h(o.code)}</span></td><td>${h(String(o.orderDate || "").slice(5))}</td>
+            <td>${h(o.partnerName)}</td><td class="wrap">${h(o.title)}${o.statementNo ? `<br><span class="muted" style="font-size:11px">${h(o.statementNo)}</span>` : ""}</td>
+            <td class="num">${money.format(o.total || 0)}${o.paid && o.remaining ? `<br><span class="muted" style="font-size:11px">남음 ${money.format(o.remaining)}</span>` : ""}</td>
+            <td><span class="badge ${o.stage === "paid" ? "muted" : o.stage === "on_hold" ? "warn" : ""}">${h(labels[o.stage] || o.stage)}</span></td>
+            <td>${o.next ? `<span class="muted">${h(SALES_NEXT_LABEL[o.next] || "")}</span>` : ""}</td></tr>`).join("") || `<tr><td colspan="7" class="empty">해당하는 주문이 없습니다.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">${ss.selectedId ? renderSalesDetail() : renderSalesForm()}</div>
+    </section>`;
+}
+
+function renderSalesForm() {
+  const ss = salesState();
+  if (!can("sales", "create")) return `<div class="panel-body"><p class="muted">주문을 고르면 진행 상황이 보입니다.</p></div>`;
+  const d = ss.draft || { orderDate: new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10), lines: [{}, {}, {}] };
+  const partners = (state.partners || []).filter((p) => p.isActive !== false && p.category !== "issuer");
+  const partner = partners.find((p) => p.id === d.partnerId);
+  const gross = salesGrossMode(partner);
+  const hints = salesItemHints(d.partnerId);
+  return `
+    <div class="panel-head"><h2>새 주문</h2></div>
+    <div class="panel-body">
+      <form class="form-grid" data-sales-form>
+        <div class="field"><label>거래처</label><select name="partnerId" data-sales-partner required><option value="">선택</option>
+          ${partners.map((p) => `<option value="${p.id}" ${d.partnerId === p.id ? "selected" : ""}>${h(p.code ? `${p.code} · ` : "")}${h(p.name)}</option>`).join("")}</select></div>
+        <div class="field two">
+          <div><label>주문일</label><input type="date" name="orderDate" value="${h(d.orderDate || "")}"></div>
+          <div><label>입금기한</label><input type="date" name="dueDate" value="${h(d.dueDate || "")}"></div>
+        </div>
+        <div class="field two">
+          <div><label>주문 경로</label><input name="channel" value="${h(d.channel || "")}" placeholder="전화 / 카톡 / 메일 / 발주서"></div>
+          <div><label>납품지</label><input name="deliveryPlaceName" list="sales-dp" value="${h(d.deliveryPlaceName || "")}">
+            <datalist id="sales-dp">${(state.deliveryPlaces || []).map((p) => `<option value="${h(p.name)}">`).join("")}</datalist></div>
+        </div>
+        <div class="field">
+          <label>품목 <span class="muted" style="font-weight:400">(${gross ? "단가는 부가세 포함" : "단가는 부가세 별도"} · 예전 명세서 품목을 고르면 단가가 채워집니다)</span></label>
+          <datalist id="sales-items">${[...hints.keys()].map((n) => `<option value="${h(n)}">`).join("")}</datalist>
+          <table class="sales-lines"><thead><tr><th>품목명</th><th>수량</th><th>단가</th><th>금액</th></tr></thead><tbody>
+            ${d.lines.map((l, i) => `<tr>
+              <td><input data-sl-name="${i}" list="sales-items" value="${h(l.itemName || "")}"></td>
+              <td><input data-sl-qty="${i}" inputmode="numeric" value="${h(l.quantity || "")}" style="width:70px"></td>
+              <td><input data-sl-price="${i}" inputmode="numeric" value="${h(l.price ? money.format(l.price) : "")}" style="width:100px"></td>
+              <td class="num">${l.quantity && l.price ? money.format(Number(l.quantity) * Number(l.price)) : ""}</td></tr>`).join("")}
+          </tbody></table>
+          <button type="button" data-sl-add>줄 추가</button>
+        </div>
+        <div class="field"><label>메모</label><input name="memo" value="${h(d.memo || "")}"></div>
+        <div class="toolbar"><button class="primary" type="submit">주문 등록</button></div>
+      </form>
+    </div>`;
+}
+
+function renderSalesDetail() {
+  const ss = salesState();
+  const o = (ss.list || []).find((x) => x.id === ss.selectedId);
+  if (!o) return `<div class="panel-body"><p class="muted">주문을 찾을 수 없습니다.</p></div>`;
+  const meta = ss.meta || {};
+  const done = (k) => {
+    const order = ["received", "statement", "sent", "invoiced", "paid"];
+    return order.indexOf(o.stage) >= order.indexOf(k) && !["on_hold", "cancelled"].includes(o.stage);
+  };
+  const step = (k, label, body) => `<div class="sales-stage ${done(k) ? "done" : ""}"><div class="sales-stage-title">${done(k) ? "✓" : "○"} ${label}</div><div>${body}</div></div>`;
+  const partner = (state.partners || []).find((p) => p.id === o.partnerId);
+  const today = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+  return `
+    <div class="panel-head"><h2>${h(o.code)} · ${h(o.partnerName)}</h2><button data-sales-close>닫기</button></div>
+    <div class="panel-body">
+      <p><strong>${money.format(o.total || 0)}원</strong> <span class="muted">(공급가 ${money.format(o.subtotal || 0)} + 부가세 ${money.format(o.vat || 0)})</span><br>
+        <span class="muted">${h(o.title)} · 주문일 ${h(o.orderDate || "")}${o.dueDate ? ` · 입금기한 ${h(o.dueDate)}` : ""}</span></p>
+      ${step("statement", "명세서", o.statementId
+        ? `${h(o.statementNo)} <a href="/api/purchase-orders/${h(o.statementId)}/excel">엑셀</a> · <a href="/api/purchase-orders/${h(o.statementId)}/pdf" target="_blank">PDF</a>`
+        : can("sales", "edit") ? `<button class="primary" data-sales-step="statement">명세서 만들기</button>` : "")}
+      ${step("sent", "업체 전달", o.sentAt ? `${h(o.sentAt)} · ${h(o.sentMethod || "")}`
+        : o.statementId && can("sales", "edit") ? `<select data-sales-send-method>${(meta.sendMethods || []).map((m) => `<option>${h(m)}</option>`).join("")}</select> <button data-sales-step="send">전달했음</button>` : "")}
+      ${step("invoiced", "청구·계산서", o.invoice?.requestedAt
+        ? `${h(o.invoice.type)} · <span class="badge ${o.invoice.status === "issued" ? "muted" : "warn"}">${h((meta.invoiceStatuses || {})[o.invoice.status] || o.invoice.status)}</span>
+           ${o.invoice.issuedAt ? ` ${h(o.invoice.issuedAt)} 발행` : ""}${o.invoice.email ? `<br><span class="muted">${h(o.invoice.email)}</span>` : ""}${o.invoice.content ? `<br><span class="muted">${h(o.invoice.content)}</span>` : ""}
+           ${o.invoice.status === "requested" && can("sales", "invoice") ? `<br><button data-sales-step="issue">발행 완료</button>` : ""}`
+        : o.sentAt && can("sales", "edit") ? `
+          <div class="field two"><div><select data-sales-inv-type>${(meta.invoiceTypes || []).map((t) => `<option>${h(t)}</option>`).join("")}</select></div>
+          <div><input type="date" data-sales-inv-due value="${h(o.dueDate || "")}" title="입금기한"></div></div>
+          <input data-sales-inv-email value="${h(partner?.invoiceEmail || "")}" placeholder="발행용 이메일">
+          <input data-sales-inv-content placeholder="발행내용(필요시)">
+          <button data-sales-step="invoice">청구·계산서 요청</button>` : "")}
+      ${step("paid", "입금 확인", `${(o.receipts || []).map((r) => `<div>${h(r.date)} ${money.format(r.amount)}원 ${r.memo ? `· ${h(r.memo)}` : ""}</div>`).join("")}
+        ${o.remaining > 0 && o.stage !== "cancelled" && can("sales", "receive") ? `<div class="toolbar"><input data-sales-rcv-amount inputmode="numeric" value="${money.format(o.remaining)}" style="width:120px"><input type="date" data-sales-rcv-date value="${today}"><button data-sales-step="receive">입금 확인</button></div>` : ""}`)}
+      <div class="toolbar" style="margin-top:12px">
+        ${can("sales", "edit") && !["paid", "cancelled", "on_hold"].includes(o.stage) ? `<button data-sales-step="hold">보류</button>` : ""}
+        ${can("sales", "edit") && ["on_hold", "cancelled"].includes(o.stage) ? `<button data-sales-step="reopen">다시 진행</button>` : ""}
+        ${can("sales", "edit") && !["paid", "cancelled"].includes(o.stage) ? `<button class="danger" data-sales-step="cancel">취소</button>` : ""}
+      </div>
+      ${(o.history || []).length ? `<details><summary class="muted">기록 ${o.history.length}건</summary>${o.history.map((x) => `<div class="muted" style="font-size:12px">${h(String(x.at).slice(0, 16).replace("T", " "))} · ${h(x.by)} · ${h(x.action)} ${x.note ? `· ${h(x.note)}` : ""}</div>`).join("")}</details>` : ""}
+    </div>`;
+}
+
+function bindSales() {
+  const ss = salesState();
+  if (ss.list === null && !ss.loading) {
+    loadSales().then(renderApp);
+    return;
+  }
+  const reload = async () => { await loadSales(); renderApp(); };
+  const readDraft = () => {
+    const form = app.querySelector("[data-sales-form]");
+    if (!form) return ss.draft;
+    const f = formObject(form);
+    const lines = [...form.querySelectorAll("[data-sl-name]")].map((el) => {
+      const i = el.dataset.slName;
+      return {
+        itemName: el.value.trim(),
+        quantity: Number(String(form.querySelector(`[data-sl-qty="${i}"]`).value).replace(/,/g, "")) || "",
+        price: Number(String(form.querySelector(`[data-sl-price="${i}"]`).value).replace(/,/g, "")) || ""
+      };
+    });
+    return { ...f, lines };
+  };
+  app.querySelectorAll("[data-sales-filter]").forEach((b) => b.addEventListener("click", () => { ss.filter = b.dataset.salesFilter; renderApp(); }));
+  app.querySelector("[data-sales-new]")?.addEventListener("click", () => { ss.selectedId = ""; ss.draft = null; renderApp(); });
+  app.querySelector("[data-sales-close]")?.addEventListener("click", () => { ss.selectedId = ""; renderApp(); });
+  app.querySelectorAll("[data-sales-open]").forEach((tr) => tr.addEventListener("click", () => { ss.selectedId = tr.dataset.salesOpen; renderApp(); }));
+  app.querySelector("[data-sales-partner]")?.addEventListener("change", () => { ss.draft = readDraft(); renderApp(); });
+  app.querySelector("[data-sl-add]")?.addEventListener("click", () => { const d = readDraft(); d.lines.push({}); ss.draft = d; renderApp(); });
+  // 품목을 고르면 예전 단가를 채운다.
+  app.querySelectorAll("[data-sl-name]").forEach((el) => el.addEventListener("change", () => {
+    const d = readDraft();
+    const partner = (state.partners || []).find((p) => p.id === d.partnerId);
+    const hint = salesItemHints(d.partnerId).get(el.value.trim());
+    const i = Number(el.dataset.slName);
+    if (hint && !d.lines[i].price) d.lines[i].price = salesGrossMode(partner) ? (hint.grossUnitPrice || hint.unitPrice) : hint.unitPrice;
+    if (hint) d.lines[i].materialId = hint.materialId || "";
+    ss.draft = d;
+    renderApp();
+  }));
+  app.querySelectorAll("[data-sl-qty], [data-sl-price]").forEach((el) => el.addEventListener("change", () => { ss.draft = readDraft(); renderApp(); }));
+  app.querySelector("[data-sales-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const d = readDraft();
+    const partner = (state.partners || []).find((p) => p.id === d.partnerId);
+    const gross = salesGrossMode(partner);
+    const dp = (state.deliveryPlaces || []).find((p) => p.name === d.deliveryPlaceName) || (d.deliveryPlaceName ? { name: d.deliveryPlaceName } : null);
+    const lineItems = d.lines.filter((l) => l.itemName && l.quantity).map((l) => ({
+      itemName: l.itemName, quantity: l.quantity, materialId: l.materialId || "",
+      unitPrice: gross ? Math.round(Number(l.price || 0) / 1.1) : Number(l.price || 0),
+      grossUnitPrice: gross ? Number(l.price || 0) : Math.round(Number(l.price || 0) * 1.1)
+    }));
+    try {
+      const res = await api("/api/sales", { method: "POST", body: { partnerId: d.partnerId, orderDate: d.orderDate, dueDate: d.dueDate, channel: d.channel, memo: d.memo, deliveryPlace: dp, lineItems } });
+      ss.draft = null;
+      ss.selectedId = res.order.id;
+      showToast(`${res.order.code} 주문을 등록했습니다. 이어서 명세서를 만드세요.`);
+      await reload();
+    } catch (error) {
+      showToast(error.message || "등록하지 못했습니다.", "error");
+    }
+  });
+  app.querySelectorAll("[data-sales-step]").forEach((b) => b.addEventListener("click", async () => {
+    const step = b.dataset.salesStep;
+    const q = (sel) => app.querySelector(sel)?.value;
+    const body = {};
+    if (step === "send") body.method = q("[data-sales-send-method]");
+    if (step === "invoice") Object.assign(body, { type: q("[data-sales-inv-type]"), dueDate: q("[data-sales-inv-due]"), email: q("[data-sales-inv-email]"), content: q("[data-sales-inv-content]") });
+    if (step === "receive") Object.assign(body, { amount: q("[data-sales-rcv-amount]"), date: q("[data-sales-rcv-date]") });
+    if (step === "cancel" && !confirm("이 주문을 취소할까요?")) return;
+    if (step === "hold") { const note = prompt("보류 사유"); if (note === null) return; body.note = note; }
+    try {
+      await api(`/api/sales/${ss.selectedId}/${step}`, { method: "POST", body });
+      if (step === "statement") state.purchaseOrders = (await api("/api/purchase-orders")).purchaseOrders;
+      showToast("처리했습니다.");
+      await reload();
+    } catch (error) {
+      showToast(error.message || "처리하지 못했습니다.", "error");
+    }
+  }));
 }

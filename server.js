@@ -18,6 +18,7 @@ import { createProductSyncService } from "./lib/product-sync-service.mjs";
 import { createErpStore } from "./lib/erp-store.mjs";
 import * as payments from "./lib/payment-requests.mjs";
 import * as cashReport from "./lib/cash-report.mjs";
+import * as sales from "./lib/sales-orders.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -1737,6 +1738,17 @@ function migrateDb(db) {
     if (req.includes("view")) grant.push("view", "create", "edit");
     if (req.includes("pay")) grant.push("confirm", "pay");
     perms.payments = grant;
+    changed = true;
+  }
+  // v2 판매 메뉴: 거래관리를 쓰던 사람은 주문·명세서까지, 입금완료 처리 권한자는
+  // 계산서 발행·입금 확인까지.
+  for (const admin of db.admins || []) {
+    const perms = admin.permissions;
+    if (!perms || typeof perms !== "object" || Array.isArray(perms.sales)) continue;
+    const grant = [];
+    if (Array.isArray(perms.procurement) && perms.procurement.includes("view")) grant.push("view", "create", "edit");
+    if (Array.isArray(perms.requests) && perms.requests.includes("pay")) grant.push("invoice", "receive");
+    perms.sales = [...new Set(grant)];
     changed = true;
   }
   // v2 자금 메뉴: 입금완료 처리 권한자(경영지원)에게 열어 둔다.
@@ -5388,7 +5400,9 @@ const MENU_REGISTRY = [
   // v2 지급요청. 요청은 누구나, 확인·처리완료는 경영지원, 허가는 대표.
   { key: "payments", label: "지급요청", actions: ["view", "create", "edit", "delete", "confirm", "approve", "pay"] },
   // v2 자금: 일일 자금보고·자금 일정(정기 나갈 돈/들어올 돈).
-  { key: "cash", label: "자금", actions: ["view", "edit"] }
+  { key: "cash", label: "자금", actions: ["view", "edit"] },
+  // v2 판매: 주문접수 → 명세서 → 업체전달 → 청구·계산서 → 입금확인.
+  { key: "sales", label: "판매", actions: ["view", "create", "edit", "invoice", "receive"] }
 ];
 
 const ACTION_LABELS = {
@@ -5399,6 +5413,8 @@ const ACTION_LABELS = {
   pay: "입금완료 처리",
   export: "정산서 출력",
   apply: "실행·반영",
+  invoice: "계산서 발행 처리",
+  receive: "입금 확인",
   confirm: "확인",
   approve: "허가(고액)"
 };
@@ -5419,6 +5435,7 @@ function defaultPermissions(role) {
     if (menu.key === "reconcile" || menu.key === "pipeline" || menu.key === "productsync") all[menu.key] = [];
     else if (menu.key === "payments") all[menu.key] = ["view", "create", "edit"];
     else if (menu.key === "cash") all[menu.key] = [];
+    else if (menu.key === "sales") all[menu.key] = ["view", "create", "edit"];
     else if (menu.key === "admins") all[menu.key] = ["view"];
     else all[menu.key] = [...menu.actions];
   }
@@ -6918,6 +6935,47 @@ async function cafe24KeepAlive() {
     // 살아 있어야 할 백그라운드 작업이다. 실패해도 서버를 세우지 않는다.
     console.error(`[cafe24] keep-alive failed: ${error.message}`);
   }
+}
+
+// 명세서·발주서·청구서·견적서 한 건을 만든다(저장은 호출한 쪽). 명세서 발행
+// 화면과 v2 판매 파이프라인이 같이 쓴다.
+function buildTradeDoc(db, body) {
+  const partner = db.partners.find((item) => item.id === body.partnerId);
+  if (!partner) return { error: "거래처를 선택하세요." };
+  const issuerPartnerId = String(body.issuerPartnerId || "").trim();
+  const issuer = resolveIssuerSnapshot(db, issuerPartnerId);
+  if (!issuer) return { error: "발행자를 선택하세요." };
+    const docType = tradeDocTypes.has(body.docType) ? body.docType : "purchase_order";
+  const orderDate = dateOnly(body.orderDate) || now().slice(0, 10);
+  const lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
+  // 금액 기준: 요청에 없으면 거래처 기본값, 그것도 없으면 공급가 기준.
+  const priceMode = body.priceMode === "gross" || body.priceMode === "supply"
+    ? body.priceMode
+    : (partner.priceMode === "gross" ? "gross" : "supply");
+  const { subtotal, vat, total } = purchaseOrderTotals(lineItems, priceMode);
+  const po = {
+    id: id("po"),
+    docType,
+    docNo: nextPurchaseOrderDocNo(db, orderDate, docType),
+    partnerId: partner.id,
+    priceMode,
+    orderDate,
+    // 양식마다 뜻이 다른 두 번째 날짜 — 발주서는 납기일, 견적서는 유효기간,
+    // 청구서는 지급기일. 거래명세서는 쓰지 않는다.
+    dueDate: dateOnly(body.dueDate) || "",
+    status: purchaseOrderStatuses.has(body.status) ? body.status : "ordered",
+    lineItems,
+    issuerPartnerId,
+    issuer,
+    deliveryPlace: sanitizeDeliveryPlace(body.deliveryPlace),
+    subtotal,
+    vat,
+    total,
+    note: String(body.note || "").trim(),
+    createdAt: now(),
+    updatedAt: now()
+  };
+  return { po };
 }
 
 async function routeApi(req, res, url) {
@@ -10432,47 +10490,12 @@ async function routeApi(req, res, url) {
 
   if (pathname === "/api/purchase-orders" && method === "POST") {
     const body = await readBody(req);
-    const partner = db.partners.find((item) => item.id === body.partnerId);
-    if (!partner) {
-      sendJson(res, 400, { error: "거래처를 선택하세요." });
+    const built = buildTradeDoc(db, body);
+    if (built.error) {
+      sendJson(res, 400, { error: built.error });
       return;
     }
-    const issuerPartnerId = String(body.issuerPartnerId || "").trim();
-    const issuer = resolveIssuerSnapshot(db, issuerPartnerId);
-    if (!issuer) {
-      sendJson(res, 400, { error: "발행자를 선택하세요." });
-      return;
-    }
-    const docType = tradeDocTypes.has(body.docType) ? body.docType : "purchase_order";
-    const orderDate = dateOnly(body.orderDate) || now().slice(0, 10);
-    const lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
-    // 금액 기준: 요청에 없으면 거래처 기본값, 그것도 없으면 공급가 기준.
-    const priceMode = body.priceMode === "gross" || body.priceMode === "supply"
-      ? body.priceMode
-      : (partner.priceMode === "gross" ? "gross" : "supply");
-    const { subtotal, vat, total } = purchaseOrderTotals(lineItems, priceMode);
-    const po = {
-      id: id("po"),
-      docType,
-      docNo: nextPurchaseOrderDocNo(db, orderDate, docType),
-      partnerId: partner.id,
-      priceMode,
-      orderDate,
-      // 양식마다 뜻이 다른 두 번째 날짜 — 발주서는 납기일, 견적서는 유효기간,
-      // 청구서는 지급기일. 거래명세서는 쓰지 않는다.
-      dueDate: dateOnly(body.dueDate) || "",
-      status: purchaseOrderStatuses.has(body.status) ? body.status : "ordered",
-      lineItems,
-      issuerPartnerId,
-      issuer,
-      deliveryPlace: sanitizeDeliveryPlace(body.deliveryPlace),
-      subtotal,
-      vat,
-      total,
-      note: String(body.note || "").trim(),
-      createdAt: now(),
-      updatedAt: now()
-    };
+    const po = built.po;
     db.purchaseOrders.unshift(po);
     addAudit(db, actor, "create", "purchaseOrder", po.id, `${po.docNo} ${TRADE_DOC_LABELS[docType]} 생성`, null, po);
     await writeDb(db);
@@ -10575,6 +10598,187 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // --- v2 판매 파이프라인 -------------------------------------------------------
+  // 주문접수 → 명세서 → 업체전달 → 청구·계산서 → 입금확인. 판매주문은 erp
+  // 저장소에, 명세서는 기존 '명세서 발행'(purchaseOrders) 기록으로 만든다.
+  if (pathname === "/api/sales" || pathname.startsWith("/api/sales/")) {
+    if (!requirePermission(actor, res, "sales", "view")) return;
+    const who = { id: actor.id, name: actor.name || actor.email || "" };
+    const log = (o, action, note = "") => {
+      o.history = [...(o.history || []), { at: now(), by: who.name, action, note }].slice(-50);
+    };
+    const decorate = (o) => ({ ...o, stage: sales.deriveStage(o), next: sales.nextAction(o), paid: sales.paidTotal(o), remaining: sales.remaining(o) });
+    const shapeOrder = (body, base) => {
+      const o = { ...base };
+      if ("partnerId" in body) {
+        const partner = db.partners.find((p) => p.id === body.partnerId);
+        o.partnerId = partner?.id || "";
+        o.partnerName = partner?.name || "";
+        o.partnerCode = partner?.code || "";
+        // 금액 기준: 요청 → 거래처 기본값 → 이 거래처에 낸 지난 명세서 → 부가세 별도.
+        const lastDoc = db.purchaseOrders.find((p) => p.partnerId === partner?.id && p.docType === "statement");
+        const mode = body.priceMode || partner?.priceMode || lastDoc?.priceMode;
+        o.priceMode = mode === "gross" ? "gross" : "supply";
+      }
+      for (const key of ["title", "channel", "memo", "businessUnit", "issuerPartnerId"]) {
+        if (key in body) o[key] = String(body[key] ?? "").trim().slice(0, key === "memo" ? 2000 : 200);
+      }
+      if ("orderDate" in body) o.orderDate = dateOnly(body.orderDate) || kstToday();
+      if ("dueDate" in body) o.dueDate = dateOnly(body.dueDate) || "";
+      if ("deliveryPlace" in body) o.deliveryPlace = sanitizeDeliveryPlace(body.deliveryPlace);
+      if ("lineItems" in body) o.lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
+      if (o.businessUnit && !BUSINESS_UNITS[o.businessUnit]) o.businessUnit = "";
+      const totals = purchaseOrderTotals(o.lineItems || [], o.priceMode || "supply");
+      Object.assign(o, totals);
+      return o;
+    };
+
+    if (pathname === "/api/sales" && method === "GET") {
+      const list = (await erp.list("salesOrders")).map(decorate);
+      sendJson(res, 200, {
+        orders: list,
+        stages: sales.SALES_STAGES,
+        stageLabels: sales.SALES_STAGE_LABELS,
+        invoiceTypes: sales.INVOICE_TYPES,
+        invoiceStatuses: sales.INVOICE_STATUSES,
+        sendMethods: sales.SEND_METHODS,
+        receivables: sales.receivables(list, kstToday())
+      });
+      return;
+    }
+
+    if (pathname === "/api/sales" && method === "POST") {
+      if (!requirePermission(actor, res, "sales", "create")) return;
+      const body = await readBody(req);
+      const o = shapeOrder(body, { id: id("so"), createdAt: now(), createdBy: who, receipts: [], orderDate: kstToday() });
+      if (!o.partnerId) { sendJson(res, 400, { error: "거래처를 선택하세요." }); return; }
+      if (!(o.lineItems || []).length) { sendJson(res, 400, { error: "품목을 한 줄 이상 입력하세요." }); return; }
+      const all = await erp.list("salesOrders");
+      const kst = new Date(Date.now() + 9 * 3600 * 1000).toISOString();
+      const prefix = `SO-${kst.slice(2, 4)}${kst.slice(5, 7)}-`;
+      const max = all.reduce((m, x) => (String(x.code || "").startsWith(prefix) ? Math.max(m, Number(String(x.code).slice(prefix.length)) || 0) : m), 0);
+      o.code = `${prefix}${String(max + 1).padStart(3, "0")}`;
+      o.title ||= (o.lineItems[0]?.itemName || "") + (o.lineItems.length > 1 ? ` 외 ${o.lineItems.length - 1}건` : "");
+      o.updatedAt = now();
+      log(o, "주문접수");
+      await erp.put("salesOrders", o);
+      sendJson(res, 201, { order: decorate(o) });
+      return;
+    }
+
+    const stepMatch = pathname.match(/^\/api\/sales\/([^/]+)\/(statement|send|invoice|issue|receive|hold|cancel|reopen)$/);
+    if (stepMatch && method === "POST") {
+      const [, orderId, step] = stepMatch;
+      const need = { statement: "edit", send: "edit", invoice: "edit", issue: "invoice", receive: "receive", hold: "edit", cancel: "edit", reopen: "edit" }[step];
+      if (!requirePermission(actor, res, "sales", need)) return;
+      const body = await readBody(req);
+      const o = await erp.get("salesOrders", orderId);
+      if (!o) { sendJson(res, 404, { error: "주문을 찾을 수 없습니다." }); return; }
+
+      if (step === "statement") {
+        if (o.statementId && db.purchaseOrders.some((p) => p.id === o.statementId)) {
+          sendJson(res, 400, { error: "이미 명세서가 있습니다. 명세서 발행 화면에서 고치세요." });
+          return;
+        }
+        // 발행자: 요청 값 → 주문에 적힌 값 → 마지막으로 쓴 발행자 → 첫 발행자 거래처.
+        const lastIssuer = db.purchaseOrders.find((p) => p.issuerPartnerId)?.issuerPartnerId;
+        const issuerPartnerId = String(body.issuerPartnerId || o.issuerPartnerId || lastIssuer
+          || db.partners.find((p) => p.category === "issuer")?.id || "");
+        const built = buildTradeDoc(db, {
+          docType: "statement", partnerId: o.partnerId, issuerPartnerId, orderDate: o.orderDate,
+          priceMode: o.priceMode, lineItems: o.lineItems, deliveryPlace: o.deliveryPlace,
+          note: [o.code, o.memo].filter(Boolean).join(" · ")
+        });
+        if (built.error) { sendJson(res, 400, { error: built.error }); return; }
+        db.purchaseOrders.unshift(built.po);
+        addAudit(db, actor, "create", "purchaseOrder", built.po.id, `${built.po.docNo} 거래명세서 생성 (판매 ${o.code})`, null, built.po);
+        await writeDb(db);
+        o.statementId = built.po.id;
+        o.statementNo = built.po.docNo;
+        o.issuerPartnerId = issuerPartnerId;
+        // 명세서 금액이 원본이다(부가세 반올림 포함).
+        Object.assign(o, { subtotal: built.po.subtotal, vat: built.po.vat, total: built.po.total });
+        log(o, "명세서", built.po.docNo);
+      } else if (step === "send") {
+        o.sentAt = dateOnly(body.date) || kstToday();
+        o.sentMethod = String(body.method || "").trim().slice(0, 50);
+        log(o, "업체전달", o.sentMethod);
+      } else if (step === "invoice") {
+        const type = sales.INVOICE_TYPES.includes(body.type) ? body.type : "세금계산서";
+        const partner = db.partners.find((p) => p.id === o.partnerId);
+        o.invoice = {
+          ...(o.invoice || {}),
+          type,
+          status: type === "미발행" ? "issued" : "requested",
+          email: String(body.email ?? partner?.invoiceEmail ?? "").trim().slice(0, 200),
+          content: String(body.content || "").trim().slice(0, 500),
+          dueDate: dateOnly(body.dueDate) || o.dueDate || "",
+          requestedAt: now(),
+          requestedBy: who.name
+        };
+        log(o, "청구·계산서 요청", type);
+      } else if (step === "issue") {
+        if (!o.invoice?.requestedAt) { sendJson(res, 400, { error: "계산서 요청이 먼저 필요합니다." }); return; }
+        o.invoice = { ...o.invoice, status: "issued", issuedAt: dateOnly(body.date) || kstToday(), issuedBy: who.name };
+        log(o, "계산서 발행 완료", o.invoice.issuedAt);
+      } else if (step === "receive") {
+        const amount = Math.round(number(String(body.amount ?? sales.remaining(o)).replace(/,/g, "")));
+        if (!amount) { sendJson(res, 400, { error: "입금액을 입력하세요." }); return; }
+        o.receipts = [...(o.receipts || []), { date: dateOnly(body.date) || kstToday(), amount, memo: String(body.memo || "").slice(0, 200), by: who.name }];
+        log(o, "입금확인", `${amount.toLocaleString()}원`);
+      } else if (step === "hold") {
+        o.onHold = true;
+        log(o, "보류", String(body.note || ""));
+      } else if (step === "cancel") {
+        o.cancelledAt = now();
+        log(o, "취소", String(body.note || ""));
+      } else if (step === "reopen") {
+        delete o.onHold;
+        delete o.cancelledAt;
+        log(o, "다시 진행");
+      }
+      o.updatedAt = now();
+      await erp.put("salesOrders", o);
+      sendJson(res, 200, { order: decorate(o) });
+      return;
+    }
+
+    const one = pathname.match(/^\/api\/sales\/([^/]+)$/);
+    if (one && method === "PUT") {
+      if (!requirePermission(actor, res, "sales", "edit")) return;
+      const body = await readBody(req);
+      const o = await erp.get("salesOrders", one[1]);
+      if (!o) { sendJson(res, 404, { error: "주문을 찾을 수 없습니다." }); return; }
+      // 명세서를 만든 뒤에는 품목·거래처를 여기서 바꾸지 않는다(명세서와 어긋난다).
+      if (o.statementId && ("lineItems" in body || "partnerId" in body)) {
+        sendJson(res, 400, { error: "명세서를 만든 주문의 품목·거래처는 명세서 발행 화면에서 고치세요." });
+        return;
+      }
+      const next = shapeOrder(body, o);
+      if (o.statementId) Object.assign(next, { subtotal: o.subtotal, vat: o.vat, total: o.total });
+      next.updatedAt = now();
+      await erp.put("salesOrders", next);
+      sendJson(res, 200, { order: decorate(next) });
+      return;
+    }
+
+    if (one && method === "DELETE") {
+      if (!requirePermission(actor, res, "sales", "edit")) return;
+      const o = await erp.get("salesOrders", one[1]);
+      if (!o) { sendJson(res, 404, { error: "주문을 찾을 수 없습니다." }); return; }
+      if (o.statementId || (o.receipts || []).length) {
+        sendJson(res, 400, { error: "명세서나 입금 기록이 있는 주문은 지우지 말고 '취소'하세요." });
+        return;
+      }
+      await erp.remove("salesOrders", o.id);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    sendJson(res, 404, { error: "지원하지 않는 요청입니다." });
+    return;
+  }
+
   // --- v2 자금: 자금 일정 + 일일 자금보고 ---------------------------------------
   if (pathname === "/api/cash" || pathname.startsWith("/api/cash/")) {
     if (!requirePermission(actor, res, "cash", "view")) return;
@@ -10655,7 +10859,8 @@ async function routeApi(req, res, url) {
         schedules: await erp.list("cashSchedules"),
         payments: companyKey === "wooof" ? await erp.list("payments").catch(() => []) : [],
         // 선매입 입금요청은 우프 통장에서 나간다.
-        requests: companyKey === "wooof" ? db.requests : []
+        requests: companyKey === "wooof" ? db.requests : [],
+        receivables: companyKey === "wooof" ? sales.receivables(await erp.list("salesOrders").catch(() => []), today) : []
       });
       sendJson(res, 200, {
         company, report, accounts, fund, clobeError,
