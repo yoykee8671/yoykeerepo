@@ -2336,3 +2336,19 @@ a.button:hover {
 .danger-text { color: #c2410c; }
 .badge.warn { background: #fff4e5; color: #b45309; }
 .badge.muted { background: #f1f5f9; color: #64748b; }
+
+/* v2 자금 */
+.cash-two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.cash-two > div, .cash-two table { min-width: 0; }
+.cash-table td.wrap, .cash-table td:first-child { word-break: keep-all; overflow-wrap: anywhere; }
+@media (max-width: 720px) { .cash-two { grid-template-columns: 1fr; } }
+.cash-two h3 { margin: 0 0 6px; font-size: 14px; }
+.cash-in { color: #1d4ed8; }
+.cash-out { color: #c2410c; }
+.cash-table { width: 100%; }
+.cash-table .num { text-align: right; white-space: nowrap; }
+.cash-short td { background: #fff1f0; }
+.cash-text { white-space: pre-wrap; font-size: 12px; background: #f8fafc; padding: 10px; border-radius: 6px; }
+@media print {
+  .sidebar, .toolbar, .npb-subnav, details { display: none !important; }
+}

@@ -773,6 +773,7 @@ function renderApp() {
   }
   const tabs = [
     ["dashboard", "대시보드"],
+    ["cash", "자금"],
     ["requests", "입금요청"],
     ["payments", "지급요청"],
     ["prices", "단가표"],
@@ -978,6 +979,7 @@ function renderCurrentTab() {
   if (state.tab === "brands") return renderBrands();
   if (state.tab === "procurement") return renderProcurement();
   if (state.tab === "payments") return renderPayments();
+  if (state.tab === "cash") return renderCash();
   if (state.tab === "admins") return renderAdmins();
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
@@ -2454,6 +2456,7 @@ function bindCurrentTab() {
   if (state.tab === "brands") bindBrands();
   if (state.tab === "procurement") bindProcurement();
   if (state.tab === "payments") bindPayments();
+  if (state.tab === "cash") bindCash();
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
   if (state.tab === "settlement") bindSettlement();
@@ -11426,6 +11429,192 @@ function bindPayments() {
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
       showToast(error.message || "이체 양식을 만들지 못했습니다.", "error");
+    }
+  });
+}
+
+// ===========================================================================
+// v2 자금 — 일일 자금보고 + 자금 일정(정기 나갈 돈/들어올 돈)
+// ===========================================================================
+function cashState() {
+  if (!state.cash) state.cash = { screen: "report", company: "wooof", data: null, schedules: null, editing: null, loading: false };
+  return state.cash;
+}
+
+async function loadCash() {
+  const cs = cashState();
+  cs.loading = true;
+  try {
+    const [rep, sch] = await Promise.all([
+      api(`/api/cash/report?company=${encodeURIComponent(cs.company)}&days=7`),
+      api("/api/cash/schedules")
+    ]);
+    cs.data = rep;
+    cs.schedules = sch.schedules || [];
+    cs.meta = sch;
+  } catch (error) {
+    cs.error = error.message;
+    cs.data = cs.data || { report: null };
+    cs.schedules = cs.schedules || [];
+  } finally {
+    cs.loading = false;
+  }
+}
+
+const WEEKDAY_KO = ["일", "월", "화", "수", "목", "금", "토"];
+const cashDay = (d) => `${Number(d.slice(5, 7))}/${Number(d.slice(8, 10))}(${WEEKDAY_KO[new Date(`${d}T00:00:00Z`).getUTCDay()]})`;
+
+function renderCash() {
+  const cs = cashState();
+  const head = pageHead("자금", "오늘과 7일 안에 들어올 돈·나갈 돈, 계좌 잔액을 한 장으로 봅니다. 매일 아침 이 화면을 보고 채널톡에 공유하세요.");
+  const tabs = `<div class="npb-subnav">${[["report", "일일 자금보고"], ["schedules", "자금 일정"]].map(([k, l]) => `<button class="npb-subtab ${cs.screen === k ? "active" : ""}" data-cash-screen="${k}">${l}</button>`).join("")}
+    <span style="flex:1"></span>
+    ${(cs.meta?.companies || [{ key: "wooof", name: "우프컴퍼니" }, { key: "betters", name: "베럴즈" }]).map((c) => `<button class="npb-subtab ${cs.company === c.key ? "active" : ""}" data-cash-company="${c.key}">${h(c.name)}</button>`).join("")}</div>`;
+  if (!cs.data) return `${head}${tabs}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  return `${head}${tabs}${cs.screen === "schedules" ? renderCashSchedules() : renderCashReport()}`;
+}
+
+function renderCashReport() {
+  const cs = cashState();
+  const { report: r, accounts = [], fund, clobeError } = cs.data || {};
+  if (!r) return `<section class="panel"><div class="panel-body"><p class="muted">${h(cs.error || "보고서를 만들지 못했습니다.")}</p></div></section>`;
+  const itemRows = (items, dir) => items.filter((l) => l.direction === dir).map((l) => `
+    <tr><td>${l.overdue ? `<span class="badge warn">기한지남</span> ` : ""}${h(l.title)}<br><span class="muted" style="font-size:11px">${(() => { const src = { schedule: "자금일정", payment: "지급요청", request: "선매입" }[l.source] || ""; return h(l.category && l.category !== src ? `${l.category} · ${src}` : src); })()}</span></td>
+    <td class="num">${money.format(l.amount)}</td></tr>`).join("") || `<tr><td colspan="2" class="empty">없음</td></tr>`;
+  return `
+    ${clobeError ? `<p class="muted" style="margin:8px 0">⚠ 잔액: ${h(clobeError)}</p>` : ""}
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>오늘 ${h(cashDay(r.start))}</h2><span class="muted">현 잔액 <strong>${r.openingBalance == null ? "-" : `${money.format(r.openingBalance)}원`}</strong></span></div>
+        <div class="panel-body cash-two">
+          <div><h3 class="cash-in">들어올 돈 ${money.format(r.today.cashIn)}원</h3><table class="cash-table"><tbody>${itemRows(r.today.items, "in")}</tbody></table></div>
+          <div><h3 class="cash-out">나갈 돈 ${money.format(r.today.cashOut)}원</h3><table class="cash-table"><tbody>${itemRows(r.today.items, "out")}</tbody></table></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>계좌 잔액</h2><span class="muted">클로브 · ${fund ? `${h(fund.transactionDate)} 기준 어제 +${money.format(fund.cashIn || 0)} / ${money.format(fund.cashOut || 0)}` : ""}</span></div>
+        <div class="table-wrap"><table class="cash-table"><tbody>
+          ${accounts.map((a) => `<tr><td>${h(a.name)}<br><span class="muted" style="font-size:11px">${h(a.number || "")}</span></td><td class="num">${money.format(a.balance)}</td></tr>`).join("") || `<tr><td class="empty">잔액 정보 없음</td></tr>`}
+        </tbody></table></div>
+        ${fund?.summaryText ? `<div class="panel-body"><p class="muted" style="white-space:pre-line;font-size:12px">${h(fund.summaryText)}</p></div>` : ""}
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>7일 예정</h2><span class="muted">들어올 돈 ${money.format(r.weekIn)}원 · 나갈 돈 ${money.format(r.weekOut)}원${r.shortfallDate ? ` · <strong class="danger-text">⚠ ${h(cashDay(r.shortfallDate))} 잔액 부족</strong>` : ""}</span></div>
+      <div class="table-wrap"><table class="cash-table">
+        <thead><tr><th>날짜</th><th>들어올 돈</th><th>나갈 돈</th><th>예상 잔액</th><th>내역</th></tr></thead>
+        <tbody>${r.days.map((d) => `<tr class="${d.balance != null && d.balance < 0 ? "cash-short" : ""}">
+          <td>${h(cashDay(d.date))}</td><td class="num">${d.cashIn ? money.format(d.cashIn) : ""}</td><td class="num">${d.cashOut ? money.format(d.cashOut) : ""}</td>
+          <td class="num">${d.balance == null ? "-" : money.format(d.balance)}</td>
+          <td class="wrap muted" style="font-size:12px">${d.items.map((l) => `${l.direction === "in" ? "+" : "-"}${h(l.title)} ${money.format(l.amount)}`).join(" · ")}</td></tr>`).join("")}</tbody>
+      </table></div>
+      <div class="toolbar" style="padding:12px 16px">
+        <button class="primary" data-cash-copy>채널톡 보고 문구 복사</button>
+        <button data-cash-print>인쇄·이미지 저장</button>
+        <button data-cash-reload>새로고침</button>
+      </div>
+      <details style="padding:0 16px 16px"><summary class="muted">보고 문구 미리보기</summary><pre class="cash-text">${h(cs.data.text || "")}</pre></details>
+    </section>`;
+}
+
+function renderCashSchedules() {
+  const cs = cashState();
+  const meta = cs.meta || {};
+  const list = (cs.schedules || []).filter((s) => !s.company || s.company === cs.company)
+    .sort((a, b) => String(a.direction).localeCompare(String(b.direction)) || String(a.category).localeCompare(String(b.category), "ko"));
+  const when = (s) => s.repeat === "monthly" ? `매월 ${s.dayOfMonth}일` : s.repeat === "weekly" ? `매주 ${WEEKDAY_KO[s.weekday ?? 1]}요일` : (s.date || "");
+  const e = { direction: "out", repeat: "monthly", dayOfMonth: 25, company: cs.company, ...(cs.editing || {}) };
+  const cats = (meta.categories || {})[e.direction] || [];
+  return `
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>자금 일정</h2><span class="muted">${list.length}건 · 고정비·급여·대출상환·정산 입금 등</span></div>
+        <div class="table-wrap"><table class="cash-table">
+          <thead><tr><th>구분</th><th>항목</th><th>분류</th><th>언제</th><th>금액</th><th>방식</th><th></th></tr></thead>
+          <tbody>${list.map((s) => `<tr class="${s.active === false ? "muted" : ""}">
+            <td>${s.direction === "in" ? `<span class="cash-in">들어옴</span>` : `<span class="cash-out">나감</span>`}</td>
+            <td>${h(s.title)}${s.memo ? `<br><span class="muted" style="font-size:11px">${h(s.memo)}</span>` : ""}</td>
+            <td>${h(s.category || "")}</td><td>${h(when(s))}${s.endDate ? `<br><span class="muted" style="font-size:11px">~${h(s.endDate)}</span>` : ""}</td>
+            <td class="num">${money.format(s.amount || 0)}</td><td>${h(s.method || "")}</td>
+            <td><div class="row-actions">${can("cash", "edit") ? `<button data-cash-edit="${s.id}">수정</button><button class="danger icon-btn" data-cash-del="${s.id}" title="삭제">×</button>` : ""}</div></td></tr>`).join("") || `<tr><td colspan="7" class="empty">등록된 일정이 없습니다. 오른쪽에서 정기 지출(임대료·급여·대출상환 등)부터 넣어 보세요.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>${cs.editing?.id ? "일정 수정" : "일정 추가"}</h2></div>
+        <div class="panel-body">${can("cash", "edit") ? `
+          <form class="form-grid" data-cash-form>
+            <input type="hidden" name="company" value="${h(e.company)}">
+            <div class="field two">
+              <div><label>구분</label><select name="direction" data-cash-dir><option value="out" ${e.direction === "out" ? "selected" : ""}>나갈 돈</option><option value="in" ${e.direction === "in" ? "selected" : ""}>들어올 돈</option></select></div>
+              <div><label>분류</label><select name="category"><option value="">선택</option>${cats.map((c) => `<option ${e.category === c ? "selected" : ""}>${h(c)}</option>`).join("")}</select></div>
+            </div>
+            <div class="field"><label>항목</label><input name="title" value="${h(e.title || "")}" required placeholder="예: 사무실 임대료"></div>
+            <div class="field two">
+              <div><label>금액(원)</label><input name="amount" inputmode="numeric" value="${h(e.amount ? money.format(e.amount) : "")}" required></div>
+              <div><label>결제방식</label><input name="method" value="${h(e.method || "")}" placeholder="자동이체 / 계좌이체 / 카드"></div>
+            </div>
+            <div class="field two">
+              <div><label>반복</label><select name="repeat" data-cash-repeat>${Object.entries(meta.repeats || { once: "1회", monthly: "매월", weekly: "매주" }).map(([k, l]) => `<option value="${k}" ${e.repeat === k ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+              <div>${e.repeat === "monthly" ? `<label>매월 며칠</label><input name="dayOfMonth" type="number" min="1" max="31" value="${h(e.dayOfMonth || 25)}">`
+                : e.repeat === "weekly" ? `<label>요일</label><select name="weekday">${WEEKDAY_KO.map((w, i) => `<option value="${i}" ${Number(e.weekday ?? 1) === i ? "selected" : ""}>${w}</option>`).join("")}</select>`
+                : `<label>날짜</label><input type="date" name="date" value="${h(e.date || "")}" required>`}</div>
+            </div>
+            ${e.repeat !== "once" ? `<div class="field two"><div><label>시작일</label><input type="date" name="startDate" value="${h(e.startDate || "")}"></div><div><label>종료일 <span class="muted" style="font-weight:400">(대출 만기 등)</span></label><input type="date" name="endDate" value="${h(e.endDate || "")}"></div></div>` : ""}
+            <div class="field"><label>메모</label><input name="memo" value="${h(e.memo || "")}"></div>
+            <div class="toolbar"><button class="primary" type="submit">${cs.editing?.id ? "수정 저장" : "일정 추가"}</button>${cs.editing ? `<button type="button" data-cash-cancel>취소</button>` : ""}</div>
+          </form>` : `<p class="muted">자금 수정 권한이 없습니다.</p>`}</div>
+      </div>
+    </section>`;
+}
+
+function bindCash() {
+  const cs = cashState();
+  if (!cs.data && !cs.loading) {
+    loadCash().then(renderApp);
+    return;
+  }
+  const reload = async () => { await loadCash(); renderApp(); };
+  app.querySelectorAll("[data-cash-screen]").forEach((b) => b.addEventListener("click", () => { cs.screen = b.dataset.cashScreen; renderApp(); }));
+  app.querySelectorAll("[data-cash-company]").forEach((b) => b.addEventListener("click", async () => { cs.company = b.dataset.cashCompany; cs.editing = null; await reload(); }));
+  app.querySelector("[data-cash-reload]")?.addEventListener("click", reload);
+  app.querySelector("[data-cash-print]")?.addEventListener("click", () => window.print());
+  app.querySelector("[data-cash-copy]")?.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(cs.data?.text || "");
+      showToast("보고 문구를 복사했습니다. 채널톡에 붙여 넣으세요.");
+    } catch {
+      showToast("복사하지 못했습니다. 아래 미리보기를 길게 눌러 복사하세요.", "error");
+    }
+  });
+  // 구분·반복을 바꾸면 그에 맞는 칸을 다시 그린다(입력값은 유지).
+  const keep = (patch) => {
+    const form = app.querySelector("[data-cash-form]");
+    cs.editing = { ...(cs.editing || {}), ...(form ? formObject(form) : {}), ...patch };
+    renderApp();
+  };
+  app.querySelector("[data-cash-dir]")?.addEventListener("change", (e) => keep({ direction: e.target.value, category: "" }));
+  app.querySelector("[data-cash-repeat]")?.addEventListener("change", (e) => keep({ repeat: e.target.value }));
+  app.querySelector("[data-cash-cancel]")?.addEventListener("click", () => { cs.editing = null; renderApp(); });
+  app.querySelectorAll("[data-cash-edit]").forEach((b) => b.addEventListener("click", () => {
+    cs.editing = (cs.schedules || []).find((s) => s.id === b.dataset.cashEdit) || null;
+    renderApp();
+  }));
+  app.querySelectorAll("[data-cash-del]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("이 일정을 삭제할까요?")) return;
+    await api(`/api/cash/schedules/${b.dataset.cashDel}`, { method: "DELETE" });
+    await reload();
+  }));
+  app.querySelector("[data-cash-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = formObject(event.currentTarget);
+    try {
+      if (cs.editing?.id) await api(`/api/cash/schedules/${cs.editing.id}`, { method: "PUT", body });
+      else await api("/api/cash/schedules", { method: "POST", body });
+      cs.editing = null;
+      showToast("저장했습니다.");
+      await reload();
+    } catch (error) {
+      showToast(error.message || "저장하지 못했습니다.", "error");
     }
   });
 }

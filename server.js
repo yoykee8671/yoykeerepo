@@ -17,6 +17,7 @@ import { buildRequestDrafts, findShippedAwaiting } from "./lib/cafe24-collect.mj
 import { createProductSyncService } from "./lib/product-sync-service.mjs";
 import { createErpStore } from "./lib/erp-store.mjs";
 import * as payments from "./lib/payment-requests.mjs";
+import * as cashReport from "./lib/cash-report.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -1738,6 +1739,13 @@ function migrateDb(db) {
     perms.payments = grant;
     changed = true;
   }
+  // v2 자금 메뉴: 입금완료 처리 권한자(경영지원)에게 열어 둔다.
+  for (const admin of db.admins || []) {
+    const perms = admin.permissions;
+    if (!perms || typeof perms !== "object" || Array.isArray(perms.cash)) continue;
+    perms.cash = Array.isArray(perms.requests) && perms.requests.includes("pay") ? ["view", "edit"] : [];
+    changed = true;
+  }
 
   // 우프코드 일괄 부여(처음 한 번). 이후에는 저장할 때마다 새 항목에 붙는다.
   if (assignCodes(db) > 0) changed = true;
@@ -1831,6 +1839,26 @@ async function readDb() {
 // (db.codeSeq 가 지금까지 쓴 가장 큰 번호를 기억한다).
 // 명세서·발주서는 이미 문서번호(docNo)가 있어 그것을 코드로 쓴다.
 // ---------------------------------------------------------------------------
+// --- v2 자금 도우미 ---
+// 자금보고를 내는 회사. 클로브에 두 회사가 따로 있다(우프컴퍼니, 베럴즈).
+const CASH_COMPANIES = [
+  { key: "wooof", name: "우프컴퍼니", match: "우프" },
+  { key: "betters", name: "베럴즈", match: "베럴즈" }
+];
+let clobeContextCache = { at: 0, companies: [] };
+
+// 우프는 연결할 때 고정한 companyId, 그 밖의 회사는 클로브 계정의 회사 목록에서
+// 이름으로 찾는다(1시간 캐시).
+async function clobeCompanyIdFor(db, company) {
+  if (!db.clobe?.connectedAt && !db.clobe?.refreshToken) return "";
+  if (company.key === "wooof") return db.clobe.companyId || "";
+  if (Date.now() - clobeContextCache.at > 3600 * 1000) {
+    const ctx = await clobeCall(db, "get_my_context", {});
+    clobeContextCache = { at: Date.now(), companies: ctx.companies || [] };
+  }
+  return clobeContextCache.companies.find((c) => String(c.companyName || "").includes(company.match))?.companyId || "";
+}
+
 // --- v2 지급요청 도우미 ---
 const PAYMENT_SETTING_DEFAULTS = {
   approvalThreshold: payments.DEFAULT_APPROVAL_THRESHOLD,
@@ -5358,7 +5386,9 @@ const MENU_REGISTRY = [
   // 신규 상품을 등록한다.
   { key: "productsync", label: "상품동기화", actions: ["view", "apply"] },
   // v2 지급요청. 요청은 누구나, 확인·처리완료는 경영지원, 허가는 대표.
-  { key: "payments", label: "지급요청", actions: ["view", "create", "edit", "delete", "confirm", "approve", "pay"] }
+  { key: "payments", label: "지급요청", actions: ["view", "create", "edit", "delete", "confirm", "approve", "pay"] },
+  // v2 자금: 일일 자금보고·자금 일정(정기 나갈 돈/들어올 돈).
+  { key: "cash", label: "자금", actions: ["view", "edit"] }
 ];
 
 const ACTION_LABELS = {
@@ -5388,6 +5418,7 @@ function defaultPermissions(role) {
     // (GET /api/admins 에는 검사가 없었고 생성·수정·삭제만 막혀 있었다).
     if (menu.key === "reconcile" || menu.key === "pipeline" || menu.key === "productsync") all[menu.key] = [];
     else if (menu.key === "payments") all[menu.key] = ["view", "create", "edit"];
+    else if (menu.key === "cash") all[menu.key] = [];
     else if (menu.key === "admins") all[menu.key] = ["view"];
     else all[menu.key] = [...menu.actions];
   }
@@ -10541,6 +10572,99 @@ async function routeApi(req, res, url) {
     } catch (error) {
       sendJson(res, 500, { error: `${label} ${format === "pdf" ? "PDF " : ""}생성 실패: ${error.message}` });
     }
+    return;
+  }
+
+  // --- v2 자금: 자금 일정 + 일일 자금보고 ---------------------------------------
+  if (pathname === "/api/cash" || pathname.startsWith("/api/cash/")) {
+    if (!requirePermission(actor, res, "cash", "view")) return;
+
+    if (pathname === "/api/cash/schedules" && method === "GET") {
+      sendJson(res, 200, { schedules: await erp.list("cashSchedules"), repeats: cashReport.SCHEDULE_REPEATS, categories: cashReport.SCHEDULE_CATEGORIES, companies: CASH_COMPANIES });
+      return;
+    }
+
+    const schedMatch = pathname.match(/^\/api\/cash\/schedules(?:\/([^/]+))?$/);
+    if (schedMatch && (method === "POST" || method === "PUT")) {
+      if (!requirePermission(actor, res, "cash", "edit")) return;
+      const body = await readBody(req);
+      const prior = schedMatch[1] ? await erp.get("cashSchedules", schedMatch[1]) : null;
+      if (schedMatch[1] && !prior) { sendJson(res, 404, { error: "일정을 찾을 수 없습니다." }); return; }
+      const rec = { ...(prior || { id: id("cash"), createdAt: now(), createdBy: actor.name || actor.email || "" }) };
+      for (const key of ["title", "category", "method", "memo", "company"]) {
+        if (key in body) rec[key] = String(body[key] ?? "").trim().slice(0, 200);
+      }
+      if ("direction" in body) rec.direction = body.direction === "in" ? "in" : "out";
+      if ("repeat" in body) rec.repeat = cashReport.SCHEDULE_REPEATS[body.repeat] ? body.repeat : "once";
+      if ("amount" in body) rec.amount = Math.max(0, Math.round(number(String(body.amount).replace(/,/g, ""))));
+      if ("dayOfMonth" in body) rec.dayOfMonth = Math.min(31, Math.max(1, Math.round(number(body.dayOfMonth)) || 1));
+      if ("weekday" in body) rec.weekday = Math.min(6, Math.max(0, Math.round(number(body.weekday))));
+      for (const key of ["date", "startDate", "endDate"]) if (key in body) rec[key] = dateOnly(body[key]) || "";
+      if ("active" in body) rec.active = body.active !== false && body.active !== "false";
+      if (!rec.title) { sendJson(res, 400, { error: "항목명을 입력하세요." }); return; }
+      if (!rec.amount) { sendJson(res, 400, { error: "금액을 입력하세요." }); return; }
+      if ((rec.repeat || "once") === "once" && !rec.date) { sendJson(res, 400, { error: "1회 일정은 날짜가 필요합니다." }); return; }
+      rec.direction ||= "out";
+      rec.company ||= "wooof";
+      rec.updatedAt = now();
+      await erp.put("cashSchedules", rec);
+      sendJson(res, prior ? 200 : 201, { schedule: rec });
+      return;
+    }
+
+    if (schedMatch && schedMatch[1] && method === "DELETE") {
+      if (!requirePermission(actor, res, "cash", "edit")) return;
+      await erp.remove("cashSchedules", schedMatch[1]);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // 일일 자금보고. ?company=wooof|betters&days=7
+    if (pathname === "/api/cash/report" && method === "GET") {
+      const companyKey = CASH_COMPANIES.some((c) => c.key === url.searchParams.get("company")) ? url.searchParams.get("company") : "wooof";
+      const company = CASH_COMPANIES.find((c) => c.key === companyKey);
+      const days = Math.min(31, Math.max(1, Math.round(number(url.searchParams.get("days")) || 7)));
+      const today = kstToday();
+      // 클로브: 계좌 잔액(지금) + 어제 입출금 요약. 실패해도 일정 표는 보여 준다.
+      let accounts = [];
+      let fund = null;
+      let clobeError = "";
+      try {
+        const companyId = await clobeCompanyIdFor(db, company);
+        if (companyId) {
+          const [acc, rep] = await Promise.all([
+            clobeCall(db, "get_bank_accounts", { companyId }),
+            clobeCall(db, "get_daily_fund_report", { companyId }).catch(() => null)
+          ]);
+          accounts = (acc.accounts || [])
+            .filter((a) => (a.currencyCode || "KRW") === "KRW")
+            .map((a) => ({ id: a.bankAccountId, name: a.aliasName || a.accountName || a.displayAccountNumber, number: a.displayAccountNumber, balance: Number(a.krwBalance || 0) }));
+          fund = rep && rep.baseDate ? {
+            baseDate: rep.baseDate, transactionDate: rep.transactionDate, cashIn: rep.cashIn, cashOut: rep.cashOut,
+            cashBalance: rep.cashBalance, summaryText: rep.summaryText, templateType: rep.templateType
+          } : null;
+        } else {
+          clobeError = "클로브에 이 회사가 연결돼 있지 않습니다.";
+        }
+      } catch (error) {
+        clobeError = error.message || "클로브 잔액을 불러오지 못했습니다.";
+      }
+      const opening = accounts.length ? accounts.reduce((s, a) => s + a.balance, 0) : null;
+      const report = cashReport.buildCashReport({
+        today, days, company: companyKey, openingBalance: opening,
+        schedules: await erp.list("cashSchedules"),
+        payments: companyKey === "wooof" ? await erp.list("payments").catch(() => []) : [],
+        // 선매입 입금요청은 우프 통장에서 나간다.
+        requests: companyKey === "wooof" ? db.requests : []
+      });
+      sendJson(res, 200, {
+        company, report, accounts, fund, clobeError,
+        text: cashReport.reportText(report, { companyName: company.name, accounts })
+      });
+      return;
+    }
+
+    sendJson(res, 404, { error: "지원하지 않는 요청입니다." });
     return;
   }
 
