@@ -23,6 +23,7 @@ import * as inventory from "./lib/inventory.mjs";
 import * as legacy from "./lib/legacy-migration.mjs";
 import * as pricing from "./lib/channel-pricing.mjs";
 import * as production from "./lib/production-cost.mjs";
+import * as loansLib from "./lib/loans.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -37,6 +38,8 @@ const HANA_ACCOUNTS_SCRIPT = path.join(__dirname, "scripts", "hana_accounts.py")
 const PRODUCTION_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_production.py");
 // 생산비 구글시트(링크 공개). 시트를 다른 곳으로 옮기면 PRODUCTION_SHEET_ID 로 바꾼다.
 const PRODUCTION_SHEET_ID = process.env.PRODUCTION_SHEET_ID || "1xuvDKLTBZ4AgFsk3nYNnCKmRnz_-Z2os";
+const LOAN_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_loans.py");
+const LOAN_SHEET_ID = process.env.LOAN_SHEET_ID || "1_7bKONJvSWSH5wzciqHkfIRbZS6fmqVY";
 const HANA_TRANSFER_SCRIPT = path.join(__dirname, "scripts", "hana_transfer_xlsx.py");
 const NPB_PARSE_SCRIPT = path.join(__dirname, "scripts", "npb_parse.py");
 const NPB_XLSX_SCRIPT = path.join(__dirname, "scripts", "npb_settlement_xlsx.py");
@@ -2192,14 +2195,19 @@ async function parsePriceWorkbookUpload(body = {}) {
 
 // 생산비 시트를 내려받아 추출한다(구글시트 → xlsx → JSON).
 async function extractProductionSheet() {
-  const resp = await fetch(`https://docs.google.com/spreadsheets/d/${PRODUCTION_SHEET_ID}/export?format=xlsx`, { redirect: "follow" });
-  if (!resp.ok) throw new Error(`생산비 시트를 받지 못했습니다(${resp.status}). 링크 공유가 켜져 있는지 확인하세요.`);
+  return extractSheetWith(PRODUCTION_SHEET_ID, PRODUCTION_EXTRACT_SCRIPT, "생산비 시트");
+}
+
+// 링크 공개 구글시트를 xlsx 로 받아 추출 스크립트로 읽는다.
+async function extractSheetWith(sheetId, script, label) {
+  const resp = await fetch(`https://docs.google.com/spreadsheets/d/${sheetId}/export?format=xlsx`, { redirect: "follow" });
+  if (!resp.ok) throw new Error(`${label}를 받지 못했습니다(${resp.status}). 링크 공유가 켜져 있는지 확인하세요.`);
   const buffer = Buffer.from(await resp.arrayBuffer());
-  if (buffer.subarray(0, 2).toString() !== "PK") throw new Error("생산비 시트가 엑셀 파일로 오지 않았습니다. 링크 공유를 확인하세요.");
-  const tmpPath = path.join(os.tmpdir(), `wooofpay-prod-${crypto.randomBytes(8).toString("hex")}.xlsx`);
+  if (buffer.subarray(0, 2).toString() !== "PK") throw new Error(`${label}가 엑셀 파일로 오지 않았습니다. 링크 공유를 확인하세요.`);
+  const tmpPath = path.join(os.tmpdir(), `wooofpay-sheet-${crypto.randomBytes(8).toString("hex")}.xlsx`);
   try {
     await writeFile(tmpPath, buffer);
-    const { stdout } = await execFileAsync("python3", [PRODUCTION_EXTRACT_SCRIPT, "--input", tmpPath], { cwd: __dirname, maxBuffer: 50 * 1024 * 1024 });
+    const { stdout } = await execFileAsync("python3", [script, "--input", tmpPath], { cwd: __dirname, maxBuffer: 50 * 1024 * 1024 });
     return JSON.parse(stdout || "{}");
   } finally {
     await safeUnlink(tmpPath);
@@ -10868,6 +10876,19 @@ async function routeApi(req, res, url) {
           addAudit(db, actor, "create", "prodRates", rec.id, `${partner.name} ${rec.item} 공임 ${price.toLocaleString()}원 등록`, null, rec);
           applied = `${rec.item} ${price.toLocaleString()}원${rec.from ? ` (${rec.from}부터)` : ""} 등록`;
         } else applied = choice.label;
+      } else if (qn.kind === "loan-maturity") {
+        const loan = await erp.get("loans", qn.subjectId);
+        if (!loan) { sendJson(res, 404, { error: "대출이 없습니다." }); return; }
+        if (choice.key === "extended") {
+          const d = dateOnly(body.value);
+          if (!d) { sendJson(res, 400, { error: "새 만기일을 입력하세요." }); return; }
+          await erp.put("loans", { ...loan, maturity: d, editedAt: now(), editedBy: who });
+          applied = `만기 ${d}로 연장`;
+        } else {
+          await erp.put("loans", { ...loan, closed: true, editedAt: now(), editedBy: who });
+          applied = "종료(다 갚음)";
+        }
+        addAudit(db, actor, "update", "loan", loan.id, `${loan.name} ${applied} (확인 필요 답변)`, { maturity: loan.maturity }, null);
       } else if (qn.kind === "prod-total") {
         applied = choice.label;
       } else if (qn.kind === "zero-deduction") {
@@ -11126,6 +11147,162 @@ async function routeApi(req, res, url) {
   // --- v2 판매 파이프라인 -------------------------------------------------------
   // 주문접수 → 명세서 → 업체전달 → 청구·계산서 → 입금확인. 판매주문은 erp
   // 저장소에, 명세서는 기존 '명세서 발행'(purchaseOrders) 기록으로 만든다.
+  // --- v2 대출금 원장 ------------------------------------------------------------
+  if (pathname === "/api/loans" || pathname.startsWith("/api/loans/")) {
+    if (!requirePermission(actor, res, "cash", "view")) return;
+    const canEdit = actor.role === "owner" || can(actor, "cash", "edit");
+    const who = actor.name || actor.email || "";
+    const today = kstToday();
+    const decorate = (l, pays) => {
+      const balance = loansLib.loanBalance(l, pays);
+      const next = loansLib.loanScheduleLines([l], pays, today, payments.addDays(today, 45))[0];
+      return { ...l, currentBalance: balance, status: loansLib.loanStatus(l, balance, today), expected: loansLib.expectedPayment(l, balance, today),
+        nextDate: next?.date || "", nextAmount: next?.amount || 0, paymentCount: pays.filter((p) => p.loanId === l.id && !p.voided).length };
+    };
+
+    if (pathname === "/api/loans" && method === "GET") {
+      const [loans, pays] = await Promise.all([erp.list("loans"), erp.list("loanPayments")]);
+      const rows = loans.map((l) => decorate(l, pays)).sort((a, b) => String(a.company).localeCompare(String(b.company)) || b.currentBalance - a.currentBalance);
+      const totals = {};
+      for (const r of rows) if (r.status !== "closed") totals[r.company] = (totals[r.company] || 0) + r.currentBalance;
+      sendJson(res, 200, { loans: rows, totals, companies: loansLib.LOAN_COMPANIES, canEdit, lastSync: (await erp.get("settings", "loanSync")) || null });
+      return;
+    }
+
+    const one = pathname.match(/^\/api\/loans\/item\/([^/]+)$/);
+    if (one && method === "GET") {
+      const loan = await erp.get("loans", decodeURIComponent(one[1]));
+      if (!loan) { sendJson(res, 404, { error: "대출을 찾을 수 없습니다." }); return; }
+      const pays = await erp.list("loanPayments");
+      sendJson(res, 200, { loan: decorate(loan, pays), payments: pays.filter((p) => p.loanId === loan.id).sort((a, b) => String(b.date).localeCompare(String(a.date))) });
+      return;
+    }
+
+    if (!canEdit) { sendJson(res, 403, { error: "대출금을 고칠 권한이 없습니다." }); return; }
+
+    if (pathname === "/api/loans/import-sheet" && method === "POST") {
+      if (actor.role !== "owner") { sendJson(res, 403, { error: "가져오기는 오너만 할 수 있습니다." }); return; }
+      let extract;
+      try { extract = await extractSheetWith(LOAN_SHEET_ID, LOAN_EXTRACT_SCRIPT, "대출금 관리대장"); } catch (error) { sendJson(res, 502, { error: error.message }); return; }
+      const plan = loansLib.planLoanImport(extract, { today });
+      const stamp = now();
+      let saved = 0;
+      for (const l of plan.loans) {
+        const prev = await erp.get("loans", l.id);
+        if (prev?.editedAt) continue; // 화면에서 고친 대출은 덮어쓰지 않는다
+        await erp.put("loans", { ...l, importedAt: stamp });
+        saved += 1;
+      }
+      const existingQ = new Map((await erp.list("setupQuestions")).map((x) => [x.id, x]));
+      for (const qn of plan.questions) {
+        if (existingQ.get(qn.id)?.status === "answered") continue;
+        await erp.put("setupQuestions", { ...qn, createdAt: existingQ.get(qn.id)?.createdAt || stamp, updatedAt: stamp });
+      }
+      addAudit(db, actor, "update", "loans", "import", `대출금 관리대장 가져오기: 대출 ${plan.loans.length}건, 질문 ${plan.questions.length}건`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { loans: plan.loans.length, saved, questions: plan.questions.length });
+      return;
+    }
+
+    // 클로브 출금 거래에서 상환을 찾아 기록한다. 출금계좌가 클로브에 없으면 그 대출은 '미연결'.
+    if (pathname === "/api/loans/sync" && method === "POST") {
+      const [loans, pays] = await Promise.all([erp.list("loans"), erp.list("loanPayments")]);
+      const active = loans.filter((l) => !l.closed);
+      const result = { matched: 0, unconnected: [], errors: [] };
+      for (const companyKey of Object.keys(loansLib.LOAN_COMPANIES)) {
+        const mine = active.filter((l) => l.company === companyKey);
+        if (!mine.length) continue;
+        const company = CASH_COMPANIES.find((c) => c.key === companyKey);
+        try {
+          const companyId = company ? await clobeCompanyIdFor(db, company) : "";
+          if (!companyId) { result.unconnected.push(...mine.map((l) => l.id)); continue; }
+          const acc = await clobeCall(db, "get_bank_accounts", { companyId });
+          const byDigits = new Map((acc.accounts || []).map((a) => [String(a.displayAccountNumber || a.accountNumber || "").replace(/\D/g, ""), a.bankAccountId]));
+          const txs = [];
+          for (const [digitsKey, accountId] of byDigits) {
+            const loansHere = mine.filter((l) => String(l.account || "").replace(/\D/g, "") === digitsKey);
+            if (!loansHere.length) continue;
+            const startDate = loansHere.map((l) => l.asOf || today).sort()[0];
+            let cursor = null;
+            for (let page = 0; page < 10; page += 1) {
+              const p = await clobeCall(db, "get_labeled_transactions", { companyId, accountId, direction: "OUT", startDate, endDate: today, size: 100, ...(cursor ? { cursor } : {}) });
+              txs.push(...(p.content || []));
+              if (!p.hasNext || !p.nextCursor) break;
+              cursor = p.nextCursor;
+            }
+          }
+          for (const l of mine) if (!byDigits.has(String(l.account || "").replace(/\D/g, ""))) result.unconnected.push(l.id);
+          const found = loansLib.matchLoanPayments(mine, txs, pays);
+          for (const f of found) {
+            await erp.put("loanPayments", { ...f, company: companyKey, createdAt: now() });
+            pays.push(f);
+          }
+          result.matched += found.length;
+        } catch (error) {
+          result.errors.push(`${loansLib.LOAN_COMPANIES[companyKey]}: ${error.message}`);
+        }
+      }
+      await erp.put("settings", { id: "loanSync", at: now(), by: who, ...result });
+      sendJson(res, 200, result);
+      return;
+    }
+
+    const payAdd = pathname.match(/^\/api\/loans\/item\/([^/]+)\/payments$/);
+    if (payAdd && method === "POST") {
+      const loan = await erp.get("loans", decodeURIComponent(payAdd[1]));
+      if (!loan) { sendJson(res, 404, { error: "대출을 찾을 수 없습니다." }); return; }
+      const body = await readBody(req);
+      const n = (v) => Math.max(0, Math.round(number(String(v ?? "").replace(/,/g, ""))));
+      const rec = { id: id("lp"), loanId: loan.id, company: loan.company, date: dateOnly(body.date) || today, principal: n(body.principal), interest: n(body.interest),
+        memo: String(body.memo || "").slice(0, 200), source: "직접 입력", createdBy: who, createdAt: now() };
+      rec.amount = rec.principal + rec.interest;
+      if (!rec.amount) { sendJson(res, 400, { error: "원금 또는 이자를 입력하세요." }); return; }
+      await erp.put("loanPayments", rec);
+      addAudit(db, actor, "create", "loanPayment", rec.id, `${loan.name} 상환 원금 ${rec.principal.toLocaleString()} 이자 ${rec.interest.toLocaleString()}`, null, rec);
+      await writeDb(db);
+      sendJson(res, 201, { payment: rec });
+      return;
+    }
+
+    const payVoid = pathname.match(/^\/api\/loans\/payments\/([^/]+)\/void$/);
+    if (payVoid && method === "POST") {
+      const rec = await erp.get("loanPayments", decodeURIComponent(payVoid[1]));
+      if (!rec) { sendJson(res, 404, { error: "기록을 찾을 수 없습니다." }); return; }
+      await erp.put("loanPayments", { ...rec, voided: true, voidedBy: who, voidedAt: now() });
+      addAudit(db, actor, "delete", "loanPayment", rec.id, "대출 상환 기록 취소", rec, null);
+      await writeDb(db);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    const edit = pathname.match(/^\/api\/loans\/item\/([^/]+)$/);
+    if ((edit && method === "PUT") || (pathname === "/api/loans/item" && method === "POST")) {
+      const body = await readBody(req);
+      const base = edit ? await erp.get("loans", decodeURIComponent(edit[1])) : { id: id("loan"), createdAt: now(), source: "직접 입력" };
+      if (!base) { sendJson(res, 404, { error: "대출을 찾을 수 없습니다." }); return; }
+      const next = { ...base };
+      for (const k of ["company", "category", "name", "bank", "account", "payDay", "term", "memo"]) if (k in body) next[k] = String(body[k] ?? "").trim().slice(0, 200);
+      for (const k of ["principal", "principalPayment", "monthlyPayment", "balance"]) if (k in body) next[k] = Math.max(0, Math.round(number(String(body[k] ?? "").replace(/,/g, ""))));
+      if ("rate" in body) next.rate = number(body.rate);
+      for (const k of ["startDate", "repayStart", "maturity", "asOf"]) if (k in body) next[k] = dateOnly(body[k]) || "";
+      if ("closed" in body) next.closed = body.closed === true || body.closed === "true";
+      if ("autoRenew" in body) next.autoRenew = body.autoRenew === true || body.autoRenew === "true";
+      if (!loansLib.LOAN_COMPANIES[next.company]) next.company = "wooof";
+      if (!next.name) { sendJson(res, 400, { error: "대출명을 입력하세요." }); return; }
+      if ("balance" in body && !("asOf" in body)) next.asOf = today; // 잔액을 고치면 오늘 기준으로 본다
+      next.editedAt = now();
+      next.editedBy = who;
+      await erp.put("loans", next);
+      addAudit(db, actor, edit ? "update" : "create", "loan", next.id, `대출 ${next.name} ${edit ? "수정" : "등록"}`, edit ? base : null, next);
+      await writeDb(db);
+      sendJson(res, edit ? 200 : 201, { loan: next });
+      return;
+    }
+
+    sendJson(res, 404, { error: "없는 경로입니다." });
+    return;
+  }
+
   // --- v2 생산비: 생산처 청구·지급 원장, 미지급, 공임 대조 -------------------------
   if (pathname === "/api/production" || pathname.startsWith("/api/production/")) {
     if (!requirePermission(actor, res, "stock", "view")) return;
@@ -11705,7 +11882,8 @@ async function routeApi(req, res, url) {
       const opening = accounts.length ? accounts.reduce((s, a) => s + a.balance, 0) : null;
       const report = cashReport.buildCashReport({
         today, days, company: companyKey, openingBalance: opening,
-        schedules: await erp.list("cashSchedules"),
+        schedules: [...await erp.list("cashSchedules"),
+          ...loansLib.loanScheduleLines((await erp.list("loans")).filter((l) => l.company === companyKey), await erp.list("loanPayments"), today, payments.addDays(today, days))],
         payments: companyKey === "wooof" ? await erp.list("payments").catch(() => []) : [],
         // 선매입 입금요청은 우프 통장에서 나간다.
         requests: companyKey === "wooof" ? db.requests : [],

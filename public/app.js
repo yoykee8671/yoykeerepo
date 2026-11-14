@@ -11474,12 +11474,114 @@ async function loadCash() {
 const WEEKDAY_KO = ["일", "월", "화", "수", "목", "금", "토"];
 const cashDay = (d) => `${Number(d.slice(5, 7))}/${Number(d.slice(8, 10))}(${WEEKDAY_KO[new Date(`${d}T00:00:00Z`).getUTCDay()]})`;
 
+// ===========================================================================
+// v2 대출금 원장 — 시트 기준 잔액 − 상환 원금, 매월 상환 예정, 클로브 자동 반영
+// ===========================================================================
+const LOAN_STATUS = { active: ["정상", ""], "due-soon": ["만기 임박", "warn"], matured: ["만기 지남", "warn"], closed: ["종료", "muted"] };
+
+function renderLoans() {
+  const cs = cashState();
+  const d = cs.loans;
+  if (!d) return `<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const sync = d.lastSync;
+  const unconnected = new Set(sync?.unconnected || []);
+  const group = (key) => d.loans.filter((l) => l.company === key && (cs.loanShowClosed || l.status !== "closed"));
+  const table = (key) => `
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head"><h2>${h(d.companies[key])}</h2><span class="muted">남은 대출금 <strong>${money.format(d.totals[key] || 0)}원</strong></span></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>대출</th><th>남은 금액</th><th>다음 상환(추정)</th><th>만기</th></tr></thead>
+        <tbody>${group(key).map((l) => `<tr class="${cs.loanSel === l.id ? "selected" : ""}" data-loan-open="${h(l.id)}">
+          <td>${h(l.bank)} ${h(l.name)}<br><span class="muted" style="font-size:11px">연 ${l.rate || 0}% · 매월 ${h(l.payDay || "-")} · ${h(l.account || "")}${unconnected.has(l.id) ? ' · <span class="danger-text">클로브 미연결</span>' : ""}</span></td>
+          <td class="num"><strong>${money.format(l.currentBalance)}</strong>${l.paymentCount ? `<br><span class="muted" style="font-size:11px">상환 ${l.paymentCount}건 반영</span>` : `<br><span class="muted" style="font-size:11px">${h(l.asOf || "")} 기준</span>`}</td>
+          <td>${l.nextDate ? `${h(l.nextDate.slice(5))}<br><span class="muted" style="font-size:11px">${money.format(l.nextAmount)}원</span>` : ""}</td>
+          <td>${h(l.maturity || "")}<br><span class="badge ${LOAN_STATUS[l.status][1]}">${LOAN_STATUS[l.status][0]}</span></td></tr>`).join("") || `<tr><td colspan="4" class="empty">대출이 없습니다.</td></tr>`}</tbody>
+      </table></div>
+    </div>`;
+  return `
+    <div class="toolbar" style="margin:8px 0">
+      ${d.canEdit ? `<button data-loan-sync>클로브에서 상환 찾기</button><button data-loan-import>대출금 관리대장에서 가져오기</button>` : ""}
+      <label class="check"><input type="checkbox" data-loan-closed ${cs.loanShowClosed ? "checked" : ""}> 종료된 대출도 보기</label>
+      <span class="muted" style="font-size:12px">${sync ? `마지막 상환 찾기 ${h(String(sync.at || "").slice(0, 16).replace("T", " "))} · ${sync.matched}건 반영${sync.unconnected?.length ? ` · 클로브에 출금계좌가 없는 대출 ${sync.unconnected.length}건은 직접 입력하세요` : ""}` : "상환은 클로브 출금 거래에서 자동으로 찾습니다. 출금계좌가 클로브에 없으면 직접 입력합니다."}</span>
+    </div>
+    <section class="layout pricing-layout loans-layout">
+      <div>${Object.keys(d.companies).map(table).join("")}</div>
+      <div class="panel">${cs.loanDetail ? renderLoanDetail() : `<div class="panel-body"><p class="muted">대출을 고르면 상환 기록과 정보가 보입니다. 상환 예정은 자금보고 7일 일정에 자동으로 들어갑니다.</p></div>`}</div>
+    </section>`;
+}
+
+function renderLoanDetail() {
+  const cs = cashState();
+  const { loan: l, payments = [] } = cs.loanDetail;
+  const canEdit = cs.loans?.canEdit;
+  const today = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+  return `
+    <div class="panel-head"><h2>${h(l.bank)} ${h(l.name)}</h2><button data-loan-close>닫기</button></div>
+    <div class="panel-body">
+      <p>남은 금액 <strong>${money.format(l.currentBalance)}원</strong> (${h(l.asOf || "")} 기준 ${money.format(l.balance)}원 − 이후 상환 원금)<br>
+      <span class="muted">원금 ${money.format(l.principal || 0)} · 실행 ${h(l.startDate || "")} · 연 ${l.rate}% · 매월 ${h(l.payDay || "")} · 예상 ${money.format(l.expected?.total || 0)}원(이자 ${money.format(l.expected?.interest || 0)}) · ${h(l.term || "")} ${h(l.memo || "")}</span></p>
+      ${canEdit ? `<h3>상환 직접 기록</h3><form class="form-grid" data-loan-pay>
+        <div class="field two"><div><label>날짜</label><input type="date" name="date" value="${today}"></div><div><label>메모</label><input name="memo"></div></div>
+        <div class="field two"><div><label>원금</label><input name="principal" inputmode="numeric" value="${l.expected?.principal ? money.format(l.expected.principal) : ""}"></div><div><label>이자</label><input name="interest" inputmode="numeric" value="${l.expected?.interest ? money.format(l.expected.interest) : ""}"></div></div>
+        <div class="toolbar"><button class="primary" type="submit">기록</button></div></form>` : ""}
+      <h3 style="margin-top:12px">상환 기록</h3>
+      <div class="table-wrap"><table><thead><tr><th>날짜</th><th>원금</th><th>이자</th><th>근거</th><th></th></tr></thead><tbody>
+        ${payments.map((p) => `<tr class="${p.voided ? "muted" : ""}"><td>${h(p.date)}</td><td class="num">${money.format(p.principal || 0)}</td><td class="num">${money.format(p.interest || 0)}</td>
+          <td class="muted" style="font-size:11px">${h(p.source || "")} ${h(p.memo || "")}${p.voided ? " · 취소됨" : ""}</td>
+          <td>${canEdit && !p.voided ? `<button data-loan-pay-void="${h(p.id)}">취소</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">아직 기록이 없습니다.</td></tr>`}
+      </tbody></table></div>
+      ${canEdit ? `<details style="margin-top:12px"><summary>대출 정보 고치기</summary><form class="form-grid" data-loan-edit>
+        <div class="field two"><div><label>남은 금액(지금)</label><input name="balance" inputmode="numeric" value="${money.format(l.currentBalance)}"></div><div><label>만기</label><input type="date" name="maturity" value="${h(l.maturity || "")}"></div></div>
+        <div class="field two"><div><label>이율 %</label><input name="rate" value="${h(l.rate)}"></div><div><label>매월 상환일</label><input name="payDay" value="${h(l.payDay || "")}" placeholder="15일 / 말일"></div></div>
+        <div class="field two"><div><label>매월 원금상환</label><input name="principalPayment" inputmode="numeric" value="${h(l.principalPayment || "")}"></div><div><label>출금계좌</label><input name="account" value="${h(l.account || "")}"></div></div>
+        <label class="check"><input type="checkbox" name="closed" ${l.closed ? "checked" : ""}> 종료(다 갚음)</label>
+        <div class="toolbar"><button type="submit">저장</button><span class="muted" style="font-size:12px">남은 금액을 고치면 오늘 기준 잔액이 됩니다.</span></div></form></details>` : ""}
+    </div>`;
+}
+
+function bindLoans() {
+  const cs = cashState();
+  const load = async (sel) => {
+    cs.loans = await api("/api/loans");
+    const id = sel ?? cs.loanSel ?? "";
+    cs.loanSel = id;
+    cs.loanDetail = id ? await api(`/api/loans/item/${encodeURIComponent(id)}`) : null;
+  };
+  if (!cs.loans && !cs.loansLoading) {
+    cs.loansLoading = true;
+    load().catch((e) => showToast(e.message, "error")).finally(() => { cs.loansLoading = false; renderApp(); });
+    return;
+  }
+  const refresh = async (sel) => { await load(sel); renderApp(); };
+  const run = async (fn, ok) => { try { const r = await fn(); if (ok) showToast(typeof ok === "function" ? ok(r) : ok); await refresh(); } catch (e) { showToast(e.message || "처리하지 못했습니다.", "error"); } };
+  app.querySelectorAll("[data-loan-open]").forEach((tr) => tr.addEventListener("click", () => refresh(tr.dataset.loanOpen).catch((e) => showToast(e.message, "error"))));
+  app.querySelector("[data-loan-close]")?.addEventListener("click", () => { cs.loanSel = ""; cs.loanDetail = null; renderApp(); });
+  app.querySelector("[data-loan-closed]")?.addEventListener("change", (e) => { cs.loanShowClosed = e.target.checked; renderApp(); });
+  app.querySelector("[data-loan-import]")?.addEventListener("click", () => {
+    if (!confirm("대출금 관리대장(구글시트)을 읽어 대출 목록과 기준일 잔액을 가져옵니다. 여기서 고친 대출은 그대로 둡니다. 진행할까요?")) return;
+    run(() => api("/api/loans/import-sheet", { method: "POST", body: {} }), (r) => `대출 ${r.loans}건을 가져왔습니다. 확인 필요 질문 ${r.questions}건.`);
+  });
+  app.querySelector("[data-loan-sync]")?.addEventListener("click", () => run(() => api("/api/loans/sync", { method: "POST", body: {} }),
+    (r) => `상환 ${r.matched}건을 반영했습니다.${r.unconnected.length ? ` 클로브에 출금계좌가 없는 대출 ${r.unconnected.length}건.` : ""}${r.errors.length ? ` 오류: ${r.errors.join(", ")}` : ""}`));
+  app.querySelector("[data-loan-pay]")?.addEventListener("submit", (e) => { e.preventDefault(); run(() => api(`/api/loans/item/${encodeURIComponent(cs.loanSel)}/payments`, { method: "POST", body: formObject(e.currentTarget) }), "기록했습니다."); });
+  app.querySelectorAll("[data-loan-pay-void]").forEach((b) => b.addEventListener("click", () => { if (confirm("이 상환 기록을 취소할까요?")) run(() => api(`/api/loans/payments/${encodeURIComponent(b.dataset.loanPayVoid)}/void`, { method: "POST", body: {} }), "취소했습니다."); }));
+  app.querySelector("[data-loan-edit]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = formObject(e.currentTarget);
+    f.closed = e.currentTarget.querySelector('[name="closed"]').checked;
+    const before = cs.loanDetail.loan;
+    if (Number(String(f.balance).replace(/,/g, "")) === before.currentBalance) delete f.balance; // 안 고쳤으면 기준일 유지
+    run(() => api(`/api/loans/item/${encodeURIComponent(cs.loanSel)}`, { method: "PUT", body: f }), "저장했습니다.");
+  });
+}
+
 function renderCash() {
   const cs = cashState();
   const head = pageHead("자금", "오늘과 7일 안에 들어올 돈·나갈 돈, 계좌 잔액을 한 장으로 봅니다. 매일 아침 이 화면을 보고 채널톡에 공유하세요.");
-  const tabs = `<div class="npb-subnav">${[["report", "일일 자금보고"], ["schedules", "자금 일정"], ["receivables", "채권원장"]].map(([k, l]) => `<button class="npb-subtab ${cs.screen === k ? "active" : ""}" data-cash-screen="${k}">${l}</button>`).join("")}
+  const tabs = `<div class="npb-subnav">${[["report", "일일 자금보고"], ["schedules", "자금 일정"], ["loans", "대출금"], ["receivables", "채권원장"]].map(([k, l]) => `<button class="npb-subtab ${cs.screen === k ? "active" : ""}" data-cash-screen="${k}">${l}</button>`).join("")}
     <span style="flex:1"></span>
     ${(cs.meta?.companies || [{ key: "wooof", name: "우프컴퍼니" }, { key: "betters", name: "베럴즈" }]).map((c) => `<button class="npb-subtab ${cs.company === c.key ? "active" : ""}" data-cash-company="${c.key}">${h(c.name)}</button>`).join("")}</div>`;
+  if (cs.screen === "loans") return `${head}${tabs}${renderLoans()}`;
   if (!cs.data) return `${head}${tabs}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   return `${head}${tabs}${cs.screen === "schedules" ? renderCashSchedules() : cs.screen === "receivables" ? renderReceivableLedger() : renderCashReport()}`;
 }
@@ -11579,6 +11681,11 @@ function renderCashSchedules() {
 
 function bindCash() {
   const cs = cashState();
+  if (cs.screen === "loans") {
+    app.querySelectorAll("[data-cash-screen]").forEach((b) => b.addEventListener("click", () => { cs.screen = b.dataset.cashScreen; renderApp(); }));
+    bindLoans();
+    return;
+  }
   if (!cs.data && !cs.loading) {
     loadCash().then(renderApp);
     return;
@@ -12461,14 +12568,14 @@ async function loadSetup() {
   try { const res = await api("/api/setup/questions"); ss.list = res.questions || []; ss.brands = res.brands || []; }
   catch (error) { ss.list = []; ss.error = error.message; } finally { ss.loading = false; }
 }
-const SETUP_KIND_LABEL = { "claim-base": "채권총액", "request-deduction": "채권차감액", "amount-mismatch": "금액 차이", "tab-brand": "시트 탭 연결", "zero-deduction": "차감 방식", "channel-rule": "판매처 가격 방식", "channel-price": "판매처 단가", "prod-balance": "생산비 잔금", "prod-rate-change": "공임 변경", "prod-rate-new": "공임 등록", "prod-total": "상세 합계" };
+const SETUP_KIND_LABEL = { "claim-base": "채권총액", "request-deduction": "채권차감액", "amount-mismatch": "금액 차이", "tab-brand": "시트 탭 연결", "zero-deduction": "차감 방식", "channel-rule": "판매처 가격 방식", "channel-price": "판매처 단가", "prod-balance": "생산비 잔금", "prod-rate-change": "공임 변경", "prod-rate-new": "공임 등록", "prod-total": "상세 합계", "loan-maturity": "대출 만기" };
 
 function renderSetup() {
   const ss = setupState();
   const head = pageHead("확인 필요", "시스템이 스스로 정할 수 없는 값을 질문으로 모았습니다. 답하면 바로 적용되고, 누가 언제 무엇으로 답했는지 남습니다.");
   if (ss.list === null) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   // 큰돈이 걸린 것부터: 잔금·채권총액 → 차감·가격 방식 → 나머지.
-  const order = ["prod-balance", "claim-base", "zero-deduction", "channel-rule", "prod-rate-change", "request-deduction", "amount-mismatch",
+  const order = ["prod-balance", "loan-maturity", "claim-base", "zero-deduction", "channel-rule", "prod-rate-change", "request-deduction", "amount-mismatch",
     "tab-brand", "channel-price", "prod-rate-new", "prod-total"];
   const rank = (q) => { const i = order.indexOf(q.kind); return i === -1 ? order.length : i; };
   const open = ss.list.filter((q) => q.status !== "answered").sort((a, b) => rank(a) - rank(b));
@@ -12485,6 +12592,7 @@ function renderSetup() {
         ? `<div class="muted">✓ ${h(q.answer?.applied || q.answer?.label || "")} · ${h(q.answeredBy || "")} ${h(String(q.answeredAt || "").slice(0, 10))}</div>`
         : `<div class="toolbar">${(q.choices || []).map((c) => c.input === "brand"
             ? `<select data-setup-brand="${h(q.id)}"><option value="">브랜드 선택</option>${(ss.brands || []).map((b) => `<option value="${h(b.id)}">${h(b.code ? `${b.code} · ` : "")}${h(b.name)}</option>`).join("")}</select><button data-setup-answer="${h(q.id)}" data-choice="${h(c.key)}">이 브랜드로</button>`
+            : c.input === "date" ? `<input type="date" data-setup-input="${h(q.id)}:${h(c.key)}"><button data-setup-answer="${h(q.id)}" data-choice="${h(c.key)}">${h(c.label)}</button>`
             : c.input ? `<input data-setup-input="${h(q.id)}:${h(c.key)}" inputmode="decimal" placeholder="${c.input === "rate" ? (q.topic === "pricing" ? "%" : "수수료율 %") : "금액"}" value="${c.value != null && c.input === "rate" ? h(c.value) : ""}" style="width:110px"><button data-setup-answer="${h(q.id)}" data-choice="${h(c.key)}">${h(c.label)}</button>`
             : `<button class="${q.suggested === c.key ? "primary" : ""}" data-setup-answer="${h(q.id)}" data-choice="${h(c.key)}">${h(c.label)}</button>`).join("")}</div>`}
     </div>`;
