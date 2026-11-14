@@ -5433,6 +5433,7 @@ const MENU_REGISTRY = [
   { key: "audits", label: "이력", actions: ["view"] },
   { key: "archive", label: "아카이브", actions: ["view", "edit"] },
   { key: "settlement", label: "정산", actions: ["view", "export", "edit"] },
+  { key: "kpi", label: "KPI·손익", actions: ["view", "edit"] },
   { key: "pipeline", label: "주문매칭", actions: ["view", "apply"] },
   // 화면은 주문매칭 하나로 합쳤지만, 클로브 연결·대사 API 는 자기 권한을 그대로
   // 쓴다. 권한을 없애면 기존에 막아 둔 계정이 갑자기 열린다.
@@ -11218,6 +11219,51 @@ async function routeApi(req, res, url) {
   // --- v2 판매 파이프라인 -------------------------------------------------------
   // 주문접수 → 명세서 → 업체전달 → 청구·계산서 → 입금확인. 판매주문은 erp
   // 저장소에, 명세서는 기존 '명세서 발행'(purchaseOrders) 기록으로 만든다.
+  // --- v2 경영 KPI·손익: kpi.html 저장소 + v2 참고값 -------------------------------
+  if (pathname === "/api/kpi/state" || pathname === "/api/kpi/v2-summary") {
+    if (!requirePermission(actor, res, "kpi", "view")) return;
+    if (pathname === "/api/kpi/state" && method === "GET") {
+      const rec = await erp.get("settings", "kpiState");
+      sendJson(res, 200, { state: rec?.state || null, rev: rec?.rev || 0, updatedAt: rec?.updatedAt || "", updatedBy: rec?.updatedBy || "" });
+      return;
+    }
+    if (pathname === "/api/kpi/state" && method === "PUT") {
+      if (!requirePermission(actor, res, "kpi", "edit")) return;
+      const body = await readBody(req);
+      if (!body.state || typeof body.state !== "object" || !body.state.months) { sendJson(res, 400, { error: "KPI 값이 비었습니다." }); return; }
+      const prev = await erp.get("settings", "kpiState");
+      if (prev && Number(body.rev || 0) !== Number(prev.rev || 0)) { sendJson(res, 409, { error: "다른 곳에서 먼저 고쳤습니다.", rev: prev.rev }); return; }
+      const rev = Number(prev?.rev || 0) + 1;
+      await erp.put("settings", { id: "kpiState", state: body.state, rev, updatedAt: now(), updatedBy: actor.name || actor.email || "" });
+      // 하루 한 벌씩 되돌릴 수 있게 남긴다.
+      await erp.put("kpiHistory", { id: kstToday(), state: body.state, rev, savedAt: now() });
+      sendJson(res, 200, { rev });
+      return;
+    }
+    if (pathname === "/api/kpi/v2-summary" && method === "GET") {
+      const ym = /^\d{4}-\d{2}$/.test(url.searchParams.get("month") || "") ? url.searchParams.get("month") : kstToday().slice(0, 7);
+      const [records, salesOrders, bills, loans, loanPays, schedules] = await Promise.all(
+        ["monthlyBoard", "salesOrders", "prodBills", "loans", "loanPayments", "cashSchedules"].map((c) => erp.list(c).catch(() => [])));
+      const board = monthly.boardRows({ brands: db.brands.filter((b) => (b.type || "brand") === "brand"), requests: db.requests, records, ym });
+      const sum = (list, f) => list.reduce((s, x) => s + Math.round(Number(f(x) || 0)), 0);
+      const inMonth = (d) => String(d || "").slice(0, 7) === ym;
+      const so = salesOrders.filter((o) => o.status !== "cancelled" && inMonth(o.orderDate));
+      const pb = bills.filter((b) => !b.voided && inMonth(b.date));
+      const activeLoans = loans.filter((l) => !l.closed);
+      const interest = sum(activeLoans, (l) => loansLib.expectedPayment(l, loansLib.loanBalance(l, loanPays), `${ym}-15`).interest);
+      const fixed = schedules.filter((s) => s.active !== false && s.direction !== "in" && s.repeat === "monthly");
+      const byCat = {};
+      for (const s of fixed) byCat[s.category || "기타"] = (byCat[s.category || "기타"] || 0) + Math.round(Number(s.amount || 0));
+      sendJson(res, 200, { month: ym,
+        wooof: { brands: board.length, sales: sum(board, (r) => r.sales), shipping: sum(board, (r) => r.shipping), recovered: sum(board, (r) => r.recovered), margin: sum(board, (r) => r.margin) },
+        sales: { orders: so.length, total: sum(so, (o) => o.total), supply: sum(so, (o) => o.subtotal) },
+        production: { bills: pb.length, total: sum(pb, (b) => b.amount), byPartner: Object.entries(pb.reduce((m, b) => ((m[b.partnerName] = (m[b.partnerName] || 0) + Math.round(b.amount)), m), {})) },
+        loans: { interest, count: activeLoans.length },
+        fixedCosts: { total: Object.values(byCat).reduce((a, b) => a + b, 0), byCategory: byCat } });
+      return;
+    }
+  }
+
   // --- v2 입점사 월정산 보드 ----------------------------------------------------
   if (pathname === "/api/monthly" || pathname.startsWith("/api/monthly/")) {
     if (!requirePermission(actor, res, "settlement", "view")) return;
@@ -12663,11 +12709,34 @@ async function serveStatic(req, res, pathname) {
   }
 }
 
+// 경영 KPI 계산기(kpi/kpi.html)를 로그인·권한 확인 뒤 보여 준다. 저장된 값을 페이지에 심어
+// 보내고(window.KPI_SERVER), 페이지는 고칠 때마다 /api/kpi/state 로 저장한다.
+async function serveKpi(req, res, url) {
+  const actor = await getActor(req);
+  if (!actor) { res.writeHead(302, { location: "/" }); res.end(); return; }
+  if (!can(actor, "kpi", "view")) { res.writeHead(403, { "content-type": "text/plain; charset=utf-8" }); res.end("KPI·손익 권한이 없습니다."); return; }
+  if (url.pathname === "/kpi") { res.writeHead(302, { location: "/kpi/" }); res.end(); return; }
+  if (url.pathname === "/kpi/kpi-autofill.js") {
+    const js = await readFile(path.join(__dirname, "kpi", "kpi-autofill.js")).catch(() => Buffer.from("/* no autofill */"));
+    res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store" });
+    res.end(js);
+    return;
+  }
+  if (url.pathname !== "/kpi/") { res.writeHead(404); res.end(); return; }
+  const rec = await erp.get("settings", "kpiState");
+  const boot = JSON.stringify({ state: rec?.state || null, rev: rec?.rev || 0, canEdit: can(actor, "kpi", "edit") }).replace(/</g, "\\u003c");
+  const html = (await readFile(path.join(__dirname, "kpi", "kpi.html"), "utf8")).replace(/<head>/i, `<head>\n<script>window.KPI_SERVER=${boot};</script>`);
+  res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "SAMEORIGIN" });
+  res.end(html);
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     if (url.pathname.startsWith("/api/")) {
       await routeApi(req, res, url);
+    } else if (url.pathname === "/kpi" || url.pathname.startsWith("/kpi/")) {
+      await serveKpi(req, res, url);
     } else {
       await serveStatic(req, res, url.pathname);
     }

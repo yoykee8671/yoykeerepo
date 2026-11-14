@@ -773,6 +773,7 @@ function renderApp() {
   }
   const tabs = [
     ["dashboard", "대시보드"],
+    ["kpi", "KPI·손익"],
     ["cash", "자금"],
     ["requests", "입금요청"],
     ["payments", "지급요청"],
@@ -989,6 +990,7 @@ function renderCurrentTab() {
   if (state.tab === "stock") return renderStock();
   if (state.tab === "setup") return renderSetup();
   if (state.tab === "monthly") return renderMonthly();
+  if (state.tab === "kpi") return renderKpi();
   if (state.tab === "admins") return renderAdmins();
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
@@ -2470,6 +2472,7 @@ function bindCurrentTab() {
   if (state.tab === "stock") bindStock();
   if (state.tab === "setup") bindSetup();
   if (state.tab === "monthly") bindMonthly();
+  if (state.tab === "kpi") bindKpi();
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
   if (state.tab === "settlement") bindSettlement();
@@ -12306,6 +12309,45 @@ function bindMonthly() {
       await reload();
     } catch (e) { showToast(e.message || "가져오지 못했습니다.", "error"); }
   });
+}
+
+// ===========================================================================
+// v2 경영 KPI·손익 — 공헌이익 계산기(kpi.html) + v2에서 모은 이번 달 참고값
+// ===========================================================================
+function kpiState() {
+  if (!state.kpi) state.kpi = { month: new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 7), summary: null, loading: false };
+  return state.kpi;
+}
+function renderKpi() {
+  const ks = kpiState();
+  const head = pageHead("KPI·손익", "공헌이익 KPI 계산기입니다. 이제 값이 서버에 저장돼 어느 기기에서 열어도 같습니다. 위 칸은 v2에 쌓인 이번 달 숫자로, 계산기에 넣을 때 맞춰 보는 참고값입니다.");
+  const s = ks.summary;
+  const card = (label, value, sub = "") => `<div class="sales-step"><span>${label}</span><strong>${money.format(value || 0)}원</strong>${sub ? `<em class="muted" style="font-size:11px;font-style:normal">${sub}</em>` : ""}</div>`;
+  const months = [];
+  const now = new Date(Date.now() + 9 * 3600 * 1000);
+  for (let i = 0; i < 12; i += 1) months.push(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1)).toISOString().slice(0, 7));
+  return `${head}
+    <div class="toolbar" style="margin:8px 0">
+      <select data-kpi-month style="width:auto">${months.map((m) => `<option value="${m}" ${m === ks.month ? "selected" : ""}>${m.replace("-", "년 ")}월 참고값</option>`).join("")}</select>
+      <a class="button ghost" href="/kpi/" target="_blank" rel="noopener">계산기 새 창으로</a>
+    </div>
+    ${s ? `<section class="sales-flow">
+      ${card("입점 매출(월정산)", s.wooof.sales, `${s.wooof.brands}곳 · 회수 ${money.format(s.wooof.recovered)} · 마진 ${money.format(s.wooof.margin)}`)}
+      ${card("판매(B2B 주문)", s.sales.total, `${s.sales.orders}건 · 공급가 ${money.format(s.sales.supply)}`)}
+      ${card("생산비 청구", s.production.total, s.production.byPartner.map(([n, v]) => `${n} ${money.format(v)}`).join(" · "))}
+      ${card("대출 이자(추정)", s.loans.interest, `대출 ${s.loans.count}건`)}
+      ${card("매월 고정 지출(자금 일정)", s.fixedCosts.total, Object.entries(s.fixedCosts.byCategory).map(([k, v]) => `${k} ${money.format(v)}`).join(" · "))}
+    </section>` : `<p class="muted">참고값을 불러오는 중…</p>`}
+    <iframe class="kpi-frame" src="/kpi/" title="KPI 계산기"></iframe>`;
+}
+function bindKpi() {
+  const ks = kpiState();
+  const load = async () => {
+    ks.loading = true;
+    try { ks.summary = await api(`/api/kpi/v2-summary?month=${ks.month}`); } catch (e) { showToast(e.message, "error"); } finally { ks.loading = false; renderApp(); }
+  };
+  if (!ks.summary && !ks.loading) { load(); return; }
+  app.querySelector("[data-kpi-month]")?.addEventListener("change", (e) => { ks.month = e.target.value; ks.summary = null; load(); });
 }
 
 // ===========================================================================

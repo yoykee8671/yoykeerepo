@@ -2397,3 +2397,4 @@ a.button:hover {
 .setup-actions li { margin: 2px 0; }
 .monthly-table td.wrap { min-width: 180px; }
 .monthly-table td.wrap form input { margin-bottom: 4px; }
+.kpi-frame { width: 100%; height: calc(100vh - 260px); min-height: 700px; border: 1px solid var(--line, #e5e7eb); border-radius: 12px; background: #fff; }
