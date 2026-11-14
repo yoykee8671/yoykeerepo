@@ -2381,3 +2381,10 @@ a.button:hover {
 .setup-card.answered { opacity: .75; }
 .setup-card p { margin: 4px 0 8px; font-size: 13px; }
 .setup-kind { font-size: 11px; color: #1d4ed8; font-weight: 600; margin-bottom: 2px; }
+
+/* v2 판매처 가격 */
+.pricing-layout { grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr); }
+.pricing-layout .table-wrap { overflow-x: auto; }
+.pricing-layout table { min-width: 0; }
+.pricing-layout td.pricing-item { min-width: 180px; white-space: normal; }
+@media (max-width: 1100px) { .pricing-layout { grid-template-columns: minmax(0, 1fr); } }

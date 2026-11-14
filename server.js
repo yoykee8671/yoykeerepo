@@ -21,6 +21,7 @@ import * as cashReport from "./lib/cash-report.mjs";
 import * as sales from "./lib/sales-orders.mjs";
 import * as inventory from "./lib/inventory.mjs";
 import * as legacy from "./lib/legacy-migration.mjs";
+import * as pricing from "./lib/channel-pricing.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -1435,6 +1436,7 @@ function migrateDb(db) {
   touch(db, "partners", []);
   touch(db, "materials", []);
   touch(db, "purchaseOrders", []);
+  touch(db, "salesChannels", []);
   touch(db, "deliveryPlaces", []);
   // 자주 쓰는 입금계좌(하나은행 목록). 브랜드가 여기서 계좌를 골라 이체등록
   // 양식의 기본값으로 쓴다.
@@ -1922,7 +1924,8 @@ export const CODE_SCHEMES = [
   // 품목(같은 브랜드의 같은 상품코드, 없으면 같은 품목명)에 붙여 이력끼리 공유한다.
   { collection: "priceEntries", prefix: "IT", width: 5, label: "단가표 품목",
     groupKey: (e) => `${e.brandId || ""}|${String(e.itemCode || "").trim() || String(e.itemName || "").trim()}` },
-  { collection: "transferAccounts", prefix: "AC", width: 4, label: "입금계좌" }
+  { collection: "transferAccounts", prefix: "AC", width: 4, label: "입금계좌" },
+  { collection: "salesChannels", prefix: "CH", width: 3, label: "판매처" }
 ];
 
 // 코드가 없는 항목에 번호를 붙인다. 만든 순서(createdAt)대로 붙여 오래된
@@ -5856,6 +5859,49 @@ function priceEntryWithBrand(db, entry) {
     latest: getLatestPriceCatalog(db, entry.brandId).some((item) => item.id === entry.id)
   };
 }
+
+// v2 판매처 가격: 값을 매길 품목. NPB 제품 + PB/NPB 사업부 브랜드의 단가표 품목.
+function pricingItems(db) {
+  const npbBrand = new Map((db.npb?.brands || []).map((b) => [b.id, b.name]));
+  const items = (db.npb?.products || []).map((p) => ({ ref: `npb:${p.id}`, code: p.barcode || "", name: p.name,
+    brandId: p.brandId, brandName: npbBrand.get(p.brandId) || "", listPrice: number(p.listPrice), source: "NPB 제품" }));
+  const brandById = new Map((db.brands || []).map((b) => [b.id, b]));
+  for (const e of getLatestPriceCatalog(db)) {
+    const b = brandById.get(e.brandId);
+    if (!b || !["pb", "npb"].includes(b.businessUnit)) continue;
+    items.push({ ref: `it:${e.code || e.id}`, code: e.code || "", name: e.itemName || e.itemCode, brandId: b.id, brandName: b.name,
+      listPrice: number(e.originalPrice || e.consumerPrice), source: "단가표" });
+  }
+  return items;
+}
+
+// 판매처에 실제로 쓴 단가: 판매처와 연결된 거래처에 낸 명세서 + 판매처를 고른 판매 주문.
+async function pricingUsedPrices(db) {
+  const items = pricingItems(db);
+  const byName = new Map(items.map((it) => [normalizeItemKey("", it.name), it]));
+  const byCode = new Map(items.filter((it) => it.code).map((it) => [it.code, it]));
+  const match = (li) => byCode.get(String(li.itemCode || "").trim()) || byName.get(normalizeItemKey("", li.itemName));
+  const out = [];
+  const push = (channelId, li, priceMode, date, docNo) => {
+    const it = match(li);
+    if (!it) return;
+    const gross = priceMode === "gross";
+    out.push({ channelId, itemRef: it.ref, itemName: it.name, date, docNo,
+      unitPrice: gross ? number(li.grossUnitPrice) : number(li.unitPrice), vatMode: gross ? "included" : "excluded" });
+  };
+  for (const ch of db.salesChannels || []) {
+    if (!ch.partnerId) continue;
+    for (const po of (db.purchaseOrders || []).filter((p) => p.docType === "statement" && p.partnerId === ch.partnerId)) {
+      for (const li of po.lineItems || []) push(ch.id, li, po.priceMode, po.orderDate || String(po.createdAt || "").slice(0, 10), po.docNo);
+    }
+  }
+  for (const o of await erp.list("salesOrders")) {
+    if (!o.salesChannelId || o.status === "cancelled") continue;
+    for (const li of o.lineItems || []) push(o.salesChannelId, li, o.priceMode, o.orderDate, o.code);
+  }
+  return out;
+}
+
 
 // 목록을 한 번에 변환할 때 쓴다.
 //
@@ -10751,6 +10797,30 @@ async function routeApi(req, res, url) {
             depositAmount: Math.round(number(row.paid)), margin: Math.round(number(row.margin)), receivableDeduction: ded, source: "2026_선매입 브랜드 관리대장", importedAt: now() });
           applied = "시트 건도 이관";
         } else applied = "wooofpay 건만 남김";
+      } else if (qn.kind === "channel-rule") {
+        const ch = (db.salesChannels || []).find((c) => c.id === qn.subjectId);
+        if (!ch) { sendJson(res, 404, { error: "판매처가 없습니다." }); return; }
+        const rate = number(String(body.value ?? choice.value ?? "").replace(/,/g, ""));
+        if (["discount", "supply_rate"].includes(choice.key) && !(rate > 0 && rate <= 100)) { sendJson(res, 400, { error: "0~100 사이 %를 입력하세요." }); return; }
+        const before = { pricingMode: ch.pricingMode, rate: ch.rate };
+        ch.pricingMode = choice.key;
+        ch.rate = ["discount", "supply_rate"].includes(choice.key) ? rate : 0;
+        ch.updatedAt = now();
+        addAudit(db, actor, "update", "salesChannel", ch.id, `${ch.name} 가격 방식: ${choice.label}${ch.rate ? ` ${ch.rate}%` : ""} (확인 필요 답변)`, before, { pricingMode: ch.pricingMode, rate: ch.rate });
+        applied = `${pricing.PRICING_MODES[choice.key]}${ch.rate ? ` ${ch.rate}%` : ""}`;
+      } else if (qn.kind === "channel-price") {
+        const ch = (db.salesChannels || []).find((c) => c.id === qn.subjectId);
+        const item = pricingItems(db).find((it) => it.ref === qn.payload?.itemRef);
+        if (!ch || !item) { sendJson(res, 404, { error: "판매처나 품목이 없습니다." }); return; }
+        const price = choice.key === "fixed-used" ? choice.value : choice.key === "input" ? amountInput : 0;
+        if (choice.key === "input" && !(price > 0)) { sendJson(res, 400, { error: "금액을 입력하세요." }); return; }
+        if (price > 0) {
+          const x = { id: `q:${ch.id}:${item.ref}`, channelId: ch.id, itemRef: item.ref, itemName: item.name, mode: "fixed", price,
+            vatMode: qn.payload?.vatMode || ch.vatMode, from: "", to: "", source: "확인 필요 답변", createdBy: who, createdAt: now(), active: true };
+          await erp.put("channelPrices", x);
+          addAudit(db, actor, "create", "channelPrice", x.id, `${ch.name} · ${item.name} ${price.toLocaleString()}원 고정 (확인 필요 답변)`, null, x);
+          applied = `${price.toLocaleString()}원 고정`;
+        } else applied = choice.label;
       } else if (qn.kind === "zero-deduction") {
         // 정산 방식 결정만 기록한다. 실제 재계산은 브랜드 정산 설정을 고친 뒤 '다시 계산'으로 한다.
         applied = choice.key === "rate" ? `수수료율 ${number(body.value)}%로 차감 (재계산 대기)` : choice.label;
@@ -10986,6 +11056,163 @@ async function routeApi(req, res, url) {
   // --- v2 판매 파이프라인 -------------------------------------------------------
   // 주문접수 → 명세서 → 업체전달 → 청구·계산서 → 입금확인. 판매주문은 erp
   // 저장소에, 명세서는 기존 '명세서 발행'(purchaseOrders) 기록으로 만든다.
+  // --- v2 판매처별 가격 체계 (docs/v2 §9) --------------------------------------
+  if (pathname === "/api/pricing" || pathname.startsWith("/api/pricing/")) {
+    if (!requirePermission(actor, res, "sales", "view")) return;
+    const canEdit = actor.role === "owner" || can(actor, "sales", "edit");
+    const who = actor.name || actor.email || "";
+    const items = pricingItems(db);
+    const channels = () => (db.salesChannels || []).map(pricing.normalizeChannel);
+    const findChannel = (cid) => (db.salesChannels || []).find((c) => c.id === cid);
+    const shapeChannel = (body, base = {}) => {
+      const next = { ...base };
+      for (const key of ["name", "type", "pricingMode", "vatMode", "roundMethod", "partnerId", "memo"]) {
+        if (key in body) next[key] = String(body[key] ?? "").trim().slice(0, 200);
+      }
+      for (const key of ["rate", "feeRate", "roundUnit"]) if (key in body) next[key] = number(String(body[key] ?? "").replace(/,/g, ""));
+      if ("npbChannelCodes" in body) next.npbChannelCodes = (Array.isArray(body.npbChannelCodes) ? body.npbChannelCodes : String(body.npbChannelCodes || "").split(","))
+        .map((x) => String(x).trim()).filter(Boolean);
+      if ("active" in body) next.active = body.active !== false && body.active !== "false";
+      const n = pricing.normalizeChannel(next);
+      return { ...base, ...n, id: base.id, code: base.code };
+    };
+
+    if (pathname === "/api/pricing" && method === "GET") {
+      const exceptions = await erp.list("channelPrices");
+      sendJson(res, 200, {
+        channels: channels().map((c) => ({ ...c, partnerName: db.partners.find((p) => p.id === c.partnerId)?.name || "",
+          exceptionCount: exceptions.filter((x) => x.channelId === c.id && x.active !== false).length,
+          missing: items.filter((it) => pricing.resolvePrice({ channel: c, item: it, exceptions, date: kstToday() }).status === "missing").length })),
+        items, types: pricing.CHANNEL_TYPES, modes: pricing.PRICING_MODES, roundMethods: pricing.ROUND_METHODS, roundUnits: pricing.ROUND_UNITS,
+        npbChannels: (db.npb?.channels || []).map((c) => ({ code: c.code, name: c.name, brandId: c.brandId })),
+        canEdit
+      });
+      return;
+    }
+
+    // 가격 찾기(주문 입력용): channelId + itemRef 또는 itemName
+    if (pathname === "/api/pricing/lookup" && method === "GET") {
+      const ch = findChannel(url.searchParams.get("channelId"));
+      const ref = url.searchParams.get("itemRef") || "";
+      const name = normalizeItemKey("", url.searchParams.get("itemName") || "");
+      const item = items.find((it) => it.ref === ref) || items.find((it) => name && normalizeItemKey("", it.name) === name);
+      if (!ch || !item) { sendJson(res, 200, { found: false }); return; }
+      const r = pricing.resolvePrice({ channel: ch, item, exceptions: await erp.list("channelPrices"), date: url.searchParams.get("date") || kstToday() });
+      sendJson(res, 200, { found: r.status === "ok", item, ...r });
+      return;
+    }
+
+    const sheetMatch = pathname.match(/^\/api\/pricing\/channels\/([^/]+)\/sheet$/);
+    if (sheetMatch && method === "GET") {
+      const ch = findChannel(sheetMatch[1]);
+      if (!ch) { sendJson(res, 404, { error: "판매처를 찾을 수 없습니다." }); return; }
+      const exceptions = (await erp.list("channelPrices")).filter((x) => x.channelId === ch.id);
+      const date = dateOnly(url.searchParams.get("date")) || kstToday();
+      sendJson(res, 200, { channel: pricing.normalizeChannel(ch), date, rows: pricing.priceSheet({ channel: ch, items, exceptions, date }),
+        exceptions: exceptions.sort((a, b) => String(b.from || "").localeCompare(String(a.from || ""))) });
+      return;
+    }
+
+    if (!canEdit) { sendJson(res, 403, { error: "판매처 가격을 고칠 권한이 없습니다." }); return; }
+
+    if (pathname === "/api/pricing/channels" && method === "POST") {
+      const body = await readBody(req);
+      const ch = shapeChannel(body, { id: id("ch"), createdAt: now() });
+      if (!ch.name) { sendJson(res, 400, { error: "판매처 이름을 입력하세요." }); return; }
+      ch.updatedAt = now();
+      db.salesChannels.push(ch);
+      addAudit(db, actor, "create", "salesChannel", ch.id, `판매처 ${ch.name} 등록`, null, ch);
+      await writeDb(db);
+      sendJson(res, 201, { channel: db.salesChannels.find((c) => c.id === ch.id) });
+      return;
+    }
+
+    const chMatch = pathname.match(/^\/api\/pricing\/channels\/([^/]+)$/);
+    if (chMatch && method === "PUT") {
+      const index = (db.salesChannels || []).findIndex((c) => c.id === chMatch[1]);
+      if (index === -1) { sendJson(res, 404, { error: "판매처를 찾을 수 없습니다." }); return; }
+      const before = db.salesChannels[index];
+      const ch = shapeChannel(await readBody(req), before);
+      if (!ch.name) { sendJson(res, 400, { error: "판매처 이름을 입력하세요." }); return; }
+      ch.updatedAt = now();
+      db.salesChannels[index] = ch;
+      addAudit(db, actor, "update", "salesChannel", ch.id, `판매처 ${ch.name} 가격 규칙 수정`, before, ch);
+      await writeDb(db);
+      sendJson(res, 200, { channel: ch });
+      return;
+    }
+
+    if (pathname === "/api/pricing/exceptions" && method === "POST") {
+      const body = await readBody(req);
+      const ch = findChannel(body.channelId);
+      const item = items.find((it) => it.ref === body.itemRef);
+      if (!ch || !item) { sendJson(res, 400, { error: "판매처와 품목을 고르세요." }); return; }
+      const mode = pricing.PRICING_MODES[body.mode] ? body.mode : "";
+      const x = {
+        id: id("chp"), channelId: ch.id, itemRef: item.ref, itemName: item.name, mode,
+        price: mode === "fixed" ? Math.round(number(String(body.price ?? "").replace(/,/g, ""))) : 0,
+        rate: ["discount", "supply_rate"].includes(mode) ? number(body.rate) : 0,
+        vatMode: body.vatMode === "excluded" ? "excluded" : body.vatMode === "included" ? "included" : "",
+        from: dateOnly(body.from) || "", to: dateOnly(body.to) || "", note: String(body.note || "").slice(0, 200),
+        source: "직접 입력", createdBy: who, createdAt: now(), active: true
+      };
+      if (body.feeRate !== undefined && body.feeRate !== "") x.feeRate = number(body.feeRate);
+      if (mode === "fixed" && !(x.price > 0)) { sendJson(res, 400, { error: "고정가를 입력하세요." }); return; }
+      if (!mode && x.feeRate === undefined) { sendJson(res, 400, { error: "가격 또는 수수료율을 입력하세요." }); return; }
+      if (x.from && x.to && x.from > x.to) { sendJson(res, 400, { error: "기간이 거꾸로입니다." }); return; }
+      await erp.put("channelPrices", x);
+      addAudit(db, actor, "create", "channelPrice", x.id, `${ch.name} · ${item.name} 가격 예외`, null, x);
+      await writeDb(db);
+      sendJson(res, 201, { exception: x });
+      return;
+    }
+
+    const exMatch = pathname.match(/^\/api\/pricing\/exceptions\/([^/]+)$/);
+    if (exMatch && method === "DELETE") {
+      const x = await erp.get("channelPrices", decodeURIComponent(exMatch[1]));
+      if (!x) { sendJson(res, 404, { error: "예외를 찾을 수 없습니다." }); return; }
+      // 지우지 않고 끈다(가격 이력).
+      await erp.put("channelPrices", { ...x, active: false, endedBy: who, endedAt: now() });
+      addAudit(db, actor, "delete", "channelPrice", x.id, `${x.itemName} 가격 예외 해제`, x, null);
+      await writeDb(db);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // 최초 세팅: NPB 채널 → 판매처, NPB 공급가·수수료 → 예외, 모르는 칸 → 확인 필요 질문
+    if (pathname === "/api/pricing/seed" && method === "POST") {
+      const npbChannels = db.npb?.channels || [];
+      const seed = pricing.seedChannelsFromNpb(npbChannels, db.salesChannels);
+      const stamp = now();
+      for (const c of seed.created) db.salesChannels.push({ ...c, id: id("ch"), createdAt: stamp, updatedAt: stamp });
+      assignCodes(db);
+      const existingX = new Map((await erp.list("channelPrices")).map((x) => [x.id, x]));
+      let seededX = 0;
+      for (const x of pricing.seedExceptionsFromNpb(npbChannels, db.salesChannels, db.npb?.products || [])) {
+        if (existingX.has(x.id)) continue; // 손댄 예외는 덮어쓰지 않는다
+        await erp.put("channelPrices", { ...x, active: true, createdAt: stamp, createdBy: "씨앗" });
+        seededX += 1;
+      }
+      const hintsById = Object.fromEntries(db.salesChannels.map((c) => [c.id, seed.hints[c.seedKey] || {}]));
+      const qs = pricing.pricingQuestions({ channels: db.salesChannels, items, exceptions: await erp.list("channelPrices"),
+        used: await pricingUsedPrices(db), hints: hintsById });
+      const existingQ = new Map((await erp.list("setupQuestions")).map((x) => [x.id, x]));
+      let added = 0;
+      for (const qn of qs) {
+        if (existingQ.get(qn.id)?.status === "answered") continue;
+        await erp.put("setupQuestions", { ...qn, createdAt: existingQ.get(qn.id)?.createdAt || stamp, updatedAt: stamp });
+        added += existingQ.has(qn.id) ? 0 : 1;
+      }
+      addAudit(db, actor, "update", "pricing", "seed", `판매처 가격 최초 세팅: 판매처 ${seed.created.length}곳, 예외 ${seededX}건, 질문 ${qs.length}건`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { channels: seed.created.length, exceptions: seededX, questions: qs.length, newQuestions: added });
+      return;
+    }
+
+    sendJson(res, 404, { error: "없는 경로입니다." });
+    return;
+  }
+
   if (pathname === "/api/sales" || pathname.startsWith("/api/sales/")) {
     if (!requirePermission(actor, res, "sales", "view")) return;
     const who = { id: actor.id, name: actor.name || actor.email || "" };
@@ -11005,7 +11232,13 @@ async function routeApi(req, res, url) {
         const mode = body.priceMode || partner?.priceMode || lastDoc?.priceMode;
         o.priceMode = mode === "gross" ? "gross" : "supply";
       }
+      if ("salesChannelId" in body) {
+        const ch = (db.salesChannels || []).find((c) => c.id === body.salesChannelId);
+        o.salesChannelId = ch?.id || "";
+        if (ch) o.channel = ch.name;
+      }
       for (const key of ["title", "channel", "memo", "businessUnit", "issuerPartnerId"]) {
+        if (key === "channel" && o.salesChannelId && "salesChannelId" in body) continue;
         if (key in body) o[key] = String(body[key] ?? "").trim().slice(0, key === "memo" ? 2000 : 200);
       }
       if ("orderDate" in body) o.orderDate = dateOnly(body.orderDate) || kstToday();

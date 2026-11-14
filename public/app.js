@@ -11683,9 +11683,14 @@ function salesGrossMode(partner) {
 
 const SALES_NEXT_LABEL = { statement: "명세서 만들기", send: "업체 전달 표시", invoice: "청구·계산서 요청", issue: "계산서 발행 완료", receive: "입금 확인" };
 
+function salesViewNav(ss) {
+  return `<div class="npb-subnav">${[["orders", "주문"], ["pricing", "판매처 가격"]].map(([k, l]) => `<button class="npb-subtab ${(ss.view || "orders") === k ? "active" : ""}" data-sales-view="${k}">${l}</button>`).join("")}</div>`;
+}
+
 function renderSales() {
   const ss = salesState();
-  const head = pageHead("판매", "주문이 들어오면 여기서 명세서 → 업체 전달 → 청구·계산서 → 입금 확인까지 한 번에 진행합니다.");
+  if (ss.view === "pricing") return renderPricing();
+  const head = pageHead("판매", "주문이 들어오면 여기서 명세서 → 업체 전달 → 청구·계산서 → 입금 확인까지 한 번에 진행합니다.") + salesViewNav(ss);
   if (ss.list === null) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   const meta = ss.meta || {};
   const labels = meta.stageLabels || {};
@@ -11732,12 +11737,19 @@ function renderSalesForm() {
   const partner = partners.find((p) => p.id === d.partnerId);
   const gross = salesGrossMode(partner);
   const hints = salesItemHints(d.partnerId);
+  const pricingData = ss.pricing || {};
+  const channels = (pricingData.channels || []).filter((c) => c.active !== false);
+  for (const it of pricingData.items || []) if (!hints.has(it.name)) hints.set(it.name, { itemName: it.name });
   return `
     <div class="panel-head"><h2>새 주문</h2></div>
     <div class="panel-body">
       <form class="form-grid" data-sales-form>
-        <div class="field"><label>거래처</label><select name="partnerId" data-sales-partner required><option value="">선택</option>
+        <div class="field two">
+          <div><label>거래처</label><select name="partnerId" data-sales-partner required><option value="">선택</option>
           ${partners.map((p) => `<option value="${p.id}" ${d.partnerId === p.id ? "selected" : ""}>${h(p.code ? `${p.code} · ` : "")}${h(p.name)}</option>`).join("")}</select></div>
+          <div><label>판매처 <span class="muted" style="font-weight:400">(가격 자동)</span></label><select name="salesChannelId" data-sales-channel><option value="">없음</option>
+          ${channels.map((c) => `<option value="${c.id}" ${d.salesChannelId === c.id ? "selected" : ""}>${h(c.code ? `${c.code} · ` : "")}${h(c.name)}</option>`).join("")}</select></div>
+        </div>
         <div class="field two">
           <div><label>주문일</label><input type="date" name="orderDate" value="${h(d.orderDate || "")}"></div>
           <div><label>입금기한</label><input type="date" name="dueDate" value="${h(d.dueDate || "")}"></div>
@@ -11755,7 +11767,7 @@ function renderSalesForm() {
               <td><input data-sl-name="${i}" list="sales-items" value="${h(l.itemName || "")}"></td>
               <td><input data-sl-qty="${i}" inputmode="numeric" value="${h(l.quantity || "")}" style="width:70px"></td>
               <td><input data-sl-price="${i}" inputmode="numeric" value="${h(l.price ? money.format(l.price) : "")}" style="width:100px"></td>
-              <td class="num">${l.quantity && l.price ? money.format(Number(l.quantity) * Number(l.price)) : ""}</td></tr>`).join("")}
+              <td class="num">${l.quantity && l.price ? money.format(Number(l.quantity) * Number(l.price)) : ""}${l.priceNote ? `<br><span class="muted" style="font-size:11px">${h(l.priceNote)}</span>` : ""}</td></tr>`).join("")}
           </tbody></table>
           <button type="button" data-sl-add>줄 추가</button>
         </div>
@@ -11810,6 +11822,13 @@ function renderSalesDetail() {
 
 function bindSales() {
   const ss = salesState();
+  app.querySelectorAll("[data-sales-view]").forEach((b) => b.addEventListener("click", () => { ss.view = b.dataset.salesView; renderApp(); }));
+  if (ss.view === "pricing") { bindPricing(); return; }
+  if (!ss.pricing && !ss.pricingLoading) {
+    // 주문 입력에서 판매처를 고를 수 있게 판매처 목록도 불러 둔다.
+    ss.pricingLoading = true;
+    api("/api/pricing").then((r) => { ss.pricing = r; }).catch(() => { ss.pricing = { channels: [] }; }).finally(() => { ss.pricingLoading = false; renderApp(); });
+  }
   if (ss.list === null && !ss.loading) {
     loadSales().then(renderApp);
     return;
@@ -11824,7 +11843,8 @@ function bindSales() {
       return {
         itemName: el.value.trim(),
         quantity: Number(String(form.querySelector(`[data-sl-qty="${i}"]`).value).replace(/,/g, "")) || "",
-        price: Number(String(form.querySelector(`[data-sl-price="${i}"]`).value).replace(/,/g, "")) || ""
+        price: Number(String(form.querySelector(`[data-sl-price="${i}"]`).value).replace(/,/g, "")) || "",
+        priceNote: ss.draft?.lines?.[i]?.priceNote || ""
       };
     });
     return { ...f, lines };
@@ -11834,14 +11854,33 @@ function bindSales() {
   app.querySelector("[data-sales-close]")?.addEventListener("click", () => { ss.selectedId = ""; renderApp(); });
   app.querySelectorAll("[data-sales-open]").forEach((tr) => tr.addEventListener("click", () => { ss.selectedId = tr.dataset.salesOpen; renderApp(); }));
   app.querySelector("[data-sales-partner]")?.addEventListener("change", () => { ss.draft = readDraft(); renderApp(); });
+  app.querySelector("[data-sales-channel]")?.addEventListener("change", () => {
+    const d = readDraft();
+    const ch = (ss.pricing?.channels || []).find((c) => c.id === d.salesChannelId);
+    if (ch?.partnerId && !d.partnerId) d.partnerId = ch.partnerId;
+    ss.draft = d;
+    renderApp();
+  });
   app.querySelector("[data-sl-add]")?.addEventListener("click", () => { const d = readDraft(); d.lines.push({}); ss.draft = d; renderApp(); });
   // 품목을 고르면 예전 단가를 채운다.
-  app.querySelectorAll("[data-sl-name]").forEach((el) => el.addEventListener("change", () => {
+  app.querySelectorAll("[data-sl-name]").forEach((el) => el.addEventListener("change", async () => {
     const d = readDraft();
     const partner = (state.partners || []).find((p) => p.id === d.partnerId);
+    const gross = salesGrossMode(partner);
     const hint = salesItemHints(d.partnerId).get(el.value.trim());
     const i = Number(el.dataset.slName);
-    if (hint && !d.lines[i].price) d.lines[i].price = salesGrossMode(partner) ? (hint.grossUnitPrice || hint.unitPrice) : hint.unitPrice;
+    // 판매처를 골랐으면 판매처 가격 체계에서 먼저 찾는다.
+    if (d.salesChannelId && el.value.trim() && !d.lines[i].price) {
+      try {
+        const q = new URLSearchParams({ channelId: d.salesChannelId, itemName: el.value.trim(), date: d.orderDate || "" });
+        const r = await api(`/api/pricing/lookup?${q}`);
+        if (r.found) {
+          d.lines[i].price = gross ? r.gross : r.supply;
+          d.lines[i].priceNote = `판매처 가격 · ${r.note}`;
+        }
+      } catch { /* fall back to past statements */ }
+    }
+    if (hint && !d.lines[i].price && hint.unitPrice != null) d.lines[i].price = gross ? (hint.grossUnitPrice || hint.unitPrice) : hint.unitPrice;
     if (hint) d.lines[i].materialId = hint.materialId || "";
     ss.draft = d;
     renderApp();
@@ -11859,7 +11898,7 @@ function bindSales() {
       grossUnitPrice: gross ? Number(l.price || 0) : Math.round(Number(l.price || 0) * 1.1)
     }));
     try {
-      const res = await api("/api/sales", { method: "POST", body: { partnerId: d.partnerId, orderDate: d.orderDate, dueDate: d.dueDate, channel: d.channel, memo: d.memo, deliveryPlace: dp, lineItems } });
+      const res = await api("/api/sales", { method: "POST", body: { partnerId: d.partnerId, salesChannelId: d.salesChannelId || "", orderDate: d.orderDate, dueDate: d.dueDate, channel: d.channel, memo: d.memo, deliveryPlace: dp, lineItems } });
       ss.draft = null;
       ss.selectedId = res.order.id;
       showToast(`${res.order.code} 주문을 등록했습니다. 이어서 명세서를 만드세요.`);
@@ -11885,6 +11924,161 @@ function bindSales() {
     } catch (error) {
       showToast(error.message || "처리하지 못했습니다.", "error");
     }
+  }));
+}
+
+// ===========================================================================
+// v2 판매처 가격 — 판매처 기본 규칙 + 판매처 × 품목 예외 (docs/v2 §9)
+// ===========================================================================
+const PRICE_SOURCE_LABEL = { exception: "예외", rule: "규칙", list: "정가" };
+
+async function loadPricing(selectId) {
+  const ss = salesState();
+  ss.pricing = await api("/api/pricing");
+  const id = selectId ?? ss.pricingSel ?? "";
+  ss.pricingSel = id;
+  ss.pricingSheet = id ? await api(`/api/pricing/channels/${id}/sheet`) : null;
+}
+
+function renderPricing() {
+  const ss = salesState();
+  const head = pageHead("판매", "판매처마다 기본 가격 규칙을 정하고, 다른 품목만 예외로 적습니다. 값은 예외 → 판매처 규칙 → 정가 순서로 찾습니다.") + salesViewNav(ss);
+  const p = ss.pricing;
+  if (!p) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const modes = p.modes || {};
+  const types = p.types || {};
+  const rows = (p.channels || []).map((c) => `<tr class="${ss.pricingSel === c.id ? "selected" : ""}" data-pricing-open="${c.id}">
+    <td><span class="code-tag">${h(c.code || "")}</span></td><td>${h(c.name)}${c.active === false ? ' <span class="badge muted">중지</span>' : ""}</td>
+    <td>${c.pricingMode ? `${h(modes[c.pricingMode])}${c.rate ? ` ${c.rate}%` : ""}` : '<span class="badge warn">미지정</span>'}<br><span class="muted" style="font-size:11px">${h(types[c.type] || "")} · VAT ${c.vatMode === "excluded" ? "별도" : "포함"}${c.exceptionCount ? ` · 예외 ${c.exceptionCount}` : ""}</span></td>
+    <td class="num">${c.feeRate ? `${Math.round(c.feeRate * 100) / 100}%` : ""}</td>
+    <td class="num">${c.missing ? `<span class="danger-text">${c.missing}</span>` : ""}</td></tr>`).join("");
+  return `${head}
+    <section class="layout pricing-layout">
+      <div class="panel">
+        <div class="panel-head"><h2>판매처</h2>
+          ${p.canEdit ? `<div class="toolbar"><button data-pricing-seed>NPB 채널에서 가져오기</button><button class="primary" data-pricing-new>판매처 추가</button></div>` : ""}</div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>코드</th><th>판매처</th><th>기본 가격</th><th>수수료</th><th>가격 없음</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="5" class="empty">판매처가 없습니다. 'NPB 채널에서 가져오기'로 시작하세요. 모르는 칸은 '확인 필요'에 질문으로 쌓입니다.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">${ss.pricingSel === "new" ? renderPricingChannelForm({}) : ss.pricingSheet ? renderPricingSheet() : `<div class="panel-body"><p class="muted">판매처를 고르면 품목별 가격이 보입니다.</p></div>`}</div>
+    </section>`;
+}
+
+function renderPricingChannelForm(c) {
+  const p = salesState().pricing;
+  const opt = (obj, cur) => Object.entries(obj).map(([k, l]) => `<option value="${k}" ${cur === k ? "selected" : ""}>${h(l)}</option>`).join("");
+  const partners = (state.partners || []).filter((x) => x.isActive !== false && x.category !== "issuer");
+  return `<form class="form-grid" data-pricing-channel-form="${h(c.id || "")}">
+    <div class="field two"><div><label>판매처 이름</label><input name="name" value="${h(c.name || "")}" required></div>
+      <div><label>유형</label><select name="type">${opt(p.types, c.type)}</select></div></div>
+    <div class="field two"><div><label>기본 가격 방식</label><select name="pricingMode"><option value="">미지정</option>${opt(p.modes, c.pricingMode)}</select></div>
+      <div><label>할인율·공급률 %</label><input name="rate" inputmode="decimal" value="${h(c.rate || "")}"></div></div>
+    <div class="field two"><div><label>금액 기준</label><select name="vatMode">${opt({ included: "VAT 포함", excluded: "VAT 별도" }, c.vatMode)}</select></div>
+      <div><label>판매수수료 %</label><input name="feeRate" inputmode="decimal" value="${h(c.feeRate || "")}"></div></div>
+    <div class="field two"><div><label>끝전 단위</label><select name="roundUnit">${(p.roundUnits || [1]).map((u) => `<option value="${u}" ${Number(c.roundUnit || 1) === u ? "selected" : ""}>${u}원</option>`).join("")}</select></div>
+      <div><label>끝전 처리</label><select name="roundMethod">${opt(p.roundMethods, c.roundMethod || "round")}</select></div></div>
+    <div class="field two"><div><label>거래처(명세서 상대)</label><select name="partnerId"><option value="">없음</option>
+      ${partners.map((x) => `<option value="${x.id}" ${c.partnerId === x.id ? "selected" : ""}>${h(x.name)}</option>`).join("")}</select></div>
+      <div><label>NPB 채널 코드 <span class="muted" style="font-weight:400">(쉼표)</span></label><input name="npbChannelCodes" value="${h((c.npbChannelCodes || []).join(", "))}"></div></div>
+    ${c.id ? `<label class="check"><input type="checkbox" name="active" ${c.active !== false ? "checked" : ""}> 사용 중</label>` : ""}
+    <div class="toolbar"><button class="primary" type="submit">${c.id ? "규칙 저장" : "추가"}</button></div>
+  </form>`;
+}
+
+function renderPricingSheet() {
+  const ss = salesState();
+  const { channel: c, rows = [], exceptions = [], date } = ss.pricingSheet;
+  const canEdit = ss.pricing?.canEdit;
+  const items = ss.pricing?.items || [];
+  return `
+    <div class="panel-head"><h2>${h(c.code || "")} ${h(c.name)}</h2><button data-pricing-close>닫기</button></div>
+    <div class="panel-body">
+      ${canEdit ? `<details ${c.pricingMode ? "" : "open"}><summary>기본 규칙 고치기</summary>${renderPricingChannelForm(c)}</details>` : ""}
+      <h3 style="margin-top:16px">품목별 가격 <span class="muted" style="font-weight:400;font-size:12px">${h(date)} 기준 · ${c.vatMode === "excluded" ? "단가는 VAT 별도" : "단가는 VAT 포함"}</span></h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>품목</th><th>정가</th><th>단가</th><th>공급가</th><th>세액</th><th>수수료</th><th>근거</th></tr></thead>
+        <tbody>${rows.map((r) => `<tr>
+          <td class="wrap pricing-item">${h(r.name)}</td><td class="num">${money.format(r.listPrice || 0)}</td>
+          ${r.status === "ok" ? `<td class="num"><strong>${money.format(r.unitPrice)}</strong></td><td class="num">${money.format(r.supply)}</td><td class="num">${money.format(r.vat)}</td>`
+            : `<td colspan="3"><span class="badge warn">${h(r.note)}</span></td>`}
+          <td class="num">${r.feeRate ? `${Math.round(r.feeRate * 100) / 100}%` : ""}</td>
+          <td>${r.source ? `<span class="badge ${r.source === "exception" ? "" : "muted"}">${h(PRICE_SOURCE_LABEL[r.source])}</span> <span class="muted" style="font-size:11px">${h(r.status === "ok" && r.source !== "list" ? r.note : "")}</span>` : ""}</td></tr>`).join("")
+          || `<tr><td colspan="7" class="empty">값을 매길 품목이 없습니다. NPB 제품과, 사업부가 PB·NPB인 브랜드의 단가표 품목이 여기 나옵니다.</td></tr>`}</tbody>
+      </table></div>
+      ${canEdit ? `<h3 style="margin-top:16px">예외 추가</h3>
+      <form class="form-grid" data-pricing-ex-form>
+        <div class="field"><label>품목</label><select name="itemRef" required><option value="">선택</option>${items.map((it) => `<option value="${h(it.ref)}">${h(it.name)}</option>`).join("")}</select></div>
+        <div class="field two"><div><label>방식</label><select name="mode"><option value="fixed">고정가</option><option value="discount">할인율 %</option><option value="supply_rate">공급률 %</option><option value="">가격은 규칙대로(수수료만)</option></select></div>
+          <div><label>고정가 또는 %</label><input name="value" inputmode="decimal"></div></div>
+        <div class="field two"><div><label>고정가 기준</label><select name="vatMode"><option value="">판매처 기준 따름</option><option value="included">VAT 포함</option><option value="excluded">VAT 별도</option></select></div>
+          <div><label>수수료 % (다를 때만)</label><input name="feeRate" inputmode="decimal"></div></div>
+        <div class="field two"><div><label>시작일 (행사)</label><input type="date" name="from"></div><div><label>종료일</label><input type="date" name="to"></div></div>
+        <div class="field"><label>메모</label><input name="note"></div>
+        <div class="toolbar"><button class="primary" type="submit">예외 저장</button></div>
+      </form>` : ""}
+      <h3 style="margin-top:16px">예외 목록</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>품목</th><th>내용</th><th>기간</th><th>근거</th><th></th></tr></thead>
+        <tbody>${exceptions.map((x) => `<tr class="${x.active === false ? "muted" : ""}">
+          <td class="wrap">${h(x.itemName || (items.find((it) => it.ref === x.itemRef) || {}).name || x.itemRef)}</td>
+          <td>${x.mode === "fixed" ? `${money.format(x.price)}원${x.vatMode === "excluded" ? "(VAT별도)" : x.vatMode === "included" ? "(VAT포함)" : ""}` : x.mode ? `${h((ss.pricing.modes || {})[x.mode])} ${x.rate}%` : ""}${x.feeRate !== undefined ? ` · 수수료 ${x.feeRate}%` : ""}</td>
+          <td>${x.from || x.to ? `${h(x.from || "")}~${h(x.to || "")}` : "상시"}</td>
+          <td class="muted" style="font-size:11px">${h(x.source || "")}${x.active === false ? " · 해제됨" : ""}</td>
+          <td>${canEdit && x.active !== false ? `<button data-pricing-ex-off="${h(x.id)}">해제</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">예외가 없습니다.</td></tr>`}</tbody>
+      </table></div>
+    </div>`;
+}
+
+function bindPricing() {
+  const ss = salesState();
+  if (!ss.pricing && !ss.pricingLoading) {
+    ss.pricingLoading = true;
+    loadPricing().catch((e) => showToast(e.message, "error")).finally(() => { ss.pricingLoading = false; renderApp(); });
+    return;
+  }
+  const refresh = async (sel) => { await loadPricing(sel); renderApp(); };
+  app.querySelectorAll("[data-pricing-open]").forEach((tr) => tr.addEventListener("click", () => refresh(tr.dataset.pricingOpen).catch((e) => showToast(e.message, "error"))));
+  app.querySelector("[data-pricing-close]")?.addEventListener("click", () => { ss.pricingSel = ""; ss.pricingSheet = null; renderApp(); });
+  app.querySelector("[data-pricing-new]")?.addEventListener("click", () => { ss.pricingSel = "new"; ss.pricingSheet = null; renderApp(); });
+  app.querySelector("[data-pricing-seed]")?.addEventListener("click", async () => {
+    if (!confirm("NPB 채널 설정에서 판매처·공급가·수수료를 가져옵니다. 이미 있는 판매처와 고친 예외는 그대로 둡니다. 진행할까요?")) return;
+    try {
+      const r = await api("/api/pricing/seed", { method: "POST", body: {} });
+      showToast(`판매처 ${r.channels}곳, 예외 ${r.exceptions}건을 만들었습니다. 확인 필요 질문 ${r.questions}건(새 질문 ${r.newQuestions}건).`);
+      await refresh();
+    } catch (e) { showToast(e.message || "가져오지 못했습니다.", "error"); }
+  });
+  app.querySelector("[data-pricing-channel-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const body = formObject(form);
+    body.active = form.querySelector('[name="active"]') ? form.querySelector('[name="active"]').checked : true;
+    const cid = form.dataset.pricingChannelForm;
+    try {
+      const r = await api(cid ? `/api/pricing/channels/${cid}` : "/api/pricing/channels", { method: cid ? "PUT" : "POST", body });
+      showToast("저장했습니다.");
+      await refresh(r.channel.id);
+    } catch (e) { showToast(e.message || "저장하지 못했습니다.", "error"); }
+  });
+  app.querySelector("[data-pricing-ex-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const f = formObject(event.currentTarget);
+    const body = { channelId: ss.pricingSel, itemRef: f.itemRef, mode: f.mode, vatMode: f.vatMode, from: f.from, to: f.to, note: f.note, feeRate: f.feeRate };
+    if (f.mode === "fixed") body.price = f.value; else if (f.mode) body.rate = f.value;
+    try {
+      await api("/api/pricing/exceptions", { method: "POST", body });
+      showToast("예외를 저장했습니다.");
+      await refresh();
+    } catch (e) { showToast(e.message || "저장하지 못했습니다.", "error"); }
+  });
+  app.querySelectorAll("[data-pricing-ex-off]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("이 예외를 해제할까요? 기록은 남습니다.")) return;
+    try {
+      await api(`/api/pricing/exceptions/${encodeURIComponent(b.dataset.pricingExOff)}`, { method: "DELETE" });
+      await refresh();
+    } catch (e) { showToast(e.message, "error"); }
   }));
 }
 
@@ -12117,7 +12311,7 @@ async function loadSetup() {
   try { const res = await api("/api/setup/questions"); ss.list = res.questions || []; ss.brands = res.brands || []; }
   catch (error) { ss.list = []; ss.error = error.message; } finally { ss.loading = false; }
 }
-const SETUP_KIND_LABEL = { "claim-base": "채권총액", "request-deduction": "채권차감액", "amount-mismatch": "금액 차이", "tab-brand": "시트 탭 연결", "zero-deduction": "차감 방식" };
+const SETUP_KIND_LABEL = { "claim-base": "채권총액", "request-deduction": "채권차감액", "amount-mismatch": "금액 차이", "tab-brand": "시트 탭 연결", "zero-deduction": "차감 방식", "channel-rule": "판매처 가격 방식", "channel-price": "판매처 단가" };
 
 function renderSetup() {
   const ss = setupState();
@@ -12137,7 +12331,7 @@ function renderSetup() {
         ? `<div class="muted">✓ ${h(q.answer?.applied || q.answer?.label || "")} · ${h(q.answeredBy || "")} ${h(String(q.answeredAt || "").slice(0, 10))}</div>`
         : `<div class="toolbar">${(q.choices || []).map((c) => c.input === "brand"
             ? `<select data-setup-brand="${h(q.id)}"><option value="">브랜드 선택</option>${(ss.brands || []).map((b) => `<option value="${h(b.id)}">${h(b.code ? `${b.code} · ` : "")}${h(b.name)}</option>`).join("")}</select><button data-setup-answer="${h(q.id)}" data-choice="${h(c.key)}">이 브랜드로</button>`
-            : c.input ? `<input data-setup-input="${h(q.id)}:${h(c.key)}" inputmode="decimal" placeholder="${c.input === "rate" ? "수수료율 %" : "금액"}" style="width:110px"><button data-setup-answer="${h(q.id)}" data-choice="${h(c.key)}">${h(c.label)}</button>`
+            : c.input ? `<input data-setup-input="${h(q.id)}:${h(c.key)}" inputmode="decimal" placeholder="${c.input === "rate" ? (q.topic === "pricing" ? "%" : "수수료율 %") : "금액"}" value="${c.value != null && c.input === "rate" ? h(c.value) : ""}" style="width:110px"><button data-setup-answer="${h(q.id)}" data-choice="${h(c.key)}">${h(c.label)}</button>`
             : `<button class="${q.suggested === c.key ? "primary" : ""}" data-setup-answer="${h(q.id)}" data-choice="${h(c.key)}">${h(c.label)}</button>`).join("")}</div>`}
     </div>`;
   return `
