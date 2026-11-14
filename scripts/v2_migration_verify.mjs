@@ -4,7 +4,7 @@
 //   node scripts/v2_migration_verify.mjs
 
 import assert from 'node:assert/strict';
-import { planMigration, receivableLedger, matchBrandForTab } from '../lib/legacy-migration.mjs';
+import { planMigration, receivableLedger, matchBrandForTab, recomputeZeroDeductions } from '../lib/legacy-migration.mjs';
 
 const brands = [
   { id: 'b1', name: '고공캣', rawSheetName: '고공캣', hasReceivable: true, receivableTotal: 13_865_295, depositorName: '김지연' },
@@ -59,5 +59,18 @@ const led = receivableLedger({ ...brands[0], receivableTotal: 22_328_600 }, {
 assert.equal(led.deducted, 6_375 + 6_375 + 1_000);
 assert.equal(led.balance, 22_328_600 - 13_750);
 assert.equal(led.entries.at(-1).balance, led.balance);
+
+// zero-deduction answers
+const zr = [
+  { id: 'z1', productSalesAmount: 40_000, receivableDeduction: 0 },
+  { id: 'z2', productSalesAmount: 10_000, supplyAmount: 7_000, receivableDeduction: 0, cancelledAmount: 2_000 },
+  { id: 'z3', productSalesAmount: 0, receivableDeduction: 0 }
+];
+let z = recomputeZeroDeductions(zr, { mode: 'rate', rate: 25 });
+assert.deepEqual(z.changes.map((c) => [c.id, c.after]), [['z1', 10_000], ['z2', 2_500 + 1_500]]);
+z = recomputeZeroDeductions(zr, { mode: 'supply-margin' });
+assert.deepEqual(z.changes.map((c) => [c.id, c.after]), [['z2', 3_000]]);
+assert.deepEqual(z.skipped.map((x) => x.id), ['z1', 'z3']);
+assert.equal(recomputeZeroDeductions(zr, { mode: 'none' }).changes.length, 0);
 
 console.log('v2 migration verify: all checks passed');

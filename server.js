@@ -10822,8 +10822,29 @@ async function routeApi(req, res, url) {
           applied = `${price.toLocaleString()}원 고정`;
         } else applied = choice.label;
       } else if (qn.kind === "zero-deduction") {
-        // 정산 방식 결정만 기록한다. 실제 재계산은 브랜드 정산 설정을 고친 뒤 '다시 계산'으로 한다.
-        applied = choice.key === "rate" ? `수수료율 ${number(body.value)}%로 차감 (재계산 대기)` : choice.label;
+        // 그 입금요청들의 채권차감액만 다시 계산한다(입금액은 그대로 — 이미 송금한 건이 있다).
+        const brand = db.brands.find((b) => b.id === qn.subjectId);
+        const rate = number(String(body.value ?? "").replace(/,/g, ""));
+        if (choice.key === "rate" && !(rate > 0 && rate <= 100)) { sendJson(res, 400, { error: "0~100 사이 %를 입력하세요." }); return; }
+        const ids = new Set(qn.payload?.requestIds || []);
+        const targets = db.requests.filter((r) => ids.has(r.id) && r.status !== "deleted");
+        const { changes, skipped } = legacy.recomputeZeroDeductions(targets, { mode: choice.key, rate });
+        for (const c of changes) {
+          const r = db.requests.find((x) => x.id === c.id);
+          r.receivableDeduction = c.after;
+          r.updatedAt = now();
+          addAudit(db, actor, "update", "request", r.id, `${r.brandName} ${r.orderNo} 채권차감 ${c.before.toLocaleString()} → ${c.after.toLocaleString()} (확인 필요 답변: ${choice.label})`, { receivableDeduction: c.before }, { receivableDeduction: c.after });
+        }
+        // 채권 브랜드(prepay_debt)는 수수료율이 차감에만 쓰이므로, 앞으로 올라올 건도 같은 율로 차감되게 브랜드에 저장한다.
+        if (brand && choice.key === "rate" && brand.settlementType === "prepay_debt" && number(brand.commissionRate) !== rate) {
+          const before = { commissionRate: brand.commissionRate };
+          brand.commissionRate = rate;
+          brand.updatedAt = now();
+          addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 수수료율 ${number(before.commissionRate)}% → ${rate}% (확인 필요 답변)`, before, { commissionRate: rate });
+        }
+        const total = changes.reduce((sum, c) => sum + c.after - c.before, 0);
+        applied = choice.key === "none" ? "0원 유지"
+          : `${changes.length}건 다시 계산(차감 +${total.toLocaleString()}원)${skipped.length ? `, ${skipped.length}건은 공급가가 없어 그대로` : ""}`;
       }
       qn.status = "answered";
       qn.answer = { choice: choice.key, label: choice.label, value: body.value ?? null, brandId: body.brandId || null, applied };
