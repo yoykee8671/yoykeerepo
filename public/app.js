@@ -12568,14 +12568,14 @@ async function loadSetup() {
   try { const res = await api("/api/setup/questions"); ss.list = res.questions || []; ss.brands = res.brands || []; }
   catch (error) { ss.list = []; ss.error = error.message; } finally { ss.loading = false; }
 }
-const SETUP_KIND_LABEL = { "claim-base": "채권총액", "request-deduction": "채권차감액", "amount-mismatch": "금액 차이", "tab-brand": "시트 탭 연결", "zero-deduction": "차감 방식", "channel-rule": "판매처 가격 방식", "channel-price": "판매처 단가", "prod-balance": "생산비 잔금", "prod-rate-change": "공임 변경", "prod-rate-new": "공임 등록", "prod-total": "상세 합계", "loan-maturity": "대출 만기" };
+const SETUP_KIND_LABEL = { "claim-base": "채권총액", "request-deduction": "채권차감액", "amount-mismatch": "금액 차이", "tab-brand": "시트 탭 연결", "zero-deduction": "차감 방식", "channel-rule": "판매처 가격 방식", "channel-price": "판매처 단가", "prod-balance": "생산비 잔금", "prod-rate-change": "공임 변경", "prod-rate-new": "공임 등록", "prod-total": "상세 합계", "loan-maturity": "대출 만기", proposal: "등록 제안" };
 
 function renderSetup() {
   const ss = setupState();
   const head = pageHead("확인 필요", "시스템이 스스로 정할 수 없는 값을 질문으로 모았습니다. 답하면 바로 적용되고, 누가 언제 무엇으로 답했는지 남습니다.");
   if (ss.list === null) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   // 큰돈이 걸린 것부터: 잔금·채권총액 → 차감·가격 방식 → 나머지.
-  const order = ["prod-balance", "loan-maturity", "claim-base", "zero-deduction", "channel-rule", "prod-rate-change", "request-deduction", "amount-mismatch",
+  const order = ["prod-balance", "loan-maturity", "proposal", "claim-base", "zero-deduction", "channel-rule", "prod-rate-change", "request-deduction", "amount-mismatch",
     "tab-brand", "channel-price", "prod-rate-new", "prod-total"];
   const rank = (q) => { const i = order.indexOf(q.kind); return i === -1 ? order.length : i; };
   const open = ss.list.filter((q) => q.status !== "answered").sort((a, b) => rank(a) - rank(b));
@@ -12588,6 +12588,7 @@ function renderSetup() {
       <div class="setup-kind">${h(SETUP_KIND_LABEL[q.kind] || q.kind)}</div>
       <strong>${h(q.title)}</strong>
       <p class="muted">${h(q.detail || "")}</p>
+      ${q.kind === "proposal" && q.status !== "answered" ? `<ul class="setup-actions">${(q.choices || []).filter((c) => (c.actions || []).length).map((c) => `<li><strong>${h(c.label)}</strong>: ${(c.actions || []).map((a) => h(a.type === "cashSchedule" ? `자금일정 '${a.title}' ${a.repeat === "monthly" ? `매월 ${a.dayOfMonth}일(${a.startDate || ""}~${a.endDate || ""})` : a.date} ${money.format(a.amount)}원${a.direction === "in" ? " 받을 돈" : ""}` : a.type === "payment" ? `지급요청 '${a.title}' ${money.format(a.amount)}원` : `생산비 지급 기록 ${a.date} ${money.format(a.amount)}원`)).join(" · ")}</li>`).join("")}</ul>` : ""}
       ${q.status === "answered"
         ? `<div class="muted">✓ ${h(q.answer?.applied || q.answer?.label || "")} · ${h(q.answeredBy || "")} ${h(String(q.answeredAt || "").slice(0, 10))}</div>`
         : `<div class="toolbar">${(q.choices || []).map((c) => c.input === "brand"

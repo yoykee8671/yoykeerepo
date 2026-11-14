@@ -24,6 +24,7 @@ import * as legacy from "./lib/legacy-migration.mjs";
 import * as pricing from "./lib/channel-pricing.mjs";
 import * as production from "./lib/production-cost.mjs";
 import * as loansLib from "./lib/loans.mjs";
+import * as proposals from "./lib/setup-proposals.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -10769,6 +10770,24 @@ async function routeApi(req, res, url) {
       return;
     }
 
+    // 제안 질문 올리기(오너). 자료는 저장소 밖에 두고 배포 때 올린다.
+    if (pathname === "/api/setup/proposals" && method === "POST") {
+      if (!isOwner) { sendJson(res, 403, { error: "제안은 오너만 올릴 수 있습니다." }); return; }
+      const body = await readBody(req);
+      let list;
+      try { list = (Array.isArray(body.proposals) ? body.proposals : []).map(proposals.normalizeProposal); } catch (error) { sendJson(res, 400, { error: error.message }); return; }
+      const existingQ = new Map((await erp.list("setupQuestions")).map((x) => [x.id, x]));
+      const stamp = now();
+      let added = 0;
+      for (const qn of list) {
+        if (existingQ.get(qn.id)?.status === "answered") continue;
+        await erp.put("setupQuestions", { ...qn, status: "open", createdAt: existingQ.get(qn.id)?.createdAt || stamp, updatedAt: stamp });
+        added += existingQ.has(qn.id) ? 0 : 1;
+      }
+      sendJson(res, 200, { proposals: list.length, newQuestions: added });
+      return;
+    }
+
     if (pathname === "/api/setup/questions" && method === "GET") {
       if (!canAnswer) { sendJson(res, 403, { error: "확인 필요 항목을 볼 권한이 없습니다." }); return; }
       const list = (await erp.list("setupQuestions")).map(({ payload, ...q }) => ({ ...q, hasPayload: Boolean(payload) }));
@@ -10889,6 +10908,30 @@ async function routeApi(req, res, url) {
           applied = "종료(다 갚음)";
         }
         addAudit(db, actor, "update", "loan", loan.id, `${loan.name} ${applied} (확인 필요 답변)`, { maturity: loan.maturity }, null);
+      } else if (qn.kind === "proposal") {
+        // 선택지에 담긴 할 일을 그대로 실행한다(올릴 때 이미 검사했지만 한 번 더 거른다).
+        const actions = (choice.actions || []).map(proposals.sanitizeAction);
+        const tag = { source: `확인 필요: ${qn.title}`.slice(0, 200), createdBy: who, createdAt: now() };
+        for (const [i, a] of actions.entries()) {
+          if (a.type === "cashSchedule") {
+            const { type, ...data } = a;
+            await erp.put("cashSchedules", { id: `cash:${qn.id}:${i}`, ...data, active: true, ...tag, updatedAt: now() });
+          } else if (a.type === "payment") {
+            const { type, ...data } = a;
+            const rec = { id: `pay:${qn.id}:${i}`.slice(0, 120), status: "requested", files: [], requestedBy: { id: actor.id, name: who }, ...data,
+              createdAt: now(), updatedAt: now(), history: [{ at: now(), by: who, action: "create", from: "", to: "requested", note: "확인 필요 답변으로 만듦" }] };
+            if (!(await erp.get("payments", rec.id))) {
+              rec.code = nextPaymentCode(await erp.list("payments"), rec.createdAt);
+              await erp.put("payments", rec);
+            }
+          } else if (a.type === "prodPayment") {
+            const partner = db.partners.find((x) => String(x.name || "").replace(/\s+/g, "") === a.partnerName.replace(/\s+/g, ""));
+            if (!partner) { sendJson(res, 400, { error: `거래처 '${a.partnerName}'가 없습니다. 생산비 시트를 먼저 가져오세요.` }); return; }
+            await erp.put("prodPayments", { id: `pp:${qn.id}:${i}`, partnerId: partner.id, partnerName: partner.name, date: a.date, amount: a.amount, memo: a.memo, ...tag });
+          }
+        }
+        applied = actions.length ? proposals.describeActions(actions) : choice.label;
+        addAudit(db, actor, "update", "proposal", qn.id, `${qn.title}: ${applied}`.slice(0, 300), null, null);
       } else if (qn.kind === "prod-total") {
         applied = choice.label;
       } else if (qn.kind === "zero-deduction") {
@@ -11884,7 +11927,8 @@ async function routeApi(req, res, url) {
         today, days, company: companyKey, openingBalance: opening,
         schedules: [...await erp.list("cashSchedules"),
           ...loansLib.loanScheduleLines((await erp.list("loans")).filter((l) => l.company === companyKey), await erp.list("loanPayments"), today, payments.addDays(today, days))],
-        payments: companyKey === "wooof" ? await erp.list("payments").catch(() => []) : [],
+        // 지급요청은 회사가 적혀 있으면 그 회사, 없으면 우프 통장에서 나간다.
+        payments: (await erp.list("payments").catch(() => [])).filter((p) => (p.company || "wooof") === companyKey),
         // 선매입 입금요청은 우프 통장에서 나간다.
         requests: companyKey === "wooof" ? db.requests : [],
         receivables: companyKey === "wooof" ? sales.receivables(await erp.list("salesOrders").catch(() => []), today) : []
