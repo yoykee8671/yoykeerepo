@@ -26,6 +26,7 @@ import * as production from "./lib/production-cost.mjs";
 import * as loansLib from "./lib/loans.mjs";
 import * as proposals from "./lib/setup-proposals.mjs";
 import * as monthly from "./lib/monthly-board.mjs";
+import * as brandInfo from "./lib/brand-info.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -2364,6 +2365,20 @@ function parseCafe24Csv(base64) {
     header.forEach((h, i) => { obj[h] = r[i] != null ? String(r[i]).trim() : ""; });
     return obj;
   });
+}
+
+// 업로드 엑셀의 모든 탭을 { 탭이름: [행 객체] } 로 읽는다(첫 줄 = 머리글).
+async function parseXlsxAllSheets(base64, fileName = "") {
+  const given = path.extname(String(fileName || "")).toLowerCase();
+  const ext = [".xlsx", ".xlsm", ".xls"].includes(given) ? given : ".xlsx";
+  const tmpPath = path.join(os.tmpdir(), `wooofpay-up-${crypto.randomBytes(8).toString("hex")}${ext}`);
+  try {
+    await writeFile(tmpPath, Buffer.from(base64, "base64"));
+    const { stdout } = await execFileAsync("python3", [XLSX_PARSE_SCRIPT, "--input", tmpPath], { cwd: __dirname, maxBuffer: 50 * 1024 * 1024 });
+    return JSON.parse(stdout || "{}").sheets || {};
+  } finally {
+    await safeUnlink(tmpPath);
+  }
 }
 
 // 업로드 파일을 임시로 떨어뜨려 xlsx_to_json.py 로 읽는다.
@@ -7684,6 +7699,44 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // --- v2 입점 브랜드 정보 정리(설문 응답 엑셀 올리기) + 마지막 거래일 ------------------
+  if (pathname === "/api/brands/activity" && method === "GET") {
+    if (!requirePermission(actor, res, "brands", "view")) return;
+    const plan = brandInfo.planBrandInfo({ brands: db.brands, sheets: {}, requests: db.requests, today: kstToday() });
+    sendJson(res, 200, { lastRequest: plan.lastRequest, dormant: plan.dormant.map((d) => d.brandId) });
+    return;
+  }
+  if (pathname === "/api/brands/info-upload" && method === "POST") {
+    if (actor.role !== "owner") { sendJson(res, 403, { error: "브랜드 정보 올리기는 오너만 할 수 있습니다." }); return; }
+    const body = await readBody(req);
+    let sheets;
+    try { sheets = await parseXlsxAllSheets(String(body.fileBase64 || "").split(",").pop(), body.fileName); } catch (error) { sendJson(res, 400, { error: "엑셀을 읽지 못했습니다." }); return; }
+    const plan = brandInfo.planBrandInfo({ brands: db.brands.filter((b) => (b.type || "brand") === "brand"), sheets, requests: db.requests, today: kstToday() });
+    if (!plan.responses) { sendJson(res, 400, { error: "설문 응답(브랜드명 칸)을 찾지 못했습니다. '우프 파트너 브랜드사 정보' 응답 시트를 엑셀로 받아 올려 주세요." }); return; }
+    let filled = 0;
+    for (const a of plan.auto) {
+      const brand = db.brands.find((b) => b.id === a.brandId);
+      if (!brand) continue;
+      const before = JSON.parse(JSON.stringify({ profile: brand.profile || {}, businessName: brand.businessName, bankAccount: brand.bankAccount }));
+      brandInfo.applyPaths(brand, a.set);
+      if (a.set["top.bankAccount"]) brand.bankAccount = normalizeAccountNumber(brand.bankAccount);
+      brand.profileUpdatedAt = a.time;
+      brand.updatedAt = now();
+      addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 빈 정보 ${Object.keys(a.set).length}칸 채움(브랜드 설문)`, before, null);
+      filled += 1;
+    }
+    const qs = brandInfo.brandInfoQuestions(plan);
+    const existingQ = new Map((await erp.list("setupQuestions")).map((x) => [x.id, x]));
+    const stamp = now();
+    for (const qn of qs) {
+      if (existingQ.get(qn.id)?.status === "answered") continue;
+      await erp.put("setupQuestions", { ...qn, status: "open", createdAt: existingQ.get(qn.id)?.createdAt || stamp, updatedAt: stamp });
+    }
+    await writeDb(db);
+    sendJson(res, 200, { responses: plan.responses, filled, conflicts: plan.conflicts.length, newBrands: plan.newBrands.length, dormant: plan.dormant.length, questions: qs.length });
+    return;
+  }
+
   const brandMatch = pathname.match(/^\/api\/brands\/([^/]+)$/);
   if (brandMatch && method === "PUT") {
     const body = await readBody(req);
@@ -10961,6 +11014,22 @@ async function routeApi(req, res, url) {
           }
           applied = `입금요청 ${n}건 확인 필요로 표시`;
         } else applied = choice.label;
+      } else if (qn.kind === "brand-info") {
+        const brand = db.brands.find((b) => b.id === qn.subjectId);
+        if (!brand) { sendJson(res, 404, { error: "브랜드가 없습니다." }); return; }
+        if (choice.key === "keep") applied = "지금 값 유지";
+        else {
+          const set = { ...(qn.payload?.set || {}) };
+          if (choice.key === "sheet-no-bank") for (const k of Object.keys(set)) if (/bank|accountHolder/.test(k)) delete set[k];
+          const before = JSON.parse(JSON.stringify({ profile: brand.profile || {}, businessName: brand.businessName, bankName: brand.bankName, bankAccount: brand.bankAccount, accountHolder: brand.accountHolder }));
+          brandInfo.applyPaths(brand, set);
+          if (set["top.bankAccount"]) brand.bankAccount = normalizeAccountNumber(brand.bankAccount);
+          brand.updatedAt = now();
+          addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 정보 ${Object.keys(set).length}칸 설문 값으로 변경 (확인 필요 답변)`, before, set);
+          applied = `${Object.keys(set).length}칸 변경`;
+        }
+      } else if (qn.kind === "brand-new") {
+        applied = choice.label;
       } else if (qn.kind === "prod-total") {
         applied = choice.label;
       } else if (qn.kind === "zero-deduction") {

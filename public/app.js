@@ -1529,12 +1529,13 @@ function renderBrands() {
   const rules = filteredPromotionRules();
   const brandRows = filteredBrands();
   return `
-    ${pageHead("브랜드", "시트별 업체 정보를 관리하고 공유 링크와 Google Sheets 아카이브 링크를 지정합니다.", `<button class="primary" data-new-brand>새 브랜드</button>`)}
+    ${pageHead("브랜드", "시트별 업체 정보를 관리하고 공유 링크와 Google Sheets 아카이브 링크를 지정합니다.", `${state.admin?.role === "owner" ? `<button data-brand-info-upload>브랜드 설문 응답 올리기</button><input type="file" accept=".xlsx,.xls" data-brand-info-file hidden>` : ""}<button class="primary" data-new-brand>새 브랜드</button>`)}
     <section class="layout">
       <div class="panel">
         <div class="panel-head"><h2>브랜드 목록</h2><span class="muted">${money.format(brandRows.length)}개</span></div>
         <div class="panel-body" style="padding-bottom:0">
           <input data-brand-filter-q placeholder="브랜드명, 사업자명 검색" value="${h(state.brandFilterQ)}">
+          <div class="npb-subnav" style="margin:8px 0 0">${[["all", "전체"], ["active", "최근 6개월 거래"], ["dormant", `장기 미거래 ${(state.brandActivity?.dormant || []).length || ""}`]].map(([k, l]) => `<button class="npb-subtab ${(state.brandDormantFilter || "all") === k ? "active" : ""}" data-brand-dormant="${k}">${l}</button>`).join("")}</div>
         </div>
         <div class="table-wrap">
           <table class="brands-table">
@@ -1737,7 +1738,11 @@ function filteredPriceAliases() {
 
 function filteredBrands() {
   const q = normalizeSearchText(state.brandFilterQ);
+  const dormant = new Set(state.brandActivity?.dormant || []);
+  const mode = state.brandDormantFilter || "all";
   return state.brands.filter((brand) => {
+    if (mode === "dormant" && !dormant.has(brand.id)) return false;
+    if (mode === "active" && (dormant.has(brand.id) || brand.type === "reference")) return false;
     if (!q) return true;
     return normalizeSearchText(`${brand.name || ""} ${brand.businessName || ""} ${brand.rawSheetName || ""}`).includes(q);
   });
@@ -1900,7 +1905,7 @@ function renderBrandRow(brand) {
   const share = `${location.origin}/share/${brand.shareToken}`;
   return `
     <tr>
-      <td>${codeTag(brand)}${brand.starred ? "★ " : ""}${h(brand.name)}</td>
+      <td>${codeTag(brand)}${brand.starred ? "★ " : ""}${h(brand.name)}${(state.brandActivity?.dormant || []).includes(brand.id) && brand.type !== "reference" ? ` <span class="badge muted" title="마지막 입금요청 ${h(state.brandActivity?.lastRequest?.[brand.id] || "없음")}">장기 미거래</span>` : ""}</td>
       <td><span class="badge">${brand.type === "reference" ? "참고시트" : settlementLabel(brand.settlementType)}</span></td>
       <td>${money.format(brand.requestCount || 0)}건</td>
       <td>${brand.hasReceivable ? `${money.format(brand.receivableRemaining || 0)}원` : `${money.format(brand.totalAmount || 0)}원`}</td>
@@ -1972,9 +1977,25 @@ function renderBrandRuleSection(brand) {
   `;
 }
 
+// 설문으로 받은 업체 정보(담당자·세금계산서 이메일·반품지 등). 보기 전용.
+function renderBrandProfile(b) {
+  const p = b.profile;
+  if (!p) return "";
+  const c = p.contacts || {};
+  const person = (label, x) => x && (x.name || x.email || x.mobile || x.phone)
+    ? `<tr><th>${label}</th><td>${h(x.name || "")} ${h(x.mobile || x.phone || "")} ${x.email ? `<a href="mailto:${h(x.email)}">${h(x.email)}</a>` : ""}</td></tr>` : "";
+  const row = (label, v) => v ? `<tr><th>${label}</th><td class="wrap">${h(v)}</td></tr>` : "";
+  return `<details class="brand-profile" open><summary>업체 정보 (브랜드 설문${b.profileUpdatedAt ? ` ${h(String(b.profileUpdatedAt).slice(0, 10))}` : ""})</summary>
+    <table class="kv">${person("메인 담당자", c.main)}${person("정산 담당자", c.settlement)}${person("CS 담당자", c.cs)}${person("배송 담당자", c.delivery)}
+    ${row("세금계산서 이메일", p.invoiceEmail)}${row("대표 전화", p.phone)}${row("사업자유형", p.businessType)}${row("공급형태", p.supplyType)}
+    ${row("사업장 주소", p.address)}${row("반품지", p.returnAddress)}${row("택배사", p.courier)}${row("배송비 정책", p.shippingPolicyText)}${row("발송 마감", p.cutoffText)}
+    ${row("공급사 아이디", p.supplierId)}${row("웹사이트", p.website)}${row("SNS", p.sns)}</table></details>`;
+}
+
 function renderBrandForm() {
   const b = state.editingBrand || {};
   return `
+    ${renderBrandProfile(b)}
     <form class="form-grid" data-brand-form>
       <div class="field"><label>브랜드명</label><input name="name" value="${h(b.name)}" required></div>
       <div class="field two">
@@ -4165,6 +4186,24 @@ function bindPrices() {
 function bindBrands() {
   bindSearchInput("[data-brand-filter-q]", (value) => {
     state.brandFilterQ = value;
+  });
+  if (!state.brandActivity && !state.brandActivityLoading) {
+    state.brandActivityLoading = true;
+    api("/api/brands/activity").then((r) => { state.brandActivity = r; }).catch(() => { state.brandActivity = { dormant: [], lastRequest: {} }; })
+      .finally(() => { state.brandActivityLoading = false; renderApp(); });
+  }
+  app.querySelectorAll("[data-brand-dormant]").forEach((b) => b.addEventListener("click", () => { state.brandDormantFilter = b.dataset.brandDormant; renderApp(); }));
+  app.querySelector("[data-brand-info-upload]")?.addEventListener("click", () => app.querySelector("[data-brand-info-file]")?.click());
+  app.querySelector("[data-brand-info-file]")?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const fileBase64 = await new Promise((ok, bad) => { const r = new FileReader(); r.onload = () => ok(String(r.result)); r.onerror = bad; r.readAsDataURL(file); });
+    try {
+      const r = await api("/api/brands/info-upload", { method: "POST", body: { fileBase64, fileName: file.name } });
+      showToast(`응답 ${r.responses}곳을 읽어 ${r.filled}곳의 빈 정보를 채웠습니다. 값이 다른 ${r.conflicts}곳·새 브랜드 ${r.newBrands}곳은 '확인 필요'에서 확인하세요.`);
+      state.brands = (await api("/api/brands")).brands || state.brands;
+      renderApp();
+    } catch (error) { showToast(error.message || "올리지 못했습니다.", "error"); }
   });
   app.querySelector("[data-new-brand]")?.addEventListener("click", () => {
     state.editingBrand = null;
@@ -12715,14 +12754,14 @@ async function loadSetup() {
   try { const res = await api("/api/setup/questions"); ss.list = res.questions || []; ss.brands = res.brands || []; }
   catch (error) { ss.list = []; ss.error = error.message; } finally { ss.loading = false; }
 }
-const SETUP_KIND_LABEL = { "claim-base": "채권총액", "request-deduction": "채권차감액", "amount-mismatch": "금액 차이", "tab-brand": "시트 탭 연결", "zero-deduction": "차감 방식", "channel-rule": "판매처 가격 방식", "channel-price": "판매처 단가", "prod-balance": "생산비 잔금", "prod-rate-change": "공임 변경", "prod-rate-new": "공임 등록", "prod-total": "상세 합계", "loan-maturity": "대출 만기", proposal: "등록 제안", "monthly-brand": "월정산 브랜드", "monthly-gap": "월정산 매출 차이" };
+const SETUP_KIND_LABEL = { "claim-base": "채권총액", "request-deduction": "채권차감액", "amount-mismatch": "금액 차이", "tab-brand": "시트 탭 연결", "zero-deduction": "차감 방식", "channel-rule": "판매처 가격 방식", "channel-price": "판매처 단가", "prod-balance": "생산비 잔금", "prod-rate-change": "공임 변경", "prod-rate-new": "공임 등록", "prod-total": "상세 합계", "loan-maturity": "대출 만기", proposal: "등록 제안", "monthly-brand": "월정산 브랜드", "monthly-gap": "월정산 매출 차이", "brand-info": "브랜드 정보", "brand-new": "새 브랜드" };
 
 function renderSetup() {
   const ss = setupState();
   const head = pageHead("확인 필요", "시스템이 스스로 정할 수 없는 값을 질문으로 모았습니다. 답하면 바로 적용되고, 누가 언제 무엇으로 답했는지 남습니다.");
   if (ss.list === null) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   // 큰돈이 걸린 것부터: 잔금·채권총액 → 차감·가격 방식 → 나머지.
-  const order = ["prod-balance", "loan-maturity", "proposal", "claim-base", "zero-deduction", "channel-rule", "prod-rate-change", "request-deduction", "amount-mismatch",
+  const order = ["prod-balance", "loan-maturity", "proposal", "brand-info", "claim-base", "zero-deduction", "channel-rule", "prod-rate-change", "request-deduction", "amount-mismatch",
     "tab-brand", "channel-price", "prod-rate-new", "prod-total"];
   const rank = (q) => { const i = order.indexOf(q.kind); return i === -1 ? order.length : i; };
   const open = ss.list.filter((q) => q.status !== "answered").sort((a, b) => rank(a) - rank(b));

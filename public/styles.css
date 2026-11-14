@@ -2398,3 +2398,9 @@ a.button:hover {
 .monthly-table td.wrap { min-width: 180px; }
 .monthly-table td.wrap form input { margin-bottom: 4px; }
 .kpi-frame { width: 100%; height: calc(100vh - 260px); min-height: 700px; border: 1px solid var(--line, #e5e7eb); border-radius: 12px; background: #fff; }
+.brand-profile { margin: 0 0 12px; padding: 8px 12px; border: 1px solid var(--line, #e5e7eb); border-radius: 10px; }
+.brand-profile summary { cursor: pointer; font-weight: 600; }
+.brand-profile table.kv { min-width: 0; margin-top: 6px; }
+.brand-profile table.kv th { width: 110px; font-weight: 500; color: var(--muted, #667); text-align: left; }
+.brand-profile table.kv { width: 100%; table-layout: fixed; }
+.brand-profile table.kv td { white-space: normal; word-break: break-all; }
