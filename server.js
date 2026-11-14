@@ -25,6 +25,7 @@ import * as pricing from "./lib/channel-pricing.mjs";
 import * as production from "./lib/production-cost.mjs";
 import * as loansLib from "./lib/loans.mjs";
 import * as proposals from "./lib/setup-proposals.mjs";
+import * as monthly from "./lib/monthly-board.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -41,6 +42,8 @@ const PRODUCTION_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_pr
 const PRODUCTION_SHEET_ID = process.env.PRODUCTION_SHEET_ID || "1xuvDKLTBZ4AgFsk3nYNnCKmRnz_-Z2os";
 const LOAN_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_loans.py");
 const LOAN_SHEET_ID = process.env.LOAN_SHEET_ID || "1_7bKONJvSWSH5wzciqHkfIRbZS6fmqVY";
+const MONTHLY_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_monthly.py");
+const MONTHLY_SHEET_ID = process.env.MONTHLY_SHEET_ID || "1_fg3KbjmZrJzFTf1w2LLkjoxYj2DuweYFdDIOp3Qumo";
 const HANA_TRANSFER_SCRIPT = path.join(__dirname, "scripts", "hana_transfer_xlsx.py");
 const NPB_PARSE_SCRIPT = path.join(__dirname, "scripts", "npb_parse.py");
 const NPB_XLSX_SCRIPT = path.join(__dirname, "scripts", "npb_settlement_xlsx.py");
@@ -5429,7 +5432,7 @@ const MENU_REGISTRY = [
   { key: "admins", label: "관리자", actions: ["view", "create", "edit", "delete"] },
   { key: "audits", label: "이력", actions: ["view"] },
   { key: "archive", label: "아카이브", actions: ["view", "edit"] },
-  { key: "settlement", label: "정산", actions: ["view", "export"] },
+  { key: "settlement", label: "정산", actions: ["view", "export", "edit"] },
   { key: "pipeline", label: "주문매칭", actions: ["view", "apply"] },
   // 화면은 주문매칭 하나로 합쳤지만, 클로브 연결·대사 API 는 자기 권한을 그대로
   // 쓴다. 권한을 없애면 기존에 막아 둔 계정이 갑자기 열린다.
@@ -10932,6 +10935,31 @@ async function routeApi(req, res, url) {
         }
         applied = actions.length ? proposals.describeActions(actions) : choice.label;
         addAudit(db, actor, "update", "proposal", qn.id, `${qn.title}: ${applied}`.slice(0, 300), null, null);
+      } else if (qn.kind === "monthly-brand") {
+        if (choice.key === "pick-brand") {
+          const brand = db.brands.find((b) => b.id === body.brandId);
+          if (!brand) { sendJson(res, 400, { error: "브랜드를 고르세요." }); return; }
+          const months = {};
+          for (const { ym, row } of qn.payload?.rows || []) (months[ym] ||= []).push({ ...row, brand: brand.name });
+          const plan = monthly.planMonthlyImport({ months }, { brands: [brand], requests: db.requests });
+          for (const r of plan.records) {
+            const prev = await erp.get("monthlyBoard", r.id);
+            await erp.put("monthlyBoard", prev?.editedAt ? { ...prev, sheet: r.sheet } : { ...r, importedAt: now() });
+          }
+          applied = `${brand.name}에 ${plan.records.length}개월 연결`;
+        } else applied = "연결 안 함";
+      } else if (qn.kind === "monthly-gap") {
+        if (choice.key === "review") {
+          const months = new Set(qn.payload?.months || []);
+          let n = 0;
+          for (const r of db.requests) {
+            if (r.brandId !== qn.subjectId || r.status === "deleted" || !months.has(monthly.requestMonth(r))) continue;
+            r.needsReview = true;
+            r.reviewNote = "월정산 시트 매출과 다름(프로모션·할인 확인)";
+            n += 1;
+          }
+          applied = `입금요청 ${n}건 확인 필요로 표시`;
+        } else applied = choice.label;
       } else if (qn.kind === "prod-total") {
         applied = choice.label;
       } else if (qn.kind === "zero-deduction") {
@@ -11190,6 +11218,79 @@ async function routeApi(req, res, url) {
   // --- v2 판매 파이프라인 -------------------------------------------------------
   // 주문접수 → 명세서 → 업체전달 → 청구·계산서 → 입금확인. 판매주문은 erp
   // 저장소에, 명세서는 기존 '명세서 발행'(purchaseOrders) 기록으로 만든다.
+  // --- v2 입점사 월정산 보드 ----------------------------------------------------
+  if (pathname === "/api/monthly" || pathname.startsWith("/api/monthly/")) {
+    if (!requirePermission(actor, res, "settlement", "view")) return;
+    const canEdit = actor.role === "owner" || can(actor, "settlement", "edit");
+    const who = actor.name || actor.email || "";
+    const brandList = db.brands.filter((b) => (b.type || "brand") === "brand");
+
+    if (pathname === "/api/monthly" && method === "GET") {
+      const records = await erp.list("monthlyBoard");
+      const months = [...new Set([...records.map((r) => r.month), ...db.requests.filter((r) => r.status !== "deleted").map(monthly.requestMonth)])]
+        .filter((m) => /^\d{4}-\d{2}$/.test(m)).sort().reverse();
+      const ym = /^\d{4}-\d{2}$/.test(url.searchParams.get("month") || "") ? url.searchParams.get("month") : kstToday().slice(0, 7);
+      const rows = monthly.boardRows({ brands: brandList, requests: db.requests, records, ym });
+      const sum = (f) => rows.reduce((s, r) => s + Number(r[f] || 0), 0);
+      sendJson(res, 200, { month: ym, months, rows, canEdit,
+        totals: { sales: sum("sales"), shipping: sum("shipping"), recovered: sum("recovered"), margin: sum("margin"),
+          checked: rows.filter((r) => r.checked).length, sent: rows.filter((r) => r.sent).length, diffs: rows.filter((r) => r.diffs.length).length },
+        brands: brandList.map((b) => ({ id: b.id, name: b.name, code: b.code || "" })) });
+      return;
+    }
+
+    if (!canEdit) { sendJson(res, 403, { error: "월정산을 고칠 권한이 없습니다." }); return; }
+
+    const rowMatch = pathname.match(/^\/api\/monthly\/(\d{4}-\d{2})\/([^/]+)$/);
+    if (rowMatch && method === "PUT") {
+      const [, ym, brandId] = rowMatch;
+      const brand = brandList.find((b) => b.id === decodeURIComponent(brandId));
+      if (!brand) { sendJson(res, 404, { error: "브랜드를 찾을 수 없습니다." }); return; }
+      const body = await readBody(req);
+      const rid = `${ym}:${brand.id}`;
+      const rec = (await erp.get("monthlyBoard", rid)) || { id: rid, month: ym, brandId: brand.id, brandName: brand.name, createdAt: now() };
+      for (const k of ["checked", "invoiceRequested", "sent"]) if (k in body) rec[k] = body[k] === true || body[k] === "true";
+      for (const k of ["memo", "fixRequest"]) if (k in body) rec[k] = String(body[k] ?? "").slice(0, 500);
+      if (body.manual && typeof body.manual === "object") {
+        rec.manual = Object.fromEntries(["sales", "shipping", "recovered", "margin"].map((f) => [f, Math.round(number(String(body.manual[f] ?? "").replace(/,/g, "")))]));
+      }
+      rec.updatedBy = who;
+      rec.updatedAt = now();
+      rec.editedAt = now();
+      await erp.put("monthlyBoard", rec);
+      sendJson(res, 200, { record: rec });
+      return;
+    }
+
+    if (pathname === "/api/monthly/import-sheet" && method === "POST") {
+      if (actor.role !== "owner") { sendJson(res, 403, { error: "가져오기는 오너만 할 수 있습니다." }); return; }
+      let extract;
+      try { extract = await extractSheetWith(MONTHLY_SHEET_ID, MONTHLY_EXTRACT_SCRIPT, "월정산 시트"); } catch (error) { sendJson(res, 502, { error: error.message }); return; }
+      const plan = monthly.planMonthlyImport(extract, { brands: brandList, requests: db.requests });
+      const stamp = now();
+      let saved = 0;
+      for (const r of plan.records) {
+        const prev = await erp.get("monthlyBoard", r.id);
+        if (prev?.editedAt) { await erp.put("monthlyBoard", { ...prev, sheet: r.sheet }); continue; } // 손댄 줄은 시트 값만 갱신
+        await erp.put("monthlyBoard", { ...r, importedAt: stamp });
+        saved += 1;
+      }
+      const qs = monthly.monthlyQuestions(plan);
+      const existingQ = new Map((await erp.list("setupQuestions")).map((x) => [x.id, x]));
+      for (const qn of qs) {
+        if (existingQ.get(qn.id)?.status === "answered") continue;
+        await erp.put("setupQuestions", { ...qn, createdAt: existingQ.get(qn.id)?.createdAt || stamp, updatedAt: stamp });
+      }
+      addAudit(db, actor, "update", "monthly", "import", `월정산 시트 가져오기: ${Object.keys(extract.months || {}).length}개월, ${plan.records.length}줄, 질문 ${qs.length}건`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { months: Object.keys(extract.months || {}).length, records: plan.records.length, saved, unmatched: plan.unmatched.length, questions: qs.length });
+      return;
+    }
+
+    sendJson(res, 404, { error: "없는 경로입니다." });
+    return;
+  }
+
   // --- v2 대출금 원장 ------------------------------------------------------------
   if (pathname === "/api/loans" || pathname.startsWith("/api/loans/")) {
     if (!requirePermission(actor, res, "cash", "view")) return;

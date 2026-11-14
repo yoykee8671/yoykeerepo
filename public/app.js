@@ -788,10 +788,11 @@ function renderApp() {
     // 본다. 권한 키는 pipeline 하나로 묶고, 화면 안에서 두 단계를 이어 보여준다.
     ["pipeline", "주문매칭"],
     ["settlement", "정산"],
+    ["monthly", "월정산"],
     ["npb", "npb정산"],
     ["productsync", "상품동기화"],
     ["setup", "확인 필요"]
-  ].filter(([key]) => can(key, "view") || (key === "pipeline" && can("reconcile", "view"))
+  ].filter(([key]) => (key === "monthly" ? can("settlement", "view") : can(key, "view")) || (key === "pipeline" && can("reconcile", "view"))
     || (key === "setup" && (state.admin?.role === "owner" || can("cash", "edit"))));
   app.innerHTML = `
     <div class="shell">
@@ -987,6 +988,7 @@ function renderCurrentTab() {
   if (state.tab === "sales") return renderSales();
   if (state.tab === "stock") return renderStock();
   if (state.tab === "setup") return renderSetup();
+  if (state.tab === "monthly") return renderMonthly();
   if (state.tab === "admins") return renderAdmins();
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
@@ -2467,6 +2469,7 @@ function bindCurrentTab() {
   if (state.tab === "sales") bindSales();
   if (state.tab === "stock") bindStock();
   if (state.tab === "setup") bindSetup();
+  if (state.tab === "monthly") bindMonthly();
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
   if (state.tab === "settlement") bindSettlement();
@@ -12204,6 +12207,108 @@ async function loadStock() {
 const qtyFmt = (n) => (Number(n || 0) % 1 ? Number(n).toLocaleString("ko-KR", { maximumFractionDigits: 3 }) : money.format(Number(n || 0)));
 
 // ===========================================================================
+// v2 입점사 월정산 보드 — 브랜드별 매출·배송비·회수·마진 + 확인/발행요청/발송 체크
+// ===========================================================================
+function monthlyState() {
+  if (!state.monthly) state.monthly = { data: null, loading: false, month: "", filter: "all", editing: "" };
+  return state.monthly;
+}
+async function loadMonthly() {
+  const ms = monthlyState();
+  ms.loading = true;
+  try {
+    ms.data = await api(`/api/monthly${ms.month ? `?month=${ms.month}` : ""}`);
+    ms.month = ms.data.month;
+  } catch (e) { ms.data = { rows: [], months: [], totals: {}, error: e.message }; } finally { ms.loading = false; }
+}
+
+const MONTHLY_FIELD_LABEL = { sales: "매출", shipping: "배송비", recovered: "회수", margin: "마진" };
+
+function renderMonthly() {
+  const ms = monthlyState();
+  const head = pageHead("월정산", "입점 브랜드마다 이번 달 매출·배송비·채권 회수·마진을 보고, 확인 → 계산서 발행요청 → 정산서 발송을 체크합니다. 숫자는 입금요청에서 계산하고, 입금요청이 없는 위탁 브랜드는 직접 적습니다.");
+  const d = ms.data;
+  if (!d) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const t = d.totals || {};
+  const rows = d.rows.filter((r) => ms.filter === "all" || (ms.filter === "todo" ? !(r.checked && r.sent) : ms.filter === "diff" ? r.diffs.length : true));
+  const cell = (r, f) => {
+    const sheet = r.sheet ? r.sheet[f] : null;
+    const diff = r.diffs.includes(f);
+    return `<td class="num">${money.format(r[f] || 0)}${diff ? `<br><span class="danger-text" style="font-size:11px">시트 ${money.format(sheet || 0)}</span>` : ""}</td>`;
+  };
+  const chk = (r, k) => `<input type="checkbox" data-monthly-check="${h(r.brandId)}:${k}" ${r[k] ? "checked" : ""} ${d.canEdit ? "" : "disabled"}>`;
+  return `${head}
+    <div class="toolbar" style="margin:8px 0">
+      <select data-monthly-month style="width:auto">${(d.months.includes(d.month) ? d.months : [d.month, ...d.months]).map((m) => `<option value="${m}" ${m === d.month ? "selected" : ""}>${m.replace("-", "년 ")}월</option>`).join("")}</select>
+      ${[["all", "전체"], ["todo", "안 끝난 것"], ["diff", "시트와 다른 것"]].map(([k, l]) => `<button class="npb-subtab ${ms.filter === k ? "active" : ""}" data-monthly-filter="${k}">${l}</button>`).join("")}
+      <span style="flex:1"></span>
+      ${d.canEdit ? `<button data-monthly-add>브랜드 줄 추가</button>` : ""}
+      ${state.admin?.role === "owner" ? `<button data-monthly-import>월정산 시트에서 가져오기</button>` : ""}
+    </div>
+    <section class="sales-flow">
+      <div class="sales-step"><span>매출</span><strong>${money.format(t.sales || 0)}원</strong></div>
+      <div class="sales-step"><span>채권 회수</span><strong>${money.format(t.recovered || 0)}원</strong></div>
+      <div class="sales-step"><span>마진(위탁 등)</span><strong>${money.format(t.margin || 0)}원</strong></div>
+      <div class="sales-step"><span>확인 / 정산서 발송</span><strong>${t.checked || 0} / ${t.sent || 0} <span class="muted" style="font-size:12px">(${d.rows.length}곳)</span></strong></div>
+      ${t.diffs ? `<div class="sales-step"><span>시트와 다름</span><strong class="danger-text">${t.diffs}곳</strong></div>` : ""}
+    </section>
+    <section class="panel"><div class="table-wrap"><table class="monthly-table">
+      <thead><tr><th>브랜드</th><th>건수</th><th>매출</th><th>배송비</th><th>회수</th><th>마진</th><th>확인</th><th>발행요청</th><th>정산서 발송</th><th>메모 / 수정요청</th></tr></thead>
+      <tbody>${rows.map((r) => `<tr>
+        <td>${r.code ? `<span class="code-tag">${h(r.code)}</span> ` : ""}${h(r.brandName)}<br><span class="muted" style="font-size:11px">${h(/^[a-z_]+$/.test(r.kind || "") ? settlementLabel(r.kind) : (r.kind || ""))}${r.source === "manual" ? " · 직접 입력" : r.source === "sheet-only" ? " · 시트 값만" : ""}</span></td>
+        <td class="num">${r.count || ""}</td>${cell(r, "sales")}${cell(r, "shipping")}${cell(r, "recovered")}${cell(r, "margin")}
+        <td>${chk(r, "checked")}</td><td>${chk(r, "invoiceRequested")}</td><td>${chk(r, "sent")}</td>
+        <td class="wrap">${ms.editing === r.brandId ? `<form data-monthly-edit="${h(r.brandId)}" class="form-grid">
+            <input name="memo" value="${h(r.memo)}" placeholder="메모"><input name="fixRequest" value="${h(r.fixRequest)}" placeholder="수정요청">
+            ${r.source !== "requests" ? `<div class="field two">${["sales", "shipping", "recovered", "margin"].map((f) => `<div><label>${MONTHLY_FIELD_LABEL[f]}</label><input name="m_${f}" inputmode="numeric" value="${r[f] ? money.format(r[f]) : ""}"></div>`).join("")}</div>` : ""}
+            <div class="toolbar"><button class="primary" type="submit">저장</button><button type="button" data-monthly-cancel>취소</button></div></form>`
+          : `${h(r.memo)}${r.fixRequest ? `<br><span class="danger-text">${h(r.fixRequest)}</span>` : ""}${d.canEdit ? ` <button class="ghost" data-monthly-open="${h(r.brandId)}">고치기</button>` : ""}`}</td>
+      </tr>`).join("") || `<tr><td colspan="10" class="empty">이 달 내역이 없습니다.</td></tr>`}</tbody>
+    </table></div></section>`;
+}
+
+function bindMonthly() {
+  const ms = monthlyState();
+  if (!ms.data && !ms.loading) { loadMonthly().then(renderApp); return; }
+  const reload = async () => { await loadMonthly(); renderApp(); };
+  const put = async (brandId, body) => {
+    try { await api(`/api/monthly/${ms.month}/${encodeURIComponent(brandId)}`, { method: "PUT", body }); await reload(); } catch (e) { showToast(e.message || "저장하지 못했습니다.", "error"); }
+  };
+  app.querySelector("[data-monthly-month]")?.addEventListener("change", (e) => { ms.month = e.target.value; ms.editing = ""; reload(); });
+  app.querySelectorAll("[data-monthly-filter]").forEach((b) => b.addEventListener("click", () => { ms.filter = b.dataset.monthlyFilter; renderApp(); }));
+  app.querySelectorAll("[data-monthly-check]").forEach((el) => el.addEventListener("change", () => {
+    const [brandId, key] = el.dataset.monthlyCheck.split(":");
+    put(brandId, { [key]: el.checked });
+  }));
+  app.querySelectorAll("[data-monthly-open]").forEach((b) => b.addEventListener("click", () => { ms.editing = b.dataset.monthlyOpen; renderApp(); }));
+  app.querySelector("[data-monthly-cancel]")?.addEventListener("click", () => { ms.editing = ""; renderApp(); });
+  app.querySelector("[data-monthly-edit]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = formObject(e.currentTarget);
+    const body = { memo: f.memo, fixRequest: f.fixRequest };
+    if ("m_sales" in f) body.manual = { sales: f.m_sales, shipping: f.m_shipping, recovered: f.m_recovered, margin: f.m_margin };
+    ms.editing = "";
+    put(e.currentTarget.dataset.monthlyEdit, body);
+  });
+  app.querySelector("[data-monthly-add]")?.addEventListener("click", () => {
+    const name = prompt("추가할 브랜드 이름(위탁 등 입금요청이 없는 브랜드)");
+    if (!name) return;
+    const b = (ms.data.brands || []).find((x) => x.name.replace(/\s/g, "").includes(name.replace(/\s/g, "")));
+    if (!b) { showToast("그 이름의 브랜드가 없습니다. 브랜드 메뉴에서 먼저 등록하세요.", "error"); return; }
+    ms.editing = b.id;
+    put(b.id, { memo: "" });
+  });
+  app.querySelector("[data-monthly-import]")?.addEventListener("click", async () => {
+    if (!confirm("월정산 구글시트(2025-08~)를 읽어 체크·메모·시트 값을 가져옵니다. 여기서 고친 줄은 시트 값만 갱신합니다. 진행할까요?")) return;
+    try {
+      const r = await api("/api/monthly/import-sheet", { method: "POST", body: {} });
+      showToast(`${r.months}개월 ${r.records}줄을 가져왔습니다. 확인 필요 질문 ${r.questions}건.`);
+      await reload();
+    } catch (e) { showToast(e.message || "가져오지 못했습니다.", "error"); }
+  });
+}
+
+// ===========================================================================
 // v2 생산비 — 생산처별 청구·지급 원장, 미지급, 공임 대조
 // ===========================================================================
 const PROD_KIND_LABEL = { bill: "청구", payment: "지급", adjust: "조정" };
@@ -12568,7 +12673,7 @@ async function loadSetup() {
   try { const res = await api("/api/setup/questions"); ss.list = res.questions || []; ss.brands = res.brands || []; }
   catch (error) { ss.list = []; ss.error = error.message; } finally { ss.loading = false; }
 }
-const SETUP_KIND_LABEL = { "claim-base": "채권총액", "request-deduction": "채권차감액", "amount-mismatch": "금액 차이", "tab-brand": "시트 탭 연결", "zero-deduction": "차감 방식", "channel-rule": "판매처 가격 방식", "channel-price": "판매처 단가", "prod-balance": "생산비 잔금", "prod-rate-change": "공임 변경", "prod-rate-new": "공임 등록", "prod-total": "상세 합계", "loan-maturity": "대출 만기", proposal: "등록 제안" };
+const SETUP_KIND_LABEL = { "claim-base": "채권총액", "request-deduction": "채권차감액", "amount-mismatch": "금액 차이", "tab-brand": "시트 탭 연결", "zero-deduction": "차감 방식", "channel-rule": "판매처 가격 방식", "channel-price": "판매처 단가", "prod-balance": "생산비 잔금", "prod-rate-change": "공임 변경", "prod-rate-new": "공임 등록", "prod-total": "상세 합계", "loan-maturity": "대출 만기", proposal: "등록 제안", "monthly-brand": "월정산 브랜드", "monthly-gap": "월정산 매출 차이" };
 
 function renderSetup() {
   const ss = setupState();

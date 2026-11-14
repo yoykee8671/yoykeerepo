@@ -2395,3 +2395,5 @@ a.button:hover {
 @media (max-width: 1100px) { .loans-layout { grid-template-columns: minmax(0, 1fr); } }
 .setup-actions { margin: 4px 0 8px; padding-left: 18px; font-size: 12px; color: var(--muted, #667); }
 .setup-actions li { margin: 2px 0; }
+.monthly-table td.wrap { min-width: 180px; }
+.monthly-table td.wrap form input { margin-bottom: 4px; }
