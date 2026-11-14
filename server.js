@@ -22,6 +22,7 @@ import * as sales from "./lib/sales-orders.mjs";
 import * as inventory from "./lib/inventory.mjs";
 import * as legacy from "./lib/legacy-migration.mjs";
 import * as pricing from "./lib/channel-pricing.mjs";
+import * as production from "./lib/production-cost.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -33,6 +34,9 @@ const PURCHASE_ORDER_SCRIPT = path.join(__dirname, "scripts", "purchase_order_ex
 const XLSX_PARSE_SCRIPT = path.join(__dirname, "scripts", "xlsx_to_json.py");
 const ROWS_TO_XLSX_SCRIPT = path.join(__dirname, "scripts", "rows_to_xlsx.py");
 const HANA_ACCOUNTS_SCRIPT = path.join(__dirname, "scripts", "hana_accounts.py");
+const PRODUCTION_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_production.py");
+// 생산비 구글시트(링크 공개). 시트를 다른 곳으로 옮기면 PRODUCTION_SHEET_ID 로 바꾼다.
+const PRODUCTION_SHEET_ID = process.env.PRODUCTION_SHEET_ID || "1xuvDKLTBZ4AgFsk3nYNnCKmRnz_-Z2os";
 const HANA_TRANSFER_SCRIPT = path.join(__dirname, "scripts", "hana_transfer_xlsx.py");
 const NPB_PARSE_SCRIPT = path.join(__dirname, "scripts", "npb_parse.py");
 const NPB_XLSX_SCRIPT = path.join(__dirname, "scripts", "npb_settlement_xlsx.py");
@@ -2185,6 +2189,22 @@ async function parsePriceWorkbookUpload(body = {}) {
 // column list (Korean header <-> field key, ID always first for round-trip
 // matching on re-upload); everything else is one shared writer/reader.
 // ---------------------------------------------------------------------------
+
+// 생산비 시트를 내려받아 추출한다(구글시트 → xlsx → JSON).
+async function extractProductionSheet() {
+  const resp = await fetch(`https://docs.google.com/spreadsheets/d/${PRODUCTION_SHEET_ID}/export?format=xlsx`, { redirect: "follow" });
+  if (!resp.ok) throw new Error(`생산비 시트를 받지 못했습니다(${resp.status}). 링크 공유가 켜져 있는지 확인하세요.`);
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  if (buffer.subarray(0, 2).toString() !== "PK") throw new Error("생산비 시트가 엑셀 파일로 오지 않았습니다. 링크 공유를 확인하세요.");
+  const tmpPath = path.join(os.tmpdir(), `wooofpay-prod-${crypto.randomBytes(8).toString("hex")}.xlsx`);
+  try {
+    await writeFile(tmpPath, buffer);
+    const { stdout } = await execFileAsync("python3", [PRODUCTION_EXTRACT_SCRIPT, "--input", tmpPath], { cwd: __dirname, maxBuffer: 50 * 1024 * 1024 });
+    return JSON.parse(stdout || "{}");
+  } finally {
+    await safeUnlink(tmpPath);
+  }
+}
 
 // 하나은행 '자주쓰는입금계좌관리' 파일을 읽는다.
 async function parseHanaAccountsUpload(base64, fileName = "") {
@@ -10821,6 +10841,35 @@ async function routeApi(req, res, url) {
           addAudit(db, actor, "create", "channelPrice", x.id, `${ch.name} · ${item.name} ${price.toLocaleString()}원 고정 (확인 필요 답변)`, null, x);
           applied = `${price.toLocaleString()}원 고정`;
         } else applied = choice.label;
+      } else if (qn.kind === "prod-balance") {
+        const partner = db.partners.find((x) => x.id === qn.subjectId);
+        if (!partner) { sendJson(res, 404, { error: "거래처가 없습니다." }); return; }
+        const target = choice.key === "sheet" ? choice.value : choice.key === "input" ? amountInput : null;
+        if (choice.key === "input" && !(String(body.value ?? "").trim())) { sendJson(res, 400, { error: "잔금을 입력하세요." }); return; }
+        if (target != null) {
+          const [bills, pays, adjs] = await Promise.all(["prodBills", "prodPayments", "prodAdjustments"].map((c) => erp.list(c)));
+          const mine = (l) => l.filter((x) => x.partnerId === partner.id && x.id !== `pa:q:${partner.id}`);
+          const current = production.partnerLedger({ bills: mine(bills), payments: mine(pays), adjustments: mine(adjs) }).balance;
+          const diff = target - current;
+          if (diff) {
+            await erp.put("prodAdjustments", { id: `pa:q:${partner.id}`, partnerId: partner.id, partnerName: partner.name, date: kstToday(), amount: diff,
+              memo: `잔금 맞춤(확인 필요 답변): ${current.toLocaleString()} → ${target.toLocaleString()}`, createdBy: who, createdAt: now() });
+          }
+          applied = `잔금 ${target.toLocaleString()}원${diff ? `(조정 ${diff > 0 ? "+" : ""}${diff.toLocaleString()})` : ""}`;
+        } else applied = "맞음";
+      } else if (qn.kind === "prod-rate-change" || qn.kind === "prod-rate-new") {
+        const partner = db.partners.find((x) => x.id === qn.subjectId);
+        const price = ["new-rate", "register"].includes(choice.key) ? choice.value : choice.key === "input" ? amountInput : 0;
+        if (choice.key === "input" && !(price > 0)) { sendJson(res, 400, { error: "단가를 입력하세요." }); return; }
+        if (partner && price > 0) {
+          const rec = { id: `prr:q:${qn.id}`, partnerId: partner.id, partnerName: partner.name, item: qn.payload?.item || "", option: "",
+            unitPrice: price, from: qn.kind === "prod-rate-change" ? qn.payload?.from || "" : "", source: "확인 필요 답변", createdBy: who, createdAt: now() };
+          await erp.put("prodRates", rec);
+          addAudit(db, actor, "create", "prodRates", rec.id, `${partner.name} ${rec.item} 공임 ${price.toLocaleString()}원 등록`, null, rec);
+          applied = `${rec.item} ${price.toLocaleString()}원${rec.from ? ` (${rec.from}부터)` : ""} 등록`;
+        } else applied = choice.label;
+      } else if (qn.kind === "prod-total") {
+        applied = choice.label;
       } else if (qn.kind === "zero-deduction") {
         // 그 입금요청들의 채권차감액만 다시 계산한다(입금액은 그대로 — 이미 송금한 건이 있다).
         const brand = db.brands.find((b) => b.id === qn.subjectId);
@@ -11077,6 +11126,167 @@ async function routeApi(req, res, url) {
   // --- v2 판매 파이프라인 -------------------------------------------------------
   // 주문접수 → 명세서 → 업체전달 → 청구·계산서 → 입금확인. 판매주문은 erp
   // 저장소에, 명세서는 기존 '명세서 발행'(purchaseOrders) 기록으로 만든다.
+  // --- v2 생산비: 생산처 청구·지급 원장, 미지급, 공임 대조 -------------------------
+  if (pathname === "/api/production" || pathname.startsWith("/api/production/")) {
+    if (!requirePermission(actor, res, "stock", "view")) return;
+    const canEdit = actor.role === "owner" || can(actor, "stock", "edit");
+    const who = actor.name || actor.email || "";
+    const today = kstToday();
+    const load = async () => {
+      const [bills, pays, adjs, details, rates] = await Promise.all(["prodBills", "prodPayments", "prodAdjustments", "prodDetails", "prodRates"].map((c) => erp.list(c)));
+      return { bills, pays, adjs, details, rates };
+    };
+    const ofPartner = (all, pid) => ({
+      bills: all.bills.filter((x) => x.partnerId === pid), payments: all.pays.filter((x) => x.partnerId === pid),
+      adjustments: all.adjs.filter((x) => x.partnerId === pid)
+    });
+
+    if (pathname === "/api/production" && method === "GET") {
+      const all = await load();
+      const ids = new Set([...all.bills, ...all.pays].map((x) => x.partnerId));
+      const partners = db.partners.filter((p) => ids.has(p.id) || p.category === "production").map((p) => {
+        const s = production.partnerSummary(ofPartner(all, p.id), today);
+        return { id: p.id, code: p.code || "", name: p.name, company: p.productionCompany || "wooof", ...s };
+      }).sort((a, b) => b.balance - a.balance);
+      const wooof = partners.filter((p) => p.company !== "betters_personal");
+      sendJson(res, 200, { partners, total: wooof.reduce((s, p) => s + p.balance, 0), over60: wooof.reduce((s, p) => s + p.over60, 0), canEdit,
+        canRequestPay: can(actor, "payments", "create") });
+      return;
+    }
+
+    const one = pathname.match(/^\/api\/production\/partners\/([^/]+)$/);
+    if (one && method === "GET") {
+      const partner = db.partners.find((p) => p.id === one[1]);
+      if (!partner) { sendJson(res, 404, { error: "거래처를 찾을 수 없습니다." }); return; }
+      const all = await load();
+      const mine = ofPartner(all, partner.id);
+      const details = all.details.filter((d) => d.partnerId === partner.id).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+      const rates = all.rates.filter((r) => r.partnerId === partner.id && !r.voided);
+      const checks = production.rateChecks({ details, rates, bills: mine.bills, since: `${today.slice(0, 4)}-01-01` });
+      const ledger = production.partnerLedger(mine);
+      sendJson(res, 200, {
+        partner: { id: partner.id, code: partner.code || "", name: partner.name, bankName: partner.bankName || "", bankAccount: partner.bankAccount || "",
+          accountHolder: partner.accountHolder || "", company: partner.productionCompany || "wooof" },
+        summary: production.partnerSummary(mine, today), open: production.openBills(mine, today),
+        entries: ledger.entries.slice().reverse().slice(0, 300), details: details.slice(0, 60), rates, checks
+      });
+      return;
+    }
+
+    if (!canEdit) { sendJson(res, 403, { error: "생산비를 고칠 권한이 없습니다." }); return; }
+
+    // 시트 추출본 넣기(오너). 거래처가 없으면 생산처로 만든다.
+    if ((pathname === "/api/production/import" || pathname === "/api/production/import-sheet") && method === "POST") {
+      if (actor.role !== "owner") { sendJson(res, 403, { error: "가져오기는 오너만 할 수 있습니다." }); return; }
+      let body;
+      try {
+        body = pathname.endsWith("-sheet") ? await extractProductionSheet() : await readBody(req);
+      } catch (error) {
+        sendJson(res, 502, { error: error.message || "시트를 읽지 못했습니다." });
+        return;
+      }
+      const partnerIdByName = {};
+      let createdPartners = 0;
+      for (const p of body.partners || []) {
+        const key = String(p.name || "").replace(/\s+/g, "");
+        let partner = db.partners.find((x) => String(x.name || "").replace(/\s+/g, "") === key);
+        if (!partner) {
+          partner = { id: id("partner"), name: p.name, category: "production", isActive: true, createdAt: now(), updatedAt: now() };
+          db.partners.push(partner);
+          createdPartners += 1;
+          addAudit(db, actor, "create", "partner", partner.id, `생산처 ${p.name} 등록 (생산비 시트 가져오기)`, null, partner);
+        }
+        if (p.company && !partner.productionCompany) partner.productionCompany = p.company;
+        partnerIdByName[p.name] = partner.id;
+      }
+      const plan = production.planProductionImport(body, { partnerIdByName, today, since: `${today.slice(0, 4)}-01-01` });
+      const stamp = now();
+      const keepEdited = async (col, rec) => {
+        const prev = await erp.get(col, rec.id);
+        if (prev?.editedAt || prev?.voided) return; // 손댄 기록은 덮어쓰지 않는다
+        await erp.put(col, { ...rec, importedAt: stamp });
+      };
+      for (const r of plan.bills) await keepEdited("prodBills", r);
+      for (const r of plan.payments) await keepEdited("prodPayments", r);
+      for (const r of plan.details) await keepEdited("prodDetails", r);
+      for (const r of plan.rates) await keepEdited("prodRates", r);
+      const existingQ = new Map((await erp.list("setupQuestions")).map((x) => [x.id, x]));
+      let added = 0;
+      for (const qn of plan.questions) {
+        if (existingQ.get(qn.id)?.status === "answered") continue;
+        await erp.put("setupQuestions", { ...qn, createdAt: existingQ.get(qn.id)?.createdAt || stamp, updatedAt: stamp });
+        added += existingQ.has(qn.id) ? 0 : 1;
+      }
+      addAudit(db, actor, "update", "production", "import", `생산비 시트 가져오기: 청구 ${plan.bills.length}, 지급 ${plan.payments.length}, 질문 ${plan.questions.length}`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { createdPartners, summary: plan.summary, bills: plan.bills.length, payments: plan.payments.length,
+        details: plan.details.length, rates: plan.rates.length, questions: plan.questions.length, newQuestions: added });
+      return;
+    }
+
+    // 청구·지급·조정 직접 입력
+    const add = pathname.match(/^\/api\/production\/partners\/([^/]+)\/(bills|payments|adjustments|rates)$/);
+    if (add && method === "POST") {
+      const partner = db.partners.find((p) => p.id === add[1]);
+      if (!partner) { sendJson(res, 404, { error: "거래처를 찾을 수 없습니다." }); return; }
+      const body = await readBody(req);
+      const col = { bills: "prodBills", payments: "prodPayments", adjustments: "prodAdjustments", rates: "prodRates" }[add[2]];
+      const amount = Math.round(number(String(body.amount ?? body.unitPrice ?? "").replace(/,/g, "")));
+      const rec = { id: id(col === "prodRates" ? "prr" : "prd"), partnerId: partner.id, partnerName: partner.name, createdBy: who, createdAt: now(), source: "직접 입력" };
+      if (col === "prodRates") {
+        Object.assign(rec, { item: String(body.item || "").trim(), option: String(body.option || "").trim(), unitPrice: amount, from: dateOnly(body.from) || "" });
+        if (!rec.item || !(amount > 0)) { sendJson(res, 400, { error: "품목과 단가를 입력하세요." }); return; }
+      } else {
+        Object.assign(rec, { date: dateOnly(body.date) || today, amount, memo: String(body.memo || "").slice(0, 300) });
+        if (!amount || (col !== "prodAdjustments" && amount < 0)) { sendJson(res, 400, { error: "금액을 입력하세요." }); return; }
+        if (col === "prodBills" && Array.isArray(body.lines)) rec.lines = body.lines.slice(0, 50);
+      }
+      await erp.put(col, rec);
+      addAudit(db, actor, "create", col, rec.id, `${partner.name} 생산비 ${add[2]} ${amount.toLocaleString()}`, null, rec);
+      await writeDb(db);
+      sendJson(res, 201, { record: rec });
+      return;
+    }
+
+    const voidMatch = pathname.match(/^\/api\/production\/(prodBills|prodPayments|prodAdjustments|prodRates)\/([^/]+)\/void$/);
+    if (voidMatch && method === "POST") {
+      const rec = await erp.get(voidMatch[1], decodeURIComponent(voidMatch[2]));
+      if (!rec) { sendJson(res, 404, { error: "기록을 찾을 수 없습니다." }); return; }
+      await erp.put(voidMatch[1], { ...rec, voided: true, voidedBy: who, voidedAt: now(), editedAt: now() });
+      addAudit(db, actor, "delete", voidMatch[1], rec.id, `${rec.partnerName} 생산비 기록 취소`, rec, null);
+      await writeDb(db);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // 미지급에서 지급요청 만들기. 지급요청이 '지급완료'가 되면 생산비 지급으로 자동 기록된다.
+    const payReq = pathname.match(/^\/api\/production\/partners\/([^/]+)\/pay-request$/);
+    if (payReq && method === "POST") {
+      if (!requirePermission(actor, res, "payments", "create")) return;
+      const partner = db.partners.find((p) => p.id === payReq[1]);
+      if (!partner) { sendJson(res, 404, { error: "거래처를 찾을 수 없습니다." }); return; }
+      const body = await readBody(req);
+      const amount = Math.round(number(String(body.amount ?? "").replace(/,/g, "")));
+      if (!(amount > 0)) { sendJson(res, 400, { error: "금액을 입력하세요." }); return; }
+      const rec = {
+        id: id("pay"), status: "requested", files: [], requestedBy: { id: actor.id, name: who }, createdAt: now(),
+        title: String(body.title || `${partner.name} 생산비`).slice(0, 200), payeeName: partner.name, partnerCode: partner.code || "",
+        category: "생산비", amount, dueDate: dateOnly(body.dueDate) || "", memo: String(body.memo || "").slice(0, 2000),
+        bankName: payments.normalizeBankName(partner.bankName || ""), accountNumber: normalizeAccountNumber(partner.bankAccount || ""),
+        holder: partner.accountHolder || "", sourceType: "production", sourcePartnerId: partner.id
+      };
+      rec.code = nextPaymentCode(await erp.list("payments"), rec.createdAt);
+      rec.updatedAt = now();
+      rec.history = [{ at: now(), by: who, action: "create", from: "", to: "requested", note: "생산비 미지급에서 만듦" }];
+      await erp.put("payments", rec);
+      sendJson(res, 201, { payment: rec });
+      return;
+    }
+
+    sendJson(res, 404, { error: "없는 경로입니다." });
+    return;
+  }
+
   // --- v2 판매처별 가격 체계 (docs/v2 §9) --------------------------------------
   if (pathname === "/api/pricing" || pathname.startsWith("/api/pricing/")) {
     if (!requirePermission(actor, res, "sales", "view")) return;
@@ -11665,6 +11875,17 @@ async function routeApi(req, res, url) {
         if (body.withdrawAccount) rec.withdrawAccount = String(body.withdrawAccount).trim();
       }
       if (body.action === "reopen") { delete rec.paidAt; delete rec.paidBy; }
+      // 생산비에서 만든 지급요청: 지급완료 → 생산비 지급 기록, 되돌리면 그 기록 취소.
+      if (rec.sourceType === "production" && rec.sourcePartnerId) {
+        const pid = `pp:pay:${rec.id}`;
+        if (to === "paid") {
+          await erp.put("prodPayments", { id: pid, partnerId: rec.sourcePartnerId, partnerName: rec.payeeName, date: rec.paidAt,
+            amount: rec.amount, memo: `지급요청 ${rec.code}`, source: "지급요청", createdAt: now() });
+        } else if (from === "paid") {
+          const prev = await erp.get("prodPayments", pid);
+          if (prev) await erp.put("prodPayments", { ...prev, voided: true, voidedAt: now(), voidedBy: who.name });
+        }
+      }
       rec.status = to;
       rec.updatedAt = now();
       log(rec, body.action, from, to, String(body.note || "").slice(0, 300));

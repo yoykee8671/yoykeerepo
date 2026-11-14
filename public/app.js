@@ -12096,10 +12096,155 @@ async function loadStock() {
 }
 const qtyFmt = (n) => (Number(n || 0) % 1 ? Number(n).toLocaleString("ko-KR", { maximumFractionDigits: 3 }) : money.format(Number(n || 0)));
 
+// ===========================================================================
+// v2 생산비 — 생산처별 청구·지급 원장, 미지급, 공임 대조
+// ===========================================================================
+const PROD_KIND_LABEL = { bill: "청구", payment: "지급", adjust: "조정" };
+
+async function loadProdCost(selectId) {
+  const st = stockState();
+  st.prod = await api("/api/production");
+  const pid = selectId ?? st.prodSel ?? "";
+  st.prodSel = pid;
+  st.prodDetail = pid ? await api(`/api/production/partners/${pid}`) : null;
+}
+
+function renderProdCost() {
+  const st = stockState();
+  const d = st.prod;
+  if (!d) return `<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const rows = d.partners.map((p) => `<tr class="${st.prodSel === p.id ? "selected" : ""}" data-prod-open="${p.id}">
+    <td>${p.code ? `<span class="code-tag">${h(p.code)}</span> ` : ""}${h(p.name)}${p.company === "betters_personal" ? ' <span class="badge muted">베럴즈(개인)</span>' : ""}</td>
+    <td class="num"><strong>${money.format(p.balance)}</strong></td>
+    <td class="num">${p.over60 ? `<span class="danger-text">${money.format(p.over60)}</span>` : ""}</td>
+    <td>${h(p.oldestDate || "")}${p.oldestAge ? ` <span class="muted" style="font-size:11px">${p.oldestAge}일</span>` : ""}</td>
+    <td>${h(p.lastPayment || "")}</td></tr>`).join("");
+  return `
+    <section class="sales-flow">
+      <div class="sales-step"><span>우프 생산비 미지급</span><strong>${money.format(d.total)}원</strong></div>
+      <div class="sales-step"><span>60일 넘은 미지급</span><strong class="${d.over60 ? "danger-text" : ""}">${money.format(d.over60)}원</strong></div>
+    </section>
+    <section class="layout pricing-layout">
+      <div class="panel">
+        <div class="panel-head"><h2>생산처</h2>${d.canEdit ? `<button data-prod-import>생산비 시트에서 가져오기</button>` : ""}</div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>생산처</th><th>미지급</th><th>60일 넘음</th><th>가장 오래된 청구</th><th>마지막 지급</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="5" class="empty">아직 기록이 없습니다. '생산비 시트에서 가져오기'로 시작하세요.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">${st.prodDetail ? renderProdPartner() : `<div class="panel-body"><p class="muted">생산처를 고르면 원장·미지급 청구·공임 대조가 보입니다.</p></div>`}</div>
+    </section>`;
+}
+
+function renderProdPartner() {
+  const st = stockState();
+  const { partner: p, summary: s, open = [], entries = [], details = [], rates = [], checks = {} } = st.prodDetail;
+  const canEdit = st.prod?.canEdit;
+  const tab = st.prodTab || "open";
+  const sub = [["open", `미지급 ${open.length}`], ["ledger", "원장"], ["check", `공임 대조 ${(checks.mismatches || []).length + (checks.unknown || []).length}`], ["details", "상세내역"]];
+  let body = "";
+  if (tab === "open") {
+    body = `<div class="table-wrap"><table><thead><tr><th>청구일</th><th>내용</th><th>남은 금액</th><th>경과</th></tr></thead><tbody>
+      ${open.map((b) => `<tr><td>${h(b.date)}</td><td class="wrap">${h(b.memo || (b.lines || []).map((l) => l.item).join(", "))}${b.partial ? ' <span class="badge muted">일부 지급</span>' : ""}</td>
+        <td class="num">${money.format(b.remaining)}</td><td class="${b.ageDays > 60 ? "danger-text" : ""}">${b.ageDays}일</td></tr>`).join("") || `<tr><td colspan="4" class="empty">미지급 청구가 없습니다.</td></tr>`}
+    </tbody></table></div>
+    ${st.prod?.canRequestPay && s.balance > 0 ? `<form class="form-grid" data-prod-payreq style="margin-top:12px">
+      <div class="field two"><div><label>지급요청 금액</label><input name="amount" inputmode="numeric" value="${money.format(s.balance)}"></div>
+        <div><label>지급 기한</label><input type="date" name="dueDate"></div></div>
+      <div class="toolbar"><button class="primary" type="submit">지급요청 만들기</button><span class="muted" style="font-size:12px">지급요청이 '지급완료'가 되면 여기 지급으로 자동 기록됩니다.</span></div>
+    </form>` : ""}`;
+  } else if (tab === "ledger") {
+    body = `${canEdit ? `<form class="form-grid" data-prod-add>
+      <div class="field two"><div><label>구분</label><select name="kind"><option value="bills">청구(받은 계산서·명세서)</option><option value="payments">지급(보낸 돈)</option><option value="adjustments">조정(± 불량·상계)</option></select></div>
+        <div><label>날짜</label><input type="date" name="date" value="${h(new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10))}"></div></div>
+      <div class="field two"><div><label>금액(VAT 포함)</label><input name="amount" inputmode="numeric" required></div><div><label>메모</label><input name="memo"></div></div>
+      <div class="toolbar"><button class="primary" type="submit">기록</button></div></form>` : ""}
+      <div class="table-wrap"><table><thead><tr><th>날짜</th><th>구분</th><th>내용</th><th>금액</th><th>잔액</th><th></th></tr></thead><tbody>
+      ${entries.map((e) => `<tr><td>${h(e.date)}</td><td>${PROD_KIND_LABEL[e.kind]}${e.assumed ? ' <span class="badge muted">추정</span>' : ""}</td><td class="wrap">${h(e.memo)}</td>
+        <td class="num">${money.format(e.amount)}</td><td class="num">${money.format(e.balance)}</td>
+        <td>${canEdit ? `<button data-prod-void="${h({ bill: "prodBills", payment: "prodPayments", adjust: "prodAdjustments" }[e.kind])}:${h(e.id)}">취소</button>` : ""}</td></tr>`).join("")}
+      </tbody></table></div>`;
+  } else if (tab === "check") {
+    const mm = checks.mismatches || [];
+    body = `<p class="muted" style="font-size:12px">올해 상세내역 단가를 약속한 공임(VAT 별도)과 맞춰 봅니다. 운임·샘플은 빼고 봅니다.</p>
+      <h3>단가가 다른 줄 ${mm.length}</h3>
+      <div class="table-wrap"><table><thead><tr><th>날짜</th><th>품목</th><th>수량</th><th>청구 단가</th><th>약속 단가</th><th>차액</th></tr></thead><tbody>
+      ${mm.map((m) => `<tr><td>${h(m.date)}</td><td>${h(m.item)}</td><td class="num">${m.qty}</td><td class="num">${money.format(m.unitPrice)}</td><td class="num">${money.format(m.rate)}</td><td class="num ${m.diff > 0 ? "danger-text" : ""}">${money.format(m.diff)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">다른 줄이 없습니다.</td></tr>`}
+      </tbody></table></div>
+      <h3 style="margin-top:12px">공임표에 없는 품목 ${(checks.unknown || []).length}</h3>
+      <p>${(checks.unknown || []).map((u) => `<span class="badge muted">${h(u.item)} ${money.format(u.lastPrice)}</span>`).join(" ") || '<span class="muted">없음</span>'}</p>
+      <h3 style="margin-top:12px">상세 합계 ≠ 청구 ${(checks.totals || []).length}</h3>
+      <p>${(checks.totals || []).map((t) => `${h(t.date)} 상세 ${money.format(t.detail)} / 청구 ${money.format(t.billed)}`).join("<br>") || '<span class="muted">없음</span>'}</p>
+      <h3 style="margin-top:12px">공임표</h3>
+      <div class="table-wrap"><table><thead><tr><th>품목</th><th>옵션</th><th>단가(VAT별도)</th><th>시작일</th></tr></thead><tbody>
+      ${rates.map((r) => `<tr><td>${h(r.item)}</td><td>${h(r.option)}</td><td class="num">${money.format(r.unitPrice)}</td><td>${h(r.from || r.fromText || "")}</td></tr>`).join("")}
+      </tbody></table></div>
+      ${canEdit ? `<form class="form-grid" data-prod-rate style="margin-top:8px"><div class="field two"><div><label>품목</label><input name="item" required></div><div><label>옵션</label><input name="option"></div></div>
+        <div class="field two"><div><label>단가(VAT별도)</label><input name="unitPrice" inputmode="numeric" required></div><div><label>시작일</label><input type="date" name="from"></div></div>
+        <div class="toolbar"><button type="submit">공임 단가 추가</button></div></form>` : ""}`;
+  } else {
+    body = details.map((d) => `<div class="prod-detail"><strong>${h(d.date)}</strong> <span class="muted">합계 ${money.format(d.total || 0)}</span>
+      <table><tbody>${(d.lines || []).map((l) => `<tr><td>${h(l.item)}</td><td class="num">${l.qty}</td><td class="num">${money.format(l.unitPrice)}</td><td class="num">${money.format(l.gross || 0)}</td></tr>`).join("")}</tbody></table></div>`).join("")
+      || `<p class="muted">상세내역이 없습니다.</p>`;
+  }
+  return `
+    <div class="panel-head"><h2>${h(p.code || "")} ${h(p.name)}</h2><button data-prod-close>닫기</button></div>
+    <div class="panel-body">
+      <p>미지급 <strong>${money.format(s.balance)}원</strong> · 청구 ${money.format(s.billed)} · 지급 ${money.format(s.paid)}${p.bankAccount ? ` · <span class="muted">${h(p.bankName)} ${h(p.bankAccount)}</span>` : ""}</p>
+      <div class="npb-subnav">${sub.map(([k, l]) => `<button class="npb-subtab ${tab === k ? "active" : ""}" data-prod-tab="${k}">${l}</button>`).join("")}</div>
+      ${body}
+    </div>`;
+}
+
+function bindProdCost() {
+  const st = stockState();
+  if (!st.prod && !st.prodLoading) {
+    st.prodLoading = true;
+    loadProdCost().catch((e) => showToast(e.message, "error")).finally(() => { st.prodLoading = false; renderApp(); });
+    return;
+  }
+  const refresh = async (sel) => { await loadProdCost(sel); renderApp(); };
+  const run = async (fn, ok) => { try { await fn(); if (ok) showToast(ok); await refresh(); } catch (e) { showToast(e.message || "처리하지 못했습니다.", "error"); } };
+  app.querySelectorAll("[data-prod-open]").forEach((tr) => tr.addEventListener("click", () => refresh(tr.dataset.prodOpen).catch((e) => showToast(e.message, "error"))));
+  app.querySelector("[data-prod-close]")?.addEventListener("click", () => { st.prodSel = ""; st.prodDetail = null; renderApp(); });
+  app.querySelectorAll("[data-prod-tab]").forEach((b) => b.addEventListener("click", () => { st.prodTab = b.dataset.prodTab; renderApp(); }));
+  app.querySelector("[data-prod-import]")?.addEventListener("click", async () => {
+    if (!confirm("생산비 구글시트를 읽어 청구·지급·상세내역·공임표를 가져옵니다. 이미 가져온 줄은 덮어쓰고, 여기서 고치거나 취소한 줄은 그대로 둡니다. 진행할까요?")) return;
+    try {
+      const r = await api("/api/production/import-sheet", { method: "POST", body: {} });
+      showToast(`청구 ${r.bills}건, 지급 ${r.payments}건을 가져왔습니다. 확인 필요 질문 ${r.questions}건(새 질문 ${r.newQuestions}건).`);
+      await refresh();
+    } catch (e) { showToast(e.message || "가져오지 못했습니다.", "error"); }
+  });
+  app.querySelector("[data-prod-add]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = formObject(e.currentTarget);
+    run(() => api(`/api/production/partners/${st.prodSel}/${f.kind}`, { method: "POST", body: f }), "기록했습니다.");
+  });
+  app.querySelector("[data-prod-rate]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    run(() => api(`/api/production/partners/${st.prodSel}/rates`, { method: "POST", body: formObject(e.currentTarget) }), "공임 단가를 추가했습니다.");
+  });
+  app.querySelectorAll("[data-prod-void]").forEach((b) => b.addEventListener("click", () => {
+    if (!confirm("이 기록을 취소할까요? 기록은 남고 잔액에서만 빠집니다.")) return;
+    const [col, rid] = b.dataset.prodVoid.split(/:(.+)/);
+    run(() => api(`/api/production/${col}/${encodeURIComponent(rid)}/void`, { method: "POST", body: {} }), "취소했습니다.");
+  }));
+  app.querySelector("[data-prod-payreq]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = formObject(e.currentTarget);
+    run(async () => {
+      const r = await api(`/api/production/partners/${st.prodSel}/pay-request`, { method: "POST", body: f });
+      showToast(`지급요청 ${r.payment.code}을 만들었습니다. 지급요청 메뉴에서 확인·승인하세요.`);
+    });
+  });
+}
+
 function renderStock() {
   const st = stockState();
   const head = pageHead("생산·재고", "원부자재를 어디에 얼마나 넣었고, 생산에 얼마나 썼고, 얼마나 남았는지, 언제 얼마나 발주해야 하는지 봅니다.");
-  const tabs = `<div class="npb-subnav">${[["status", "재고현황"], ["moves", "입출고 기록"], ["runs", "생산 기록"], ["products", "제품 구성(BOM)"]].map(([k, l]) => `<button class="npb-subtab ${st.screen === k ? "active" : ""}" data-stock-screen="${k}">${l}</button>`).join("")}</div>`;
+  const tabs = `<div class="npb-subnav">${[["status", "재고현황"], ["moves", "입출고 기록"], ["runs", "생산 기록"], ["products", "제품 구성(BOM)"], ["cost", "생산비"]].map(([k, l]) => `<button class="npb-subtab ${st.screen === k ? "active" : ""}" data-stock-screen="${k}">${l}</button>`).join("")}</div>`;
+  if (st.screen === "cost") return `${head}${tabs}${renderProdCost()}`;
   if (!st.data) return `${head}${tabs}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   const body = { status: renderStockStatus, moves: renderStockMoves, runs: renderStockRuns, products: renderStockProducts }[st.screen] || renderStockStatus;
   return `${head}${tabs}${body()}`;
@@ -12264,6 +12409,11 @@ function renderStockProducts() {
 
 function bindStock() {
   const st = stockState();
+  if (st.screen === "cost") {
+    app.querySelectorAll("[data-stock-screen]").forEach((b) => b.addEventListener("click", () => { st.screen = b.dataset.stockScreen; renderApp(); }));
+    bindProdCost();
+    return;
+  }
   if (!st.data && !st.loading) { loadStock().then(renderApp); return; }
   const reload = async () => { await loadStock(); renderApp(); };
   const run = async (fn, ok) => { try { await fn(); if (ok) showToast(ok); await reload(); } catch (error) { showToast(error.message || "처리하지 못했습니다.", "error"); } };
@@ -12311,13 +12461,17 @@ async function loadSetup() {
   try { const res = await api("/api/setup/questions"); ss.list = res.questions || []; ss.brands = res.brands || []; }
   catch (error) { ss.list = []; ss.error = error.message; } finally { ss.loading = false; }
 }
-const SETUP_KIND_LABEL = { "claim-base": "채권총액", "request-deduction": "채권차감액", "amount-mismatch": "금액 차이", "tab-brand": "시트 탭 연결", "zero-deduction": "차감 방식", "channel-rule": "판매처 가격 방식", "channel-price": "판매처 단가" };
+const SETUP_KIND_LABEL = { "claim-base": "채권총액", "request-deduction": "채권차감액", "amount-mismatch": "금액 차이", "tab-brand": "시트 탭 연결", "zero-deduction": "차감 방식", "channel-rule": "판매처 가격 방식", "channel-price": "판매처 단가", "prod-balance": "생산비 잔금", "prod-rate-change": "공임 변경", "prod-rate-new": "공임 등록", "prod-total": "상세 합계" };
 
 function renderSetup() {
   const ss = setupState();
   const head = pageHead("확인 필요", "시스템이 스스로 정할 수 없는 값을 질문으로 모았습니다. 답하면 바로 적용되고, 누가 언제 무엇으로 답했는지 남습니다.");
   if (ss.list === null) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
-  const open = ss.list.filter((q) => q.status !== "answered");
+  // 큰돈이 걸린 것부터: 잔금·채권총액 → 차감·가격 방식 → 나머지.
+  const order = ["prod-balance", "claim-base", "zero-deduction", "channel-rule", "prod-rate-change", "request-deduction", "amount-mismatch",
+    "tab-brand", "channel-price", "prod-rate-new", "prod-total"];
+  const rank = (q) => { const i = order.indexOf(q.kind); return i === -1 ? order.length : i; };
+  const open = ss.list.filter((q) => q.status !== "answered").sort((a, b) => rank(a) - rank(b));
   const done = ss.list.filter((q) => q.status === "answered");
   const shown = ss.show === "open" ? open : done;
   const byKind = {};
