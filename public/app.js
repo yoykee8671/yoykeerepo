@@ -524,12 +524,12 @@ function splitDirectTotal(total, brand) {
   return { product: value, shipping: 0 };
 }
 
-function renderCreditBalance(value) {
+function renderCreditBalance(value, withUnit = true) {
   const n = Number(value || 0);
   if (!n) return `<span class="muted">-</span>`;
   const color = n > 0 ? "var(--green)" : "var(--red)";
   const prefix = n > 0 ? "+" : "";
-  return `<strong style="color:${color}">${prefix}${money.format(n)}원</strong>`;
+  return `<strong style="color:${color}">${prefix}${money.format(n)}${withUnit ? "원" : ""}</strong>`;
 }
 
 function discountKindLabel(value) {
@@ -1530,7 +1530,7 @@ function renderBrands() {
   const brandRows = filteredBrands();
   return `
     ${pageHead("브랜드", "시트별 업체 정보를 관리하고 공유 링크와 Google Sheets 아카이브 링크를 지정합니다.", `${state.admin?.role === "owner" ? `<button data-brand-info-upload>브랜드 설문 응답 올리기</button><input type="file" accept=".xlsx,.xls" data-brand-info-file hidden>` : ""}<button class="primary" data-new-brand>새 브랜드</button>`)}
-    <section class="layout">
+    <section class="layout brands-layout">
       <div class="panel">
         <div class="panel-head"><h2>브랜드 목록</h2><span class="muted">${money.format(brandRows.length)}개</span></div>
         <div class="panel-body" style="padding-bottom:0">
@@ -1538,15 +1538,15 @@ function renderBrands() {
           <div class="npb-subnav" style="margin:8px 0 0">${[["all", "전체"], ["active", "최근 6개월 거래"], ["dormant", `장기 미거래 ${(state.brandActivity?.dormant || []).length || ""}`]].map(([k, l]) => `<button class="npb-subtab ${(state.brandDormantFilter || "all") === k ? "active" : ""}" data-brand-dormant="${k}">${l}</button>`).join("")}</div>
         </div>
         <div class="table-wrap">
-          <table class="brands-table">
-            <thead><tr><th>브랜드</th><th>정산유형</th><th>요청</th><th>금액/채권잔액</th><th>외상잔액</th><th>사업자</th><th>프로모션</th><th>공유</th><th>작업</th></tr></thead>
+          <table class="compact brands-table" data-unit="원">
+            <thead><tr><th>브랜드</th><th>정산유형</th><th data-nounit="1">요청</th><th>금액/채권잔액</th><th>외상잔액</th><th>사업자</th><th>프로모션</th><th>공유</th><th>작업</th></tr></thead>
             <tbody>${brandRows.map(renderBrandRow).join("") || `<tr><td colspan="9" class="empty">표시할 브랜드가 없습니다.</td></tr>`}</tbody>
           </table>
         </div>
         <div class="panel-body">
           <h3 style="margin-top:0">프로모션 규칙 (수수료 / 가격할인)</h3>
           <div class="table-wrap" style="max-height:280px">
-            <table class="promotion-rules-table">
+            <table class="compact promotion-rules-table">
               <thead><tr><th>브랜드</th><th>프로모션</th><th>범위</th><th>수수료율</th><th>가격 할인</th><th>기간</th><th>상태</th><th>작업</th></tr></thead>
               <tbody>
                 ${rules.map((item) => `
@@ -1907,9 +1907,9 @@ function renderBrandRow(brand) {
     <tr>
       <td>${codeTag(brand)}${brand.starred ? "★ " : ""}${h(brand.name)}${(state.brandActivity?.dormant || []).includes(brand.id) && brand.type !== "reference" ? ` <span class="badge muted" title="마지막 입금요청 ${h(state.brandActivity?.lastRequest?.[brand.id] || "없음")}">장기 미거래</span>` : ""}</td>
       <td><span class="badge">${brand.type === "reference" ? "참고시트" : settlementLabel(brand.settlementType)}</span></td>
-      <td>${money.format(brand.requestCount || 0)}건</td>
-      <td>${brand.hasReceivable ? `${money.format(brand.receivableRemaining || 0)}원` : `${money.format(brand.totalAmount || 0)}원`}</td>
-      <td>${renderCreditBalance(brand.creditBalance)}</td>
+      <td class="num">${money.format(brand.requestCount || 0)}건</td>
+      <td class="num">${brand.hasReceivable ? money.format(brand.receivableRemaining || 0) : money.format(brand.totalAmount || 0)}</td>
+      <td class="num">${renderCreditBalance(brand.creditBalance, false)}</td>
       <td class="wrap">${h(brand.businessName || "-")}<br><span class="muted">${h(cutoffLabel(brand))}</span></td>
       <td class="wrap">${h(brand.promotionSummary || "-")}</td>
       <td><a href="${share}" target="_blank" rel="noreferrer">공유 보기</a></td>
@@ -2483,6 +2483,7 @@ async function ensureTabData() {
 
 function bindCurrentTab() {
   ensureTabData();
+  setTimeout(() => alignV2Tables(), 0);
   if (state.tab === "requests") bindRequests();
   if (state.tab === "prices") bindPrices();
   if (state.tab === "brands") bindBrands();
@@ -11286,7 +11287,7 @@ function renderPayments() {
           ${can("payments", "pay") ? `<button data-pay-transfer ${ps.selected.length ? "" : "disabled"}>하나은행 이체양식</button>` : ""}
           <span class="muted">선택 ${ps.selected.length}건${ps.selected.length ? ` · ${money.format(selectedTotal)}원` : ""}</span>
         </div>
-        <div class="table-wrap"><table class="payments-table">
+        <div class="table-wrap"><table class="compact payments-table" data-unit="원">
           <thead><tr><th></th><th>번호·상태</th><th>작성</th><th>받는 곳</th><th>내용</th><th>금액</th><th>일정</th><th>분류</th><th>영수증</th><th>처리</th></tr></thead>
           <tbody>${list}</tbody>
         </table></div>
@@ -11534,7 +11535,7 @@ function renderLoans() {
   const table = (key) => `
     <div class="panel" style="margin-bottom:14px">
       <div class="panel-head"><h2>${h(d.companies[key])}</h2><span class="muted">남은 대출금 <strong>${money.format(d.totals[key] || 0)}원</strong>${d.rehabTotals?.[key] ? ` · 회생채권으로 전환 ${money.format(d.rehabTotals[key])}원` : ""}</span></div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="compact" data-unit="원">
         <thead><tr><th>대출</th><th>남은 금액</th><th>다음 상환(추정)</th><th>만기</th></tr></thead>
         <tbody>${group(key).map((l) => `<tr class="${cs.loanSel === l.id ? "selected" : ""}" data-loan-open="${h(l.id)}">
           <td>${h(l.bank)} ${h(l.name)}<br><span class="muted" style="font-size:11px">연 ${l.rate || 0}% · 매월 ${h(l.payDay || "-")} · ${h(l.account || "")}${unconnected.has(l.id) ? ' · <span class="danger-text">클로브 미연결</span>' : ""}</span></td>
@@ -11549,10 +11550,8 @@ function renderLoans() {
       <label class="check"><input type="checkbox" data-loan-closed ${cs.loanShowClosed ? "checked" : ""}> 종료된 대출도 보기</label>
       <span class="muted" style="font-size:12px">${sync ? `마지막 상환 찾기 ${h(String(sync.at || "").slice(0, 16).replace("T", " "))} · ${sync.matched}건 반영${sync.unconnected?.length ? ` · 클로브에 출금계좌가 없는 대출 ${sync.unconnected.length}건은 직접 입력하세요` : ""}` : "상환은 클로브 출금 거래에서 자동으로 찾습니다. 출금계좌가 클로브에 없으면 직접 입력합니다."}</span>
     </div>
-    <section class="layout pricing-layout loans-layout">
-      <div>${Object.keys(d.companies).map(table).join("")}</div>
-      <div class="panel">${cs.loanDetail ? renderLoanDetail() : `<div class="panel-body"><p class="muted">대출을 고르면 상환 기록과 정보가 보입니다. 상환 예정은 자금보고 7일 일정에 자동으로 들어갑니다.</p></div>`}</div>
-    </section>`;
+    <section class="v2-wide">${Object.keys(d.companies).map(table).join("")}</section>
+    ${cs.loanDetail ? v2Modal(renderLoanDetail(), "data-loan-close") : ""}`;
 }
 
 function renderLoanDetail() {
@@ -11571,7 +11570,7 @@ function renderLoanDetail() {
         <div class="field two"><div><label>원금</label><input name="principal" inputmode="numeric" value="${l.expected?.principal ? money.format(l.expected.principal) : ""}"></div><div><label>이자</label><input name="interest" inputmode="numeric" value="${l.expected?.interest ? money.format(l.expected.interest) : ""}"></div></div>
         <div class="toolbar"><button class="primary" type="submit">기록</button></div></form>` : ""}
       <h3 style="margin-top:12px">상환 기록</h3>
-      <div class="table-wrap"><table><thead><tr><th>날짜</th><th>원금</th><th>이자</th><th>근거</th><th></th></tr></thead><tbody>
+      <div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>날짜</th><th>원금</th><th>이자</th><th>근거</th><th></th></tr></thead><tbody>
         ${payments.map((p) => `<tr class="${p.voided ? "muted" : ""}"><td>${h(p.date)}</td><td class="num">${money.format(p.principal || 0)}</td><td class="num">${money.format(p.interest || 0)}</td>
           <td class="muted" style="font-size:11px">${h(p.source || "")} ${h(p.memo || "")}${p.voided ? " · 취소됨" : ""}</td>
           <td>${canEdit && !p.voided ? `<button data-loan-pay-void="${h(p.id)}">취소</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">아직 기록이 없습니다.</td></tr>`}
@@ -11601,6 +11600,7 @@ function bindLoans() {
   }
   const refresh = async (sel) => { await load(sel); renderApp(); };
   const run = async (fn, ok) => { try { const r = await fn(); if (ok) showToast(typeof ok === "function" ? ok(r) : ok); await refresh(); } catch (e) { showToast(e.message || "처리하지 못했습니다.", "error"); } };
+  bindV2Modal();
   app.querySelectorAll("[data-loan-open]").forEach((tr) => tr.addEventListener("click", () => refresh(tr.dataset.loanOpen).catch((e) => showToast(e.message, "error"))));
   app.querySelector("[data-loan-close]")?.addEventListener("click", () => { cs.loanSel = ""; cs.loanDetail = null; renderApp(); });
   app.querySelector("[data-loan-closed]")?.addEventListener("change", (e) => { cs.loanShowClosed = e.target.checked; renderApp(); });
@@ -11639,18 +11639,19 @@ function renderRehab() {
       ${state.admin?.role === "owner" ? `<button data-rehab-import>변제계획표 다시 가져오기</button>` : ""}
       <span class="muted" style="font-size:12px">채권총액 ${money.format(t.total)}원 · 80% 출자전환(특수관계인 100%), 나머지를 2026~2035년 해마다 연말까지 현금변제(조세는 2028년까지) · ${cats}</span>
     </div>
-    <section class="panel"><div class="table-wrap"><table>
+    <section class="panel"><div class="table-wrap"><table class="compact fit" data-unit="원">
       <thead><tr><th>연도</th><th>계획 변제액</th><th>미리 낸 돈</th><th>지급 기록</th><th>남은 금액</th><th>기한</th><th>상태</th></tr></thead>
       <tbody>${d.years.map((y) => `<tr class="${y.year === d.year ? "selected" : ""}" data-rehab-year="${y.year}">
         <td>${y.year}년</td><td class="num">${money.format(y.planned)}</td>
-        <td class="num">${y.prepaid ? `${money.format(y.prepaid)}<br><span class="muted" style="font-size:11px">2025년 선변제(실제 ${money.format(y.prepaidPaid)}, 현가할인 4.4%)</span>` : ""}</td>
+        <td class="num">${y.prepaid ? `<span title="2025년에 2026년분 50% 선변제(조기졸업 조건). 실제 낸 돈 ${money.format(y.prepaidPaid)}원(현가할인 4.4%)">${money.format(y.prepaid)} <span class="muted">*</span></span>` : ""}</td>
         <td class="num">${y.paid ? money.format(y.paid) : ""}</td><td class="num"><strong>${money.format(y.due)}</strong></td>
         <td>${h(y.dueDate)}</td><td><span class="badge ${REHAB_STATUS[y.status][1]}">${REHAB_STATUS[y.status][0]}</span></td></tr>`).join("")}</tbody>
-    </table></div></section>
-    <section class="layout pricing-layout" style="margin-top:14px">
+    </table></div>
+    ${d.years.some((y) => y.prepaid) ? `<p class="muted" style="font-size:12px;margin:6px 12px">* 2026년분 50%를 2025년에 미리 냄(조기졸업 조건). 실제 낸 돈은 현가할인 4.4%를 적용한 ${money.format(d.years.find((y) => y.prepaid).prepaidPaid)}원.</p>` : ""}</section>
+    <section class="rehab-bottom">
       <div class="panel">
-        <div class="panel-head"><h2>${h(d.year)}년 채권자별</h2><span class="muted">${d.creditors.length}곳</span></div>
-        <div class="table-wrap"><table>
+        <div class="panel-head"><h2>${h(d.year)}년 채권자별</h2><span class="muted">${d.creditors.length}곳 · 연도를 누르면 바뀝니다</span></div>
+        <div class="table-wrap" style="max-height:560px"><table class="compact" data-unit="원">
           <thead><tr><th>채권자</th><th>구분</th><th>계획</th><th>미리 낸 돈</th><th>남은 금액</th></tr></thead>
           <tbody>${d.creditors.map((c) => `<tr><td class="wrap">${h(c.creditor)}${c.biz ? `<br><span class="muted" style="font-size:11px">${h(c.biz)}</span>` : ""}</td>
             <td style="font-size:12px">${h(c.cat)}</td><td class="num">${money.format(c.planned)}</td><td class="num">${c.prepaid ? money.format(c.prepaid) : ""}</td>
@@ -11664,7 +11665,7 @@ function renderRehab() {
             <div class="field two"><div><label>연도</label><input name="year" value="${h(d.year)}"></div><div><label>지급일</label><input type="date" name="date" value="${new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10)}"></div></div>
             <div class="field two"><div><label>금액</label><input name="amount" inputmode="numeric" value="${cur.due ? money.format(cur.due) : ""}"></div><div><label>메모</label><input name="memo" placeholder="예: 채권자 67곳 일괄 이체"></div></div>
             <div class="toolbar"><button class="primary" type="submit">지급 기록</button></div></form>` : ""}
-          <div class="table-wrap"><table><thead><tr><th>연도</th><th>지급일</th><th>금액</th><th>메모</th><th></th></tr></thead><tbody>
+          <div class="table-wrap"><table class="compact tight" data-unit="원"><thead><tr><th>연도</th><th>지급일</th><th>금액</th><th>메모</th><th></th></tr></thead><tbody>
             ${d.payments.map((p) => `<tr><td>${h(p.year)}</td><td>${h(p.date)}</td><td class="num">${money.format(p.amount)}</td><td class="wrap">${h(p.memo || "")}</td>
               <td>${d.canEdit ? `<button data-rehab-void="${h(p.id)}">취소</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">2025년 선변제는 계획표 값으로 반영돼 있습니다. 연말에 낸 뒤 여기에 기록하세요.</td></tr>`}
           </tbody></table></div>
@@ -11715,13 +11716,13 @@ function renderCashReport() {
       <div class="panel">
         <div class="panel-head"><h2>오늘 ${h(cashDay(r.start))}</h2><span class="muted">현 잔액 <strong>${r.openingBalance == null ? "-" : `${money.format(r.openingBalance)}원`}</strong></span></div>
         <div class="panel-body cash-two">
-          <div><h3 class="cash-in">들어올 돈 ${money.format(r.today.cashIn)}원</h3><table class="cash-table"><tbody>${itemRows(r.today.items, "in")}</tbody></table></div>
-          <div><h3 class="cash-out">나갈 돈 ${money.format(r.today.cashOut)}원</h3><table class="cash-table"><tbody>${itemRows(r.today.items, "out")}</tbody></table></div>
+          <div><h3 class="cash-in">들어올 돈 ${money.format(r.today.cashIn)}원</h3><table class="compact cash-table" data-unit="원"><tbody>${itemRows(r.today.items, "in")}</tbody></table></div>
+          <div><h3 class="cash-out">나갈 돈 ${money.format(r.today.cashOut)}원</h3><table class="compact cash-table" data-unit="원"><tbody>${itemRows(r.today.items, "out")}</tbody></table></div>
         </div>
       </div>
       <div class="panel">
         <div class="panel-head"><h2>계좌 잔액</h2><span class="muted">클로브 · ${fund ? `${h(fund.transactionDate)} 기준 어제 +${money.format(fund.cashIn || 0)} / ${money.format(fund.cashOut || 0)}` : ""}</span></div>
-        <div class="table-wrap"><table class="cash-table"><tbody>
+        <div class="table-wrap"><table class="compact cash-table" data-unit="원"><tbody>
           ${accounts.map((a) => `<tr><td>${h(a.name)}<br><span class="muted" style="font-size:11px">${h(a.number || "")}</span></td><td class="num">${money.format(a.balance)}</td></tr>`).join("") || `<tr><td class="empty">잔액 정보 없음</td></tr>`}
         </tbody></table></div>
         ${fund?.summaryText ? `<div class="panel-body"><p class="muted" style="white-space:pre-line;font-size:12px">${h(fund.summaryText)}</p></div>` : ""}
@@ -11729,7 +11730,7 @@ function renderCashReport() {
     </section>
     <section class="panel">
       <div class="panel-head"><h2>7일 예정</h2><span class="muted">들어올 돈 ${money.format(r.weekIn)}원 · 나갈 돈 ${money.format(r.weekOut)}원${r.shortfallDate ? ` · <strong class="danger-text">⚠ ${h(cashDay(r.shortfallDate))} 잔액 부족</strong>` : ""}</span></div>
-      <div class="table-wrap"><table class="cash-table">
+      <div class="table-wrap"><table class="compact cash-table" data-unit="원">
         <thead><tr><th>날짜</th><th>들어올 돈</th><th>나갈 돈</th><th>예상 잔액</th><th>내역</th></tr></thead>
         <tbody>${r.days.map((d) => `<tr class="${d.balance != null && d.balance < 0 ? "cash-short" : ""}">
           <td>${h(cashDay(d.date))}</td><td class="num">${d.cashIn ? money.format(d.cashIn) : ""}</td><td class="num">${d.cashOut ? money.format(d.cashOut) : ""}</td>
@@ -11757,7 +11758,7 @@ function renderCashSchedules() {
     <section class="layout">
       <div class="panel">
         <div class="panel-head"><h2>자금 일정</h2><span class="muted">${list.length}건 · 고정비·급여·대출상환·정산 입금 등</span></div>
-        <div class="table-wrap"><table class="cash-table">
+        <div class="table-wrap"><table class="compact cash-table" data-unit="원">
           <thead><tr><th>구분</th><th>항목</th><th>분류</th><th>언제</th><th>금액</th><th>방식</th><th></th></tr></thead>
           <tbody>${list.map((s) => `<tr class="${s.active === false ? "muted" : ""}">
             <td>${s.direction === "in" ? `<span class="cash-in">들어옴</span>` : `<span class="cash-out">나감</span>`}</td>
@@ -11816,6 +11817,8 @@ function bindCash() {
     cs.recDetail = await api(`/api/receivables/${tr.dataset.recOpen}`);
     renderApp();
   }));
+  app.querySelector("[data-rec-close]")?.addEventListener("click", () => { cs.recDetail = null; renderApp(); });
+  bindV2Modal();
   app.querySelectorAll("[data-cash-company]").forEach((b) => b.addEventListener("click", async () => { cs.company = b.dataset.cashCompany; cs.editing = null; await reload(); }));
   app.querySelector("[data-cash-reload]")?.addEventListener("click", reload);
   app.querySelector("[data-cash-print]")?.addEventListener("click", () => window.print());
@@ -11938,7 +11941,7 @@ function renderSales() {
           <div class="npb-subnav" style="margin:0">${filters.filter(([k]) => ["open", "on_hold", "cancelled", "all"].includes(k)).map(([k, l]) => `<button class="npb-subtab ${ss.filter === k ? "active" : ""}" data-sales-filter="${k}">${l}</button>`).join("")}</div>
           ${can("sales", "create") ? `<button class="primary" data-sales-new>새 주문</button>` : ""}
         </div>
-        <div class="table-wrap"><table class="sales-table">
+        <div class="table-wrap"><table class="compact sales-table" data-unit="원">
           <thead><tr><th>번호</th><th>주문일</th><th>거래처</th><th>내용</th><th>금액</th><th>단계</th><th>다음 할 일</th></tr></thead>
           <tbody>${rows.map((o) => `<tr class="${ss.selectedId === o.id ? "selected" : ""}" data-sales-open="${o.id}">
             <td><span class="code-tag">${h(o.code)}</span></td><td>${h(String(o.orderDate || "").slice(5))}</td>
@@ -12155,6 +12158,51 @@ function bindSales() {
 // ===========================================================================
 const PRICE_SOURCE_LABEL = { exception: "예외", rule: "규칙", list: "정가" };
 
+// v2 화면 공통: 상세는 팝업으로 띄운다(목록은 넓게, 좌우 스크롤 없이). closeAttr 은 닫기 버튼의 data- 속성.
+function v2Modal(inner, closeAttr) {
+  return `<div class="v2-modal-backdrop" data-modal-close="${closeAttr}"><div class="v2-modal panel" role="dialog" aria-modal="true">${inner}</div></div>`;
+}
+// 팝업 바깥을 누르거나 Esc 를 누르면 닫기 버튼을 누른 것처럼.
+function bindV2Modal() {
+  const bd = app.querySelector(".v2-modal-backdrop");
+  if (!bd) return;
+  const close = () => bd.querySelector(`[${bd.dataset.modalClose}]`)?.click();
+  bd.addEventListener("click", (e) => { if (e.target === bd) close(); });
+  if (!window.__v2EscBound) {
+    window.__v2EscBound = true;
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      const b = document.querySelector(".v2-modal-backdrop");
+      b?.querySelector(`[${b.dataset.modalClose}]`)?.click();
+    });
+  }
+}
+// 표 머리글을 값 정렬에 맞춘다: 숫자 열이면 머리글도 오른쪽, 금액 표(data-unit)면 '원' 표시.
+function alignV2Tables(root = app) {
+  root.querySelectorAll("table.compact").forEach((t) => {
+    const head = t.tHead?.rows?.[0];
+    const body = t.tBodies?.[0];
+    if (!head || !body) return;
+    [...head.cells].forEach((th, i) => {
+      const cells = [...body.rows].map((r) => r.cells[i]).filter(Boolean);
+      const nums = cells.filter((c) => c.classList.contains("num")).length;
+      if (cells.length && nums >= cells.length / 2) {
+        th.classList.add("num");
+        // 클로브처럼 금액 칸마다 '원'을 붙인다(머리글이 아니라 값에).
+        if (t.dataset.unit && !th.dataset.nounit) {
+          for (const c of cells) {
+            if (!c.classList.contains("num") || c.dataset.unitDone) continue;
+            c.dataset.unitDone = "1";
+            const walker = document.createTreeWalker(c, NodeFilter.SHOW_TEXT);
+            const first = walker.nextNode();
+            if (first && /^\s*[+-]?[\d,]+\s*$/.test(first.nodeValue) && /\d/.test(first.nodeValue)) first.nodeValue = `${first.nodeValue.trim()}${t.dataset.unit}`;
+          }
+        }
+      }
+    });
+  });
+}
+
 async function loadPricing(selectId) {
   const ss = salesState();
   ss.pricing = await api("/api/pricing");
@@ -12176,17 +12224,18 @@ function renderPricing() {
     <td class="num">${c.feeRate ? `${Math.round(c.feeRate * 100) / 100}%` : ""}</td>
     <td class="num">${c.missing ? `<span class="danger-text">${c.missing}</span>` : ""}</td></tr>`).join("");
   return `${head}
-    <section class="layout pricing-layout">
+    <section class="v2-wide">
       <div class="panel">
         <div class="panel-head"><h2>판매처</h2>
           ${p.canEdit ? `<div class="toolbar"><button data-pricing-seed>NPB 채널에서 가져오기</button><button class="primary" data-pricing-new>판매처 추가</button></div>` : ""}</div>
-        <div class="table-wrap"><table>
+        <div class="table-wrap"><table class="compact">
           <thead><tr><th>코드</th><th>판매처</th><th>기본 가격</th><th>수수료</th><th>가격 없음</th></tr></thead>
           <tbody>${rows || `<tr><td colspan="5" class="empty">판매처가 없습니다. 'NPB 채널에서 가져오기'로 시작하세요. 모르는 칸은 '확인 필요'에 질문으로 쌓입니다.</td></tr>`}</tbody>
         </table></div>
       </div>
-      <div class="panel">${ss.pricingSel === "new" ? renderPricingChannelForm({}) : ss.pricingSheet ? renderPricingSheet() : `<div class="panel-body"><p class="muted">판매처를 고르면 품목별 가격이 보입니다.</p></div>`}</div>
-    </section>`;
+    </section>
+    ${ss.pricingSel === "new" ? v2Modal(`<div class="panel-head"><h2>판매처 추가</h2><button data-pricing-close>닫기</button></div><div class="panel-body">${renderPricingChannelForm({})}</div>`, "data-pricing-close")
+      : ss.pricingSheet ? v2Modal(renderPricingSheet(), "data-pricing-close") : ""}`;
 }
 
 function renderPricingChannelForm(c) {
@@ -12220,8 +12269,8 @@ function renderPricingSheet() {
     <div class="panel-body">
       ${canEdit ? `<details ${c.pricingMode ? "" : "open"}><summary>기본 규칙 고치기</summary>${renderPricingChannelForm(c)}</details>` : ""}
       <h3 style="margin-top:16px">품목별 가격 <span class="muted" style="font-weight:400;font-size:12px">${h(date)} 기준 · ${c.vatMode === "excluded" ? "단가는 VAT 별도" : "단가는 VAT 포함"}</span></h3>
-      <div class="table-wrap"><table>
-        <thead><tr><th>품목</th><th>정가</th><th>단가</th><th>공급가</th><th>세액</th><th>수수료</th><th>근거</th></tr></thead>
+      <div class="table-wrap"><table class="compact" data-unit="원">
+        <thead><tr><th>품목</th><th>정가</th><th>단가</th><th>공급가</th><th>세액</th><th data-nounit="1">수수료</th><th>근거</th></tr></thead>
         <tbody>${rows.map((r) => `<tr>
           <td class="wrap pricing-item">${h(r.name)}</td><td class="num">${money.format(r.listPrice || 0)}</td>
           ${r.status === "ok" ? `<td class="num"><strong>${money.format(r.unitPrice)}</strong></td><td class="num">${money.format(r.supply)}</td><td class="num">${money.format(r.vat)}</td>`
@@ -12242,7 +12291,7 @@ function renderPricingSheet() {
         <div class="toolbar"><button class="primary" type="submit">예외 저장</button></div>
       </form>` : ""}
       <h3 style="margin-top:16px">예외 목록</h3>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="compact">
         <thead><tr><th>품목</th><th>내용</th><th>기간</th><th>근거</th><th></th></tr></thead>
         <tbody>${exceptions.map((x) => `<tr class="${x.active === false ? "muted" : ""}">
           <td class="wrap">${h(x.itemName || (items.find((it) => it.ref === x.itemRef) || {}).name || x.itemRef)}</td>
@@ -12262,6 +12311,7 @@ function bindPricing() {
     return;
   }
   const refresh = async (sel) => { await loadPricing(sel); renderApp(); };
+  bindV2Modal();
   app.querySelectorAll("[data-pricing-open]").forEach((tr) => tr.addEventListener("click", () => refresh(tr.dataset.pricingOpen).catch((e) => showToast(e.message, "error"))));
   app.querySelector("[data-pricing-close]")?.addEventListener("click", () => { ss.pricingSel = ""; ss.pricingSheet = null; renderApp(); });
   app.querySelector("[data-pricing-new]")?.addEventListener("click", () => { ss.pricingSel = "new"; ss.pricingSheet = null; renderApp(); });
@@ -12365,19 +12415,25 @@ function renderMonthly() {
       <div class="sales-step"><span>확인 / 정산서 발송</span><strong>${t.checked || 0} / ${t.sent || 0} <span class="muted" style="font-size:12px">(${d.rows.length}곳)</span></strong></div>
       ${t.diffs ? `<div class="sales-step"><span>시트와 다름</span><strong class="danger-text">${t.diffs}곳</strong></div>` : ""}
     </section>
-    <section class="panel"><div class="table-wrap"><table class="monthly-table">
-      <thead><tr><th>브랜드</th><th>건수</th><th>매출</th><th>배송비</th><th>회수</th><th>마진</th><th>확인</th><th>발행요청</th><th>정산서 발송</th><th>메모 / 수정요청</th></tr></thead>
+    <section class="panel"><div class="table-wrap"><table class="compact monthly-table" data-unit="원">
+      <thead><tr><th>브랜드</th><th data-nounit="1">건수</th><th>매출</th><th>배송비</th><th>회수</th><th>마진</th><th class="center">확인</th><th class="center">발행요청</th><th class="center">정산서 발송</th><th>메모 / 수정요청</th></tr></thead>
       <tbody>${rows.map((r) => `<tr>
         <td>${r.code ? `<span class="code-tag">${h(r.code)}</span> ` : ""}${h(r.brandName)}<br><span class="muted" style="font-size:11px">${h(/^[a-z_]+$/.test(r.kind || "") ? settlementLabel(r.kind) : (r.kind || ""))}${r.source === "manual" ? " · 직접 입력" : r.source === "sheet-only" ? " · 시트 값만" : ""}</span></td>
         <td class="num">${r.count || ""}</td>${cell(r, "sales")}${cell(r, "shipping")}${cell(r, "recovered")}${cell(r, "margin")}
-        <td>${chk(r, "checked")}</td><td>${chk(r, "invoiceRequested")}</td><td>${chk(r, "sent")}</td>
-        <td class="wrap">${ms.editing === r.brandId ? `<form data-monthly-edit="${h(r.brandId)}" class="form-grid">
-            <input name="memo" value="${h(r.memo)}" placeholder="메모"><input name="fixRequest" value="${h(r.fixRequest)}" placeholder="수정요청">
-            ${r.source !== "requests" ? `<div class="field two">${["sales", "shipping", "recovered", "margin"].map((f) => `<div><label>${MONTHLY_FIELD_LABEL[f]}</label><input name="m_${f}" inputmode="numeric" value="${r[f] ? money.format(r[f]) : ""}"></div>`).join("")}</div>` : ""}
-            <div class="toolbar"><button class="primary" type="submit">저장</button><button type="button" data-monthly-cancel>취소</button></div></form>`
-          : `${h(r.memo)}${r.fixRequest ? `<br><span class="danger-text">${h(r.fixRequest)}</span>` : ""}${d.canEdit ? ` <button class="ghost" data-monthly-open="${h(r.brandId)}">고치기</button>` : ""}`}</td>
+        <td class="center">${chk(r, "checked")}</td><td class="center">${chk(r, "invoiceRequested")}</td><td class="center">${chk(r, "sent")}</td>
+        <td class="wrap memo-cell">${h(r.memo)}${r.fixRequest ? `<br><span class="danger-text">${h(r.fixRequest)}</span>` : ""}${d.canEdit ? ` <button class="ghost small" data-monthly-open="${h(r.brandId)}">고치기</button>` : ""}</td>
       </tr>`).join("") || `<tr><td colspan="10" class="empty">이 달 내역이 없습니다.</td></tr>`}</tbody>
-    </table></div></section>`;
+    </table></div></section>
+    ${(() => {
+      const r = d.rows.find((x) => x.brandId === ms.editing);
+      if (!r) return "";
+      return v2Modal(`<div class="panel-head"><h2>${h(r.brandName)} · ${h(d.month)}</h2><button data-monthly-cancel>닫기</button></div>
+        <div class="panel-body"><form data-monthly-edit="${h(r.brandId)}" class="form-grid">
+          <div class="field"><label>메모</label><input name="memo" value="${h(r.memo)}"></div>
+          <div class="field"><label>수정요청</label><input name="fixRequest" value="${h(r.fixRequest)}"></div>
+          ${r.source !== "requests" ? `<p class="muted" style="font-size:12px">입금요청이 없는 브랜드라 숫자를 직접 적습니다(원).</p><div class="field two">${["sales", "shipping", "recovered", "margin"].map((f) => `<div><label>${MONTHLY_FIELD_LABEL[f]}</label><input name="m_${f}" inputmode="numeric" value="${r[f] ? money.format(r[f]) : ""}"></div>`).join("")}</div>` : `<p class="muted" style="font-size:12px">숫자는 입금요청에서 계산합니다. 틀리면 입금요청을 고치세요.</p>`}
+          <div class="toolbar"><button class="primary" type="submit">저장</button></div></form></div>`, "data-monthly-cancel");
+    })()}`;
 }
 
 function bindMonthly() {
@@ -12393,6 +12449,7 @@ function bindMonthly() {
     const [brandId, key] = el.dataset.monthlyCheck.split(":");
     put(brandId, { [key]: el.checked });
   }));
+  bindV2Modal();
   app.querySelectorAll("[data-monthly-open]").forEach((b) => b.addEventListener("click", () => { ms.editing = b.dataset.monthlyOpen; renderApp(); }));
   app.querySelector("[data-monthly-cancel]")?.addEventListener("click", () => { ms.editing = ""; renderApp(); });
   app.querySelector("[data-monthly-edit]")?.addEventListener("submit", (e) => {
@@ -12488,16 +12545,16 @@ function renderProdCost() {
       <div class="sales-step"><span>우프 생산비 미지급</span><strong>${money.format(d.total)}원</strong></div>
       <div class="sales-step"><span>60일 넘은 미지급</span><strong class="${d.over60 ? "danger-text" : ""}">${money.format(d.over60)}원</strong></div>
     </section>
-    <section class="layout pricing-layout">
+    <section class="v2-wide">
       <div class="panel">
         <div class="panel-head"><h2>생산처</h2>${d.canEdit ? `<button data-prod-import>생산비 시트에서 가져오기</button>` : ""}</div>
-        <div class="table-wrap"><table>
+        <div class="table-wrap"><table class="compact" data-unit="원">
           <thead><tr><th>생산처</th><th>미지급</th><th>60일 넘음</th><th>가장 오래된 청구</th><th>마지막 지급</th></tr></thead>
           <tbody>${rows || `<tr><td colspan="5" class="empty">아직 기록이 없습니다. '생산비 시트에서 가져오기'로 시작하세요.</td></tr>`}</tbody>
         </table></div>
       </div>
-      <div class="panel">${st.prodDetail ? renderProdPartner() : `<div class="panel-body"><p class="muted">생산처를 고르면 원장·미지급 청구·공임 대조가 보입니다.</p></div>`}</div>
-    </section>`;
+    </section>
+    ${st.prodDetail ? v2Modal(renderProdPartner(), "data-prod-close") : ""}`;
 }
 
 function renderProdPartner() {
@@ -12508,7 +12565,7 @@ function renderProdPartner() {
   const sub = [["open", `미지급 ${open.length}`], ["ledger", "원장"], ["check", `공임 대조 ${(checks.mismatches || []).length + (checks.unknown || []).length}`], ["details", "상세내역"]];
   let body = "";
   if (tab === "open") {
-    body = `<div class="table-wrap"><table><thead><tr><th>청구일</th><th>내용</th><th>남은 금액</th><th>경과</th></tr></thead><tbody>
+    body = `<div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>청구일</th><th>내용</th><th>남은 금액</th><th>경과</th></tr></thead><tbody>
       ${open.map((b) => `<tr><td>${h(b.date)}</td><td class="wrap">${h(b.memo || (b.lines || []).map((l) => l.item).join(", "))}${b.partial ? ' <span class="badge muted">일부 지급</span>' : ""}</td>
         <td class="num">${money.format(b.remaining)}</td><td class="${b.ageDays > 60 ? "danger-text" : ""}">${b.ageDays}일</td></tr>`).join("") || `<tr><td colspan="4" class="empty">미지급 청구가 없습니다.</td></tr>`}
     </tbody></table></div>
@@ -12523,7 +12580,7 @@ function renderProdPartner() {
         <div><label>날짜</label><input type="date" name="date" value="${h(new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10))}"></div></div>
       <div class="field two"><div><label>금액(VAT 포함)</label><input name="amount" inputmode="numeric" required></div><div><label>메모</label><input name="memo"></div></div>
       <div class="toolbar"><button class="primary" type="submit">기록</button></div></form>` : ""}
-      <div class="table-wrap"><table><thead><tr><th>날짜</th><th>구분</th><th>내용</th><th>금액</th><th>잔액</th><th></th></tr></thead><tbody>
+      <div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>날짜</th><th>구분</th><th>내용</th><th>금액</th><th>잔액</th><th></th></tr></thead><tbody>
       ${entries.map((e) => `<tr><td>${h(e.date)}</td><td>${PROD_KIND_LABEL[e.kind]}${e.assumed ? ' <span class="badge muted">추정</span>' : ""}</td><td class="wrap">${h(e.memo)}</td>
         <td class="num">${money.format(e.amount)}</td><td class="num">${money.format(e.balance)}</td>
         <td>${canEdit ? `<button data-prod-void="${h({ bill: "prodBills", payment: "prodPayments", adjust: "prodAdjustments" }[e.kind])}:${h(e.id)}">취소</button>` : ""}</td></tr>`).join("")}
@@ -12532,7 +12589,7 @@ function renderProdPartner() {
     const mm = checks.mismatches || [];
     body = `<p class="muted" style="font-size:12px">올해 상세내역 단가를 약속한 공임(VAT 별도)과 맞춰 봅니다. 운임·샘플은 빼고 봅니다.</p>
       <h3>단가가 다른 줄 ${mm.length}</h3>
-      <div class="table-wrap"><table><thead><tr><th>날짜</th><th>품목</th><th>수량</th><th>청구 단가</th><th>약속 단가</th><th>차액</th></tr></thead><tbody>
+      <div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>날짜</th><th>품목</th><th data-nounit="1">수량</th><th>청구 단가</th><th>약속 단가</th><th>차액</th></tr></thead><tbody>
       ${mm.map((m) => `<tr><td>${h(m.date)}</td><td>${h(m.item)}</td><td class="num">${m.qty}</td><td class="num">${money.format(m.unitPrice)}</td><td class="num">${money.format(m.rate)}</td><td class="num ${m.diff > 0 ? "danger-text" : ""}">${money.format(m.diff)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">다른 줄이 없습니다.</td></tr>`}
       </tbody></table></div>
       <h3 style="margin-top:12px">공임표에 없는 품목 ${(checks.unknown || []).length}</h3>
@@ -12540,7 +12597,7 @@ function renderProdPartner() {
       <h3 style="margin-top:12px">상세 합계 ≠ 청구 ${(checks.totals || []).length}</h3>
       <p>${(checks.totals || []).map((t) => `${h(t.date)} 상세 ${money.format(t.detail)} / 청구 ${money.format(t.billed)}`).join("<br>") || '<span class="muted">없음</span>'}</p>
       <h3 style="margin-top:12px">공임표</h3>
-      <div class="table-wrap"><table><thead><tr><th>품목</th><th>옵션</th><th>단가(VAT별도)</th><th>시작일</th></tr></thead><tbody>
+      <div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>품목</th><th>옵션</th><th>단가(VAT별도)</th><th>시작일</th></tr></thead><tbody>
       ${rates.map((r) => `<tr><td>${h(r.item)}</td><td>${h(r.option)}</td><td class="num">${money.format(r.unitPrice)}</td><td>${h(r.from || r.fromText || "")}</td></tr>`).join("")}
       </tbody></table></div>
       ${canEdit ? `<form class="form-grid" data-prod-rate style="margin-top:8px"><div class="field two"><div><label>품목</label><input name="item" required></div><div><label>옵션</label><input name="option"></div></div>
@@ -12548,7 +12605,7 @@ function renderProdPartner() {
         <div class="toolbar"><button type="submit">공임 단가 추가</button></div></form>` : ""}`;
   } else {
     body = details.map((d) => `<div class="prod-detail"><strong>${h(d.date)}</strong> <span class="muted">합계 ${money.format(d.total || 0)}</span>
-      <table><tbody>${(d.lines || []).map((l) => `<tr><td>${h(l.item)}</td><td class="num">${l.qty}</td><td class="num">${money.format(l.unitPrice)}</td><td class="num">${money.format(l.gross || 0)}</td></tr>`).join("")}</tbody></table></div>`).join("")
+      <table class="compact" data-unit="원"><tbody>${(d.lines || []).map((l) => `<tr><td>${h(l.item)}</td><td class="num">${l.qty}</td><td class="num">${money.format(l.unitPrice)}</td><td class="num">${money.format(l.gross || 0)}</td></tr>`).join("")}</tbody></table></div>`).join("")
       || `<p class="muted">상세내역이 없습니다.</p>`;
   }
   return `
@@ -12569,6 +12626,7 @@ function bindProdCost() {
   }
   const refresh = async (sel) => { await loadProdCost(sel); renderApp(); };
   const run = async (fn, ok) => { try { await fn(); if (ok) showToast(ok); await refresh(); } catch (e) { showToast(e.message || "처리하지 못했습니다.", "error"); } };
+  bindV2Modal();
   app.querySelectorAll("[data-prod-open]").forEach((tr) => tr.addEventListener("click", () => refresh(tr.dataset.prodOpen).catch((e) => showToast(e.message, "error"))));
   app.querySelector("[data-prod-close]")?.addEventListener("click", () => { st.prodSel = ""; st.prodDetail = null; renderApp(); });
   app.querySelectorAll("[data-prod-tab]").forEach((b) => b.addEventListener("click", () => { st.prodTab = b.dataset.prodTab; renderApp(); }));
@@ -12635,7 +12693,7 @@ function renderStockStatus() {
     <section class="layout">
       <div class="panel">
         <div class="panel-head"><h2>재고현황</h2><span class="muted">${d.status.length}개 품목 · 입출고나 제품 구성에 쓰인 원부자재만 보여요</span></div>
-        <div class="table-wrap"><table class="stock-table">
+        <div class="table-wrap"><table class="compact stock-table">
           <thead><tr><th>원부자재</th><th>보관처별</th><th>보유</th><th>쓸 예정</th><th>쓸 수 있음</th><th>안전재고</th><th>발주</th><th></th></tr></thead>
           <tbody>${d.status.map((r) => `<tr class="${r.needOrder ? "stock-need" : ""}">
             <td>${r.code ? `<span class="code-tag">${h(r.code)}</span>` : ""}${h(r.name)}</td>
@@ -12669,7 +12727,7 @@ function renderStockMoves() {
     <section class="layout">
       <div class="panel">
         <div class="panel-head"><h2>입출고 기록</h2><span class="muted">최근 ${d.moves.length}건</span></div>
-        <div class="table-wrap"><table class="stock-table">
+        <div class="table-wrap"><table class="compact stock-table">
           <thead><tr><th>날짜</th><th>구분</th><th>원부자재</th><th>보관처</th><th>수량</th><th>메모</th><th></th></tr></thead>
           <tbody>${d.moves.map((m) => `<tr class="${m.voided ? "muted stock-void" : ""}">
             <td>${h(String(m.date || "").slice(5))}</td><td>${h(d.moveTypes[m.type] || m.type)}</td><td>${h(matName(m.materialId))}</td>
@@ -12711,7 +12769,7 @@ function renderStockRuns() {
     <section class="layout">
       <div class="panel">
         <div class="panel-head"><h2>생산 기록</h2><span class="muted">완료하면 제품 구성대로 그 생산처 재고에서 자동으로 빠집니다</span></div>
-        <div class="table-wrap"><table class="stock-table">
+        <div class="table-wrap"><table class="compact stock-table">
           <thead><tr><th>날짜</th><th>제품</th><th>수량</th><th>생산처</th><th>상태</th><th></th></tr></thead>
           <tbody>${runs.map((r) => `<tr class="${r.status === "cancelled" ? "muted" : ""}">
             <td>${h(r.date || "")}</td><td>${h(r.productName)}${r.memo ? `<br><span class="muted" style="font-size:11px">${h(r.memo)}</span>` : ""}</td>
@@ -12745,7 +12803,7 @@ function renderStockProducts() {
     <section class="layout">
       <div class="panel">
         <div class="panel-head"><h2>제품 구성(BOM)</h2><span class="muted">완제품 1개를 만들 때 드는 원부자재와 손실률</span></div>
-        <div class="table-wrap"><table class="stock-table">
+        <div class="table-wrap"><table class="compact stock-table">
           <thead><tr><th>제품</th><th>원부자재 (1${"개"}당)</th><th></th></tr></thead>
           <tbody>${(d.products || []).map((p) => `<tr><td>${h(p.name)}</td>
             <td class="muted" style="font-size:12px">${(p.lines || []).map((l) => `${h(matName(l.materialId))} ${qtyFmt(l.perUnit)}${l.lossRate ? ` (+손실 ${l.lossRate}%)` : ""}`).join("<br>")}</td>
@@ -12893,10 +12951,10 @@ function renderReceivableLedger() {
   if (!cs.rec) return `<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   const detail = cs.recDetail;
   return `
-    <section class="layout">
+    <section class="v2-wide">
       <div class="panel">
         <div class="panel-head"><h2>채권원장</h2><span class="muted">채권총액 − (수수료 차감 + 회생 현금변제) = 잔액</span></div>
-        <div class="table-wrap"><table class="cash-table">
+        <div class="table-wrap"><table class="compact" data-unit="원">
           <thead><tr><th>브랜드</th><th>채권총액</th><th>수수료 차감</th><th>회생 현금변제</th><th>잔액</th></tr></thead>
           <tbody>${cs.rec.map((r) => `<tr data-rec-open="${h(r.brandId)}" style="cursor:pointer" class="${detail?.brand?.id === r.brandId ? "selected" : ""}">
             <td>${r.code ? `<span class="code-tag">${h(r.code)}</span>` : ""}${h(r.name)}${r.creditor ? `<br><span class="muted" style="font-size:11px">회생채권 · 계획표: ${h(r.creditor)}</span>`
@@ -12907,8 +12965,9 @@ function renderReceivableLedger() {
             <td class="num"><strong>${money.format(r.balance)}</strong></td></tr>`).join("")}</tbody>
         </table></div>
       </div>
-      <div class="panel">
-        <div class="panel-head"><h2>${detail ? h(detail.brand.name) : "내역"}</h2></div>
+    </section>
+    ${detail ? v2Modal(`
+        <div class="panel-head"><h2>${h(detail.brand.name)} 채권원장</h2><button data-rec-close>닫기</button></div>
         <div class="panel-body">${detail ? `
           <p>채권총액 ${money.format(detail.ledger.base)} − 수수료 차감 ${money.format(detail.ledger.commission || 0)} − 회생 현금변제 ${money.format(detail.ledger.rehabCash || 0)} = <strong>${money.format(detail.ledger.balance)}원</strong></p>
           ${detail.ledger.split ? `<table class="kv" style="min-width:0;margin-bottom:10px"><tbody>
@@ -12916,10 +12975,8 @@ function renderReceivableLedger() {
             <tr><th style="text-align:left">20% 현금변제(10년 계획)</th><td class="num">${money.format(detail.ledger.split.cashPlan)} 중 ${money.format(detail.ledger.split.cashPaid)} 냄 · 남음 <strong>${money.format(detail.ledger.split.cashLeft)}</strong></td></tr>
             <tr><th style="text-align:left">80% (수수료 차감으로 갚는 몫)</th><td class="num">${money.format(detail.ledger.split.convertPart)} 중 ${money.format(detail.ledger.split.commission)} 차감 · 남음 <strong>${money.format(detail.ledger.split.convertLeft)}</strong></td></tr>
           </tbody></table>` : `<p class="muted">회생계획표에서 이 브랜드의 채권자를 찾지 못했습니다(회생변제 화면에서 계획표를 가져왔는지 확인).</p>`}
-          <div class="table-wrap" style="max-height:520px"><table class="cash-table"><thead><tr><th>날짜</th><th>구분</th><th>주문</th><th>차감</th><th>잔액</th></tr></thead><tbody>
+          <div class="table-wrap" style="max-height:520px"><table class="compact" data-unit="원"><thead><tr><th>날짜</th><th>구분</th><th>주문</th><th>차감</th><th>잔액</th></tr></thead><tbody>
             ${detail.ledger.entries.slice().reverse().map((e) => `<tr><td>${h(String(e.date).slice(0, 10))}</td><td>${h(e.kind)}</td><td class="muted" style="font-size:12px">${h(e.orderNo || e.memo || "")}</td>
               <td class="num">${money.format(e.amount)}</td><td class="num">${money.format(e.balance)}</td></tr>`).join("")}
-          </tbody></table></div>` : `<p class="muted">브랜드를 누르면 차감 내역이 보입니다.</p>`}</div>
-      </div>
-    </section>`;
+          </tbody></table></div>` : ""}</div>`, "data-rec-close") : ""}`;
 }

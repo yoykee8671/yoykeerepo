@@ -2404,3 +2404,35 @@ a.button:hover {
 .brand-profile table.kv th { width: 110px; font-weight: 500; color: var(--muted, #667); text-align: left; }
 .brand-profile table.kv { width: 100%; table-layout: fixed; }
 .brand-profile table.kv td { white-space: normal; word-break: break-all; }
+
+/* v2 공통: 넓은 목록 + 팝업 상세 + 촘촘한 표 */
+.v2-wide > .panel + .panel { margin-top: 14px; }
+table.compact { min-width: 0; width: 100%; }
+table.compact th, table.compact td { padding: 8px 10px; vertical-align: top; }
+table.compact th.num, table.compact td.num { text-align: right; white-space: nowrap; width: 1%; font-variant-numeric: tabular-nums; }
+table.compact th.center, table.compact td.center { text-align: center; white-space: nowrap; width: 1%; }
+table.compact td.wrap { white-space: normal; word-break: keep-all; overflow-wrap: anywhere; }
+table.compact td:first-child { min-width: 140px; }
+table.compact small.unit { margin-left: 2px; font-weight: 400; color: var(--muted); font-size: 10px; }
+table.compact .memo-cell { min-width: 160px; max-width: 320px; }
+button.small { padding: 2px 8px; font-size: 12px; }
+.v2-modal-backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(24, 32, 47, 0.38); display: flex; align-items: flex-start; justify-content: center; overflow: auto; padding: 40px 16px; }
+.v2-modal { width: min(980px, 100%); max-height: calc(100vh - 80px); overflow: auto; }
+.v2-modal > .panel-head { position: sticky; top: 0; z-index: 1; background: var(--panel); }
+.rehab-bottom { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); gap: 14px; margin-top: 14px; align-items: start; }
+@media (max-width: 1000px) { .rehab-bottom { grid-template-columns: minmax(0, 1fr); } }
+table.compact.fit { width: auto; min-width: 60%; }
+table.compact.tight td:first-child { min-width: 0; }
+table.compact.tight td, table.compact.tight th { padding: 6px 6px; }
+.sales-lines { min-width: 0 !important; width: 100%; }
+.sales-lines input { width: 100%; min-width: 0; }
+.sales-lines td:first-child { min-width: 160px; }
+.rehab-bottom { grid-template-columns: minmax(0, 1fr); }
+table.compact.brands-table td:nth-child(6), table.compact.brands-table td:nth-child(7) { white-space: normal; min-width: 120px; }
+table.compact.promotion-rules-table td { white-space: normal; }
+.brands-layout { grid-template-columns: minmax(0, 1fr) minmax(340px, 400px); }
+table.compact.brands-table td:first-child { min-width: 120px; }
+table.compact.brands-table .row-actions { flex-wrap: wrap; gap: 4px; }
+@media (max-width: 1200px) { .brands-layout { grid-template-columns: minmax(0, 1fr); } }
+table.compact.brands-table th, table.compact.brands-table td { width: auto; min-width: 0; }
+table.compact.brands-table td:first-child { min-width: 110px; }
