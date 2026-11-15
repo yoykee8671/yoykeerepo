@@ -2514,3 +2514,5 @@ tr.period-items > td { background: #fbfcfe; padding: 4px 16px 10px; }
 .layout-collapsible .form-unfold { display: none; margin-left: auto; }
 .layout-collapsible.form-collapsed .form-unfold { display: inline-flex; }
 .layout-collapsible .form-fold { margin-left: auto; }
+.hub-balance { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 12px; }
+.hub-balance .stat small { display: block; font-size: 11px; margin-top: 2px; }

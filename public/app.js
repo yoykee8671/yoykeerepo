@@ -4964,7 +4964,15 @@ function renderPartnerHub() {
     const kv = [["분류", PARTNER_CATEGORY_LABELS[p.category] || p.category], ["상호", p.businessName], ["사업자번호", p.businessNumber], ["대표자", p.representativeName], ["주소", p.address],
       ["담당자", [p.contactName, p.contactPhone, p.contactEmail].filter(Boolean).join(" · ")], ["세금계산서 이메일", p.invoiceEmail], ["계좌", [p.bankName, p.bankAccount, p.depositorName].filter(Boolean).join(" ")],
       ["발주 방식", p.orderMethod], ["금액 기준", p.priceMode === "gross" ? "부가세 포함" : p.priceMode ? "부가세 별도" : ""], ["메모", p.note]].filter(([, v]) => v);
-    body = `<table class="kv compact"><tbody>${kv.map(([k, v]) => `<tr><th style="text-align:left;width:130px">${k}</th><td class="wrap">${h(v)}</td></tr>`).join("")}</tbody></table>
+    const bal = d.balance || {};
+    const tile = (label, v, sub = "") => `<div class="stat"><span>${label}</span><strong>${money.format(Math.round(v || 0))}원</strong>${sub ? `<small class="muted">${sub}</small>` : ""}</div>`;
+    body = `<div class="stats hub-balance">
+        ${tile("받을 돈 (판매 미수)", bal.receivable, bal.receivableOverdue ? `<span class="danger-text">기한 지남 ${money.format(bal.receivableOverdue)}원</span>` : "")}
+        ${tile("줄 돈 (생산비 미지급)", bal.productionUnpaid)}
+        ${tile("처리 전 지급요청", bal.openPayments, bal.openPaymentCount ? `${bal.openPaymentCount}건` : "")}
+        ${bal.brandClaims ? tile("브랜드 채권잔액", bal.brandClaims) : ""}
+      </div>
+      <table class="kv compact"><tbody>${kv.map(([k, v]) => `<tr><th style="text-align:left;width:130px">${k}</th><td class="wrap">${h(v)}</td></tr>`).join("")}</tbody></table>
       ${d.rehab ? `<p class="muted" style="margin-top:10px">회생채권자: ${h(d.rehab.creditor)} · ${h(d.rehab.cat)} · 채권 ${money.format(d.rehab.total)}원 · 현금변제 ${money.format(d.rehab.cash)}원</p>` : ""}
       ${can("procurement", "edit") ? `<div class="toolbar" style="margin-top:10px"><button class="primary" data-hub-edit>정보 고치기</button></div>` : ""}`;
   } else if (tab === "brands") {

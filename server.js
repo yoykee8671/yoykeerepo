@@ -10518,7 +10518,16 @@ async function routeApi(req, res, url) {
     const channels = (db.salesChannels || []).filter((c) => c.partnerId === partner.id).map((c) => ({ id: c.id, code: c.code || "", name: c.name }));
     const materials = (db.materials || []).filter((m) => m.partnerId === partner.id).map((m) => ({ id: m.id, code: m.code || "", name: m.itemName }));
     const creditor = plan ? legacy.matchCreditor({ name: partner.name, businessName: partner.businessName, depositorName: partner.depositorName }, plan.creditors || []) : null;
-    sendJson(res, 200, { partner, brands, docs, salesOrders: so, payments: pr, production: prodSummary, channels, materials,
+    // 거래처 잔액 한눈에(이카운트 '거래처별 채권·채무 잔액'): 받을 돈 = 판매 미수, 줄 돈 = 생산비 미지급 + 처리 전 지급요청.
+    const openPay = pr.filter((x) => ["requested", "confirmed", "awaiting_approval", "on_hold"].includes(x.status));
+    const balance = {
+      receivable: so.filter((o) => o.stage !== "cancelled").reduce((s, o) => s + Number(o.remaining || 0), 0),
+      receivableOverdue: salesOrders.filter((o) => o.partnerId === partner.id && o.dueDate && o.dueDate < kstToday() && sales.remaining(o) > 0 && sales.deriveStage(o) !== "cancelled").reduce((s, o) => s + sales.remaining(o), 0),
+      productionUnpaid: prodSummary ? Number(prodSummary.balance || 0) : 0,
+      openPayments: openPay.reduce((s, x) => s + Number(x.amount || 0), 0), openPaymentCount: openPay.length,
+      brandClaims: brands.reduce((s, b) => s + (b.hasReceivable ? Number(b.receivableRemaining || 0) : 0), 0)
+    };
+    sendJson(res, 200, { partner, brands, docs, salesOrders: so, payments: pr, production: prodSummary, channels, materials, balance,
       rehab: creditor ? { creditor: creditor.creditor, cat: creditor.cat, total: creditor.total, cash: creditor.cash } : null,
       linkableBrands: db.brands.filter((b) => (b.type || "brand") === "brand" && !brands.some((x) => x.id === b.id)).map((b) => ({ id: b.id, name: b.name, code: b.code || "" })) });
     return;
@@ -11593,12 +11602,15 @@ async function routeApi(req, res, url) {
     if (pathname === "/api/closing/check" && method === "GET") {
       const month = closing.isYm(url.searchParams.get("month")) ? url.searchParams.get("month") : closing.prevMonth(kstToday().slice(0, 7));
       const brandList = db.brands.filter((b) => (b.type || "brand") === "brand");
-      const [records, pays, questions, moves, runs, products, settingsList] = await Promise.all([
+      const [records, pays, questions, moves, runs, products, settingsList, salesOrders] = await Promise.all([
         erp.list("monthlyBoard"), erp.list("payments"), erp.list("setupQuestions"),
-        erp.list("stockMoves"), erp.list("stockRuns"), erp.list("stockProducts"), erp.list("stockSettings")]);
+        erp.list("stockMoves"), erp.list("stockRuns"), erp.list("stockProducts"), erp.list("stockSettings"), erp.list("salesOrders").catch(() => [])]);
+      const lastDay = `${month}-31`;
+      const overdueSales = salesOrders.filter((o) => o.dueDate && o.dueDate <= lastDay && sales.remaining(o) > 0 && !["cancelled", "on_hold"].includes(sales.deriveStage(o)))
+        .map((o) => `${o.code || ""} ${o.partnerName || ""} ${Math.round(sales.remaining(o)).toLocaleString("ko-KR")}원`.trim());
       const boardRows = monthly.boardRows({ brands: brandList, requests: db.requests, records, ym: month });
       const stock = inventory.stockStatus({ materials: db.materials || [], moves, runs, products, settings: Object.fromEntries(settingsList.map((x) => [x.id, x])) });
-      const result = closing.closingCheck({ month, requests: db.requests, requestMonth: monthly.requestMonth, payments: pays, boardRows, questions, stock });
+      const result = closing.closingCheck({ month, requests: db.requests, requestMonth: monthly.requestMonth, payments: pays, boardRows, questions, stock, overdueSales });
       sendJson(res, 200, { ...result, closing: await closingState(), canClose: actor.role === "owner" });
       return;
     }

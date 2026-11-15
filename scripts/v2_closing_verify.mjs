@@ -27,6 +27,6 @@ const r = closing.closingCheck({
   stock: [{ name: "박스", negative: true }, { name: "x", negative: false }]
 });
 const by = Object.fromEntries(r.items.map((i) => [i.key, i.count]));
-assert.deepEqual(by, { requests: 1, payments: 1, unchecked: 0, unsent: 1, diffs: 0, questions: 1, negative: 1 });
+assert.deepEqual(by, { requests: 1, payments: 1, unchecked: 0, unsent: 1, diffs: 0, questions: 1, overdueSales: 0, negative: 1 });
 assert.equal(r.open, 5);
 console.log("v2 closing: ok");
