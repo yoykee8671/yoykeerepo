@@ -2459,3 +2459,8 @@ table.cf-grid .neg { color: var(--red); }
 .k-manual { color: var(--primary); font-weight: 600; }
 .cf-legend span { margin-right: 8px; }
 .cf-legend { font-size: 12px; margin: 4px 0 8px; }
+
+button.star { border: none; background: none; font-size: 16px; padding: 0 4px; color: #b6bfcc; cursor: pointer; }
+button.star.on { color: #f5a623; }
+tr.acc-row { cursor: pointer; }
+tr.acc-row:hover td { background: #f8fafc; }

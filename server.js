@@ -12417,6 +12417,45 @@ async function routeApi(req, res, url) {
   if (pathname === "/api/cash" || pathname.startsWith("/api/cash/")) {
     if (!requirePermission(actor, res, "cash", "view")) return;
 
+    // 계좌 보기 설정 저장
+    const accPref = pathname.match(/^\/api\/cash\/accounts\/(wooof|betters)\/([^/]+)$/);
+    if (accPref && method === "PUT") {
+      if (!requirePermission(actor, res, "cash", "edit")) return;
+      const body = await readBody(req);
+      const key = `${accPref[1]}:${decodeURIComponent(accPref[2])}`;
+      const rec = { ...((await erp.get("accountPrefs", key)) || { id: key }) };
+      if ("favorite" in body) rec.favorite = body.favorite === true || body.favorite === "true";
+      if ("hidden" in body) rec.hidden = body.hidden === true || body.hidden === "true";
+      if ("alias" in body) rec.alias = String(body.alias || "").trim().slice(0, 40);
+      rec.updatedBy = actor.name || actor.email || "";
+      rec.updatedAt = now();
+      await erp.put("accountPrefs", rec);
+      sendJson(res, 200, { pref: rec });
+      return;
+    }
+    // 계좌 상세: 최근 거래(클로브)
+    const accTx = pathname.match(/^\/api\/cash\/accounts\/(wooof|betters)\/([^/]+)\/transactions$/);
+    if (accTx && method === "GET") {
+      const company = CASH_COMPANIES.find((c) => c.key === accTx[1]);
+      try {
+        const companyId = await clobeCompanyIdFor(db, company);
+        if (!companyId) { sendJson(res, 200, { transactions: [], error: "클로브가 연결되지 않았습니다." }); return; }
+        const days = Math.min(90, Math.max(1, Math.round(number(url.searchParams.get("days")) || 30)));
+        const startDate = payments.addDays(kstToday(), -days);
+        const out = [];
+        let cursor = null;
+        for (let page = 0; page < 5; page += 1) {
+          const p = await clobeCall(db, "get_labeled_transactions", { companyId, accountId: Number(decodeURIComponent(accTx[2])), startDate, endDate: kstToday(), size: 100, ...(cursor ? { cursor } : {}) });
+          for (const t of p.content || []) out.push({ at: String(t.transactionAt || "").replace("T", " ").slice(0, 16), name: t.transactionName || "", desc: t.transactionDescription || "",
+            inAmount: Number(t.inAmount || 0), outAmount: Number(t.outAmount || 0), balance: Number(t.afterBalance || 0), category: t.customLabel || t.category || "", memo: t.memo || "" });
+          if (!p.hasNext || !p.nextCursor) break;
+          cursor = p.nextCursor;
+        }
+        sendJson(res, 200, { transactions: out, days });
+      } catch (error) { sendJson(res, 200, { transactions: [], error: error.message || "거래를 불러오지 못했습니다." }); }
+      return;
+    }
+
     if (pathname === "/api/cash/schedules" && method === "GET") {
       sendJson(res, 200, { schedules: await erp.list("cashSchedules"), repeats: cashReport.SCHEDULE_REPEATS, categories: cashReport.SCHEDULE_CATEGORIES, companies: CASH_COMPANIES });
       return;
@@ -12475,9 +12514,16 @@ async function routeApi(req, res, url) {
             clobeCall(db, "get_bank_accounts", { companyId }),
             clobeCall(db, "get_daily_fund_report", { companyId }).catch(() => null)
           ]);
+          // 계좌별 보기 설정(즐겨찾기·숨김·별칭) — 클로브처럼 자주 쓰는 계좌만 앞에, 안 쓰는 계좌는 접어 둔다.
+          const prefs = new Map((await erp.list("accountPrefs")).map((x) => [x.id, x]));
           accounts = (acc.accounts || [])
             .filter((a) => (a.currencyCode || "KRW") === "KRW")
-            .map((a) => ({ id: a.bankAccountId, name: a.aliasName || a.accountName || a.displayAccountNumber, number: a.displayAccountNumber, balance: Number(a.krwBalance || 0) }));
+            .map((a) => {
+              const pref = prefs.get(`${companyKey}:${a.bankAccountId}`) || {};
+              return { id: a.bankAccountId, name: pref.alias || a.aliasName || a.accountName || a.displayAccountNumber, bank: a.bankName || "",
+                number: a.displayAccountNumber, balance: Number(a.krwBalance || 0), favorite: !!pref.favorite, hidden: !!pref.hidden, clobeName: a.aliasName || a.accountName || "" };
+            })
+            .sort((x, y) => Number(y.favorite) - Number(x.favorite) || Number(x.hidden) - Number(y.hidden) || y.balance - x.balance);
           fund = rep && rep.baseDate ? {
             baseDate: rep.baseDate, transactionDate: rep.transactionDate, cashIn: rep.cashIn, cashOut: rep.cashOut,
             cashBalance: rep.cashBalance, summaryText: rep.summaryText, templateType: rep.templateType
@@ -12503,7 +12549,8 @@ async function routeApi(req, res, url) {
       });
       sendJson(res, 200, {
         company, report, accounts, fund, clobeError,
-        text: cashReport.reportText(report, { companyName: company.name, accounts })
+        // 보고 문구에는 즐겨찾는 계좌만(없으면 숨기지 않은 계좌). 현 잔액 합계는 모든 계좌.
+        text: cashReport.reportText(report, { companyName: company.name, accounts: accounts.some((a) => a.favorite) ? accounts.filter((a) => a.favorite) : accounts.filter((a) => !a.hidden) })
       });
       return;
     }

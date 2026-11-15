@@ -11837,6 +11837,26 @@ function renderCash() {
   return `${head}${tabs}${cs.screen === "schedules" ? renderCashSchedules() : cs.screen === "receivables" ? renderReceivableLedger() : renderCashReport()}`;
 }
 
+function renderAccountDetail() {
+  const cs = cashState();
+  const a = (cs.data?.accounts || []).find((x) => String(x.id) === String(cs.accDetail?.id));
+  if (!a) return "";
+  const tx = cs.accDetail.transactions;
+  return `<div class="panel-head"><h2>${h(a.name)}</h2><button data-acc-close>닫기</button></div>
+    <div class="panel-body">
+      <p>${h(a.bank || "")} ${h(a.number || "")} · 잔액 <strong>${money.format(a.balance)}원</strong>${a.clobeName && a.clobeName !== a.name ? ` <span class="muted">(클로브 이름: ${h(a.clobeName)})</span>` : ""}</p>
+      ${can("cash", "edit") ? `<form class="form-grid" data-acc-form>
+        <div class="field two"><div><label>별칭(우리가 부르는 이름)</label><input name="alias" value="${h(a.name === a.clobeName ? "" : a.name)}" placeholder="${h(a.clobeName || "")}"></div>
+          <div class="toolbar" style="align-items:flex-end"><label class="check"><input type="checkbox" name="favorite" ${a.favorite ? "checked" : ""}> 즐겨찾기(보고에 표시)</label><label class="check"><input type="checkbox" name="hidden" ${a.hidden ? "checked" : ""}> 숨기기</label></div></div>
+        <div class="toolbar"><button class="primary" type="submit">저장</button></div></form>` : ""}
+      <h3>최근 30일 거래</h3>
+      ${tx == null ? `<p class="muted">불러오는 중…</p>` : cs.accDetail.error ? `<p class="muted">${h(cs.accDetail.error)}</p>` : `<div class="table-wrap" style="max-height:420px"><table class="compact" data-unit="원">
+        <thead><tr><th>일시</th><th>거래처·적요</th><th>입금</th><th>출금</th><th>잔액</th><th>분류</th></tr></thead>
+        <tbody>${tx.map((t) => `<tr><td>${h(t.at.slice(5))}</td><td class="wrap">${h(t.name)}${t.desc && t.desc !== t.name ? `<br><span class="muted" style="font-size:11px">${h(t.desc)}</span>` : ""}${t.memo ? `<br><span class="muted" style="font-size:11px">메모: ${h(t.memo)}</span>` : ""}</td>
+          <td class="num">${t.inAmount ? money.format(t.inAmount) : ""}</td><td class="num">${t.outAmount ? money.format(t.outAmount) : ""}</td><td class="num">${money.format(t.balance)}</td><td style="font-size:12px">${h(t.category)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">거래가 없습니다.</td></tr>`}</tbody></table></div>`}
+    </div>`;
+}
+
 function renderCashReport() {
   const cs = cashState();
   const { report: r, accounts = [], fund, clobeError } = cs.data || {};
@@ -11857,8 +11877,18 @@ function renderCashReport() {
       <div class="panel">
         <div class="panel-head"><h2>계좌 잔액</h2><span class="muted">클로브 · ${fund ? `${h(fund.transactionDate)} 기준 어제 +${money.format(fund.cashIn || 0)} / ${money.format(fund.cashOut || 0)}` : ""}</span></div>
         <div class="table-wrap"><table class="compact cash-table" data-unit="원"><tbody>
-          ${accounts.map((a) => `<tr><td>${h(a.name)}<br><span class="muted" style="font-size:11px">${h(a.number || "")}</span></td><td class="num">${money.format(a.balance)}</td></tr>`).join("") || `<tr><td class="empty">잔액 정보 없음</td></tr>`}
+          ${(() => {
+            const shown = accounts.filter((a) => !a.hidden);
+            const hidden = accounts.filter((a) => a.hidden);
+            const row = (a) => `<tr class="acc-row ${a.hidden ? "muted" : ""}" data-acc-open="${h(a.id)}">
+              <td style="width:1%">${can("cash", "edit") ? `<button class="star ${a.favorite ? "on" : ""}" data-acc-star="${h(a.id)}" title="${a.favorite ? "즐겨찾기 해제" : "즐겨찾기(일일 보고에 표시)"}">${a.favorite ? "★" : "☆"}</button>` : (a.favorite ? "★" : "")}</td>
+              <td>${h(a.name)}<br><span class="muted" style="font-size:11px">${h(a.bank || "")} ${h(a.number || "")}</span></td><td class="num">${money.format(a.balance)}</td></tr>`;
+            const hiddenSum = hidden.reduce((s2, a) => s2 + a.balance, 0);
+            return (shown.map(row).join("") || `<tr><td class="empty" colspan="3">잔액 정보 없음</td></tr>`)
+              + (hidden.length ? `<tr><td colspan="3"><button class="ghost small" data-acc-toggle-hidden>${cs.showHiddenAccounts ? "숨긴 계좌 접기" : `숨긴 계좌 ${hidden.length}개 보기 (합계 ${money.format(hiddenSum)}원)`}</button></td></tr>${cs.showHiddenAccounts ? hidden.map(row).join("") : ""}` : "");
+          })()}
         </tbody></table></div>
+        <p class="muted" style="font-size:11px;margin:6px 12px">★ 즐겨찾는 계좌만 일일 보고 문구에 나옵니다. 계좌를 누르면 최근 거래와 설정이 보입니다.</p>
         ${fund?.summaryText ? `<div class="panel-body"><p class="muted" style="white-space:pre-line;font-size:12px">${h(fund.summaryText)}</p></div>` : ""}
       </div>
     </section>
@@ -11877,7 +11907,8 @@ function renderCashReport() {
         <button data-cash-reload>새로고침</button>
       </div>
       <details style="padding:0 16px 16px"><summary class="muted">보고 문구 미리보기</summary><pre class="cash-text">${h(cs.data.text || "")}</pre></details>
-    </section>`;
+    </section>
+    ${cs.accDetail ? v2Modal(renderAccountDetail(), "data-acc-close") : ""}`;
 }
 
 function renderCashSchedules() {
@@ -11959,6 +11990,34 @@ function bindCash() {
   bindV2Modal();
   app.querySelectorAll("[data-cash-company]").forEach((b) => b.addEventListener("click", async () => { cs.company = b.dataset.cashCompany; cs.editing = null; await reload(); }));
   app.querySelector("[data-cash-reload]")?.addEventListener("click", reload);
+  // 계좌: 즐겨찾기 별, 숨긴 계좌 펼치기, 누르면 상세(최근 거래·설정)
+  bindV2Modal();
+  const accSave = async (accId, body) => {
+    try { await api(`/api/cash/accounts/${cs.company}/${encodeURIComponent(accId)}`, { method: "PUT", body }); await reload(); } catch (e) { showToast(e.message || "저장하지 못했습니다.", "error"); }
+  };
+  app.querySelectorAll("[data-acc-star]").forEach((b) => b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const a = (cs.data?.accounts || []).find((x) => String(x.id) === b.dataset.accStar);
+    accSave(b.dataset.accStar, { favorite: !a?.favorite });
+  }));
+  app.querySelector("[data-acc-toggle-hidden]")?.addEventListener("click", () => { cs.showHiddenAccounts = !cs.showHiddenAccounts; renderApp(); });
+  app.querySelectorAll("[data-acc-open]").forEach((tr) => tr.addEventListener("click", async () => {
+    const id = tr.dataset.accOpen;
+    cs.accDetail = { id, transactions: null };
+    renderApp();
+    const r = await api(`/api/cash/accounts/${cs.company}/${encodeURIComponent(id)}/transactions?days=30`).catch((e) => ({ transactions: [], error: e.message }));
+    if (cs.accDetail?.id === id) { cs.accDetail = { id, transactions: r.transactions || [], error: r.error || "" }; renderApp(); }
+  }));
+  app.querySelector("[data-acc-close]")?.addEventListener("click", () => { cs.accDetail = null; renderApp(); });
+  app.querySelector("[data-acc-form]")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const keep = cs.accDetail;
+    await accSave(keep.id, { alias: form.alias.value, favorite: form.favorite.checked, hidden: form.hidden.checked });
+    cs.accDetail = keep;
+    renderApp();
+    showToast("저장했습니다.");
+  });
   app.querySelector("[data-cash-print]")?.addEventListener("click", () => window.print());
   app.querySelector("[data-cash-copy]")?.addEventListener("click", async () => {
     try {
