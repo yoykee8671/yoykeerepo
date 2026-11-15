@@ -794,9 +794,53 @@ function restoreScroll(view) {
   }
 }
 
+// 목록 + 입력칸 2단 화면: 입력칸을 접으면 목록이 화면 전체를 쓴다(1920 모니터에서도 표가 잘리지 않게).
+// 기준정보 화면(거래처·원부자재·납품지·입금계좌·명세서·단가표·브랜드)은 기본 접힘, 입금요청·지급요청처럼
+// 입력이 잦은 화면은 기본 펼침. 수정 중이면 항상 펼친다. 화면별 선택은 이 브라우저에 기억한다.
+const FORM_COLLAPSED_DEFAULT = new Set(["trade|partners", "trade|materials", "trade|deliveryPlaces", "trade|accounts", "trade|orders", "prices|", "brands|", "procurement|partners", "procurement|materials", "procurement|deliveryPlaces", "procurement|orders"]);
+function formPrefs() {
+  if (!state.formPrefs) { try { state.formPrefs = JSON.parse(localStorage.getItem("formCollapsed") || "{}"); } catch { state.formPrefs = {}; } }
+  return state.formPrefs;
+}
+function enhanceLayouts() {
+  const view = currentViewKey();
+  app.querySelectorAll(".main section.layout:not(.single)").forEach((layout, i) => {
+    const [list, side] = layout.children;
+    if (!list || !side || layout.children.length !== 2 || !side.querySelector("form")) return;
+    const key = `${view}#${i}`;
+    const editing = /수정/.test(side.querySelector(".panel-head h2, h2")?.textContent || "");
+    const pref = formPrefs()[key];
+    const collapsed = !editing && (pref ?? FORM_COLLAPSED_DEFAULT.has(view));
+    layout.classList.add("layout-collapsible");
+    layout.classList.toggle("form-collapsed", collapsed);
+    const set = (v) => { formPrefs()[key] = v; try { localStorage.setItem("formCollapsed", JSON.stringify(formPrefs())); } catch {} };
+    const sideHead = side.querySelector(".panel-head");
+    if (sideHead && !editing) {
+      const close = document.createElement("button");
+      close.type = "button"; close.className = "small ghost form-fold"; close.textContent = "접기 ⟩"; close.title = "입력칸을 접고 목록을 넓게 봅니다";
+      close.addEventListener("click", () => { set(true); layout.classList.add("form-collapsed"); });
+      sideHead.appendChild(close);
+    }
+    const listHead = list.querySelector(".panel-head") || list;
+    const open = document.createElement("button");
+    open.type = "button"; open.className = "small form-unfold";
+    open.textContent = `⟨ ${(side.querySelector(".panel-head h2, h2")?.textContent || "입력").trim()}`;
+    open.addEventListener("click", () => { set(false); layout.classList.remove("form-collapsed"); side.scrollIntoView({ block: "nearest" }); });
+    listHead.appendChild(open);
+    // 목록의 '새 ○○' 버튼은 입력칸을 펼친 채로 열리게 한다(원래 동작보다 먼저 돈다).
+    list.querySelectorAll("button").forEach((btn) => {
+      const t = btn.textContent.trim();
+      if (/^(새 |\+ ?새|＋)/.test(t) && !/새 ?창/.test(t)) btn.addEventListener("click", () => set(false), { capture: true });
+    });
+  });
+}
+
 function renderApp() {
   renderAppInner();
-  if (!isRequestPopup && !isBrandPopup && !PROCUREMENT_POPUPS[procurementPopupKind]) restoreScroll(currentViewKey());
+  if (!isRequestPopup && !isBrandPopup && !PROCUREMENT_POPUPS[procurementPopupKind]) {
+    enhanceLayouts();
+    restoreScroll(currentViewKey());
+  }
 }
 
 function renderAppInner() {
@@ -11768,7 +11812,14 @@ function bindPayments() {
     const body = formObject(event.currentTarget);
     try {
       if (ps.editing) await api(`/api/payments/${ps.editing.id}`, { method: "PUT", body });
-      else await api("/api/payments", { method: "POST", body });
+      else {
+        try { await api("/api/payments", { method: "POST", body }); }
+        catch (dupErr) {
+          if (!dupErr.payload?.duplicate) throw dupErr;
+          if (!confirm(`${dupErr.message}\n\n그래도 새로 올릴까요?`)) return;
+          await api("/api/payments", { method: "POST", body: { ...body, allowDuplicate: true } });
+        }
+      }
       showToast(ps.editing ? "수정했습니다." : "지급요청을 올렸습니다.");
       ps.editing = null;
       ps.draft = null;

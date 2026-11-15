@@ -13037,6 +13037,17 @@ async function routeApi(req, res, url) {
       const rec = shape(body, { id: id("pay"), status: "requested", files: [], requestedBy: who, createdAt: now() });
       if (!rec.title) { sendJson(res, 400, { error: "내용을 입력하세요." }); return; }
       if (!rec.amount) { sendJson(res, 400, { error: "금액을 입력하세요." }); return; }
+      // 같은 계좌·같은 금액 요청이 최근 14일 안에 있으면 한 번 더 묻는다(중복 지급 방지).
+      if (!body.allowDuplicate && rec.accountNumber) {
+        const since = new Date(Date.now() - 14 * 86400000).toISOString();
+        const dup = (await erp.list("payments")).find((p) => p.status !== "cancelled" && p.amount === rec.amount
+          && normalizeAccountNumber(p.accountNumber) === normalizeAccountNumber(rec.accountNumber) && String(p.createdAt) >= since);
+        if (dup) {
+          sendJson(res, 409, { duplicate: { id: dup.id, code: dup.code, title: dup.title, status: dup.status, createdAt: dup.createdAt },
+            error: `최근 14일 안에 같은 계좌·같은 금액 요청이 있습니다: ${dup.code || ""} ${dup.title} (${payments.PAYMENT_STATUSES[dup.status] || dup.status})` });
+          return;
+        }
+      }
       const account = rec.accountNumber ? findAccount(rec.accountNumber) : null;
       if (account) {
         rec.bankName ||= account.bankName;
