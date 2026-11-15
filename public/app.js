@@ -380,6 +380,9 @@ async function api(path, options = {}) {
   });
   const isJson = response.headers.get("content-type")?.includes("application/json");
   const data = isJson ? await response.json() : await response.text();
+  if (response.ok && data && typeof data === "object" && typeof data.warning === "string") {
+    setTimeout(() => showToast(data.warning, "error"), 0);
+  }
   if (!response.ok) {
     const error = new Error(data?.error || "요청에 실패했습니다.");
     if (data?.details) error.details = data.details;
@@ -1338,7 +1341,7 @@ function renderMultiFilter({ key, title, allLabel, options, selectedValues }) {
 function renderTodo() {
   const t = state.todo;
   if (!t) return `<section class="panel todo-panel"><div class="panel-head"><h2>오늘 할 일</h2></div><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
-  const cards = t.items.map((it) => `<button type="button" class="todo-card ${it.tone ? `tone-${it.tone}` : ""}" data-todo-go="${h(it.go.tab)}${it.go.sub ? `:${h(it.go.sub)}` : ""}">
+  const cards = t.items.map((it) => `<button type="button" class="todo-card ${it.tone ? `tone-${h(it.tone)}` : ""}" data-todo-go="${h(it.go.tab)}${it.go.sub ? `:${h(it.go.sub)}` : ""}">
       <span class="todo-label">${h(it.label)}</span>
       <strong>${it.count != null ? `${money.format(it.count)}건` : "확인"}</strong>
       ${it.amount != null ? `<span class="todo-amount">${money.format(Math.round(it.amount))}원</span>` : ""}</button>`).join("");
@@ -1349,7 +1352,7 @@ function bindTodo() {
   if (state.todo && Date.now() - (state.todoAt || 0) > 60000 && !state.todoLoading) state.todo = null;
   if (!state.todo && !state.todoLoading) {
     state.todoLoading = true;
-    api("/api/todo").then((r) => { state.todo = r; state.todoAt = Date.now(); }).catch(() => { state.todo = { items: [] }; }).finally(() => { state.todoLoading = false; if (state.tab === "dashboard") renderApp(); });
+    api("/api/todo").then((r) => { state.todo = r; state.todoAt = Date.now(); }).catch(() => { state.todo = { items: [] }; state.todoAt = Date.now(); }).finally(() => { state.todoLoading = false; if (state.tab === "dashboard") renderApp(); });
   }
   app.querySelector("[data-todo-refresh]")?.addEventListener("click", () => { state.todo = null; renderApp(); });
   app.querySelectorAll("[data-todo-go]").forEach((b) => b.addEventListener("click", () => {
@@ -13182,7 +13185,7 @@ function renderMessenger() {
   const unshared = d.notices.filter((n) => !(n.shares || []).length);
   const list = ms.filter === "unshared" ? unshared : ms.filter === "all" ? d.notices : d.notices.filter((n) => n.kind === ms.filter);
   const kindsUsed = [...new Set(d.notices.map((n) => n.kind))];
-  const chip = (key, label, n) => `<button class="npb-subtab ${ms.filter === key ? "active" : ""}" data-msg-filter="${key}">${h(label)}${n != null ? ` <span class="muted">${n}</span>` : ""}</button>`;
+  const chip = (key, label, n) => `<button class="npb-subtab ${ms.filter === key ? "active" : ""}" data-msg-filter="${h(key)}">${h(label)}${n != null ? ` <span class="muted">${n}</span>` : ""}</button>`;
   const rows = list.map((n) => {
     const last = (n.shares || []).slice(-1)[0];
     return `<tr>

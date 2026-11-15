@@ -1323,6 +1323,27 @@ async function pushNotice(kind, data = {}, ref = {}) {
   }
 }
 
+// 그 달 마감 점검(화면과 마감 요청이 같은 계산을 쓴다).
+async function computeClosingCheck(db, month) {
+  const brandList = db.brands.filter((b) => (b.type || "brand") === "brand");
+  const [records, pays, questions, moves, runs, products, settingsList, salesOrders] = await Promise.all([
+    erp.list("monthlyBoard"), erp.list("payments"), erp.list("setupQuestions"),
+    erp.list("stockMoves"), erp.list("stockRuns"), erp.list("stockProducts"), erp.list("stockSettings"), erp.list("salesOrders").catch(() => [])]);
+  const lastDay = `${month}-31`;
+  const overdueSales = salesOrders.filter((o) => o.dueDate && o.dueDate <= lastDay && sales.remaining(o) > 0 && !["cancelled", "on_hold"].includes(sales.deriveStage(o)))
+    .map((o) => `${o.code || ""} ${o.partnerName || ""} ${Math.round(sales.remaining(o)).toLocaleString("ko-KR")}원`.trim());
+  const boardRows = monthly.boardRows({ brands: brandList, requests: db.requests, records, ym: month });
+  const stock = inventory.stockStatus({ materials: db.materials || [], moves, runs, products, settings: Object.fromEntries(settingsList.map((x) => [x.id, x])) });
+  return closing.closingCheck({ month, requests: db.requests, requestMonth: monthly.requestMonth, payments: pays, boardRows, questions, stock, overdueSales });
+}
+
+// 여러 건을 한꺼번에 바꾸는 API: 마감한 달의 입금요청은 빼고 처리한다.
+async function lockedRequestFilter() {
+  const c = await closingState();
+  return (r) => closing.isLocked(c, monthly.requestMonth(r));
+}
+const lockedSkipMessage = (n) => `마감한 달의 입금요청 ${n}건은 바꾸지 않았습니다(대표가 정산 › 월 마감에서 풀어야 합니다).`;
+
 async function guardOpenMonth(res, month) {
   const c = await closingState();
   if (!closing.isLocked(c, month)) return true;
@@ -7301,6 +7322,8 @@ async function routeApi(req, res, url) {
       [/^\/api\/brands\/[^/]+$/, "PUT", "brands", "edit"],
       [/^\/api\/brands\/[^/]+$/, "DELETE", "brands", "delete"],
       [/^\/api\/price-entries$/, "POST", "prices", "create"],
+      [/^\/api\/price-entries\/import$/, "POST", "prices", "create"],
+      [/^\/api\/brands\/[^/]+\/rules\/[^/]+$/, "DELETE", "brands", "edit"],
       [/^\/api\/price-entries\/[^/]+$/, "PUT", "prices", "edit"],
       [/^\/api\/price-entries\/[^/]+$/, "DELETE", "prices", "delete"],
       [/^\/api\/price-aliases(\/[^/]+)?$/, "*", "prices", "edit"],
@@ -7999,7 +8022,8 @@ async function routeApi(req, res, url) {
       return;
     }
     const [before] = db.brands.splice(index, 1);
-    for (const request of db.requests.filter((item) => item.brandId === before.id)) {
+    const isLockedReq = await lockedRequestFilter();
+    for (const request of db.requests.filter((item) => item.brandId === before.id && !isLockedReq(item))) {
       request.brandId = "";
       request.updatedAt = now();
     }
@@ -8034,11 +8058,13 @@ async function routeApi(req, res, url) {
     addAudit(db, actor, "update", "request", request.id, `${request.orderNo} 입금요청 되돌리기(삭제 취소)`, before, request);
     await writeDb(db);
     sendJson(res, 200, { request });
+    if (request.brandId) syncArchiveInBackground(db, actor, [request.brandId], "request_restored");
     return;
   }
 
   if (pathname === "/api/requests" && method === "POST") {
     const body = await readBody(req);
+    if (!(await guardOpenMonth(res, monthly.requestMonth({ orderNo: normalizeOrderNo(body.orderNo), createdAt: now() })))) return;
     const brand = db.brands.find((item) => item.id === body.brandId);
     const promotionContext = brand ? buildPromotionContext(db, brand, sanitizeLineItems(body.lineItems), body.expectedDepositDate, body.promotionRuleId) : null;
     const calc = calculateSettlement({ ...body, _promotionContext: promotionContext }, brand);
@@ -8132,7 +8158,10 @@ async function routeApi(req, res, url) {
     const touchedBrands = new Set();
     const updated = [];
     const skipped = [];
+    const isLockedReq = await lockedRequestFilter();
+    const lockedIds = [];
     for (const request of db.requests.filter((item) => ids.includes(item.id) && item.status !== "deleted")) {
+      if (isLockedReq(request)) { lockedIds.push(request.id); continue; }
       if (request.status === "paid" && request.paidAt) {
         skipped.push(request);
         continue;
@@ -8148,11 +8177,12 @@ async function routeApi(req, res, url) {
       updated.push(request);
     }
     if (!updated.length && !skipped.length) {
+      if (lockedIds.length) { sendJson(res, 423, { error: lockedSkipMessage(lockedIds.length), locked: true }); return; }
       sendJson(res, 404, { error: "처리할 입금요청을 찾지 못했습니다." });
       return;
     }
     if (updated.length) await writeDb(db);
-    sendJson(res, 200, { updatedRequests: updated, skippedRequestIds: skipped.map((item) => item.id), batchId });
+    sendJson(res, 200, { updatedRequests: updated, skippedRequestIds: skipped.map((item) => item.id), batchId, lockedRequestIds: lockedIds, ...(lockedIds.length ? { warning: lockedSkipMessage(lockedIds.length) } : {}) });
     if (updated.length) pushNotice("request_paid", { items: updated, by: actor.name || "" }, { type: "request", id: updated[0].id });
     if (updated.length) syncArchiveInBackground(db, actor, [...touchedBrands], "request_paid");
     return;
@@ -8167,21 +8197,25 @@ async function routeApi(req, res, url) {
     }
     const touchedBrands = new Set();
     const updated = [];
+    const isLockedReq = await lockedRequestFilter();
+    const lockedIds = [];
     for (const request of db.requests.filter((item) => ids.includes(item.id) && item.status !== "deleted")) {
+      if (isLockedReq(request)) { lockedIds.push(request.id); continue; }
       const before = { ...request };
       request.statusBeforeDelete = request.status;
-    request.status = "deleted";
+      request.status = "deleted";
       request.updatedAt = now();
       addAudit(db, actor, "delete", "request", request.id, `${request.orderNo} 입금요청 삭제`, before, request);
       if (request.brandId) touchedBrands.add(request.brandId);
       updated.push(request);
     }
     if (!updated.length) {
+      if (lockedIds.length) { sendJson(res, 423, { error: lockedSkipMessage(lockedIds.length), locked: true }); return; }
       sendJson(res, 404, { error: "삭제할 입금요청을 찾지 못했습니다." });
       return;
     }
     await writeDb(db);
-    sendJson(res, 200, { deletedRequests: updated });
+    sendJson(res, 200, { deletedRequests: updated, lockedRequestIds: lockedIds, ...(lockedIds.length ? { warning: lockedSkipMessage(lockedIds.length) } : {}) });
     syncArchiveInBackground(db, actor, [...touchedBrands], "request_deleted");
     return;
   }
@@ -8192,7 +8226,9 @@ async function routeApi(req, res, url) {
     const body = await readBody(req);
     const ids = Array.isArray(body.requestIds) ? body.requestIds : [];
     const status = String(body.status || "").trim();
-    if (!requirePermission(actor, res, "requests", status === "paid" ? "pay" : "edit")) return;
+    // 입금완료로 바꾸거나 입금완료를 되돌리는 것은 입금완료 권한이 있어야 한다.
+    const touchesPaid = status === "paid" || db.requests.some((r) => ids.includes(r.id) && r.status === "paid");
+    if (!requirePermission(actor, res, "requests", touchesPaid ? "pay" : "edit")) return;
     const allowed = new Set(["pending", "await_deposit", "paid", "hold", "error", "consignment_unpaid"]);
     if (!ids.length) { sendJson(res, 400, { error: "상태를 변경할 요청을 선택하세요." }); return; }
     if (!allowed.has(status)) { sendJson(res, 400, { error: "허용되지 않은 상태입니다." }); return; }
@@ -8200,8 +8236,11 @@ async function routeApi(req, res, url) {
     const batchId = ids.length > 1 ? id("statusbatch") : "";
     const touchedBrands = new Set();
     const updated = [];
+    const isLockedReq = await lockedRequestFilter();
+    const lockedIds = [];
     for (const request of db.requests.filter((item) => ids.includes(item.id) && item.status !== "deleted")) {
       if (request.status === status) continue;
+      if (isLockedReq(request)) { lockedIds.push(request.id); continue; }
       const before = { ...request };
       if (status === "paid") {
         request.status = "paid";
@@ -8216,9 +8255,13 @@ async function routeApi(req, res, url) {
       if (request.brandId) touchedBrands.add(request.brandId);
       updated.push(request);
     }
-    if (!updated.length) { sendJson(res, 200, { updatedRequests: [] }); return; }
+    if (!updated.length) {
+      if (lockedIds.length) { sendJson(res, 423, { error: lockedSkipMessage(lockedIds.length), locked: true }); return; }
+      sendJson(res, 200, { updatedRequests: [] });
+      return;
+    }
     await writeDb(db);
-    sendJson(res, 200, { updatedRequests: updated });
+    sendJson(res, 200, { updatedRequests: updated, lockedRequestIds: lockedIds, ...(lockedIds.length ? { warning: lockedSkipMessage(lockedIds.length) } : {}) });
     if (status === "paid") pushNotice("request_paid", { items: updated, by: actor.name || "" }, { type: "request", id: updated[0].id });
     syncArchiveInBackground(db, actor, [...touchedBrands], "status_changed");
     return;
@@ -8233,6 +8276,16 @@ async function routeApi(req, res, url) {
       return;
     }
     if (!(await guardOpenMonth(res, monthly.requestMonth(request)))) return;
+    // 주문번호를 바꿔 마감한 달로 옮기는 것도 막는다.
+    if ("orderNo" in body && !(await guardOpenMonth(res, monthly.requestMonth({ orderNo: normalizeOrderNo(body.orderNo), createdAt: request.createdAt })))) return;
+    // 상태는 정해진 값만. 삭제는 DELETE 로(삭제 권한), 입금완료로/에서 바꾸거나 입금액을 고치는 것은 입금완료 권한.
+    if ("status" in body) {
+      const allowedStatus = new Set(["pending", "await_deposit", "paid", "hold", "error", "consignment_unpaid"]);
+      if (!allowedStatus.has(String(body.status))) { sendJson(res, 400, { error: "허용되지 않은 상태입니다." }); return; }
+    }
+    const paidFlip = "status" in body && (body.status === "paid") !== (request.status === "paid");
+    const paidAmountChange = "paidAmount" in body && request.status === "paid" && number(body.paidAmount) !== number(request.paidAmount);
+    if ((paidFlip || paidAmountChange) && !requirePermission(actor, res, "requests", "pay")) return;
     const before = { ...request };
     for (const key of [
       "brandId",
@@ -11231,7 +11284,8 @@ async function routeApi(req, res, url) {
           const months = {};
           for (const { ym, row } of qn.payload?.rows || []) (months[ym] ||= []).push({ ...row, brand: brand.name });
           const plan = monthly.planMonthlyImport({ months }, { brands: [brand], requests: db.requests });
-          for (const r of plan.records) {
+          const closingNow = await closingState();
+          for (const r of plan.records.filter((x) => !closing.isLocked(closingNow, x.month))) {
             const prev = await erp.get("monthlyBoard", r.id);
             await erp.put("monthlyBoard", prev?.editedAt ? { ...prev, sheet: r.sheet } : { ...r, importedAt: now() });
           }
@@ -11626,11 +11680,17 @@ async function routeApi(req, res, url) {
     const canSee = actor.role === "owner" || can(actor, "payments", "view") || can(actor, "requests", "view") || can(actor, "cash", "view");
     if (!canSee) { sendJson(res, 403, { error: "공유함을 볼 권한이 없습니다." }); return; }
     const who = actor.name || actor.email || "";
+    // 알림 종류마다 그 메뉴를 볼 수 있는 사람에게만.
+    const kindVisible = (kind) => actor.role === "owner"
+      || (kind.startsWith("request_") ? can(actor, "requests", "view")
+        : kind.startsWith("payment_") ? can(actor, "payments", "view")
+          : kind === "closing" ? can(actor, "settlement", "view")
+            : kind === "daily" ? can(actor, "cash", "view") : true);
     if (pathname === "/api/notices" && method === "GET") {
-      const list = (await erp.list("notices")).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 300);
+      const list = (await erp.list("notices")).filter((n) => kindVisible(n.kind)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 300);
       const cfg = await messengerSettings();
       sendJson(res, 200, { notices: list, kinds: notify.NOTICE_KINDS, settings: actor.role === "owner" ? cfg : { mode: cfg.mode },
-        channelReady: notify.channelConfigured() && cfg.mode !== "off", keysPresent: notify.channelConfigured(), isOwner: actor.role === "owner" });
+        channelReady: actor.role === "owner" && notify.channelConfigured() && cfg.mode !== "off", keysPresent: notify.channelConfigured(), isOwner: actor.role === "owner" });
       return;
     }
     if (pathname === "/api/notices" && method === "POST") {
@@ -11647,7 +11707,8 @@ async function routeApi(req, res, url) {
     if (share && method === "POST") {
       const body = await readBody(req);
       const rec = await erp.get("notices", decodeURIComponent(share[1]));
-      if (!rec) { sendJson(res, 404, { error: "알림을 찾을 수 없습니다." }); return; }
+      if (!rec || !kindVisible(rec.kind)) { sendJson(res, 404, { error: "알림을 찾을 수 없습니다." }); return; }
+      if (body.via === "channel" && actor.role !== "owner") { sendJson(res, 403, { error: "채널톡 보내기는 대표만 할 수 있습니다." }); return; }
       let entry = { at: now(), by: who, via: "복사" };
       if (body.via === "channel") {
         const r = await notify.sendToChannel(await messengerSettings(), rec.text);
@@ -11687,16 +11748,7 @@ async function routeApi(req, res, url) {
     }
     if (pathname === "/api/closing/check" && method === "GET") {
       const month = closing.isYm(url.searchParams.get("month")) ? url.searchParams.get("month") : closing.prevMonth(kstToday().slice(0, 7));
-      const brandList = db.brands.filter((b) => (b.type || "brand") === "brand");
-      const [records, pays, questions, moves, runs, products, settingsList, salesOrders] = await Promise.all([
-        erp.list("monthlyBoard"), erp.list("payments"), erp.list("setupQuestions"),
-        erp.list("stockMoves"), erp.list("stockRuns"), erp.list("stockProducts"), erp.list("stockSettings"), erp.list("salesOrders").catch(() => [])]);
-      const lastDay = `${month}-31`;
-      const overdueSales = salesOrders.filter((o) => o.dueDate && o.dueDate <= lastDay && sales.remaining(o) > 0 && !["cancelled", "on_hold"].includes(sales.deriveStage(o)))
-        .map((o) => `${o.code || ""} ${o.partnerName || ""} ${Math.round(sales.remaining(o)).toLocaleString("ko-KR")}원`.trim());
-      const boardRows = monthly.boardRows({ brands: brandList, requests: db.requests, records, ym: month });
-      const stock = inventory.stockStatus({ materials: db.materials || [], moves, runs, products, settings: Object.fromEntries(settingsList.map((x) => [x.id, x])) });
-      const result = closing.closingCheck({ month, requests: db.requests, requestMonth: monthly.requestMonth, payments: pays, boardRows, questions, stock, overdueSales });
+      const result = await computeClosingCheck(db, month);
       sendJson(res, 200, { ...result, closing: await closingState(), canClose: actor.role === "owner" });
       return;
     }
@@ -11707,6 +11759,10 @@ async function routeApi(req, res, url) {
       const month = String(body.month || "");
       if (!closing.isYm(month)) { sendJson(res, 400, { error: "마감할 달을 고르세요." }); return; }
       if (c.lockedThrough && month <= c.lockedThrough) { sendJson(res, 400, { error: `${c.lockedThrough} 까지 이미 마감되어 있습니다.` }); return; }
+      if (month > kstToday().slice(0, 7)) { sendJson(res, 400, { error: "아직 오지 않은 달은 마감할 수 없습니다." }); return; }
+      const check = await computeClosingCheck(db, month);
+      if (check.open && !String(body.note || "").trim()) { sendJson(res, 400, { error: `끝나지 않은 일이 ${check.open}건 있습니다. 마감하려면 이유를 적어 주세요.`, open: check.open }); return; }
+      body.open = check.open;
       c.history = [{ action: "lock", month, by: who, at: now(), note: String(body.note || "").slice(0, 300), open: Number(body.open || 0) }, ...(c.history || [])].slice(0, 100);
       c.lockedThrough = month;
       await erp.put("settings", c);
@@ -11784,7 +11840,8 @@ async function routeApi(req, res, url) {
       const plan = monthly.planMonthlyImport(extract, { brands: brandList, requests: db.requests });
       const stamp = now();
       let saved = 0;
-      for (const r of plan.records) {
+      const closingNow = await closingState();
+      for (const r of plan.records.filter((x) => !closing.isLocked(closingNow, x.month))) {
         const prev = await erp.get("monthlyBoard", r.id);
         if (prev?.editedAt) { await erp.put("monthlyBoard", { ...prev, sheet: r.sheet }); continue; } // 손댄 줄은 시트 값만 갱신
         await erp.put("monthlyBoard", { ...r, importedAt: stamp });
@@ -13173,7 +13230,7 @@ async function routeApi(req, res, url) {
         sendJson(res, 400, { error: `지금 상태(${payments.PAYMENT_STATUSES[rec.status]})에서는 할 수 없습니다.` });
         return;
       }
-      if (rec.status === "paid" && !(await guardOpenMonth(res, closing.ym(rec.paidAt)))) return;
+      if (rec.status === "paid" && !(await guardOpenMonth(res, closing.ym(rec.paidAt || rec.updatedAt || rec.createdAt)))) return;
       if (body.action === "pay" && !(await guardOpenMonth(res, closing.ym(dateOnly(body.paidAt) || kstToday())))) return;
       const from = rec.status;
       let to = def.to;
@@ -13255,10 +13312,10 @@ async function routeApi(req, res, url) {
         sendJson(res, 403, { error: "처리완료된 요청의 금액·계좌는 처리 권한자만 고칠 수 있습니다." });
         return;
       }
-      if (rec.status === "paid" && !(await guardOpenMonth(res, closing.ym(rec.paidAt)))) return;
+      if (rec.status === "paid" && !(await guardOpenMonth(res, closing.ym(rec.paidAt || rec.updatedAt || rec.createdAt)))) return;
       const next = shape(body, rec);
       next.updatedAt = now();
-      if (rec.amount !== next.amount || rec.accountNumber !== next.accountNumber) {
+      if (rec.amount !== next.amount || rec.accountNumber !== next.accountNumber || rec.bankName !== next.bankName || rec.holder !== next.holder) {
         // 확인·허가 뒤 금액이나 계좌가 바뀌면 확인을 다시 받는다(확인한 내용과 실제 지급이 어긋나지 않게).
         if (["confirmed", "awaiting_approval"].includes(rec.status)) {
           next.status = "requested";
@@ -13276,7 +13333,7 @@ async function routeApi(req, res, url) {
       if (!requirePermission(actor, res, "payments", "delete")) return;
       const rec = await erp.get("payments", one[1]);
       if (!rec) { sendJson(res, 404, { error: "지급요청을 찾을 수 없습니다." }); return; }
-      if (rec.status === "paid" && !(await guardOpenMonth(res, closing.ym(rec.paidAt)))) return;
+      if (rec.status === "paid" && !(await guardOpenMonth(res, closing.ym(rec.paidAt || rec.updatedAt || rec.createdAt)))) return;
       for (const f of rec.files || []) await erp.removeFile(f.id);
       await erp.remove("payments", rec.id);
       addAudit(db, actor, "delete", "payment", rec.id,
