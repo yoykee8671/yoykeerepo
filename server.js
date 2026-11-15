@@ -11318,7 +11318,7 @@ async function routeApi(req, res, url) {
       const inMonth = (d) => String(d || "").slice(0, 7) === ym;
       const so = salesOrders.filter((o) => o.status !== "cancelled" && inMonth(o.orderDate));
       const pb = bills.filter((b) => !b.voided && inMonth(b.date));
-      const activeLoans = loans.filter((l) => !l.closed);
+      const activeLoans = loans.filter((l) => !l.closed && !l.rehabCreditor);
       const interest = sum(activeLoans, (l) => loansLib.expectedPayment(l, loansLib.loanBalance(l, loanPays), `${ym}-15`).interest);
       const fixed = schedules.filter((s) => s.active !== false && s.direction !== "in" && s.repeat === "monthly");
       const byCat = {};
@@ -11423,8 +11423,12 @@ async function routeApi(req, res, url) {
       const [loans, pays] = await Promise.all([erp.list("loans"), erp.list("loanPayments")]);
       const rows = loans.map((l) => decorate(l, pays)).sort((a, b) => String(a.company).localeCompare(String(b.company)) || b.currentBalance - a.currentBalance);
       const totals = {};
-      for (const r of rows) if (r.status !== "closed") totals[r.company] = (totals[r.company] || 0) + r.currentBalance;
-      sendJson(res, 200, { loans: rows, totals, companies: loansLib.LOAN_COMPANIES, canEdit, lastSync: (await erp.get("settings", "loanSync")) || null });
+      const rehabTotals = {};
+      for (const r of rows) {
+        if (r.status === "rehab") rehabTotals[r.company] = (rehabTotals[r.company] || 0) + r.currentBalance;
+        else if (r.status !== "closed") totals[r.company] = (totals[r.company] || 0) + r.currentBalance;
+      }
+      sendJson(res, 200, { loans: rows, totals, rehabTotals, companies: loansLib.LOAN_COMPANIES, canEdit, lastSync: (await erp.get("settings", "loanSync")) || null });
       return;
     }
 
@@ -11540,7 +11544,7 @@ async function routeApi(req, res, url) {
       const base = edit ? await erp.get("loans", decodeURIComponent(edit[1])) : { id: id("loan"), createdAt: now(), source: "직접 입력" };
       if (!base) { sendJson(res, 404, { error: "대출을 찾을 수 없습니다." }); return; }
       const next = { ...base };
-      for (const k of ["company", "category", "name", "bank", "account", "payDay", "term", "memo"]) if (k in body) next[k] = String(body[k] ?? "").trim().slice(0, 200);
+      for (const k of ["company", "category", "name", "bank", "account", "payDay", "term", "memo", "rehabCreditor", "rehabNote"]) if (k in body) next[k] = String(body[k] ?? "").trim().slice(0, 200);
       for (const k of ["principal", "principalPayment", "monthlyPayment", "balance"]) if (k in body) next[k] = Math.max(0, Math.round(number(String(body[k] ?? "").replace(/,/g, ""))));
       if ("rate" in body) next.rate = number(body.rate);
       for (const k of ["startDate", "repayStart", "maturity", "asOf"]) if (k in body) next[k] = dateOnly(body[k]) || "";
@@ -11552,6 +11556,14 @@ async function routeApi(req, res, url) {
       next.editedAt = now();
       next.editedBy = who;
       await erp.put("loans", next);
+      // 회생채권으로 돌렸으면 만기 질문은 더 묻지 않는다.
+      if (next.rehabCreditor) {
+        const qn = await erp.get("setupQuestions", `loan-maturity:${next.id}`);
+        if (qn && qn.status !== "answered") {
+          await erp.put("setupQuestions", { ...qn, status: "answered", answeredBy: who, answeredAt: now(),
+            answer: { choice: "rehab", label: "회생채권 전환", applied: `회생채권(${next.rehabCreditor} 대위변제)으로 전환` } });
+        }
+      }
       addAudit(db, actor, edit ? "update" : "create", "loan", next.id, `대출 ${next.name} ${edit ? "수정" : "등록"}`, edit ? base : null, next);
       await writeDb(db);
       sendJson(res, edit ? 200 : 201, { loan: next });

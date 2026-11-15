@@ -11522,7 +11522,7 @@ const cashDay = (d) => `${Number(d.slice(5, 7))}/${Number(d.slice(8, 10))}(${WEE
 // ===========================================================================
 // v2 대출금 원장 — 시트 기준 잔액 − 상환 원금, 매월 상환 예정, 클로브 자동 반영
 // ===========================================================================
-const LOAN_STATUS = { active: ["정상", ""], "due-soon": ["만기 임박", "warn"], matured: ["만기 지남", "warn"], closed: ["종료", "muted"] };
+const LOAN_STATUS = { active: ["정상", ""], "due-soon": ["만기 임박", "warn"], matured: ["만기 지남", "warn"], closed: ["종료", "muted"], rehab: ["회생채권", "muted"] };
 
 function renderLoans() {
   const cs = cashState();
@@ -11533,14 +11533,14 @@ function renderLoans() {
   const group = (key) => d.loans.filter((l) => l.company === key && (cs.loanShowClosed || l.status !== "closed"));
   const table = (key) => `
     <div class="panel" style="margin-bottom:14px">
-      <div class="panel-head"><h2>${h(d.companies[key])}</h2><span class="muted">남은 대출금 <strong>${money.format(d.totals[key] || 0)}원</strong></span></div>
+      <div class="panel-head"><h2>${h(d.companies[key])}</h2><span class="muted">남은 대출금 <strong>${money.format(d.totals[key] || 0)}원</strong>${d.rehabTotals?.[key] ? ` · 회생채권으로 전환 ${money.format(d.rehabTotals[key])}원` : ""}</span></div>
       <div class="table-wrap"><table>
         <thead><tr><th>대출</th><th>남은 금액</th><th>다음 상환(추정)</th><th>만기</th></tr></thead>
         <tbody>${group(key).map((l) => `<tr class="${cs.loanSel === l.id ? "selected" : ""}" data-loan-open="${h(l.id)}">
           <td>${h(l.bank)} ${h(l.name)}<br><span class="muted" style="font-size:11px">연 ${l.rate || 0}% · 매월 ${h(l.payDay || "-")} · ${h(l.account || "")}${unconnected.has(l.id) ? ' · <span class="danger-text">클로브 미연결</span>' : ""}</span></td>
           <td class="num"><strong>${money.format(l.currentBalance)}</strong>${l.paymentCount ? `<br><span class="muted" style="font-size:11px">상환 ${l.paymentCount}건 반영</span>` : `<br><span class="muted" style="font-size:11px">${h(l.asOf || "")} 기준</span>`}</td>
           <td>${l.nextDate ? `${h(l.nextDate.slice(5))}<br><span class="muted" style="font-size:11px">${money.format(l.nextAmount)}원</span>` : ""}</td>
-          <td>${h(l.maturity || "")}<br><span class="badge ${LOAN_STATUS[l.status][1]}">${LOAN_STATUS[l.status][0]}</span></td></tr>`).join("") || `<tr><td colspan="4" class="empty">대출이 없습니다.</td></tr>`}</tbody>
+          <td>${l.status === "rehab" ? `<span class="badge muted">회생채권</span><br><span class="muted" style="font-size:11px">${h(l.rehabCreditor)} 대위변제</span>` : `${h(l.maturity || "")}<br><span class="badge ${LOAN_STATUS[l.status][1]}">${LOAN_STATUS[l.status][0]}</span>`}</td></tr>`).join("") || `<tr><td colspan="4" class="empty">대출이 없습니다.</td></tr>`}</tbody>
       </table></div>
     </div>`;
   return `
@@ -11563,6 +11563,7 @@ function renderLoanDetail() {
   return `
     <div class="panel-head"><h2>${h(l.bank)} ${h(l.name)}</h2><button data-loan-close>닫기</button></div>
     <div class="panel-body">
+      ${l.status === "rehab" ? `<p class="muted">회생채권으로 전환(${h(l.rehabCreditor)} 대위변제)${l.rehabNote ? ` · ${h(l.rehabNote)}` : ""}. 은행 상환·이자 일정에서 빠지고 회생계획 변제로 갚습니다.</p>` : ""}
       <p>남은 금액 <strong>${money.format(l.currentBalance)}원</strong> (${h(l.asOf || "")} 기준 ${money.format(l.balance)}원 − 이후 상환 원금)<br>
       <span class="muted">원금 ${money.format(l.principal || 0)} · 실행 ${h(l.startDate || "")} · 연 ${l.rate}% · 매월 ${h(l.payDay || "")} · 예상 ${money.format(l.expected?.total || 0)}원(이자 ${money.format(l.expected?.interest || 0)}) · ${h(l.term || "")} ${h(l.memo || "")}</span></p>
       ${canEdit ? `<h3>상환 직접 기록</h3><form class="form-grid" data-loan-pay>
@@ -11579,6 +11580,7 @@ function renderLoanDetail() {
         <div class="field two"><div><label>남은 금액(지금)</label><input name="balance" inputmode="numeric" value="${money.format(l.currentBalance)}"></div><div><label>만기</label><input type="date" name="maturity" value="${h(l.maturity || "")}"></div></div>
         <div class="field two"><div><label>이율 %</label><input name="rate" value="${h(l.rate)}"></div><div><label>매월 상환일</label><input name="payDay" value="${h(l.payDay || "")}" placeholder="15일 / 말일"></div></div>
         <div class="field two"><div><label>매월 원금상환</label><input name="principalPayment" inputmode="numeric" value="${h(l.principalPayment || "")}"></div><div><label>출금계좌</label><input name="account" value="${h(l.account || "")}"></div></div>
+        <div class="field two"><div><label>회생채권 전환 — 대위변제 기관</label><input name="rehabCreditor" value="${h(l.rehabCreditor || "")}" placeholder="예: 기술보증기금 (비우면 일반 대출)"></div><div><label>전환 메모</label><input name="rehabNote" value="${h(l.rehabNote || "")}"></div></div>
         <label class="check"><input type="checkbox" name="closed" ${l.closed ? "checked" : ""}> 종료(다 갚음)</label>
         <div class="toolbar"><button type="submit">저장</button><span class="muted" style="font-size:12px">남은 금액을 고치면 오늘 기준 잔액이 됩니다.</span></div></form></details>` : ""}
     </div>`;

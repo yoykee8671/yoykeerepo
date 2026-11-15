@@ -60,4 +60,10 @@ assert.ok(plan.loans[1].closed);
 assert.deepEqual(plan.questions.map((q) => q.kind), ['loan-maturity']);
 assert.equal(plan.questions[0].suggested, 'extended');
 
+// 회생채권 전환(대위변제): 상태 rehab, 상환 일정·클로브 매칭에서 빠진다
+const rb = { ...b, rehabCreditor: '기술보증기금' };
+assert.equal(loanStatus(rb, 300_000_000, '2026-11-14'), 'rehab');
+assert.equal(loanScheduleLines([rb], [], '2026-11-14', '2026-11-30').length, 0);
+assert.equal(matchLoanPayments([rb], txs.slice(0, 1), []).length, 0);
+
 console.log('v2 loans verify: all checks passed');
