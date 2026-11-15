@@ -12895,18 +12895,24 @@ function renderReceivableLedger() {
   return `
     <section class="layout">
       <div class="panel">
-        <div class="panel-head"><h2>채권원장</h2><span class="muted">채권총액 − (옛 관리대장 이관 + 입금요청 차감 + 조정) = 잔액</span></div>
+        <div class="panel-head"><h2>채권원장</h2><span class="muted">채권총액 − (수수료 차감 + 회생 현금변제) = 잔액</span></div>
         <div class="table-wrap"><table class="cash-table">
-          <thead><tr><th>브랜드</th><th>채권총액</th><th>차감 누계</th><th>잔액</th><th>이관 주문</th></tr></thead>
+          <thead><tr><th>브랜드</th><th>채권총액</th><th>수수료 차감</th><th>회생 현금변제</th><th>잔액</th></tr></thead>
           <tbody>${cs.rec.map((r) => `<tr data-rec-open="${h(r.brandId)}" style="cursor:pointer" class="${detail?.brand?.id === r.brandId ? "selected" : ""}">
-            <td>${r.code ? `<span class="code-tag">${h(r.code)}</span>` : ""}${h(r.name)}</td><td class="num">${money.format(r.base)}</td>
-            <td class="num">${money.format(r.deducted)}</td><td class="num"><strong>${money.format(r.balance)}</strong></td><td class="num">${r.legacyCount || ""}</td></tr>`).join("")}</tbody>
+            <td>${r.code ? `<span class="code-tag">${h(r.code)}</span>` : ""}${h(r.name)}${r.creditor ? `<br><span class="muted" style="font-size:11px">계획표: ${h(r.creditor)}</span>` : `<br><span class="danger-text" style="font-size:11px">계획표 채권자 못 찾음</span>`}</td>
+            <td class="num">${money.format(r.base)}</td><td class="num">${money.format(r.commission || 0)}</td><td class="num">${money.format(r.rehabCash || 0)}</td>
+            <td class="num"><strong>${money.format(r.balance)}</strong></td></tr>`).join("")}</tbody>
         </table></div>
       </div>
       <div class="panel">
         <div class="panel-head"><h2>${detail ? h(detail.brand.name) : "내역"}</h2></div>
         <div class="panel-body">${detail ? `
-          <p>채권총액 ${money.format(detail.ledger.base)} − 차감 ${money.format(detail.ledger.deducted)} = <strong>${money.format(detail.ledger.balance)}원</strong></p>
+          <p>채권총액 ${money.format(detail.ledger.base)} − 수수료 차감 ${money.format(detail.ledger.commission || 0)} − 회생 현금변제 ${money.format(detail.ledger.rehabCash || 0)} = <strong>${money.format(detail.ledger.balance)}원</strong></p>
+          ${detail.ledger.split ? `<table class="kv" style="min-width:0;margin-bottom:10px"><tbody>
+            <tr><th style="text-align:left">회생계획표(${h(detail.creditor)})</th><td class="num">채권 ${money.format(detail.ledger.split.planTotal)}${detail.ledger.split.planTotal !== detail.ledger.base ? ` <span class="danger-text">(채권총액과 다름)</span>` : ""}</td></tr>
+            <tr><th style="text-align:left">20% 현금변제(10년 계획)</th><td class="num">${money.format(detail.ledger.split.cashPlan)} 중 ${money.format(detail.ledger.split.cashPaid)} 냄 · 남음 <strong>${money.format(detail.ledger.split.cashLeft)}</strong></td></tr>
+            <tr><th style="text-align:left">80% (수수료 차감으로 갚는 몫)</th><td class="num">${money.format(detail.ledger.split.convertPart)} 중 ${money.format(detail.ledger.split.commission)} 차감 · 남음 <strong>${money.format(detail.ledger.split.convertLeft)}</strong></td></tr>
+          </tbody></table>` : `<p class="muted">회생계획표에서 이 브랜드의 채권자를 찾지 못했습니다(회생변제 화면에서 계획표를 가져왔는지 확인).</p>`}
           <div class="table-wrap" style="max-height:520px"><table class="cash-table"><thead><tr><th>날짜</th><th>구분</th><th>주문</th><th>차감</th><th>잔액</th></tr></thead><tbody>
             ${detail.ledger.entries.slice().reverse().map((e) => `<tr><td>${h(String(e.date).slice(0, 10))}</td><td>${h(e.kind)}</td><td class="muted" style="font-size:12px">${h(e.orderNo || e.memo || "")}</td>
               <td class="num">${money.format(e.amount)}</td><td class="num">${money.format(e.balance)}</td></tr>`).join("")}

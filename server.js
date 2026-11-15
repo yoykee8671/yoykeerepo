@@ -5551,6 +5551,28 @@ function finalDepositAmount(item) {
   return Math.max(0, Number(item.depositAmount || 0) - Number(item.creditUsedAmount || 0));
 }
 
+// 채권 브랜드 ↔ 회생계획표 채권자, 그리고 그 채권자에게 낸 현금변제(선변제 + 완료된 해).
+async function rehabPaidByBrand(db) {
+  const [plan, pays] = await Promise.all([erp.get("rehabPlan", "current"), erp.list("rehabPayments")]);
+  const map = {};
+  if (plan) {
+    for (const b of db.brands.filter((x) => x.hasReceivable)) {
+      const c = legacy.matchCreditor(b, plan.creditors || []);
+      if (c) map[b.id] = { creditor: c, paid: rehab.creditorCashPaid(plan, pays, c) };
+    }
+  }
+  return { plan, map };
+}
+// 브랜드 요약(채권잔액)이 바로 쓰도록 브랜드에 합계를 적어 둔다(회생계획표 가져오기·지급 기록 때).
+async function recomputeRehabPaid(db) {
+  const { map } = await rehabPaidByBrand(db);
+  for (const b of db.brands) {
+    const m = map[b.id];
+    b.rehabCashPaid = m ? m.paid.reduce((s, p) => s + Number(p.amount || 0), 0) : 0;
+    b.rehabCreditor = m ? m.creditor.creditor : "";
+  }
+}
+
 function brandSummary(db, brandId) {
   const requests = db.requests.filter((item) => item.brandId === brandId);
   const pending = requests.filter((item) => PENDING_STATUSES.includes(item.status)).length;
@@ -5564,9 +5586,11 @@ function brandSummary(db, brandId) {
   const brand = db.brands.find((item) => item.id === brandId);
   // 옛 관리대장에서 이관한 주문의 차감(v2)도 함께 뺀다. 이관 때 브랜드에 합계를 적어 둔다.
   const legacyDeducted = Number(brand?.legacyReceivableDeducted || 0);
-  const receivableRemaining = Math.max(0, Number(brand?.receivableTotal || 0) - receivableDeducted - legacyDeducted);
+  // 회생 현금변제(연말에 계획표대로 낸 돈)도 채권총액에서 뺀다(대표 확인 2026-11-15).
+  const rehabCashPaid = Number(brand?.rehabCashPaid || 0);
+  const receivableRemaining = Math.max(0, Number(brand?.receivableTotal || 0) - receivableDeducted - legacyDeducted - rehabCashPaid);
   const latestCatalogCount = getLatestPriceCatalog(db, brandId).length;
-  return { requestCount: requests.length, pendingCount: pending, totalAmount: total, receivableDeducted: receivableDeducted + legacyDeducted, legacyDeducted, receivableRemaining, creditBalance, latestCatalogCount };
+  return { requestCount: requests.length, pendingCount: pending, totalAmount: total, receivableDeducted: receivableDeducted + legacyDeducted, legacyDeducted, rehabCashPaid, receivableRemaining, creditBalance, latestCatalogCount };
 }
 
 // 계좌번호는 숫자만 남긴다. 은행 이체등록 양식은 하이픈·공백을 받지 않고,
@@ -11074,10 +11098,12 @@ async function routeApi(req, res, url) {
     // 채권원장: 채권 브랜드별 채권총액 − (이관 주문 + 입금요청 차감 + 조정) = 잔액
     if (pathname === "/api/receivables" && method === "GET") {
       if (!requirePermission(actor, res, "brands", "view")) return;
-      const [legacyOrders, adjustments] = await Promise.all([erp.list("legacyOrders"), erp.list("receivableAdjustments")]);
+      const [legacyOrders, adjustments, rp] = await Promise.all([erp.list("legacyOrders"), erp.list("receivableAdjustments"), rehabPaidByBrand(db)]);
       const rows = db.brands.filter((b) => b.hasReceivable).map((b) => {
-        const l = legacy.receivableLedger(b, { legacyOrders, requests: db.requests, adjustments });
+        const m = rp.map[b.id];
+        const l = legacy.receivableLedger(b, { legacyOrders, requests: db.requests, adjustments, rehabPaid: m?.paid || [], plan: m?.creditor || null });
         return { brandId: b.id, code: b.code || "", name: b.name, base: l.base, deducted: l.deducted, balance: l.balance,
+          commission: l.commission, rehabCash: l.rehabCash, creditor: m?.creditor?.creditor || "", split: l.split,
           legacyCount: legacyOrders.filter((o) => o.brandId === b.id).length };
       }).sort((a, b) => b.balance - a.balance);
       sendJson(res, 200, { brands: rows });
@@ -11088,8 +11114,10 @@ async function routeApi(req, res, url) {
       if (!requirePermission(actor, res, "brands", "view")) return;
       const brand = db.brands.find((b) => b.id === recOne[1]);
       if (!brand) { sendJson(res, 404, { error: "브랜드를 찾을 수 없습니다." }); return; }
-      const [legacyOrders, adjustments] = await Promise.all([erp.list("legacyOrders"), erp.list("receivableAdjustments")]);
-      sendJson(res, 200, { brand: { id: brand.id, name: brand.name, code: brand.code }, ledger: legacy.receivableLedger(brand, { legacyOrders, requests: db.requests, adjustments }),
+      const [legacyOrders, adjustments, rp] = await Promise.all([erp.list("legacyOrders"), erp.list("receivableAdjustments"), rehabPaidByBrand(db)]);
+      const m = rp.map[brand.id];
+      sendJson(res, 200, { brand: { id: brand.id, name: brand.name, code: brand.code }, creditor: m?.creditor?.creditor || "",
+        ledger: legacy.receivableLedger(brand, { legacyOrders, requests: db.requests, adjustments, rehabPaid: m?.paid || [], plan: m?.creditor || null }),
         legacyOrders: legacyOrders.filter((o) => o.brandId === brand.id).sort((a, b) => String(b.date).localeCompare(String(a.date))) });
       return;
     }
@@ -11438,6 +11466,7 @@ async function routeApi(req, res, url) {
       }
       await erp.put("rehabPlan", { id: "current", creditors, totals: extract.totals, importedAt: now(), importedBy: who });
       addAudit(db, actor, "update", "rehabPlan", "current", `회생 변제계획표 가져오기: 채권자 ${creditors.length}곳, 채권총액 ${sum.toLocaleString()}원`, null, null);
+      await recomputeRehabPaid(db);
       await writeDb(db);
       sendJson(res, 200, { creditors: creditors.length, total: sum, years: extract.totals.years });
       return;
@@ -11449,6 +11478,7 @@ async function routeApi(req, res, url) {
       if (!/^\d{4}$/.test(rec.year) || !rec.amount) { sendJson(res, 400, { error: "연도와 금액을 입력하세요." }); return; }
       await erp.put("rehabPayments", rec);
       addAudit(db, actor, "create", "rehabPayment", rec.id, `회생채권 ${rec.year}년 변제 ${rec.amount.toLocaleString()}원 기록`, null, rec);
+      await recomputeRehabPaid(db);
       await writeDb(db);
       sendJson(res, 201, { payment: rec });
       return;
@@ -11459,6 +11489,7 @@ async function routeApi(req, res, url) {
       if (!rec) { sendJson(res, 404, { error: "기록이 없습니다." }); return; }
       await erp.put("rehabPayments", { ...rec, voided: true, voidedBy: who, voidedAt: now() });
       addAudit(db, actor, "delete", "rehabPayment", rec.id, `회생채권 ${rec.year}년 변제 기록 취소`, rec, null);
+      await recomputeRehabPaid(db);
       await writeDb(db);
       sendJson(res, 200, { ok: true });
       return;

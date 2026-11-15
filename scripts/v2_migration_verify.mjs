@@ -60,6 +60,17 @@ assert.equal(led.deducted, 6_375 + 6_375 + 1_000);
 assert.equal(led.balance, 22_328_600 - 13_750);
 assert.equal(led.entries.at(-1).balance, led.balance);
 
+// 회생 현금변제도 잔액에서 빼고, 20%/80% 를 나눠 본다
+const led2 = receivableLedger({ ...brands[0], receivableTotal: 1_000_000 }, {
+  requests: [{ ...requests[0], receivableDeduction: 300_000 }],
+  rehabPaid: [{ date: '2025-12-31', amount: 10_000, memo: '선변제' }, { date: '2026-12-20', amount: 10_000 }],
+  plan: { total: 1_000_000, cash: 200_000 }
+});
+assert.equal(led2.balance, 1_000_000 - 300_000 - 20_000);
+assert.equal(led2.rehabCash, 20_000);
+assert.equal(led2.commission, 300_000);
+assert.deepEqual([led2.split.cashLeft, led2.split.convertPart, led2.split.convertLeft], [180_000, 800_000, 500_000]);
+
 // zero-deduction answers
 const zr = [
   { id: 'z1', productSalesAmount: 40_000, receivableDeduction: 0 },

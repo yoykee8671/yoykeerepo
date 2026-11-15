@@ -5,7 +5,7 @@
 //   node scripts/v2_rehab_verify.mjs
 
 import assert from 'node:assert/strict';
-import { yearSummary, creditorsForYear, rehabScheduleLines, creditorPlan } from '../lib/rehab-plan.mjs';
+import { yearSummary, creditorsForYear, rehabScheduleLines, creditorPlan, creditorCashPaid } from '../lib/rehab-plan.mjs';
 
 const plan = {
   totals: { prepaid: 1_800_270, prepaidPaid: 1_739_605, remaining2026: 1_800_300, years: { 2026: 3_600_570, 2027: 20_864_277 } },
@@ -31,5 +31,10 @@ assert.equal(rehabScheduleLines(plan, [{ year: '2026', amount: 1_800_300 }], '20
 
 assert.equal(creditorPlan(plan, '기술보증기금')?.cash, 196_017_140);
 assert.equal(creditorPlan(plan, ''), null);
+
+const kibo = plan.creditors[0];
+assert.deepEqual(creditorCashPaid(plan, [], kibo).map((p) => [p.date, p.amount]), [['2025-12-31', 980_085]]);
+assert.deepEqual(creditorCashPaid(plan, [{ year: '2026', amount: 1_800_300, date: '2026-12-20' }], kibo).map((p) => [p.year, p.amount]), [['2026', 980_085], ['2026', 980_085]]);
+assert.equal(creditorCashPaid(plan, [{ year: '2026', amount: 100, date: '2026-12-20' }], kibo).length, 1, 'partial year is not split per creditor');
 
 console.log('v2 rehab verify: all checks passed');
