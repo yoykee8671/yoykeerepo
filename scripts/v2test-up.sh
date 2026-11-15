@@ -80,6 +80,11 @@ seed_cleanup() {
 }
 
 if [ "${1:-}" = "--reset" ]; then
+  # 대표가 v2 에 직접 넣은 자료(계좌 연결·확인 필요 답·현금흐름표 등)까지 모두 지워진다.
+  if [ "${V2TEST_RESET_CONFIRM:-}" != "지워도됨" ]; then
+    echo "[v2test] --reset 은 v2 에 넣은 자료를 모두 지웁니다. 정말이면 V2TEST_RESET_CONFIRM=지워도됨 을 붙여 다시 실행하세요." >&2
+    exit 1
+  fi
   echo "[v2test] 운영 DB 복사"
   docker stop wooofpay-v2test-app >/dev/null
   psql_test -c "drop schema public cascade; create schema public;"
