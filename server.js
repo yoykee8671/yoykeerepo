@@ -8251,6 +8251,18 @@ async function routeApi(req, res, url) {
 
   // 등록된 메뉴와 액션. 새 메뉴는 MENU_REGISTRY 에 넣기만 하면 권한 화면에
   // 자동으로 나타난다.
+  // 좌측 메뉴 즐겨찾기(★) — 관리자마다 따로. 값은 'tab' 또는 'tab:하위화면'.
+  if (pathname === "/api/me/nav-favorites" && method === "PUT") {
+    const body = await readBody(req);
+    const list = Array.isArray(body.favorites) ? body.favorites : [];
+    const clean = [...new Set(list.map(String).filter((x) => /^[a-zA-Z]+(:[a-zA-Z0-9_-]+)?$/.test(x)))].slice(0, 30);
+    const me = db.admins.find((a) => a.id === actor.id);
+    if (!me) { sendJson(res, 404, { error: "계정을 찾을 수 없습니다." }); return; }
+    me.navFavorites = clean;
+    await writeDb(db);
+    sendJson(res, 200, { favorites: clean });
+    return;
+  }
   if (pathname === "/api/menus" && method === "GET") {
     sendJson(res, 200, { menus: MENU_REGISTRY, actionLabels: ACTION_LABELS });
     return;

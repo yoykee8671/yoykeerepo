@@ -850,34 +850,35 @@ function renderAppInner() {
     return;
   }
   const tabs = [
+    // 순서 = 좌측 메뉴 순서. 묶음(대분류)은 NAV_GROUPS 로 정하고, 첫 중분류 자리에 나온다.
     ["dashboard", "대시보드"],
-    ["kpi", "KPI·손익"],
-    ["cash", "자금"],
-    ["requests", "입금요청"],
-    ["payments", "지급요청"],
-    ["trade", "거래"],
-    ["prices", "단가표"],
-    ["brands", "브랜드"],
-    ["admins", "관리자"],
-    ["audits", "이력"],
-    ["archive", "아카이브"],
     // 자동화(카페24 수집)와 클로브ai(입금대사)는 결국 한 흐름이라 한 화면에서
     // 본다. 권한 키는 pipeline 하나로 묶고, 화면 안에서 두 단계를 이어 보여준다.
     ["pipeline", "주문매칭"],
+    ["requests", "입금요청"],
+    ["payments", "지급요청"],
+    ["trade", "거래"],
     ["settlement", "월 정산 생성"],
     ["monthly", "월 정산 현황"],
     ["npb", "npb정산"],
+    ["brands", "브랜드"],
+    ["prices", "단가표"],
     ["productsync", "상품동기화"],
+    ["kpi", "KPI·손익"],
+    ["cash", "자금"],
+    ["admins", "관리자"],
+    ["audits", "이력"],
+    ["archive", "아카이브"],
     ["setup", "확인 필요"]
   ].filter(([key]) => (key === "monthly" ? can("settlement", "view") : key === "trade" ? TRADE_SCREENS.some(([k]) => tradeCan(k)) : can(key, "view")) || (key === "pipeline" && can("reconcile", "view"))
     || (key === "setup" && (state.admin?.role === "owner" || can("cash", "edit"))));
   app.innerHTML = `
     <div class="shell">
       <aside class="sidebar">
-        <div class="brandmark">
-          <strong>WooofPay</strong>
-          <span>선매입 브랜드 입금 관리</span>
-        </div>
+        <button type="button" class="brandmark" data-go-home title="홈(대시보드)">
+          <strong>WOOOF ERP</strong>
+          <span>우프 통합 관리 시스템</span>
+        </button>
         <nav class="nav">
           ${renderNavItems(tabs)}
         </nav>
@@ -892,6 +893,7 @@ function renderAppInner() {
   app.querySelectorAll("[data-tab]").forEach((button) => {
     button.addEventListener("click", () => {
       state.tab = button.dataset.tab;
+      state.navKeepClosed = null;
       if (state.tab === "trade") tradeState();
       clearEditing();
       renderApp();
@@ -899,11 +901,42 @@ function renderAppInner() {
   });
   app.querySelectorAll("[data-nav-group]").forEach((button) => {
     button.addEventListener("click", () => {
-      if (button.classList.contains("active")) return;
-      state.tab = button.dataset.firstTab;
+      const open = navOpenSet();
+      const key = button.dataset.navGroup;
+      // 보고 있는 화면의 대분류를 접으면, 다른 화면으로 옮길 때까지 접힌 채로 둔다.
+      if (open.has(key)) { open.delete(key); if (navGroupOf(state.tab)?.key === key) state.navKeepClosed = key; }
+      else { open.add(key); if (state.navKeepClosed === key) state.navKeepClosed = null; }
+      saveNavOpen();
+      renderApp();
+    });
+  });
+  app.querySelectorAll("[data-nav-star]").forEach((star) => {
+    star.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const key = star.dataset.navStar;
+      const list = navFavorites();
+      const next = list.includes(key) ? list.filter((x) => x !== key) : [...list, key];
+      state.admin.navFavorites = next;
+      renderApp();
+      try { state.admin.navFavorites = (await api("/api/me/nav-favorites", { method: "PUT", body: { favorites: next } })).favorites; }
+      catch (error) { state.admin.navFavorites = list; renderApp(); showToast(error.message, "error"); }
+    });
+  });
+  app.querySelectorAll("[data-nav-fav]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const [tab, sub] = button.dataset.navFav.split(":");
+      state.tab = tab;
+      if (tab === "trade") tradeState();
+      const conf = TAB_SUBMENUS[tab];
+      if (sub && conf) state[conf.stateKey].screen = sub;
       clearEditing();
       renderApp();
     });
+  });
+  app.querySelector("[data-go-home]")?.addEventListener("click", () => {
+    state.tab = "dashboard";
+    clearEditing();
+    renderApp();
   });
   app.querySelectorAll("[data-subtab]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -942,24 +975,61 @@ const TAB_SUBMENUS = {
 };
 
 // 대분류 아래 중분류로 묶는 메뉴(대표 결정 2026-11-16). 중분류는 원래 탭 그대로(state.tab)라
-// 화면·권한·하위 화면은 바뀌지 않는다. 대분류를 누르면 볼 수 있는 첫 중분류로 간다.
-const NAV_GROUPS = [{ key: "settle", label: "정산", children: ["settlement", "monthly", "npb"] }];
+// 화면·권한·하위 화면은 바뀌지 않는다. 대분류는 눌러서 펼치고 접는다(▸/▾).
+const NAV_GROUPS = [
+  { key: "buy", label: "결제/구매", children: ["pipeline", "requests", "payments"] },
+  { key: "settle", label: "정산", children: ["settlement", "monthly", "npb"] },
+  { key: "mall", label: "자사몰관리", children: ["brands", "prices", "productsync"] },
+  { key: "mgmt", label: "경영관리", children: ["kpi", "cash"] },
+  { key: "admin", label: "관리/설정", children: ["admins", "audits", "archive", "setup"] }
+];
+const navGroupOf = (tab) => NAV_GROUPS.find((g) => g.children.includes(tab));
+// 펼쳐 둔 대분류는 이 브라우저에 기억한다(편의용).
+function navOpenSet() {
+  if (!state.navOpen) {
+    let saved = [];
+    try { saved = JSON.parse(localStorage.getItem("navOpen") || "[]"); } catch {}
+    state.navOpen = new Set(Array.isArray(saved) ? saved : []);
+  }
+  return state.navOpen;
+}
+function saveNavOpen() { try { localStorage.setItem("navOpen", JSON.stringify([...navOpenSet()])); } catch {} }
+const navFavorites = () => (Array.isArray(state.admin?.navFavorites) ? state.admin.navFavorites : []);
+const navStar = (favKey) => `<span class="nav-star ${navFavorites().includes(favKey) ? "on" : ""}" data-nav-star="${h(favKey)}" title="자주 쓰는 메뉴">${navFavorites().includes(favKey) ? "★" : "☆"}</span>`;
+
 function renderNavItems(tabs) {
   const visible = new Map(tabs);
+  const open = navOpenSet();
+  const activeGroup = navGroupOf(state.tab);
+  if (activeGroup && state.navKeepClosed !== activeGroup.key) open.add(activeGroup.key);
   const done = new Set();
-  const item = (key, label) => `
-    <button data-tab="${key}" class="${state.tab === key ? "active" : ""}">${label}${key === "productsync" ? renderPsNavDot() : ""}</button>
+  const item = (key, label) => {
+    const hasSub = Boolean(TAB_SUBMENUS[key]);
+    return `
+    <button data-tab="${key}" class="nav-item ${state.tab === key ? "active" : ""}"><span class="nav-label">${label}${key === "productsync" ? renderPsNavDot() : ""}</span>${hasSub ? `<span class="nav-caret">${state.tab === key ? "▾" : "▸"}</span>` : ""}${navStar(key)}</button>
     ${state.tab === key ? renderTabSubmenu(key) : ""}`;
-  return tabs.map(([key, label]) => {
-    const group = NAV_GROUPS.find((g) => g.children.includes(key));
+  };
+  // ★ 자주 쓰는 메뉴: 맨 위에 따로. 'tab' 또는 'tab:하위화면'.
+  const favs = navFavorites().map((fk) => {
+    const [tab, sub] = fk.split(":");
+    if (!visible.has(tab)) return "";
+    const conf = TAB_SUBMENUS[tab];
+    const subLabel = sub && conf ? (conf.screens.find(([k]) => k === sub) || [])[1] : "";
+    if (sub && !subLabel) return "";
+    const active = state.tab === tab && (!sub || state[conf.stateKey]?.screen === sub);
+    return `<button data-nav-fav="${h(fk)}" class="nav-item ${active ? "active" : ""}"><span class="nav-label">${h(subLabel || visible.get(tab))}${subLabel ? `<small class="nav-from"> · ${h(visible.get(tab))}</small>` : ""}</span>${navStar(fk)}</button>`;
+  }).filter(Boolean);
+  const favBlock = favs.length ? `<div class="nav-favs"><div class="nav-section">자주 쓰는 메뉴</div>${favs.join("")}</div>` : "";
+  return favBlock + tabs.map(([key, label]) => {
+    const group = navGroupOf(key);
     if (!group) return item(key, label);
     if (done.has(group.key)) return "";
     done.add(group.key);
     const kids = group.children.filter((k) => visible.has(k));
-    const open = kids.includes(state.tab);
+    const isOpen = open.has(group.key);
     return `
-      <button data-nav-group="${group.key}" data-first-tab="${kids[0]}" class="${open ? "active" : ""}">${group.label}</button>
-      ${open ? `<div class="nav-sub">${kids.map((k) => item(k, visible.get(k))).join("")}</div>` : ""}`;
+      <button data-nav-group="${group.key}" class="nav-item ${kids.includes(state.tab) ? "active" : ""}"><span class="nav-label">${group.label}</span><span class="nav-caret">${isOpen ? "▾" : "▸"}</span></button>
+      ${isOpen ? `<div class="nav-sub">${kids.map((k) => item(k, visible.get(k))).join("")}</div>` : ""}`;
   }).join("");
 }
 
@@ -973,7 +1043,7 @@ function renderTabSubmenu(tabKey) {
       ${config.screens
         .filter(([key]) => !config.visible || config.visible(key))
         .map(([key, label]) =>
-          `<button data-subtab="${tabKey}" data-subtab-key="${key}" class="${current === key ? "active" : ""}">${label}</button>`)
+          `<button data-subtab="${tabKey}" data-subtab-key="${key}" class="nav-item ${current === key ? "active" : ""}"><span class="nav-label">${label}</span>${navStar(`${tabKey}:${key}`)}</button>`)
         .join("")}
     </div>`;
 }

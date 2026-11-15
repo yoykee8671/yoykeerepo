@@ -2480,3 +2480,16 @@ tr.period-items > td { background: #fbfcfe; padding: 4px 16px 10px; }
 .chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; background: #f8fafc; font-size: 12px; }
 .chip-x { border: none; background: none; padding: 0 2px; cursor: pointer; color: var(--muted); font-size: 14px; }
+
+/* 좌측 메뉴: 대분류 펼침(▸/▾), 자주 쓰는 메뉴(★), 사이트 이름(누르면 홈) — 2026-11-16 */
+.brandmark { width: 100%; min-height: 0; border-radius: 0; text-align: left; background: transparent; border: 0; cursor: pointer; font: inherit; color: inherit; }
+.nav .nav-item { display: flex; align-items: center; gap: 6px; }
+.nav .nav-item .nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+.nav-caret { font-size: 10px; opacity: 0.7; }
+.nav-star { font-size: 12px; opacity: 0; color: #9fb0c9; padding: 0 2px; cursor: pointer; }
+.nav-item:hover .nav-star, .nav-star.on { opacity: 1; }
+.nav-star.on { color: #f5c542; }
+.nav-favs { margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.12); }
+.nav-section { font-size: 11px; color: #7f8fa8; padding: 2px 10px 4px; }
+.nav-from { color: #7f8fa8; font-size: 11px; }
+@media (hover: none) { .nav-star { opacity: 0.5; } }
