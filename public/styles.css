@@ -2436,3 +2436,26 @@ table.compact.brands-table .row-actions { flex-wrap: wrap; gap: 4px; }
 @media (max-width: 1200px) { .brands-layout { grid-template-columns: minmax(0, 1fr); } }
 table.compact.brands-table th, table.compact.brands-table td { width: auto; min-width: 0; }
 table.compact.brands-table td:first-child { min-width: 110px; }
+
+/* v2 현금흐름표 — 시트처럼: 왼쪽 항목·위쪽 날짜 고정, 칸 안에서만 가로 스크롤 */
+.cf-wrap { overflow: auto; max-height: calc(100vh - 300px); }
+table.cf-grid { border-collapse: separate; border-spacing: 0; min-width: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+table.cf-grid th, table.cf-grid td { padding: 4px 6px; border-bottom: 1px solid var(--line); border-right: 1px solid #eef1f5; white-space: nowrap; }
+table.cf-grid thead th { position: sticky; top: 0; z-index: 2; background: #f3f5f8; text-align: center; font-weight: 600; }
+table.cf-grid .cf-label { position: sticky; left: 0; z-index: 1; background: var(--panel); text-align: left; min-width: 150px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; cursor: pointer; font-weight: 500; }
+table.cf-grid thead .cf-label { z-index: 3; background: #f3f5f8; }
+table.cf-grid td { text-align: right; min-width: 64px; cursor: pointer; }
+table.cf-grid .cf-day small { color: var(--muted); font-weight: 400; }
+table.cf-grid .weekend { color: var(--red); }
+table.cf-grid .today { background: #fff8e1; }
+table.cf-grid .cf-total { font-weight: 600; background: #f8fafc; min-width: 90px; }
+table.cf-grid tr.cf-section th, table.cf-grid tr.cf-section td { background: #eef4fb; font-weight: 700; cursor: default; }
+table.cf-grid tr.cf-sum th, table.cf-grid tr.cf-sum td { font-weight: 700; background: #f8fafc; cursor: default; }
+table.cf-grid tr.cf-bal th, table.cf-grid tr.cf-bal td { background: #eef8f0; }
+table.cf-grid .neg { color: var(--red); }
+.k-plan { color: #8a94a6; font-style: italic; }
+.k-actual { color: var(--text); }
+.k-sheet { color: #4b5565; }
+.k-manual { color: var(--primary); font-weight: 600; }
+.cf-legend span { margin-right: 8px; }
+.cf-legend { font-size: 12px; margin: 4px 0 8px; }

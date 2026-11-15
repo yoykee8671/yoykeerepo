@@ -107,6 +107,7 @@ if [ "${1:-}" = "--reset" ]; then
   apply_overrides
   apply_brand_overrides
   post /api/rehab/import-sheet
+  post /api/cashflow/import-sheet
   seed_cleanup
 fi
 
@@ -117,6 +118,7 @@ if [ "${1:-}" = "--overrides" ]; then
   apply_overrides
   apply_brand_overrides
   post /api/rehab/import-sheet
+  post /api/cashflow/import-sheet
   seed_cleanup
 fi
 

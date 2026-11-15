@@ -28,6 +28,7 @@ import * as proposals from "./lib/setup-proposals.mjs";
 import * as monthly from "./lib/monthly-board.mjs";
 import * as brandInfo from "./lib/brand-info.mjs";
 import * as rehab from "./lib/rehab-plan.mjs";
+import * as cashFlow from "./lib/cash-flow.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -49,6 +50,9 @@ const MONTHLY_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_month
 const MONTHLY_SHEET_ID = process.env.MONTHLY_SHEET_ID || "1_fg3KbjmZrJzFTf1w2LLkjoxYj2DuweYFdDIOp3Qumo";
 const REHAB_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_rehab.py");
 const REHAB_SHEET_ID = process.env.REHAB_SHEET_ID || "1p3cLIiqHzXsiNcbkRkNgv7LAwRvkXS_DkD3qiHd1_w4";
+const CASHFLOW_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_cashflow.py");
+// 2026_현금흐름표(구글드라이브 엑셀 파일).
+const CASHFLOW_SHEET_ID = process.env.CASHFLOW_SHEET_ID || "1QPVZQ8aN0gVpFwoWTyxWXjddF6neJAGH";
 const HANA_TRANSFER_SCRIPT = path.join(__dirname, "scripts", "hana_transfer_xlsx.py");
 const NPB_PARSE_SCRIPT = path.join(__dirname, "scripts", "npb_parse.py");
 const NPB_XLSX_SCRIPT = path.join(__dirname, "scripts", "npb_settlement_xlsx.py");
@@ -11444,6 +11448,213 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // --- v2 현금흐름표 (구글시트와 같은 모양: 행=IN/OUT 항목, 열=날짜) -------------------
+  if (pathname === "/api/cashflow" || pathname.startsWith("/api/cashflow/")) {
+    if (!requirePermission(actor, res, "cash", "view")) return;
+    const canEdit = actor.role === "owner" || can(actor, "cash", "edit");
+    const who = actor.name || actor.email || "";
+    const today = kstToday();
+    const monthOf = (v) => (/^\d{4}-\d{2}$/.test(v || "") ? v : today.slice(0, 7));
+    const companies = (key) => (key === "wooof" || key === "betters" ? [key] : ["wooof", "betters"]);
+
+    // 그달 v2 예정: 일일 자금보고와 같은 계산을 그달 전체로 돌린다(회사별).
+    const planLines = async (month, companyKey) => {
+      const days = cashFlow.monthDays(month);
+      const start = days[0].date;
+      const span = days.length - 1;
+      const [schedules, pays, loans, loanPays, plan, rehabPays, so] = await Promise.all([
+        erp.list("cashSchedules"), erp.list("payments").catch(() => []), erp.list("loans"), erp.list("loanPayments"),
+        erp.get("rehabPlan", "current"), erp.list("rehabPayments"), erp.list("salesOrders").catch(() => [])]);
+      const out = [];
+      for (const co of companies(companyKey)) {
+        const end = payments.addDays(start, span);
+        const report = cashReport.buildCashReport({
+          today: start, days: span, company: co, openingBalance: null,
+          schedules: [...schedules, ...loansLib.loanScheduleLines(loans.filter((l) => l.company === co), loanPays, start, end),
+            ...(co === "wooof" ? rehab.rehabScheduleLines(plan, rehabPays, start, end) : [])],
+          payments: pays.filter((p) => (p.company || "wooof") === co),
+          requests: co === "wooof" ? db.requests : [],
+          receivables: co === "wooof" ? sales.receivables(so, start) : []
+        });
+        for (const d of report.days) for (const it of d.items) {
+          if (!it.amount) continue;
+          out.push({ date: d.date, side: it.direction === "in" ? "in" : "out", amount: it.amount, company: co,
+            text: `${it.title || ""} ${it.category || ""}`, title: it.title, source: it.source });
+        }
+      }
+      return out;
+    };
+
+    if (pathname === "/api/cashflow" && method === "GET") {
+      const month = monthOf(url.searchParams.get("month"));
+      const companyKey = ["wooof", "betters"].includes(url.searchParams.get("company")) ? url.searchParams.get("company") : "";
+      const [rows, allCells, actualDoc, plan] = await Promise.all([
+        erp.list("cashRows"), erp.list("cashCells"), erp.get("cashActual", month), planLines(month, companyKey)]);
+      const cells = allCells.filter((c) => String(c.date).startsWith(month));
+      const actual = (actualDoc?.lines || []).filter((l) => !companyKey || l.company === companyKey);
+      const grid = cashFlow.buildGrid({ rows, month, cells, actual, plan, today, company: companyKey, actualSynced: Boolean(actualDoc) });
+      // 이번 달이면 오늘 시작 잔액(클로브)부터 앞날 잔액을 이어 본다.
+      let opening = null;
+      let balanceError = "";
+      if (month === today.slice(0, 7)) {
+        try {
+          let sum = 0;
+          let any = false;
+          for (const co of companies(companyKey)) {
+            const company = CASH_COMPANIES.find((c) => c.key === co);
+            const companyId = company ? await clobeCompanyIdFor(db, company) : "";
+            if (!companyId) continue;
+            const acc = await clobeCall(db, "get_bank_accounts", { companyId });
+            for (const a of acc.accounts || []) if ((a.currencyCode || "KRW") === "KRW") { sum += Number(a.krwBalance || 0); any = true; }
+          }
+          opening = any ? sum : null;
+          if (!any) balanceError = "클로브가 연결되지 않아 잔액을 이어 볼 수 없습니다.";
+        } catch (error) { balanceError = error.message || "클로브 잔액을 불러오지 못했습니다."; }
+      }
+      sendJson(res, 200, { month, company: companyKey, today, ...grid, balances: cashFlow.balances(grid.days, grid.totals, opening, today),
+        opening, balanceError, actualSyncedAt: actualDoc?.syncedAt || "", hasRows: rows.length > 0, canEdit, isOwner: actor.role === "owner" });
+      return;
+    }
+
+    if (!canEdit) { sendJson(res, 403, { error: "현금흐름표를 고칠 권한이 없습니다." }); return; }
+
+    if (pathname === "/api/cashflow/cell" && method === "PUT") {
+      const body = await readBody(req);
+      const date = dateOnly(body.date);
+      const row = await erp.get("cashRows", String(body.rowId || ""));
+      if (!date || !row) { sendJson(res, 400, { error: "날짜와 행을 고르세요." }); return; }
+      const id = `${date}|${row.id}|manual`;
+      const raw = String(body.amount ?? "").replace(/,/g, "").trim();
+      if (raw === "") {
+        await erp.remove("cashCells", id);
+        sendJson(res, 200, { removed: true });
+        return;
+      }
+      const rec = { id, date, rowId: row.id, amount: Math.round(number(raw)), memo: String(body.memo || "").slice(0, 300), source: "manual", by: who, at: now() };
+      await erp.put("cashCells", rec);
+      sendJson(res, 200, { cell: rec });
+      return;
+    }
+
+    if (pathname === "/api/cashflow/rows" && method === "POST") {
+      const body = await readBody(req);
+      const label = String(body.label || "").trim().slice(0, 60);
+      const side = body.side === "in" ? "in" : "out";
+      if (!label) { sendJson(res, 400, { error: "행 이름을 입력하세요." }); return; }
+      const rows = await erp.list("cashRows");
+      const rec = { id: id("cfr"), side, label, order: Math.max(0, ...rows.filter((r) => r.side === side).map((r) => Number(r.order || 0))) + 1,
+        match: [], company: "", active: true, createdBy: who, createdAt: now() };
+      await erp.put("cashRows", rec);
+      sendJson(res, 201, { row: rec });
+      return;
+    }
+    const rowEdit = pathname.match(/^\/api\/cashflow\/rows\/([^/]+)$/);
+    if (rowEdit && method === "PUT") {
+      const rec = await erp.get("cashRows", decodeURIComponent(rowEdit[1]));
+      if (!rec) { sendJson(res, 404, { error: "행이 없습니다." }); return; }
+      const body = await readBody(req);
+      if ("label" in body) rec.label = String(body.label || "").trim().slice(0, 60) || rec.label;
+      if ("order" in body) rec.order = number(body.order);
+      if ("active" in body) rec.active = body.active !== false && body.active !== "false";
+      if ("company" in body) rec.company = ["wooof", "betters"].includes(body.company) ? body.company : "";
+      if ("match" in body) rec.match = String(Array.isArray(body.match) ? body.match.join(",") : body.match || "").split(",").map((x) => x.trim()).filter(Boolean).slice(0, 20);
+      rec.updatedBy = who;
+      rec.updatedAt = now();
+      await erp.put("cashRows", rec);
+      sendJson(res, 200, { row: rec });
+      return;
+    }
+
+    // 클로브 실제 입출금을 그달(어제까지) 가져와 둔다. 계좌 간 이체는 뺀다.
+    if (pathname === "/api/cashflow/sync-clobe" && method === "POST") {
+      const body = await readBody(req);
+      const month = monthOf(body.month);
+      const days = cashFlow.monthDays(month);
+      const startDate = days[0].date;
+      const endDate = days.at(-1).date < today ? days.at(-1).date : payments.addDays(today, -1);
+      if (endDate < startDate) { sendJson(res, 400, { error: "아직 지난 날이 없는 달입니다." }); return; }
+      const lines = [];
+      const errors = [];
+      for (const co of ["wooof", "betters"]) {
+        const company = CASH_COMPANIES.find((c) => c.key === co);
+        try {
+          const companyId = company ? await clobeCompanyIdFor(db, company) : "";
+          if (!companyId) { errors.push(`${company?.name || co}: 클로브 연결 없음`); continue; }
+          let cursor = null;
+          for (let page = 0; page < 40; page += 1) {
+            const p = await clobeCall(db, "get_labeled_transactions", { companyId, startDate, endDate, size: 100, ...(cursor ? { cursor } : {}) });
+            for (const tx of p.content || []) {
+              if (/계좌간/.test(String(tx.category || ""))) continue;
+              const side = Number(tx.inAmount || 0) > 0 ? "in" : "out";
+              const amount = Math.round(Number(side === "in" ? tx.inAmount : tx.outAmount) || 0);
+              if (!amount) continue;
+              lines.push({ date: String(tx.transactionAt || "").slice(0, 10), side, amount, company: co, txId: String(tx.transactionId),
+                title: tx.transactionName || tx.transactionDescription || tx.businessEntityName || "",
+                text: [tx.transactionName, tx.transactionDescription, tx.businessEntityName, tx.customLabel, tx.category].filter(Boolean).join(" ") });
+            }
+            if (!p.hasNext || !p.nextCursor) break;
+            cursor = p.nextCursor;
+          }
+        } catch (error) { errors.push(`${company?.name || co}: ${error.message}`); }
+      }
+      await erp.put("cashActual", { id: month, lines, syncedAt: now(), syncedBy: who, errors });
+      sendJson(res, 200, { lines: lines.length, errors });
+      return;
+    }
+
+    // 옛 구글시트(2026_현금흐름표) 가져오기: 행 이름, 1~11월 칸 값, 왼쪽 고정비 목록 → 자금 일정.
+    if (pathname === "/api/cashflow/import-sheet" && method === "POST") {
+      if (actor.role !== "owner") { sendJson(res, 403, { error: "가져오기는 오너만 할 수 있습니다." }); return; }
+      let ex;
+      try { ex = await extractSheetWith(CASHFLOW_SHEET_ID, CASHFLOW_EXTRACT_SCRIPT, "현금흐름표"); } catch (error) { sendJson(res, 502, { error: error.message }); return; }
+      const stamp = now();
+      const rowId = (side, label) => `cfr:${side}:${label}`;
+      // 클로브 거래처 이름이 시트 행 이름과 다른데 확실한 것만 미리 이어 둔다(나머지는 '기타' 칸에서 사람이 보낸다).
+      const SAFE_MATCH = { "스마트스토어": ["네이버파이낸셜"], "페이코": ["엔에이치엔페이코"], "마켓컬리": ["컬리", "더즌"], "29cm": ["무신사"],
+        "쿠팡": ["쿠팡페이"], "딱펫": ["제이엔씨"], "현대M몰": ["현대홈쇼핑"] };
+      for (const r of ex.rows || []) {
+        const prev = await erp.get("cashRows", rowId(r.side, r.label));
+        const match = prev?.match?.length ? prev.match : (r.side === "in" ? SAFE_MATCH[r.label] || [] : []);
+        await erp.put("cashRows", { ...(prev || { company: "", active: true }), match, id: rowId(r.side, r.label), side: r.side, label: prev?.label || r.label,
+          order: prev?.order ?? r.order, source: "현금흐름표 시트", importedAt: stamp });
+      }
+      for (const c of ex.cells || []) {
+        const rid = rowId(c.side, c.label);
+        await erp.put("cashCells", { id: `${c.date}|${rid}|sheet`, date: c.date, rowId: rid, amount: c.amount, source: "sheet", importedAt: stamp });
+      }
+      let fixed = 0;
+      for (const [i, f] of (ex.fixed || []).entries()) {
+        const day = cashFlow.scheduleDay(f.schedule);
+        if (!f.item || !day) continue;
+        const loanLike = /이자비용/.test(f.category);
+        const sid = `cf:${f.no || `x${i}`}:${f.category}:${f.item}`;
+        const prev = await erp.get("cashSchedules", sid);
+        if (prev?.editedAt) continue;
+        await erp.put("cashSchedules", { id: sid, title: `${f.category} ${f.item}`.trim(), category: f.category, kind: f.kind, method: f.method,
+          direction: "out", repeat: "monthly", dayOfMonth: day, amount: f.amount, variable: f.variable,
+          company: /베럴즈/.test(`${f.item} ${f.category}`) ? "betters" : "wooof",
+          // 이자는 대출금 원장이 실제 이율로 잡는다 → 두 번 잡히지 않게 꺼 둔다.
+          active: !loanLike && f.amount > 0,
+          memo: loanLike ? "대출금 원장에서 이율로 자동 계산 — 이 줄은 꺼 둠" : f.variable ? "변동 금액(현금흐름표 값은 예상치)" : "",
+          sheetNo: f.no, source: "현금흐름표 시트", createdBy: who, createdAt: prev?.createdAt || stamp, updatedAt: stamp });
+        fixed += 1;
+      }
+      // 시트 고정비 목록에 이미 있는 항목의 등록 제안은 닫는다.
+      for (const qid of ["proposal:ap:vreview", "proposal:ap:wage-advance"]) {
+        const qn = await erp.get("setupQuestions", qid);
+        if (qn && qn.status !== "answered") await erp.put("setupQuestions", { ...qn, status: "answered", answeredBy: who, answeredAt: stamp,
+          answer: { choice: "sheet", label: "현금흐름표 고정비 목록", applied: "현금흐름표 고정비 목록으로 들어옴" } });
+      }
+      addAudit(db, actor, "update", "cashflow", "import", `현금흐름표 시트 가져오기: 행 ${(ex.rows || []).length}, 칸 ${(ex.cells || []).length}, 고정비 ${fixed}`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { rows: (ex.rows || []).length, cells: (ex.cells || []).length, fixed });
+      return;
+    }
+
+    sendJson(res, 404, { error: "없는 경로입니다." });
+    return;
+  }
+
   // --- v2 회생계획 변제 ------------------------------------------------------------
   if (pathname === "/api/rehab" || pathname.startsWith("/api/rehab/")) {
     if (!requirePermission(actor, res, "cash", "view")) return;
@@ -12234,6 +12445,7 @@ async function routeApi(req, res, url) {
       rec.direction ||= "out";
       rec.company ||= "wooof";
       rec.updatedAt = now();
+      if (prior) rec.editedAt = now(); // 시트를 다시 가져와도 고친 일정은 덮어쓰지 않는다
       await erp.put("cashSchedules", rec);
       sendJson(res, prior ? 200 : 201, { schedule: rec });
       return;

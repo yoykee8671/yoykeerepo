@@ -11691,14 +11691,148 @@ function bindRehab() {
   app.querySelectorAll("[data-rehab-void]").forEach((b) => b.addEventListener("click", () => { if (confirm("이 지급 기록을 취소할까요?")) run(() => api(`/api/rehab/payments/${encodeURIComponent(b.dataset.rehabVoid)}/void`, { method: "POST", body: {} }), "취소했습니다."); }));
 }
 
+// ===========================================================================
+// v2 현금흐름표 — 구글시트(2026_현금흐름표)와 같은 모양: 행=현금IN/OUT 항목, 열=날짜
+// ===========================================================================
+const CF_KIND = { manual: "직접 입력", actual: "실제(클로브)", sheet: "시트 값", plan: "예정" };
+function cfState() {
+  const cs = cashState();
+  if (!cs.cf) cs.cf = { month: new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 7), company: "", data: null, loading: false, cell: null, rowEdit: null };
+  return cs.cf;
+}
+const cfNum = (n) => (n ? money.format(n) : "");
+function renderCashFlow() {
+  const cf = cfState();
+  const d = cf.data;
+  if (!d) return `<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  if (!d.hasRows) return `<section class="panel"><div class="panel-body"><p>현금흐름표 행이 아직 없습니다. 쓰시던 구글시트(2026_현금흐름표)를 그대로 가져오면 행 이름·지난 값·고정비 목록이 들어옵니다.</p>
+    ${d.isOwner ? `<button class="primary" data-cf-import>현금흐름표 시트 가져오기</button>` : `<p class="muted">오너가 가져오기를 해야 합니다.</p>`}</div></section>`;
+  const days = d.days;
+  const sumRow = (side) => days.reduce((s, x) => s + (d.totals[x.date]?.[side] || 0), 0);
+  const monthIn = sumRow("in");
+  const monthOut = sumRow("out");
+  const head = `<tr><th class="cf-label">항목</th>${days.map((x) => `<th class="cf-day ${x.date === d.today ? "today" : ""} ${["토", "일"].includes(x.dow) ? "weekend" : ""}">${x.day}<br><small>${x.dow}</small></th>`).join("")}<th class="cf-total">월 합계</th></tr>`;
+  const rowHtml = (r) => {
+    const cells = d.grid[r.id] || {};
+    const total = Object.values(cells).reduce((s, c) => s + c.amount, 0);
+    return `<tr><th class="cf-label" data-cf-row="${h(r.id)}" title="행 이름·맞춤 낱말 고치기">${h(r.label)}</th>${days.map((x) => {
+      const c = cells[x.date];
+      return `<td class="cf-cell ${c ? `k-${c.kind}` : ""} ${x.date === d.today ? "today" : ""}" data-cf-cell="${h(r.id)}|${x.date}" ${c?.memo ? `title="${h(c.memo)}"` : ""}>${c ? cfNum(c.amount) : ""}</td>`;
+    }).join("")}<td class="cf-total">${cfNum(total)}</td></tr>`;
+  };
+  const section = (side, title) => {
+    const rows = d.rows.filter((r) => r.side === side);
+    return `<tr class="cf-section"><th class="cf-label">${title}</th><td colspan="${days.length + 1}"></td></tr>${rows.map(rowHtml).join("")}
+      <tr class="cf-sum"><th class="cf-label">${side === "in" ? "입금 합계" : "출금 합계"}</th>${days.map((x) => `<td class="${x.date === d.today ? "today" : ""}">${cfNum(d.totals[x.date]?.[side])}</td>`).join("")}<td class="cf-total">${cfNum(sumRow(side))}</td></tr>`;
+  };
+  const netRow = `<tr class="cf-sum"><th class="cf-label">순현금(입금−출금)</th>${days.map((x) => { const n = (d.totals[x.date]?.in || 0) - (d.totals[x.date]?.out || 0); return `<td class="${n < 0 ? "neg" : ""} ${x.date === d.today ? "today" : ""}">${n ? money.format(n) : ""}</td>`; }).join("")}<td class="cf-total ${monthIn - monthOut < 0 ? "neg" : ""}">${money.format(monthIn - monthOut)}</td></tr>`;
+  const balRow = Object.keys(d.balances || {}).length ? `<tr class="cf-sum cf-bal"><th class="cf-label">예상 잔액</th>${days.map((x) => { const b = d.balances[x.date]; return `<td class="${b < 0 ? "neg" : ""} ${x.date === d.today ? "today" : ""}">${b == null ? "" : money.format(b)}</td>`; }).join("")}<td class="cf-total"></td></tr>` : "";
+  const ym = (delta) => { const [y, m] = cf.month.split("-").map(Number); const dt = new Date(Date.UTC(y, m - 1 + delta, 1)); return dt.toISOString().slice(0, 7); };
+  return `
+    <div class="toolbar" style="margin:8px 0">
+      <button data-cf-month="${ym(-1)}">‹</button><strong style="min-width:90px;text-align:center">${cf.month.replace("-", "년 ")}월</strong><button data-cf-month="${ym(1)}">›</button>
+      ${[["", "전체(두 회사)"], ["wooof", "우프컴퍼니"], ["betters", "베럴즈"]].map(([k, l]) => `<button class="npb-subtab ${cf.company === k ? "active" : ""}" data-cf-company="${k}">${l}</button>`).join("")}
+      <span style="flex:1"></span>
+      ${d.canEdit ? `<button data-cf-sync title="지난 날의 실제 입출금을 클로브에서 가져옵니다">클로브 실제 내역 불러오기</button><button data-cf-addrow>행 추가</button>` : ""}
+      ${d.isOwner ? `<button data-cf-import title="옛 구글시트 값을 다시 가져옵니다(직접 입력한 칸은 그대로)">시트 다시 가져오기</button>` : ""}
+    </div>
+    <section class="sales-flow">
+      <div class="sales-step"><span>이달 입금</span><strong>${money.format(monthIn)}원</strong></div>
+      <div class="sales-step"><span>이달 출금</span><strong>${money.format(monthOut)}원</strong></div>
+      <div class="sales-step"><span>순현금</span><strong class="${monthIn - monthOut < 0 ? "danger-text" : ""}">${money.format(monthIn - monthOut)}원</strong></div>
+      ${d.opening != null ? `<div class="sales-step"><span>오늘 잔액(클로브)</span><strong>${money.format(d.opening)}원</strong></div>` : d.balanceError ? `<div class="sales-step"><span>잔액</span><em class="muted" style="font-size:12px;font-style:normal">${h(d.balanceError)}</em></div>` : ""}
+    </section>
+    <p class="cf-legend muted">단위: 원 · <span class="k-actual">실제(클로브)</span> <span class="k-sheet">시트 값</span> <span class="k-plan">예정</span> <span class="k-manual">직접 입력</span> · 칸을 누르면 내역을 보고 고칠 수 있습니다${d.actualSyncedAt ? ` · 클로브 ${h(String(d.actualSyncedAt).slice(5, 16).replace("T", " "))} 기준` : " · 지난 날은 클로브 실제 내역을 불러오기 전까지 시트 값으로 보입니다"}</p>
+    <section class="panel"><div class="cf-wrap"><table class="cf-grid"><thead>${head}</thead><tbody>${section("in", "현금 IN")}${section("out", "현금 OUT")}${netRow}${balRow}</tbody></table></div></section>
+    ${cf.cell ? v2Modal(renderCashFlowCell(), "data-cf-close") : ""}
+    ${cf.rowEdit ? v2Modal(renderCashFlowRow(), "data-cf-close") : ""}`;
+}
+function renderCashFlowCell() {
+  const cf = cfState();
+  const { rowId, date } = cf.cell;
+  const r = cf.data.rows.find((x) => x.id === rowId);
+  const c = cf.data.grid[rowId]?.[date];
+  const parts = c?.parts || { actual: [], plan: [], sheet: null };
+  // 실제(클로브) 줄은 '이 행으로 보내기'로 거래처 이름을 다른 행의 맞춤 낱말로 넣을 수 있다(다음부터 자동 분류).
+  const sameSide = cf.data.rows.filter((x) => x.side === r?.side && x.id !== rowId);
+  const sendTo = (p) => cf.data.canEdit && p.title ? `<select data-cf-send="${h(p.title)}"><option value="">이 행으로 보내기…</option>${sameSide.map((x) => `<option value="${h(x.id)}">${h(x.label)}</option>`).join("")}</select>` : "";
+  const list = (title, items, withSend) => items.length ? `<h3>${title}</h3><table class="compact" data-unit="원"><tbody>${items.map((p) => `<tr><td class="wrap">${h(p.title || "")}</td><td class="num">${money.format(p.amount)}</td>${withSend ? `<td>${sendTo(p)}</td>` : ""}</tr>`).join("")}</tbody></table>` : "";
+  return `<div class="panel-head"><h2>${h(r?.label || "")} · ${h(date)}</h2><button data-cf-close>닫기</button></div>
+    <div class="panel-body">
+      <p>지금 값: <strong>${c ? `${money.format(c.amount)}원` : "없음"}</strong>${c ? ` <span class="badge muted">${CF_KIND[c.kind]}</span>` : ""}${c?.memo ? ` · ${h(c.memo)}` : ""}</p>
+      ${list("실제(클로브)", parts.actual, true)}${list("예정(v2)", parts.plan, false)}${parts.sheet != null ? `<p class="muted">옛 시트 값: ${money.format(parts.sheet)}원</p>` : ""}
+      ${cf.data.canEdit ? `<form class="form-grid" data-cf-cell-form>
+        <div class="field two"><div><label>직접 입력(원)</label><input name="amount" inputmode="numeric" value="${c?.kind === "manual" ? money.format(c.amount) : ""}" placeholder="비우고 저장하면 직접 입력을 지웁니다"></div>
+        <div><label>메모</label><input name="memo" value="${h(c?.kind === "manual" ? c.memo || "" : "")}"></div></div>
+        <div class="toolbar"><button class="primary" type="submit">저장</button><span class="muted" style="font-size:12px">직접 입력한 값이 실제·시트·예정보다 먼저 보입니다.</span></div></form>` : ""}
+    </div>`;
+}
+function renderCashFlowRow() {
+  const cf = cfState();
+  const r = cf.rowEdit.id ? cf.data.rows.find((x) => x.id === cf.rowEdit.id) : { side: "out", label: "", match: [] };
+  return `<div class="panel-head"><h2>${r.id ? "행 고치기" : "행 추가"}</h2><button data-cf-close>닫기</button></div>
+    <div class="panel-body"><form class="form-grid" data-cf-row-form="${h(r.id || "")}">
+      <div class="field two"><div><label>이름</label><input name="label" value="${h(r.label)}" required></div>
+        <div><label>구분</label><select name="side" ${r.id ? "disabled" : ""}><option value="in" ${r.side === "in" ? "selected" : ""}>현금 IN</option><option value="out" ${r.side === "out" ? "selected" : ""}>현금 OUT</option></select></div></div>
+      ${r.id ? `<div class="field"><label>맞춤 낱말(쉼표) — 클로브 거래·v2 예정의 이름에 이 낱말이 있으면 이 행으로 모읍니다</label><input name="match" value="${h((r.match || []).join(", "))}" placeholder="예: 네이버파이낸셜, 스마트스토어"></div>
+      <div class="field two"><div><label>회사</label><select name="company"><option value="">두 회사</option><option value="wooof" ${r.company === "wooof" ? "selected" : ""}>우프컴퍼니</option><option value="betters" ${r.company === "betters" ? "selected" : ""}>베럴즈</option></select></div>
+        <div><label>순서</label><input name="order" inputmode="numeric" value="${h(r.order ?? "")}"></div></div>
+      <label class="check"><input type="checkbox" name="hide"> 이 행 숨기기</label>` : ""}
+      <div class="toolbar"><button class="primary" type="submit">저장</button></div></form></div>`;
+}
+function bindCashFlow() {
+  const cf = cfState();
+  const load = async () => {
+    cf.loading = true;
+    try { cf.data = await api(`/api/cashflow?month=${cf.month}${cf.company ? `&company=${cf.company}` : ""}`); } catch (e) { showToast(e.message, "error"); cf.data = cf.data || { hasRows: false }; } finally { cf.loading = false; renderApp(); }
+  };
+  if (!cf.data && !cf.loading) { load(); return; }
+  bindV2Modal();
+  const run = async (fn, ok) => { try { const r = await fn(); if (ok) showToast(typeof ok === "function" ? ok(r) : ok); cf.cell = null; cf.rowEdit = null; await load(); } catch (e) { showToast(e.message || "처리하지 못했습니다.", "error"); } };
+  app.querySelectorAll("[data-cf-month]").forEach((b) => b.addEventListener("click", () => { cf.month = b.dataset.cfMonth; cf.data = null; load(); }));
+  app.querySelectorAll("[data-cf-company]").forEach((b) => b.addEventListener("click", () => { cf.company = b.dataset.cfCompany; cf.data = null; load(); }));
+  app.querySelectorAll("[data-cf-cell]").forEach((td) => td.addEventListener("click", () => { const [rowId, date] = td.dataset.cfCell.split("|"); cf.cell = { rowId, date }; renderApp(); }));
+  app.querySelectorAll("[data-cf-row]").forEach((th) => th.addEventListener("click", () => { if (cf.data.canEdit) { cf.rowEdit = { id: th.dataset.cfRow }; renderApp(); } }));
+  app.querySelector("[data-cf-addrow]")?.addEventListener("click", () => { cf.rowEdit = { id: "" }; renderApp(); });
+  app.querySelector("[data-cf-close]")?.addEventListener("click", () => { cf.cell = null; cf.rowEdit = null; renderApp(); });
+  app.querySelectorAll("[data-cf-import]").forEach((b) => b.addEventListener("click", () => {
+    if (!confirm("구글시트(2026_현금흐름표)의 행·1~11월 값·고정비 목록을 가져옵니다. 직접 입력한 칸과 고친 일정은 그대로 둡니다. 진행할까요?")) return;
+    run(() => api("/api/cashflow/import-sheet", { method: "POST", body: {} }), (r) => `행 ${r.rows}개, 칸 ${r.cells}개, 고정비 ${r.fixed}건을 가져왔습니다.`);
+  }));
+  app.querySelector("[data-cf-sync]")?.addEventListener("click", () => run(() => api("/api/cashflow/sync-clobe", { method: "POST", body: { month: cf.month } }),
+    (r) => `클로브 거래 ${r.lines}건을 불러왔습니다.${r.errors?.length ? ` (${r.errors.join(", ")})` : ""}`));
+  app.querySelectorAll("[data-cf-send]").forEach((sel) => sel.addEventListener("change", () => {
+    const target = cf.data.rows.find((x) => x.id === sel.value);
+    if (!target) return;
+    // 거래처 이름에서 지점·괄호 꼬리를 떼고 앞부분을 맞춤 낱말로 쓴다.
+    const term = sel.dataset.cfSend.replace(/\(.*$/, "").replace(/주식회사|㈜/g, "").trim().slice(0, 20);
+    if (!term || !confirm(`'${term}' 거래를 앞으로 '${target.label}' 행으로 모읍니다. 진행할까요?`)) { sel.value = ""; return; }
+    run(() => api(`/api/cashflow/rows/${encodeURIComponent(target.id)}`, { method: "PUT", body: { match: [...(target.match || []), term].join(",") } }), `'${term}' → ${target.label}`);
+  }));
+  app.querySelector("[data-cf-cell-form]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = formObject(e.currentTarget);
+    run(() => api("/api/cashflow/cell", { method: "PUT", body: { ...cf.cell, ...f } }), "저장했습니다.");
+  });
+  app.querySelector("[data-cf-row-form]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const f = formObject(form);
+    const rid = form.dataset.cfRowForm;
+    if (rid) run(() => api(`/api/cashflow/rows/${encodeURIComponent(rid)}`, { method: "PUT", body: { label: f.label, match: f.match, company: f.company, order: f.order, active: !form.querySelector('[name="hide"]').checked } }), "저장했습니다.");
+    else run(() => api("/api/cashflow/rows", { method: "POST", body: { label: f.label, side: f.side } }), "행을 추가했습니다.");
+  });
+}
+
 function renderCash() {
   const cs = cashState();
   const head = pageHead("자금", "오늘과 7일 안에 들어올 돈·나갈 돈, 계좌 잔액을 한 장으로 봅니다. 매일 아침 이 화면을 보고 채널톡에 공유하세요.");
-  const tabs = `<div class="npb-subnav">${[["report", "일일 자금보고"], ["schedules", "자금 일정"], ["loans", "대출금"], ["rehab", "회생변제"], ["receivables", "채권원장"]].map(([k, l]) => `<button class="npb-subtab ${cs.screen === k ? "active" : ""}" data-cash-screen="${k}">${l}</button>`).join("")}
+  const tabs = `<div class="npb-subnav">${[["report", "일일 자금보고"], ["cashflow", "현금흐름표"], ["schedules", "고정비·자금 일정"], ["loans", "대출금"], ["rehab", "회생변제"], ["receivables", "채권원장"]].map(([k, l]) => `<button class="npb-subtab ${cs.screen === k ? "active" : ""}" data-cash-screen="${k}">${l}</button>`).join("")}
     <span style="flex:1"></span>
     ${(cs.meta?.companies || [{ key: "wooof", name: "우프컴퍼니" }, { key: "betters", name: "베럴즈" }]).map((c) => `<button class="npb-subtab ${cs.company === c.key ? "active" : ""}" data-cash-company="${c.key}">${h(c.name)}</button>`).join("")}</div>`;
   if (cs.screen === "loans") return `${head}${tabs}${renderLoans()}`;
   if (cs.screen === "rehab") return `${head}${tabs}${renderRehab()}`;
+  if (cs.screen === "cashflow") return `${head}${tabs}${renderCashFlow()}`;
   if (!cs.data) return `${head}${tabs}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   return `${head}${tabs}${cs.screen === "schedules" ? renderCashSchedules() : cs.screen === "receivables" ? renderReceivableLedger() : renderCashReport()}`;
 }
@@ -11749,23 +11883,27 @@ function renderCashReport() {
 function renderCashSchedules() {
   const cs = cashState();
   const meta = cs.meta || {};
+  // 현금흐름표 시트 왼쪽 고정비 목록과 같은 순서: 나감 먼저, 날짜(일정) 순.
+  const dayKey = (s) => s.repeat === "monthly" ? Number(s.dayOfMonth || 0) : s.repeat === "weekly" ? 0 : 99;
   const list = (cs.schedules || []).filter((s) => !s.company || s.company === cs.company)
-    .sort((a, b) => String(a.direction).localeCompare(String(b.direction)) || String(a.category).localeCompare(String(b.category), "ko"));
+    .sort((a, b) => String(b.direction).localeCompare(String(a.direction)) || dayKey(a) - dayKey(b) || String(a.category).localeCompare(String(b.category), "ko"));
   const when = (s) => s.repeat === "monthly" ? `매월 ${s.dayOfMonth}일` : s.repeat === "weekly" ? `매주 ${WEEKDAY_KO[s.weekday ?? 1]}요일` : (s.date || "");
   const e = { direction: "out", repeat: "monthly", dayOfMonth: 25, company: cs.company, ...(cs.editing || {}) };
   const cats = (meta.categories || {})[e.direction] || [];
   return `
     <section class="layout">
       <div class="panel">
-        <div class="panel-head"><h2>자금 일정</h2><span class="muted">${list.length}건 · 고정비·급여·대출상환·정산 입금 등</span></div>
+        <div class="panel-head"><h2>고정비·자금 일정</h2><span class="muted">${list.length}건 · 현금흐름표 시트 왼쪽 고정비 목록과 같은 것 · 현금흐름표와 일일 자금보고에 예정으로 들어갑니다</span></div>
         <div class="table-wrap"><table class="compact cash-table" data-unit="원">
-          <thead><tr><th>구분</th><th>항목</th><th>분류</th><th>언제</th><th>금액</th><th>방식</th><th></th></tr></thead>
-          <tbody>${list.map((s) => `<tr class="${s.active === false ? "muted" : ""}">
+          <thead><tr><th>No.</th><th>구분</th><th>유형</th><th>분류</th><th>항목</th><th>금액</th><th>결제방식</th><th>일정</th><th></th></tr></thead>
+          <tbody>${list.map((s, i) => `<tr class="${s.active === false ? "muted" : ""}">
+            <td class="center">${h(s.sheetNo || i + 1)}</td>
             <td>${s.direction === "in" ? `<span class="cash-in">들어옴</span>` : `<span class="cash-out">나감</span>`}</td>
-            <td>${h(s.title)}${s.memo ? `<br><span class="muted" style="font-size:11px">${h(s.memo)}</span>` : ""}</td>
-            <td>${h(s.category || "")}</td><td>${h(when(s))}${s.endDate ? `<br><span class="muted" style="font-size:11px">~${h(s.endDate)}</span>` : ""}</td>
-            <td class="num">${money.format(s.amount || 0)}</td><td>${h(s.method || "")}</td>
-            <td><div class="row-actions">${can("cash", "edit") ? `<button data-cash-edit="${s.id}">수정</button><button class="danger icon-btn" data-cash-del="${s.id}" title="삭제">×</button>` : ""}</div></td></tr>`).join("") || `<tr><td colspan="7" class="empty">등록된 일정이 없습니다. 오른쪽에서 정기 지출(임대료·급여·대출상환 등)부터 넣어 보세요.</td></tr>`}</tbody>
+            <td>${h(s.kind || "")}</td><td>${h(s.category || "")}</td>
+            <td class="wrap">${h(s.title)}${s.memo ? `<br><span class="muted" style="font-size:11px">${h(s.memo)}</span>` : ""}${s.active === false ? ` <span class="badge muted">꺼짐</span>` : ""}</td>
+            <td class="num">${s.variable && !s.amount ? "변동" : money.format(s.amount || 0)}</td><td>${h(s.method || "")}</td>
+            <td>${h(when(s))}${s.endDate ? `<br><span class="muted" style="font-size:11px">~${h(s.endDate)}</span>` : ""}</td>
+            <td><div class="row-actions">${can("cash", "edit") ? `<button data-cash-edit="${s.id}">수정</button><button class="danger icon-btn" data-cash-del="${s.id}" title="삭제">×</button>` : ""}</div></td></tr>`).join("") || `<tr><td colspan="9" class="empty">등록된 일정이 없습니다. 현금흐름표 화면에서 시트를 가져오면 고정비 목록이 들어옵니다.</td></tr>`}</tbody>
         </table></div>
       </div>
       <div class="panel">
@@ -11798,9 +11936,9 @@ function renderCashSchedules() {
 
 function bindCash() {
   const cs = cashState();
-  if (cs.screen === "loans" || cs.screen === "rehab") {
+  if (cs.screen === "loans" || cs.screen === "rehab" || cs.screen === "cashflow") {
     app.querySelectorAll("[data-cash-screen]").forEach((b) => b.addEventListener("click", () => { cs.screen = b.dataset.cashScreen; renderApp(); }));
-    if (cs.screen === "loans") bindLoans(); else bindRehab();
+    if (cs.screen === "loans") bindLoans(); else if (cs.screen === "rehab") bindRehab(); else bindCashFlow();
     return;
   }
   if (!cs.data && !cs.loading) {
