@@ -724,8 +724,8 @@ function renderLogin(error = "") {
   app.innerHTML = `
     <main class="login">
       <form class="login-panel" data-login>
-        <h1>WooofPay</h1>
-        <p>입금 요청, 브랜드 아카이브, 관리자 이력을 한 곳에서 관리합니다.</p>
+        <h1>WOOOF ERP</h1>
+        <p>우프 통합 관리 시스템 — 결제·거래·정산·자금을 한 곳에서 관리합니다.</p>
         <div class="form-grid" style="margin-top:16px">
           <div class="field">
             <label>이메일</label>
@@ -7631,7 +7631,7 @@ function renderReconcileConnect() {
       <div class="panel-body">
         <p class="muted">
           연결하면 클로브에 등록된 회사 계좌의 입금내역을 읽어와 미입금 요청과 자동 대조합니다.
-          WooofPay는 <strong>읽기 전용</strong> 도구만 호출하며, 장부·전표를 수정하지 않습니다.
+          WOOOF ERP는 <strong>읽기 전용</strong> 도구만 호출하며, 장부·전표를 수정하지 않습니다.
         </p>
         <div class="toolbar"><button class="primary" data-clobe-connect>클로브ai 연결하기</button></div>
       </div>
