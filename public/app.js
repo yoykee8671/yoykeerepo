@@ -861,6 +861,7 @@ function renderAppInner() {
     ["settlement", "월 정산 생성"],
     ["monthly", "월 정산 현황"],
     ["npb", "npb정산"],
+    ["closing", "월 마감"],
     ["brands", "브랜드"],
     ["prices", "단가표"],
     ["productsync", "상품동기화"],
@@ -870,7 +871,7 @@ function renderAppInner() {
     ["audits", "이력"],
     ["archive", "아카이브"],
     ["setup", "확인 필요"]
-  ].filter(([key]) => (key === "monthly" ? can("settlement", "view") : key === "trade" ? TRADE_SCREENS.some(([k]) => tradeCan(k)) : can(key, "view")) || (key === "pipeline" && can("reconcile", "view"))
+  ].filter(([key]) => (key === "monthly" || key === "closing" ? can("settlement", "view") : key === "trade" ? TRADE_SCREENS.some(([k]) => tradeCan(k)) : can(key, "view")) || (key === "pipeline" && can("reconcile", "view"))
     || (key === "setup" && (state.admin?.role === "owner" || can("cash", "edit"))));
   app.innerHTML = `
     <div class="shell">
@@ -978,7 +979,7 @@ const TAB_SUBMENUS = {
 // 화면·권한·하위 화면은 바뀌지 않는다. 대분류는 눌러서 펼치고 접는다(▸/▾).
 const NAV_GROUPS = [
   { key: "buy", label: "결제/구매", children: ["pipeline", "requests", "payments"] },
-  { key: "settle", label: "정산", children: ["settlement", "monthly", "npb"] },
+  { key: "settle", label: "정산", children: ["settlement", "monthly", "npb", "closing"] },
   { key: "mall", label: "자사몰관리", children: ["brands", "prices", "productsync"] },
   { key: "mgmt", label: "경영관리", children: ["kpi", "cash"] },
   { key: "admin", label: "관리/설정", children: ["admins", "audits", "archive", "setup"] }
@@ -1183,6 +1184,7 @@ function renderCurrentTab() {
   if (state.tab === "stock") return renderStock();
   if (state.tab === "setup") return renderSetup();
   if (state.tab === "monthly") return renderMonthly();
+  if (state.tab === "closing") return renderClosing();
   if (state.tab === "trade") return renderTrade();
   if (state.tab === "kpi") return renderKpi();
   if (state.tab === "admins") return renderAdmins();
@@ -2704,6 +2706,7 @@ function bindCurrentTab() {
   if (state.tab === "stock") bindStock();
   if (state.tab === "setup") bindSetup();
   if (state.tab === "monthly") bindMonthly();
+  if (state.tab === "closing") bindClosing();
   if (state.tab === "trade") bindTrade();
   if (state.tab === "kpi") bindKpi();
   if (state.tab === "admins") bindAdmins();
@@ -13031,6 +13034,84 @@ const qtyFmt = (n) => (Number(n || 0) % 1 ? Number(n).toLocaleString("ko-KR", { 
 // ===========================================================================
 // v2 입점사 월정산 보드 — 브랜드별 매출·배송비·회수·마진 + 확인/발행요청/발송 체크
 // ===========================================================================
+// ===========================================================================
+// v2 월 마감 — 그 달에 끝나지 않은 일 점검 → 대표가 마감(잠금). 마감한 달은 서버가 수정을 거부한다.
+// ===========================================================================
+function closingUiState() {
+  if (!state.closingUi) {
+    const d = new Date(Date.now() + 9 * 3600 * 1000);
+    d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - 1);
+    state.closingUi = { month: d.toISOString().slice(0, 7), data: null, loading: false };
+  }
+  return state.closingUi;
+}
+async function loadClosing() {
+  const cs = closingUiState();
+  cs.loading = true;
+  try { cs.data = await api(`/api/closing/check?month=${cs.month}`); cs.error = ""; }
+  catch (e) { cs.error = e.message; cs.data = { items: [], closing: { history: [] } }; }
+  finally { cs.loading = false; }
+}
+function renderClosing() {
+  const cs = closingUiState();
+  const head = pageHead("월 마감", "그 달에 끝나지 않은 일을 모아 보고, 다 정리되면 대표가 마감합니다. 마감한 달의 입금요청·처리완료 지급요청·월 정산 현황·현금흐름표는 고칠 수 없습니다(이카운트의 편집제한과 같은 방식).");
+  const d = cs.data;
+  if (!d) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const c = d.closing || {};
+  const locked = c.lockedThrough && cs.month <= c.lockedThrough;
+  const rows = (d.items || []).map((it) => `<tr class="${it.count ? "" : "row-done"}">
+      <td>${it.count ? "⚠️" : "✅"} ${h(it.label)}</td><td class="num">${money.format(it.count)}건</td>
+      <td class="wrap muted" style="font-size:12px">${h((it.sample || []).join(", "))}${it.count > (it.sample || []).length ? " …" : ""}</td>
+      <td class="wrap" style="font-size:12px">${it.count ? h(it.hint) : ""}</td>
+      <td>${it.count && it.go ? `<button class="small" data-closing-go="${h(it.go.tab)}${it.go.sub ? `:${h(it.go.sub)}` : ""}">가기</button>` : ""}</td></tr>`).join("");
+  const hist = (c.history || []).slice(0, 12).map((x) => `<tr><td>${h(String(x.at || "").slice(0, 16).replace("T", " "))}</td><td>${x.action === "lock" ? "마감" : "해제"}</td><td>${h(x.month)}</td><td>${h(x.by)}</td><td class="wrap">${h(x.note || "")}${x.open ? ` (남은 일 ${x.open}건)` : ""}</td></tr>`).join("");
+  return `${head}
+    <section class="panel"><div class="panel-head"><h2>점검할 달</h2>
+      <div class="toolbar"><input type="month" data-closing-month value="${h(cs.month)}">
+      <span class="${c.lockedThrough ? "pill" : "muted"}">${c.lockedThrough ? `${h(c.lockedThrough)} 까지 마감됨` : "마감한 달 없음"}</span></div></div>
+      <div class="panel-body">
+        ${cs.error ? `<p class="error-text">${h(cs.error)}</p>` : ""}
+        <p>${locked ? `🔒 <strong>${h(cs.month)}</strong> 은(는) 마감된 달입니다.` : d.open ? `<strong>${h(cs.month)}</strong>: 끝나지 않은 일 <strong>${money.format(d.open)}건</strong>` : `<strong>${h(cs.month)}</strong>: 끝나지 않은 일이 없습니다. 마감할 수 있습니다.`}</p>
+        <div class="table-wrap"><table class="compact"><thead><tr><th>점검 항목</th><th>건수</th><th>예시</th><th>할 일</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+        ${d.canClose ? `<div class="toolbar" style="margin-top:12px">
+          ${locked ? `<button data-closing-unlock>${h(cs.month)} 마감 풀기</button>` : `<button class="primary" data-closing-lock>${h(cs.month)} 마감하기</button>`}
+          <span class="muted" style="font-size:12px">마감은 그 달까지 한꺼번에 잠급니다. 풀 때는 이유를 남깁니다.</span></div>` : `<p class="muted" style="margin-top:10px">마감·해제는 대표만 할 수 있습니다.</p>`}
+      </div></section>
+    <section class="panel" style="margin-top:14px"><div class="panel-head"><h2>마감 기록</h2></div><div class="panel-body">
+      <div class="table-wrap"><table class="compact"><thead><tr><th>시각</th><th>구분</th><th>달</th><th>누가</th><th>메모</th></tr></thead><tbody>${hist || `<tr><td colspan="5" class="empty">기록이 없습니다.</td></tr>`}</tbody></table></div>
+    </div></section>`;
+}
+function bindClosing() {
+  const cs = closingUiState();
+  if (!cs.data && !cs.loading) { loadClosing().then(renderApp); return; }
+  const reload = async () => { await loadClosing(); renderApp(); };
+  app.querySelector("[data-closing-month]")?.addEventListener("change", (e) => { if (/^\d{4}-\d{2}$/.test(e.target.value)) { cs.month = e.target.value; reload(); } });
+  app.querySelectorAll("[data-closing-go]").forEach((b) => b.addEventListener("click", () => {
+    const [tab, sub] = b.dataset.closingGo.split(":");
+    state.tab = tab;
+    if (tab === "trade") tradeState();
+    const conf = TAB_SUBMENUS[tab];
+    if (sub && conf) state[conf.stateKey].screen = sub;
+    if (tab === "monthly") { monthlyState().month = cs.month; monthlyState().data = null; }
+    renderApp();
+  }));
+  app.querySelector("[data-closing-lock]")?.addEventListener("click", async () => {
+    let note = "";
+    if (cs.data.open) {
+      note = prompt(`${cs.month}에 끝나지 않은 일이 ${cs.data.open}건 있습니다. 그래도 마감하려면 이유를 적어 주세요.`) || "";
+      if (!note.trim()) return;
+    } else if (!confirm(`${cs.month} 까지 마감할까요? 마감한 달은 고칠 수 없습니다.`)) return;
+    try { await api("/api/closing/lock", { method: "POST", body: { month: cs.month, note, open: cs.data.open } }); showToast(`${cs.month} 마감했습니다.`); await reload(); }
+    catch (e) { showToast(e.message, "error"); }
+  });
+  app.querySelector("[data-closing-unlock]")?.addEventListener("click", async () => {
+    const reason = prompt(`${cs.month} 마감을 푸는 이유를 적어 주세요. (이 달부터 뒤의 마감이 풀립니다)`) || "";
+    if (!reason.trim()) return;
+    try { await api("/api/closing/unlock", { method: "POST", body: { month: cs.month, reason } }); showToast("마감을 풀었습니다."); await reload(); }
+    catch (e) { showToast(e.message, "error"); }
+  });
+}
+
 function monthlyState() {
   if (!state.monthly) state.monthly = { data: null, loading: false, month: "", filter: "all", editing: "" };
   return state.monthly;

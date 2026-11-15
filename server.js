@@ -26,6 +26,7 @@ import * as production from "./lib/production-cost.mjs";
 import * as loansLib from "./lib/loans.mjs";
 import * as proposals from "./lib/setup-proposals.mjs";
 import * as monthly from "./lib/monthly-board.mjs";
+import * as closing from "./lib/closing.mjs";
 import * as brandInfo from "./lib/brand-info.mjs";
 import * as rehab from "./lib/rehab-plan.mjs";
 import * as cashFlow from "./lib/cash-flow.mjs";
@@ -1296,6 +1297,17 @@ const MIGRATION_WRITE_ATTEMPTS = 5;
 
 // v2 레코드 저장소(지급요청 등). app_state 덩어리와 따로 한 건씩 저장한다.
 const erp = createErpStore({ pool: pgPool, dataDir: DATA_DIR });
+
+// 월 마감(lib/closing.mjs). 마감한 달이면 오류를 보내고 false.
+async function closingState() {
+  return (await erp.get("settings", "closing")) || { id: "closing", lockedThrough: "", history: [] };
+}
+async function guardOpenMonth(res, month) {
+  const c = await closingState();
+  if (!closing.isLocked(c, month)) return true;
+  sendJson(res, 423, { error: closing.lockedMessage(month), locked: true });
+  return false;
+}
 
 let ensureDbPromise = null;
 async function ensureDb() {
@@ -8149,6 +8161,7 @@ async function routeApi(req, res, url) {
       sendJson(res, 404, { error: "입금요청을 찾을 수 없습니다." });
       return;
     }
+    if (!(await guardOpenMonth(res, monthly.requestMonth(request)))) return;
     const before = { ...request };
     for (const key of [
       "brandId",
@@ -8239,6 +8252,7 @@ async function routeApi(req, res, url) {
       sendJson(res, 404, { error: "입금요청을 찾을 수 없습니다." });
       return;
     }
+    if (!(await guardOpenMonth(res, monthly.requestMonth(request)))) return;
     const before = { ...request };
     request.status = "deleted";
     request.updatedAt = now();
@@ -11488,6 +11502,57 @@ async function routeApi(req, res, url) {
   }
 
   // --- v2 입점사 월정산 보드 ----------------------------------------------------
+  if (pathname === "/api/closing" || pathname.startsWith("/api/closing/")) {
+    if (!requirePermission(actor, res, "settlement", "view")) return;
+    const who = actor.name || actor.email || "";
+    if (pathname === "/api/closing" && method === "GET") {
+      sendJson(res, 200, { closing: await closingState(), canClose: actor.role === "owner" });
+      return;
+    }
+    if (pathname === "/api/closing/check" && method === "GET") {
+      const month = closing.isYm(url.searchParams.get("month")) ? url.searchParams.get("month") : closing.prevMonth(kstToday().slice(0, 7));
+      const brandList = db.brands.filter((b) => (b.type || "brand") === "brand");
+      const [records, pays, questions, moves, runs, products, settingsList] = await Promise.all([
+        erp.list("monthlyBoard"), erp.list("payments"), erp.list("setupQuestions"),
+        erp.list("stockMoves"), erp.list("stockRuns"), erp.list("stockProducts"), erp.list("stockSettings")]);
+      const boardRows = monthly.boardRows({ brands: brandList, requests: db.requests, records, ym: month });
+      const stock = inventory.stockStatus({ materials: db.materials || [], moves, runs, products, settings: Object.fromEntries(settingsList.map((x) => [x.id, x])) });
+      const result = closing.closingCheck({ month, requests: db.requests, requestMonth: monthly.requestMonth, payments: pays, boardRows, questions, stock });
+      sendJson(res, 200, { ...result, closing: await closingState(), canClose: actor.role === "owner" });
+      return;
+    }
+    if (actor.role !== "owner") { sendJson(res, 403, { error: "마감·해제는 대표만 할 수 있습니다." }); return; }
+    const body = await readBody(req);
+    const c = await closingState();
+    if (pathname === "/api/closing/lock" && method === "POST") {
+      const month = String(body.month || "");
+      if (!closing.isYm(month)) { sendJson(res, 400, { error: "마감할 달을 고르세요." }); return; }
+      if (c.lockedThrough && month <= c.lockedThrough) { sendJson(res, 400, { error: `${c.lockedThrough} 까지 이미 마감되어 있습니다.` }); return; }
+      c.history = [{ action: "lock", month, by: who, at: now(), note: String(body.note || "").slice(0, 300), open: Number(body.open || 0) }, ...(c.history || [])].slice(0, 100);
+      c.lockedThrough = month;
+      await erp.put("settings", c);
+      addAudit(db, actor, "update", "closing", month, `${month} 월 마감${body.note ? ` (${String(body.note).slice(0, 80)})` : ""}`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { closing: c });
+      return;
+    }
+    if (pathname === "/api/closing/unlock" && method === "POST") {
+      const month = String(body.month || c.lockedThrough || "");
+      const reason = String(body.reason || "").trim();
+      if (!closing.isLocked(c, month)) { sendJson(res, 400, { error: "마감된 달이 아닙니다." }); return; }
+      if (!reason) { sendJson(res, 400, { error: "마감을 푸는 이유를 적어 주세요." }); return; }
+      c.lockedThrough = closing.prevMonth(month) < "2000-01" ? "" : closing.prevMonth(month);
+      c.history = [{ action: "unlock", month, by: who, at: now(), note: reason.slice(0, 300) }, ...(c.history || [])].slice(0, 100);
+      await erp.put("settings", c);
+      addAudit(db, actor, "update", "closing", month, `${month} 마감 해제: ${reason.slice(0, 80)}`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { closing: c });
+      return;
+    }
+    sendJson(res, 404, { error: "없는 기능입니다." });
+    return;
+  }
+
   if (pathname === "/api/monthly" || pathname.startsWith("/api/monthly/")) {
     if (!requirePermission(actor, res, "settlement", "view")) return;
     const canEdit = actor.role === "owner" || can(actor, "settlement", "edit");
@@ -11513,6 +11578,7 @@ async function routeApi(req, res, url) {
     const rowMatch = pathname.match(/^\/api\/monthly\/(\d{4}-\d{2})\/([^/]+)$/);
     if (rowMatch && method === "PUT") {
       const [, ym, brandId] = rowMatch;
+      if (!(await guardOpenMonth(res, ym))) return;
       const brand = brandList.find((b) => b.id === decodeURIComponent(brandId));
       if (!brand) { sendJson(res, 404, { error: "브랜드를 찾을 수 없습니다." }); return; }
       const body = await readBody(req);
@@ -11636,6 +11702,7 @@ async function routeApi(req, res, url) {
       const date = dateOnly(body.date);
       const row = await erp.get("cashRows", String(body.rowId || ""));
       if (!date || !row) { sendJson(res, 400, { error: "날짜와 행을 고르세요." }); return; }
+      if (!(await guardOpenMonth(res, closing.ym(date)))) return;
       const id = `${date}|${row.id}|manual`;
       const raw = String(body.amount ?? "").replace(/,/g, "").trim();
       if (raw === "") {
@@ -12914,6 +12981,8 @@ async function routeApi(req, res, url) {
         sendJson(res, 400, { error: `지금 상태(${payments.PAYMENT_STATUSES[rec.status]})에서는 할 수 없습니다.` });
         return;
       }
+      if (rec.status === "paid" && !(await guardOpenMonth(res, closing.ym(rec.paidAt)))) return;
+      if (body.action === "pay" && !(await guardOpenMonth(res, closing.ym(dateOnly(body.paidAt) || kstToday())))) return;
       const from = rec.status;
       let to = def.to;
       if (body.action === "confirm") {
@@ -12992,11 +13061,17 @@ async function routeApi(req, res, url) {
         sendJson(res, 403, { error: "처리완료된 요청의 금액·계좌는 처리 권한자만 고칠 수 있습니다." });
         return;
       }
+      if (rec.status === "paid" && !(await guardOpenMonth(res, closing.ym(rec.paidAt)))) return;
       const next = shape(body, rec);
       next.updatedAt = now();
       if (rec.amount !== next.amount || rec.accountNumber !== next.accountNumber) {
-        log(next, "edit", rec.status, rec.status,
-          `금액 ${rec.amount}→${next.amount}, 계좌 ${rec.accountNumber || "-"}→${next.accountNumber || "-"}`);
+        // 확인·허가 뒤 금액이나 계좌가 바뀌면 확인을 다시 받는다(확인한 내용과 실제 지급이 어긋나지 않게).
+        if (["confirmed", "awaiting_approval"].includes(rec.status)) {
+          next.status = "requested";
+          delete next.confirmedBy; delete next.confirmedAt; delete next.approvedBy; delete next.approvedAt;
+        }
+        log(next, "edit", rec.status, next.status,
+          `금액 ${rec.amount}→${next.amount}, 계좌 ${rec.accountNumber || "-"}→${next.accountNumber || "-"}${next.status !== rec.status ? " · 다시 확인 필요" : ""}`);
       }
       await erp.put("payments", next);
       sendJson(res, 200, { payment: next });
@@ -13007,6 +13082,7 @@ async function routeApi(req, res, url) {
       if (!requirePermission(actor, res, "payments", "delete")) return;
       const rec = await erp.get("payments", one[1]);
       if (!rec) { sendJson(res, 404, { error: "지급요청을 찾을 수 없습니다." }); return; }
+      if (rec.status === "paid" && !(await guardOpenMonth(res, closing.ym(rec.paidAt)))) return;
       for (const f of rec.files || []) await erp.removeFile(f.id);
       await erp.remove("payments", rec.id);
       addAudit(db, actor, "delete", "payment", rec.id,
