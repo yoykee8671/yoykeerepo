@@ -29,6 +29,7 @@ import * as monthly from "./lib/monthly-board.mjs";
 import * as brandInfo from "./lib/brand-info.mjs";
 import * as rehab from "./lib/rehab-plan.mjs";
 import * as cashFlow from "./lib/cash-flow.mjs";
+import { setAtPath } from "./lib/sync-merge.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -11155,6 +11156,15 @@ async function routeApi(req, res, url) {
           addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 정보 ${Object.keys(set).length}칸 설문 값으로 변경 (확인 필요 답변)`, before, set);
           applied = `${Object.keys(set).length}칸 변경`;
         }
+      } else if (qn.kind === "sync-conflict") {
+        // pay(운영)와 v2 에서 같은 칸을 다르게 고친 경우(하루 한 번 운영 → v2 합치기). v2 값이 이미 들어 있다.
+        if (choice.key === "prod") {
+          const p = qn.payload || {};
+          if (!Array.isArray(p.path) || !p.path.length) { sendJson(res, 400, { error: "바꿀 위치 정보가 없습니다." }); return; }
+          setAtPath(db, p.path, p.prodMissing ? undefined : p.prod);
+          addAudit(db, actor, "update", "sync", qn.subjectId, `확인 필요: ${qn.subjectId} → pay 값으로`, null, null);
+        }
+        applied = choice.label;
       } else if (qn.kind === "brand-new") {
         applied = choice.label;
       } else if (qn.kind === "prod-total") {

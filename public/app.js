@@ -13491,7 +13491,7 @@ function renderSetup() {
     <div class="setup-card ${q.status === "answered" ? "answered" : ""}">
       <div class="setup-kind">${h(SETUP_KIND_LABEL[q.kind] || q.kind)}</div>
       <strong>${h(q.title)}</strong>
-      <p class="muted">${h(q.detail || "")}</p>
+      <p class="muted" style="white-space:pre-line">${h(q.detail || "")}</p>
       ${q.kind === "proposal" && q.status !== "answered" ? `<ul class="setup-actions">${(q.choices || []).filter((c) => (c.actions || []).length).map((c) => `<li><strong>${h(c.label)}</strong>: ${(c.actions || []).map((a) => h(a.type === "cashSchedule" ? `자금일정 '${a.title}' ${a.repeat === "monthly" ? `매월 ${a.dayOfMonth}일(${a.startDate || ""}~${a.endDate || ""})` : a.date} ${money.format(a.amount)}원${a.direction === "in" ? " 받을 돈" : ""}` : a.type === "payment" ? `지급요청 '${a.title}' ${money.format(a.amount)}원` : `생산비 지급 기록 ${a.date} ${money.format(a.amount)}원`)).join(" · ")}</li>`).join("")}</ul>` : ""}
       ${q.status === "answered"
         ? `<div class="muted">✓ ${h(q.answer?.applied || q.answer?.label || "")} · ${h(q.answeredBy || "")} ${h(String(q.answeredAt || "").slice(0, 10))}</div>`
