@@ -27,6 +27,7 @@ import * as loansLib from "./lib/loans.mjs";
 import * as proposals from "./lib/setup-proposals.mjs";
 import * as monthly from "./lib/monthly-board.mjs";
 import * as brandInfo from "./lib/brand-info.mjs";
+import * as rehab from "./lib/rehab-plan.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -45,6 +46,8 @@ const LOAN_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_loans.py
 const LOAN_SHEET_ID = process.env.LOAN_SHEET_ID || "1_7bKONJvSWSH5wzciqHkfIRbZS6fmqVY";
 const MONTHLY_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_monthly.py");
 const MONTHLY_SHEET_ID = process.env.MONTHLY_SHEET_ID || "1_fg3KbjmZrJzFTf1w2LLkjoxYj2DuweYFdDIOp3Qumo";
+const REHAB_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_rehab.py");
+const REHAB_SHEET_ID = process.env.REHAB_SHEET_ID || "1p3cLIiqHzXsiNcbkRkNgv7LAwRvkXS_DkD3qiHd1_w4";
 const HANA_TRANSFER_SCRIPT = path.join(__dirname, "scripts", "hana_transfer_xlsx.py");
 const NPB_PARSE_SCRIPT = path.join(__dirname, "scripts", "npb_parse.py");
 const NPB_XLSX_SCRIPT = path.join(__dirname, "scripts", "npb_settlement_xlsx.py");
@@ -11406,6 +11409,64 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // --- v2 회생계획 변제 ------------------------------------------------------------
+  if (pathname === "/api/rehab" || pathname.startsWith("/api/rehab/")) {
+    if (!requirePermission(actor, res, "cash", "view")) return;
+    const canEdit = actor.role === "owner" || can(actor, "cash", "edit");
+    const who = actor.name || actor.email || "";
+    const today = kstToday();
+    if (pathname === "/api/rehab" && method === "GET") {
+      const [plan, pays] = await Promise.all([erp.get("rehabPlan", "current"), erp.list("rehabPayments")]);
+      const years = plan ? rehab.yearSummary(plan, pays, today) : [];
+      const year = /^\d{4}$/.test(url.searchParams.get("year") || "") ? url.searchParams.get("year") : (years.find((y) => y.due > 0)?.year || today.slice(0, 4));
+      sendJson(res, 200, { hasPlan: Boolean(plan), importedAt: plan?.importedAt || "", totals: plan?.totals || null, years, year,
+        creditors: plan ? rehab.creditorsForYear(plan, year) : [], payments: pays.filter((p) => !p.voided).sort((a, b) => String(b.date).localeCompare(String(a.date))),
+        byCategory: plan ? Object.entries(plan.creditors.reduce((m, c) => { const k = c.cat || "기타"; m[k] ||= { count: 0, total: 0, cash: 0 }; m[k].count += 1; m[k].total += c.total; m[k].cash += c.cash; return m; }, {})) : [],
+        canEdit });
+      return;
+    }
+    if (!canEdit) { sendJson(res, 403, { error: "회생변제를 고칠 권한이 없습니다." }); return; }
+    if (pathname === "/api/rehab/import-sheet" && method === "POST") {
+      if (actor.role !== "owner") { sendJson(res, 403, { error: "가져오기는 오너만 할 수 있습니다." }); return; }
+      let extract;
+      try { extract = await extractSheetWith(REHAB_SHEET_ID, REHAB_EXTRACT_SCRIPT, "회생채권 변제계획표"); } catch (error) { sendJson(res, 502, { error: error.message }); return; }
+      const creditors = extract.creditors || [];
+      const sum = creditors.reduce((s, c) => s + Number(c.total || 0), 0);
+      if (!extract.totals || Math.abs(sum - Number(extract.totals.total || 0)) > 1) {
+        sendJson(res, 400, { error: `계획표 합계가 맞지 않습니다(채권자 합 ${sum.toLocaleString()} / 총 합계 ${Number(extract.totals?.total || 0).toLocaleString()}). 시트 모양이 바뀌었는지 확인하세요.` });
+        return;
+      }
+      await erp.put("rehabPlan", { id: "current", creditors, totals: extract.totals, importedAt: now(), importedBy: who });
+      addAudit(db, actor, "update", "rehabPlan", "current", `회생 변제계획표 가져오기: 채권자 ${creditors.length}곳, 채권총액 ${sum.toLocaleString()}원`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { creditors: creditors.length, total: sum, years: extract.totals.years });
+      return;
+    }
+    if (pathname === "/api/rehab/payments" && method === "POST") {
+      const body = await readBody(req);
+      const rec = { id: id("rp"), year: String(body.year || "").slice(0, 4), date: dateOnly(body.date) || today,
+        amount: Math.max(0, Math.round(number(String(body.amount ?? "").replace(/,/g, "")))), memo: String(body.memo || "").slice(0, 300), createdBy: who, createdAt: now() };
+      if (!/^\d{4}$/.test(rec.year) || !rec.amount) { sendJson(res, 400, { error: "연도와 금액을 입력하세요." }); return; }
+      await erp.put("rehabPayments", rec);
+      addAudit(db, actor, "create", "rehabPayment", rec.id, `회생채권 ${rec.year}년 변제 ${rec.amount.toLocaleString()}원 기록`, null, rec);
+      await writeDb(db);
+      sendJson(res, 201, { payment: rec });
+      return;
+    }
+    const pv = pathname.match(/^\/api\/rehab\/payments\/([^/]+)\/void$/);
+    if (pv && method === "POST") {
+      const rec = await erp.get("rehabPayments", decodeURIComponent(pv[1]));
+      if (!rec) { sendJson(res, 404, { error: "기록이 없습니다." }); return; }
+      await erp.put("rehabPayments", { ...rec, voided: true, voidedBy: who, voidedAt: now() });
+      addAudit(db, actor, "delete", "rehabPayment", rec.id, `회생채권 ${rec.year}년 변제 기록 취소`, rec, null);
+      await writeDb(db);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    sendJson(res, 404, { error: "없는 경로입니다." });
+    return;
+  }
+
   // --- v2 대출금 원장 ------------------------------------------------------------
   if (pathname === "/api/loans" || pathname.startsWith("/api/loans/")) {
     if (!requirePermission(actor, res, "cash", "view")) return;
@@ -11420,8 +11481,14 @@ async function routeApi(req, res, url) {
     };
 
     if (pathname === "/api/loans" && method === "GET") {
-      const [loans, pays] = await Promise.all([erp.list("loans"), erp.list("loanPayments")]);
-      const rows = loans.map((l) => decorate(l, pays)).sort((a, b) => String(a.company).localeCompare(String(b.company)) || b.currentBalance - a.currentBalance);
+      const [loans, pays, plan] = await Promise.all([erp.list("loans"), erp.list("loanPayments"), erp.get("rehabPlan", "current")]);
+      const rows = loans.map((l) => {
+        const d = decorate(l, pays);
+        const c = l.rehabCreditor ? rehab.creditorPlan(plan, l.rehabCreditor) : null;
+        // 회생채권: 계획표의 채권총액·현금변제액·연도별 금액을 붙인다(같은 채권자 대출이 여러 건이면 같은 값).
+        if (c) d.rehabPlan = { creditor: c.creditor, cat: c.cat, total: c.total, cash: c.cash, years: c.years, prepaid: c.prepaid, remaining2026: c.remaining2026 };
+        return d;
+      }).sort((a, b) => String(a.company).localeCompare(String(b.company)) || b.currentBalance - a.currentBalance);
       const totals = {};
       const rehabTotals = {};
       for (const r of rows) {
@@ -11556,12 +11623,14 @@ async function routeApi(req, res, url) {
       next.editedAt = now();
       next.editedBy = who;
       await erp.put("loans", next);
-      // 회생채권으로 돌렸으면 만기 질문은 더 묻지 않는다.
-      if (next.rehabCreditor) {
+      // 회생채권으로 돌렸거나, 다 갚았거나, 만기를 앞으로 옮겼으면 만기 질문은 더 묻지 않는다.
+      const settled = next.rehabCreditor ? `회생채권(${next.rehabCreditor})으로 전환` : next.closed ? "종료(다 갚음)"
+        : next.maturity && next.maturity >= kstToday() ? `만기 ${next.maturity}로 연장` : "";
+      if (settled) {
         const qn = await erp.get("setupQuestions", `loan-maturity:${next.id}`);
         if (qn && qn.status !== "answered") {
           await erp.put("setupQuestions", { ...qn, status: "answered", answeredBy: who, answeredAt: now(),
-            answer: { choice: "rehab", label: "회생채권 전환", applied: `회생채권(${next.rehabCreditor} 대위변제)으로 전환` } });
+            answer: { choice: "edit", label: "대출 정보 수정", applied: settled } });
         }
       }
       addAudit(db, actor, edit ? "update" : "create", "loan", next.id, `대출 ${next.name} ${edit ? "수정" : "등록"}`, edit ? base : null, next);
@@ -12154,7 +12223,9 @@ async function routeApi(req, res, url) {
       const report = cashReport.buildCashReport({
         today, days, company: companyKey, openingBalance: opening,
         schedules: [...await erp.list("cashSchedules"),
-          ...loansLib.loanScheduleLines((await erp.list("loans")).filter((l) => l.company === companyKey), await erp.list("loanPayments"), today, payments.addDays(today, days))],
+          ...loansLib.loanScheduleLines((await erp.list("loans")).filter((l) => l.company === companyKey), await erp.list("loanPayments"), today, payments.addDays(today, days)),
+          // 회생채권 연말 변제는 우프컴퍼니가 낸다.
+          ...(companyKey === "wooof" ? rehab.rehabScheduleLines(await erp.get("rehabPlan", "current"), await erp.list("rehabPayments"), today, payments.addDays(today, days)) : [])],
         // 지급요청은 회사가 적혀 있으면 그 회사, 없으면 우프 통장에서 나간다.
         payments: (await erp.list("payments").catch(() => [])).filter((p) => (p.company || "wooof") === companyKey),
         // 선매입 입금요청은 우프 통장에서 나간다.

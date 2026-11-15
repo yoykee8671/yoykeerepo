@@ -3,7 +3,7 @@
 #
 #   scripts/v2test-up.sh            # 지금 코드로 다시 빌드해 올린다(데이터는 그대로)
 #   scripts/v2test-up.sh --reset    # 운영 DB 를 새로 복사해 오고 v2 자료를 다시 넣는다
-#   scripts/v2test-up.sh --overrides  # 데이터는 그대로 두고 대출 고침(loan/overrides.json)만 다시 적용
+#   scripts/v2test-up.sh --overrides  # 데이터는 그대로 두고 회생계획표·등록 제안·대출 고침(loan/overrides.json)만 다시 적용
 #
 # 운영(4173)은 건드리지 않는다. 복사본의 클로브·카페24 토큰은 비운다.
 # 비밀값은 ~/.cache/v2data/v2test.env (권한 600)에만 둔다.
@@ -77,6 +77,7 @@ if [ "${1:-}" = "--reset" ]; then
   post /api/loans/import-sheet
   post /api/monthly/import-sheet
   post /api/pricing/seed
+  post /api/rehab/import-sheet
   if [ -f "$DATA/ledger_rows.json" ] && [ -f "$DATA/claims_final.json" ]; then
     node -e "
       const fs=require('fs');const d=process.argv[1];
@@ -93,6 +94,8 @@ fi
 
 if [ "${1:-}" = "--overrides" ]; then
   seed_login
+  post /api/rehab/import-sheet
+  [ -f "$DATA/ar/proposals.json" ] && post /api/setup/proposals "@$DATA/ar/proposals.json"
   apply_overrides
   seed_cleanup
 fi

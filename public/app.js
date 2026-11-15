@@ -11538,9 +11538,9 @@ function renderLoans() {
         <thead><tr><th>대출</th><th>남은 금액</th><th>다음 상환(추정)</th><th>만기</th></tr></thead>
         <tbody>${group(key).map((l) => `<tr class="${cs.loanSel === l.id ? "selected" : ""}" data-loan-open="${h(l.id)}">
           <td>${h(l.bank)} ${h(l.name)}<br><span class="muted" style="font-size:11px">연 ${l.rate || 0}% · 매월 ${h(l.payDay || "-")} · ${h(l.account || "")}${unconnected.has(l.id) ? ' · <span class="danger-text">클로브 미연결</span>' : ""}</span></td>
-          <td class="num"><strong>${money.format(l.currentBalance)}</strong>${l.paymentCount ? `<br><span class="muted" style="font-size:11px">상환 ${l.paymentCount}건 반영</span>` : `<br><span class="muted" style="font-size:11px">${h(l.asOf || "")} 기준</span>`}</td>
+          <td class="num">${l.status === "rehab" ? `<span class="muted">원래 대출 ${money.format(l.currentBalance)}</span><br><span class="muted" style="font-size:11px">회생계획으로 변제</span>` : `<strong>${money.format(l.currentBalance)}</strong>${l.paymentCount ? `<br><span class="muted" style="font-size:11px">상환 ${l.paymentCount}건 반영</span>` : `<br><span class="muted" style="font-size:11px">${h(l.asOf || "")} 기준</span>`}`}</td>
           <td>${l.nextDate ? `${h(l.nextDate.slice(5))}<br><span class="muted" style="font-size:11px">${money.format(l.nextAmount)}원</span>` : ""}</td>
-          <td>${l.status === "rehab" ? `<span class="badge muted">회생채권</span><br><span class="muted" style="font-size:11px">${h(l.rehabCreditor)} 대위변제</span>` : `${h(l.maturity || "")}<br><span class="badge ${LOAN_STATUS[l.status][1]}">${LOAN_STATUS[l.status][0]}</span>`}</td></tr>`).join("") || `<tr><td colspan="4" class="empty">대출이 없습니다.</td></tr>`}</tbody>
+          <td>${l.status === "rehab" ? `<span class="badge muted">회생채권</span><br><span class="muted" style="font-size:11px">${h(l.rehabCreditor)}${l.rehabPlan ? ` · 계획 채권 ${money.format(l.rehabPlan.total)} · 현금변제 ${money.format(l.rehabPlan.cash)}` : ""}</span>` : `${h(l.maturity || "")}<br><span class="badge ${LOAN_STATUS[l.status][1]}">${LOAN_STATUS[l.status][0]}</span>`}</td></tr>`).join("") || `<tr><td colspan="4" class="empty">대출이 없습니다.</td></tr>`}</tbody>
       </table></div>
     </div>`;
   return `
@@ -11622,13 +11622,82 @@ function bindLoans() {
   });
 }
 
+// ===========================================================================
+// v2 회생계획 변제 — 연도별 계획·미리 낸 돈·남은 돈, 채권자별 금액, 지급 기록
+// ===========================================================================
+const REHAB_STATUS = { paid: ["완료", "muted"], overdue: ["기한 지남", "warn"], "this-year": ["올해 연말까지", ""], planned: ["예정", "muted"] };
+function renderRehab() {
+  const cs = cashState();
+  const d = cs.rehab;
+  if (!d) return `<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  if (!d.hasPlan) return `<section class="panel"><div class="panel-body"><p class="muted">회생 변제계획표를 아직 가져오지 않았습니다.</p>${state.admin?.role === "owner" ? `<button class="primary" data-rehab-import>회생 변제계획표 가져오기</button>` : ""}</div></section>`;
+  const t = d.totals;
+  const cur = d.years.find((y) => y.year === d.year) || {};
+  const cats = d.byCategory.map(([k, v]) => `${h(k)} ${v.count}곳 · 현금변제 ${money.format(v.cash)}`).join(" / ");
+  return `
+    <div class="toolbar" style="margin:8px 0">
+      ${state.admin?.role === "owner" ? `<button data-rehab-import>변제계획표 다시 가져오기</button>` : ""}
+      <span class="muted" style="font-size:12px">채권총액 ${money.format(t.total)}원 · 80% 출자전환(특수관계인 100%), 나머지를 2026~2035년 해마다 연말까지 현금변제(조세는 2028년까지) · ${cats}</span>
+    </div>
+    <section class="panel"><div class="table-wrap"><table>
+      <thead><tr><th>연도</th><th>계획 변제액</th><th>미리 낸 돈</th><th>지급 기록</th><th>남은 금액</th><th>기한</th><th>상태</th></tr></thead>
+      <tbody>${d.years.map((y) => `<tr class="${y.year === d.year ? "selected" : ""}" data-rehab-year="${y.year}">
+        <td>${y.year}년</td><td class="num">${money.format(y.planned)}</td>
+        <td class="num">${y.prepaid ? `${money.format(y.prepaid)}<br><span class="muted" style="font-size:11px">2025년 선변제(실제 ${money.format(y.prepaidPaid)}, 현가할인 4.4%)</span>` : ""}</td>
+        <td class="num">${y.paid ? money.format(y.paid) : ""}</td><td class="num"><strong>${money.format(y.due)}</strong></td>
+        <td>${h(y.dueDate)}</td><td><span class="badge ${REHAB_STATUS[y.status][1]}">${REHAB_STATUS[y.status][0]}</span></td></tr>`).join("")}</tbody>
+    </table></div></section>
+    <section class="layout pricing-layout" style="margin-top:14px">
+      <div class="panel">
+        <div class="panel-head"><h2>${h(d.year)}년 채권자별</h2><span class="muted">${d.creditors.length}곳</span></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>채권자</th><th>구분</th><th>계획</th><th>미리 낸 돈</th><th>남은 금액</th></tr></thead>
+          <tbody>${d.creditors.map((c) => `<tr><td class="wrap">${h(c.creditor)}${c.biz ? `<br><span class="muted" style="font-size:11px">${h(c.biz)}</span>` : ""}</td>
+            <td style="font-size:12px">${h(c.cat)}</td><td class="num">${money.format(c.planned)}</td><td class="num">${c.prepaid ? money.format(c.prepaid) : ""}</td>
+            <td class="num"><strong>${money.format(c.remaining)}</strong></td></tr>`).join("")}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>지급 기록</h2></div>
+        <div class="panel-body">
+          ${d.canEdit ? `<form class="form-grid" data-rehab-pay>
+            <div class="field two"><div><label>연도</label><input name="year" value="${h(d.year)}"></div><div><label>지급일</label><input type="date" name="date" value="${new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10)}"></div></div>
+            <div class="field two"><div><label>금액</label><input name="amount" inputmode="numeric" value="${cur.due ? money.format(cur.due) : ""}"></div><div><label>메모</label><input name="memo" placeholder="예: 채권자 67곳 일괄 이체"></div></div>
+            <div class="toolbar"><button class="primary" type="submit">지급 기록</button></div></form>` : ""}
+          <div class="table-wrap"><table><thead><tr><th>연도</th><th>지급일</th><th>금액</th><th>메모</th><th></th></tr></thead><tbody>
+            ${d.payments.map((p) => `<tr><td>${h(p.year)}</td><td>${h(p.date)}</td><td class="num">${money.format(p.amount)}</td><td class="wrap">${h(p.memo || "")}</td>
+              <td>${d.canEdit ? `<button data-rehab-void="${h(p.id)}">취소</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">2025년 선변제는 계획표 값으로 반영돼 있습니다. 연말에 낸 뒤 여기에 기록하세요.</td></tr>`}
+          </tbody></table></div>
+        </div>
+      </div>
+    </section>`;
+}
+function bindRehab() {
+  const cs = cashState();
+  const load = async (year) => { cs.rehab = await api(`/api/rehab${year ? `?year=${year}` : ""}`); };
+  if (!cs.rehab && !cs.rehabLoading) {
+    cs.rehabLoading = true;
+    load().catch((e) => showToast(e.message, "error")).finally(() => { cs.rehabLoading = false; renderApp(); });
+    return;
+  }
+  const run = async (fn, ok) => { try { await fn(); if (ok) showToast(ok); await load(cs.rehab?.year); renderApp(); } catch (e) { showToast(e.message || "처리하지 못했습니다.", "error"); } };
+  app.querySelectorAll("[data-rehab-year]").forEach((tr) => tr.addEventListener("click", () => run(() => load(tr.dataset.rehabYear))));
+  app.querySelectorAll("[data-rehab-import]").forEach((b) => b.addEventListener("click", () => {
+    if (!confirm("회생채권 변제계획표(구글시트)를 다시 읽어 옵니다. 지급 기록은 그대로 둡니다. 진행할까요?")) return;
+    run(() => api("/api/rehab/import-sheet", { method: "POST", body: {} }), "변제계획표를 가져왔습니다.");
+  }));
+  app.querySelector("[data-rehab-pay]")?.addEventListener("submit", (e) => { e.preventDefault(); run(() => api("/api/rehab/payments", { method: "POST", body: formObject(e.currentTarget) }), "기록했습니다."); });
+  app.querySelectorAll("[data-rehab-void]").forEach((b) => b.addEventListener("click", () => { if (confirm("이 지급 기록을 취소할까요?")) run(() => api(`/api/rehab/payments/${encodeURIComponent(b.dataset.rehabVoid)}/void`, { method: "POST", body: {} }), "취소했습니다."); }));
+}
+
 function renderCash() {
   const cs = cashState();
   const head = pageHead("자금", "오늘과 7일 안에 들어올 돈·나갈 돈, 계좌 잔액을 한 장으로 봅니다. 매일 아침 이 화면을 보고 채널톡에 공유하세요.");
-  const tabs = `<div class="npb-subnav">${[["report", "일일 자금보고"], ["schedules", "자금 일정"], ["loans", "대출금"], ["receivables", "채권원장"]].map(([k, l]) => `<button class="npb-subtab ${cs.screen === k ? "active" : ""}" data-cash-screen="${k}">${l}</button>`).join("")}
+  const tabs = `<div class="npb-subnav">${[["report", "일일 자금보고"], ["schedules", "자금 일정"], ["loans", "대출금"], ["rehab", "회생변제"], ["receivables", "채권원장"]].map(([k, l]) => `<button class="npb-subtab ${cs.screen === k ? "active" : ""}" data-cash-screen="${k}">${l}</button>`).join("")}
     <span style="flex:1"></span>
     ${(cs.meta?.companies || [{ key: "wooof", name: "우프컴퍼니" }, { key: "betters", name: "베럴즈" }]).map((c) => `<button class="npb-subtab ${cs.company === c.key ? "active" : ""}" data-cash-company="${c.key}">${h(c.name)}</button>`).join("")}</div>`;
   if (cs.screen === "loans") return `${head}${tabs}${renderLoans()}`;
+  if (cs.screen === "rehab") return `${head}${tabs}${renderRehab()}`;
   if (!cs.data) return `${head}${tabs}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   return `${head}${tabs}${cs.screen === "schedules" ? renderCashSchedules() : cs.screen === "receivables" ? renderReceivableLedger() : renderCashReport()}`;
 }
@@ -11728,9 +11797,9 @@ function renderCashSchedules() {
 
 function bindCash() {
   const cs = cashState();
-  if (cs.screen === "loans") {
+  if (cs.screen === "loans" || cs.screen === "rehab") {
     app.querySelectorAll("[data-cash-screen]").forEach((b) => b.addEventListener("click", () => { cs.screen = b.dataset.cashScreen; renderApp(); }));
-    bindLoans();
+    if (cs.screen === "loans") bindLoans(); else bindRehab();
     return;
   }
   if (!cs.data && !cs.loading) {
