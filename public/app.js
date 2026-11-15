@@ -5102,14 +5102,33 @@ function bindMaterials() {
   });
 }
 
+// 입금계좌에 이어진 브랜드(BR-)·거래처(PT-). 연결은 브랜드의 transferAccountId 와 계좌의 partnerId 한 칸씩에만 둔다.
+function accountLinks(acc) {
+  const brands = state.brands.filter((b) => b.transferAccountId === acc.id);
+  const partner = (state.partners || []).find((p) => p.id === acc.partnerId) || null;
+  const kind = brands.length && partner ? "both" : brands.length ? "brand" : partner ? "partner" : "none";
+  const codes = [...brands.map((b) => b.code || ""), partner?.code || ""].filter(Boolean).sort();
+  return { brands, partner, kind, codeKey: codes[0] || "ZZZ" };
+}
+const ACCOUNT_KIND = { brand: "브랜드", partner: "거래처", both: "브랜드+거래처", none: "미연결" };
 function renderTransferAccounts() {
-  const q = String(state.procurement.accountQuery || "").trim();
-  const all = (state.transferAccounts || []).slice()
-    .sort((a, b) => String(a.alias || "").localeCompare(String(b.alias || ""), "ko"));
-  const rows = q
-    ? all.filter((a) => [a.alias, a.holder, a.bankName, a.accountNumber].some((v) => String(v || "").includes(q)))
-    : all;
-  const usedBy = (accountId) => state.brands.filter((b) => b.transferAccountId === accountId).map((b) => b.name);
+  const q = String(state.procurement.accountQuery || "").trim().toLowerCase();
+  const f = state.procurement.accountFilter || "";
+  const sort = state.procurement.accountSort || "alias";
+  const all = (state.transferAccounts || []).map((acc) => ({ acc, link: accountLinks(acc) }));
+  const counts = all.reduce((m, x) => { m[x.link.kind] = (m[x.link.kind] || 0) + 1; return m; }, {});
+  const sorters = {
+    alias: (x, y) => String(x.acc.alias || "").localeCompare(String(y.acc.alias || ""), "ko"),
+    code: (x, y) => x.link.codeKey.localeCompare(y.link.codeKey) || String(x.acc.alias || "").localeCompare(String(y.acc.alias || ""), "ko"),
+    bank: (x, y) => String(x.acc.bankName || "").localeCompare(String(y.acc.bankName || ""), "ko") || String(x.acc.alias || "").localeCompare(String(y.acc.alias || ""), "ko"),
+    holder: (x, y) => String(x.acc.holder || "").localeCompare(String(y.acc.holder || ""), "ko"),
+    recent: (x, y) => String(y.acc.registeredAt || y.acc.createdAt || "").localeCompare(String(x.acc.registeredAt || x.acc.createdAt || ""))
+  };
+  const rowsAll = all
+    .filter((x) => !f || (f === "brand" ? ["brand", "both"].includes(x.link.kind) : f === "partner" ? ["partner", "both"].includes(x.link.kind) : x.link.kind === f))
+    .filter((x) => !q || [x.acc.alias, x.acc.holder, x.acc.bankName, x.acc.accountNumber, x.acc.code, ...x.link.brands.flatMap((b) => [b.name, b.code]), x.link.partner?.name, x.link.partner?.code]
+      .some((v) => String(v || "").toLowerCase().includes(q)))
+    .sort(sorters[sort] || sorters.alias);
   const a = state.procurement.editingAccount || {};
   return `
     <section class="layout">
@@ -5118,23 +5137,30 @@ function renderTransferAccounts() {
         <div class="panel-body" style="padding-bottom:0">
           <div class="toolbar">
             <label>하나은행 목록 업로드 <input type="file" accept=".xlsx,.xls" data-account-import></label>
-            <input data-account-q placeholder="별칭·예금주·계좌번호 검색" value="${h(q)}">
+            <input data-account-q placeholder="별칭·예금주·계좌번호·브랜드·코드 검색" value="${h(state.procurement.accountQuery || "")}">
+          </div>
+          <div class="toolbar" style="margin-top:6px">
+            ${[["", "전체", all.length], ["brand", "브랜드 연결", (counts.brand || 0) + (counts.both || 0)], ["partner", "거래처 연결", (counts.partner || 0) + (counts.both || 0)], ["none", "미연결", counts.none || 0]]
+              .map(([k, l, n]) => `<button class="npb-subtab ${f === k ? "active" : ""}" data-account-filter="${k}">${l} ${n}</button>`).join("")}
+            <span style="flex:1"></span>
+            <label class="muted" style="font-size:12px">정렬 <select data-account-sort style="width:auto">${[["alias", "별칭"], ["code", "회사 코드"], ["bank", "은행"], ["holder", "예금주"], ["recent", "최근 등록"]].map(([k, l]) => `<option value="${k}" ${sort === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
           </div>
           <p class="muted">하나은행 '자주쓰는입금계좌관리'에서 내려받은 엑셀을 올리면 목록이 그 파일로 바뀝니다.
             같은 계좌번호는 브랜드 연결이 그대로 유지됩니다.</p>
         </div>
         <div class="table-wrap">
-          <table class="accounts-table">
-            <thead><tr><th>별칭</th><th>은행</th><th>계좌번호</th><th>예금주</th><th>연결 브랜드</th><th>작업</th></tr></thead>
-            <tbody>${rows.map((acc) => `
-              <tr>
+          <table class="compact accounts-table">
+            <thead><tr><th>별칭</th><th>은행</th><th>계좌번호</th><th>예금주</th><th>구분</th><th>연결(회사 코드)</th><th></th></tr></thead>
+            <tbody>${rowsAll.map(({ acc, link }) => `
+              <tr class="hub-go ${state.procurement.editingAccount?.id === acc.id ? "selected" : ""}" data-row-edit="[data-edit-account]">
                 <td>${codeTag(acc)}${h(acc.alias)}</td>
                 <td>${h(acc.bankName)}</td>
                 <td><code>${h(acc.accountNumber)}</code></td>
                 <td>${h(acc.holder)}</td>
-                <td class="wrap">${h(usedBy(acc.id).join(", "))}</td>
+                <td><span class="badge ${link.kind === "none" ? "muted" : ""}">${ACCOUNT_KIND[link.kind]}</span></td>
+                <td class="wrap">${link.brands.map((b) => `${b.code ? `<span class="code-tag">${h(b.code)}</span>` : ""}${h(b.name)}`).join("<br>")}${link.partner ? `${link.brands.length ? "<br>" : ""}${link.partner.code ? `<span class="code-tag">${h(link.partner.code)}</span>` : ""}${h(link.partner.name)} <span class="muted" style="font-size:11px">거래처</span>` : ""}</td>
                 <td><div class="row-actions"><button data-edit-account="${h(acc.id)}">수정</button><button class="danger icon-btn" data-delete-account="${h(acc.id)}" aria-label="삭제" title="삭제">×</button></div></td>
-              </tr>`).join("") || `<tr><td colspan="6" class="empty">등록된 계좌가 없습니다.</td></tr>`}</tbody>
+              </tr>`).join("") || `<tr><td colspan="7" class="empty">해당하는 계좌가 없습니다.</td></tr>`}</tbody>
           </table>
         </div>
       </div>
@@ -5148,6 +5174,15 @@ function renderTransferAccounts() {
               <div><label>계좌번호 <span class="muted" style="font-weight:400">(하이픈은 자동으로 뺍니다)</span></label><input name="accountNumber" value="${h(a.accountNumber)}" required inputmode="numeric"></div>
             </div>
             <div class="field"><label>예금주</label><input name="holder" value="${h(a.holder)}"></div>
+            ${a.id ? (() => {
+              const linked = state.procurement.accountBrandIds ?? state.brands.filter((b) => b.transferAccountId === a.id).map((b) => b.id);
+              const others = state.brands.filter((b) => (b.type || "brand") === "brand" && !linked.includes(b.id));
+              return `<div class="field"><label>연결 브랜드 <span class="muted" style="font-weight:400">(브랜드 화면의 입금계좌와 같은 연결 — 어느 쪽에서 바꿔도 같습니다)</span></label>
+                <div class="chip-list">${linked.map((id) => { const b = state.brands.find((x) => x.id === id); return b ? `<span class="chip">${b.code ? `<span class="code-tag">${h(b.code)}</span>` : ""}${h(b.name)}${b.transferAccountId && b.transferAccountId !== a.id ? ' <span class="muted" style="font-size:11px">(다른 계좌에서 옮겨 옴)</span>' : ""} <button type="button" class="chip-x" data-account-unlink="${h(id)}" title="연결 해제">×</button></span>` : ""; }).join("") || '<span class="muted">없음</span>'}</div>
+                <select data-account-link style="margin-top:6px"><option value="">브랜드 추가…</option>${others.map((b) => `<option value="${h(b.id)}">${h(b.code ? `${b.code} · ` : "")}${h(b.name)}${b.transferAccountId ? " (다른 계좌 사용 중)" : ""}</option>`).join("")}</select></div>
+                <div class="field"><label>거래처(사업자) 연결 <span class="muted" style="font-weight:400">(생산처·매입처 등 — 그 거래처 지급 계좌로 맞춰짐)</span></label>
+                <select name="partnerId"><option value="">없음</option>${(state.partners || []).filter((p) => p.isActive !== false).map((p) => `<option value="${h(p.id)}" ${a.partnerId === p.id ? "selected" : ""}>${h(p.code ? `${p.code} · ` : "")}${h(p.name)}</option>`).join("")}</select></div>`;
+            })() : `<p class="muted" style="font-size:12px">계좌를 추가한 뒤 브랜드·거래처를 연결할 수 있습니다.</p>`}
             <div class="toolbar">
               <button class="primary" type="submit">${a.id ? "수정 저장" : "계좌 추가"}</button>
               ${a.id ? `<button type="button" data-cancel-edit-account>취소</button>` : ""}
@@ -5162,12 +5197,25 @@ function bindTransferAccounts() {
   const reload = async () => {
     state.transferAccounts = (await api("/api/transfer-accounts")).transferAccounts || [];
     state.brands = (await api("/api/brands")).brands;
+    state.partners = (await api("/api/partners")).partners || state.partners;
     renderApp();
   };
   app.querySelector("[data-account-q]")?.addEventListener("change", (e) => {
     state.procurement.accountQuery = e.target.value;
     renderApp();
   });
+  app.querySelectorAll("[data-account-filter]").forEach((b) => b.addEventListener("click", () => { state.procurement.accountFilter = b.dataset.accountFilter; renderApp(); }));
+  app.querySelector("[data-account-sort]")?.addEventListener("change", (e) => { state.procurement.accountSort = e.target.value; renderApp(); });
+  const linkedNow = () => state.procurement.accountBrandIds ?? state.brands.filter((b) => b.transferAccountId === state.procurement.editingAccount?.id).map((b) => b.id);
+  app.querySelector("[data-account-link]")?.addEventListener("change", (e) => {
+    if (!e.target.value) return;
+    state.procurement.accountBrandIds = [...new Set([...linkedNow(), e.target.value])];
+    renderApp();
+  });
+  app.querySelectorAll("[data-account-unlink]").forEach((b) => b.addEventListener("click", () => {
+    state.procurement.accountBrandIds = linkedNow().filter((x) => x !== b.dataset.accountUnlink);
+    renderApp();
+  }));
   app.querySelector("[data-account-import]")?.addEventListener("change", async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -5186,11 +5234,13 @@ function bindTransferAccounts() {
   app.querySelectorAll("[data-edit-account]").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.procurement.editingAccount = (state.transferAccounts || []).find((x) => x.id === btn.dataset.editAccount) || null;
+      state.procurement.accountBrandIds = null;
       renderApp();
     });
   });
   app.querySelector("[data-cancel-edit-account]")?.addEventListener("click", () => {
     state.procurement.editingAccount = null;
+    state.procurement.accountBrandIds = null;
     renderApp();
   });
   app.querySelectorAll("[data-delete-account]").forEach((btn) => {
@@ -5208,10 +5258,12 @@ function bindTransferAccounts() {
     event.preventDefault();
     const body = formObject(event.currentTarget);
     const editing = state.procurement.editingAccount;
+    if (editing) body.brandIds = linkedNow();
     try {
       if (editing) await api(`/api/transfer-accounts/${editing.id}`, { method: "PUT", body });
       else await api("/api/transfer-accounts", { method: "POST", body });
       state.procurement.editingAccount = null;
+      state.procurement.accountBrandIds = null;
       showToast(editing ? "수정했습니다." : "추가했습니다.");
       await reload();
     } catch (error) {

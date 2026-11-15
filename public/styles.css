@@ -2473,3 +2473,6 @@ tr.hub-go:hover td { background: #f8fafc; }
 tr.today-row td { background: #fff8e1; }
 tr.period-sub td { background: #f3f5f8; font-weight: 600; }
 tr.period-items > td { background: #fbfcfe; padding: 4px 16px 10px; }
+.chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; background: #f8fafc; font-size: 12px; }
+.chip-x { border: none; background: none; padding: 0 2px; cursor: pointer; color: var(--muted); font-size: 14px; }

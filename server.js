@@ -13065,7 +13065,30 @@ async function routeApi(req, res, url) {
     for (const key of ["bankName", "alias", "holder", "registeredAt"]) {
       if (key in body) account[key] = String(body[key] || "").trim();
     }
+    // 양방향 연결: 계좌 쪽에서 브랜드를 고르면 그 브랜드의 transferAccountId 를 바꾼다(연결은 한 칸에만 둔다).
+    if (Array.isArray(body.brandIds)) {
+      const want = new Set(body.brandIds.map(String));
+      for (const brand of db.brands) {
+        if (want.has(brand.id) && brand.transferAccountId !== account.id) {
+          const prev = { transferAccountId: brand.transferAccountId || "" };
+          brand.transferAccountId = account.id;
+          addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 입금계좌를 ${account.alias || account.accountNumber}(으)로 연결 (계좌 목록에서)`, prev, { transferAccountId: account.id });
+        } else if (!want.has(brand.id) && brand.transferAccountId === account.id) {
+          brand.transferAccountId = "";
+          addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 입금계좌 연결 해제 (계좌 목록에서)`, { transferAccountId: account.id }, { transferAccountId: "" });
+        }
+      }
+    }
+    // 거래처(사업자) 연결 — 같은 회사 코드로 묶는다.
+    if ("partnerId" in body) {
+      const partner = db.partners.find((x) => x.id === body.partnerId);
+      account.partnerId = partner?.id || "";
+    }
     account.updatedAt = now();
+    if (account.partnerId) {
+      const partner = db.partners.find((x) => x.id === account.partnerId);
+      if (partner) { partner.bankName = account.bankName; partner.bankAccount = account.accountNumber; if (account.holder) partner.depositorName = account.holder; partner.updatedAt = now(); }
+    }
     // 이 계좌를 쓰는 브랜드의 이체 정보도 같이 맞춘다.
     for (const brand of db.brands) {
       if (brand.transferAccountId !== account.id) continue;
