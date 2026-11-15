@@ -73,7 +73,8 @@ def main():
                 continue
             remaining_raw = g(r, "잔여 대출금")
             loans.append({
-                "sheetKey": f"{company}:{n}:{name}",
+                # 이름은 해마다 바뀌기도 해('일반자금대출' → '일반자금대출 (기보)') 계좌·실행일로 묶는다.
+                "sheetKey": f"{company}:{re.sub(r'[^0-9]', '', text(g(r, '출금계좌번호')))[:14]}:{day(g(r, '대출실행일자')) or n}",
                 "company": company,
                 "category": text(g(r, "구분")),
                 "name": name,

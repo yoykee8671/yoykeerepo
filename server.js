@@ -43,7 +43,8 @@ const PRODUCTION_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_pr
 // 생산비 구글시트(링크 공개). 시트를 다른 곳으로 옮기면 PRODUCTION_SHEET_ID 로 바꾼다.
 const PRODUCTION_SHEET_ID = process.env.PRODUCTION_SHEET_ID || "1xuvDKLTBZ4AgFsk3nYNnCKmRnz_-Z2os";
 const LOAN_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_loans.py");
-const LOAN_SHEET_ID = process.env.LOAN_SHEET_ID || "1_7bKONJvSWSH5wzciqHkfIRbZS6fmqVY";
+// 2026년 대출금 관리대장(구글드라이브 엑셀 파일). 옛 시트는 1_7bKONJvSWSH5wzciqHkfIRbZS6fmqVY.
+const LOAN_SHEET_ID = process.env.LOAN_SHEET_ID || "1gEQBHaYhgemwBEErrm6bwwfI5W5mPm6V";
 const MONTHLY_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_monthly.py");
 const MONTHLY_SHEET_ID = process.env.MONTHLY_SHEET_ID || "1_fg3KbjmZrJzFTf1w2LLkjoxYj2DuweYFdDIOp3Qumo";
 const REHAB_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_rehab.py");
@@ -11560,6 +11561,25 @@ async function routeApi(req, res, url) {
         await erp.put("loans", { ...l, importedAt: stamp });
         saved += 1;
       }
+      // 시트에서 사라진(또는 예전 id 방식으로 들어온) 대출 정리. 상환 기록이 있으면 같은 회사·계좌·원금의
+      // 새 대출로 옮긴 뒤 지우고, 옮길 곳이 없으면 남긴다.
+      const keep = new Set(plan.loans.map((l) => l.id));
+      const digitsOf = (v) => String(v || "").replace(/\D/g, "");
+      const allPays = await erp.list("loanPayments");
+      let removed = 0;
+      let moved = 0;
+      for (const l of await erp.list("loans")) {
+        if (keep.has(l.id) || l.source !== "대출금 관리대장") continue;
+        const pays = allPays.filter((p) => p.loanId === l.id);
+        if (pays.length) {
+          const target = plan.loans.find((n) => n.company === l.company && digitsOf(n.account) === digitsOf(l.account) && Number(n.principal) === Number(l.principal));
+          if (!target) continue;
+          for (const p of pays) { await erp.put("loanPayments", { ...p, loanId: target.id }); moved += 1; }
+        }
+        await erp.remove("loans", l.id);
+        await erp.remove("setupQuestions", `loan-maturity:${l.id}`).catch(() => {});
+        removed += 1;
+      }
       const existingQ = new Map((await erp.list("setupQuestions")).map((x) => [x.id, x]));
       for (const qn of plan.questions) {
         if (existingQ.get(qn.id)?.status === "answered") continue;
@@ -11567,7 +11587,7 @@ async function routeApi(req, res, url) {
       }
       addAudit(db, actor, "update", "loans", "import", `대출금 관리대장 가져오기: 대출 ${plan.loans.length}건, 질문 ${plan.questions.length}건`, null, null);
       await writeDb(db);
-      sendJson(res, 200, { loans: plan.loans.length, saved, questions: plan.questions.length });
+      sendJson(res, 200, { loans: plan.loans.length, saved, removed, movedPayments: moved, questions: plan.questions.length });
       return;
     }
 

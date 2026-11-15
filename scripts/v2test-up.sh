@@ -113,6 +113,7 @@ fi
 if [ "${1:-}" = "--overrides" ]; then
   seed_login
   [ -f "$DATA/ar/proposals.json" ] && post /api/setup/proposals "@$DATA/ar/proposals.json"
+  post /api/loans/import-sheet
   apply_overrides
   apply_brand_overrides
   post /api/rehab/import-sheet
