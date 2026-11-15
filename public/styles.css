@@ -2516,3 +2516,30 @@ tr.period-items > td { background: #fbfcfe; padding: 4px 16px 10px; }
 .layout-collapsible .form-fold { margin-left: auto; }
 .hub-balance { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 12px; }
 .hub-balance .stat small { display: block; font-size: 11px; margin-top: 2px; }
+/* 대시보드 오늘 할 일 */
+.todo-panel { margin-bottom: 14px; }
+.todo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+.todo-card { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 12px 14px; min-height: 84px; text-align: left; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); cursor: pointer; }
+.todo-card:hover { border-color: #3b6fd8; }
+.todo-card .todo-label { font-size: 12px; color: #5b6b82; }
+.todo-card strong { font-size: 20px; }
+.todo-card .todo-amount { font-size: 12px; color: #5b6b82; }
+.todo-card.tone-warn { border-left: 4px solid #f0a020; }
+.todo-card.tone-danger { border-left: 4px solid #d64545; }
+@media (max-width: 1080px) {
+  .brandmark { width: auto; flex: 0 0 auto; }
+  .nav-favs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0 8px 0 0; border-bottom: 0; border-right: 1px solid rgba(255, 255, 255, 0.12); }
+  .nav-section { display: none; }
+}
+@media (max-width: 1080px) {
+  .sidebar { flex-wrap: wrap; row-gap: 6px; }
+  .sidebar .nav { order: 3; width: 100%; flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 2px; }
+  .sidebar .nav > *, .sidebar .nav button { flex: 0 0 auto; white-space: nowrap; }
+  .sidebar .nav-sub { flex-wrap: nowrap; }
+  .nav-favs { order: 0; }
+}
+@media (max-width: 640px) {
+  .todo-grid, .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .todo-card { min-height: 72px; padding: 10px; }
+  .todo-card strong { font-size: 18px; }
+}

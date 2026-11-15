@@ -1334,10 +1334,41 @@ function renderMultiFilter({ key, title, allLabel, options, selectedValues }) {
   `;
 }
 
+// 오늘 할 일: 여러 메뉴의 대기 건(권한에 맞게). 누르면 그 화면으로.
+function renderTodo() {
+  const t = state.todo;
+  if (!t) return `<section class="panel todo-panel"><div class="panel-head"><h2>오늘 할 일</h2></div><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const cards = t.items.map((it) => `<button type="button" class="todo-card ${it.tone ? `tone-${it.tone}` : ""}" data-todo-go="${h(it.go.tab)}${it.go.sub ? `:${h(it.go.sub)}` : ""}">
+      <span class="todo-label">${h(it.label)}</span>
+      <strong>${it.count != null ? `${money.format(it.count)}건` : "확인"}</strong>
+      ${it.amount != null ? `<span class="todo-amount">${money.format(Math.round(it.amount))}원</span>` : ""}</button>`).join("");
+  return `<section class="panel todo-panel"><div class="panel-head"><h2>오늘 할 일</h2><button class="small ghost" data-todo-refresh>새로고침</button></div>
+    <div class="panel-body">${cards ? `<div class="todo-grid">${cards}</div>` : `<p class="muted">처리할 일이 없습니다. 👍</p>`}</div></section>`;
+}
+function bindTodo() {
+  if (state.todo && Date.now() - (state.todoAt || 0) > 60000 && !state.todoLoading) state.todo = null;
+  if (!state.todo && !state.todoLoading) {
+    state.todoLoading = true;
+    api("/api/todo").then((r) => { state.todo = r; state.todoAt = Date.now(); }).catch(() => { state.todo = { items: [] }; }).finally(() => { state.todoLoading = false; if (state.tab === "dashboard") renderApp(); });
+  }
+  app.querySelector("[data-todo-refresh]")?.addEventListener("click", () => { state.todo = null; renderApp(); });
+  app.querySelectorAll("[data-todo-go]").forEach((b) => b.addEventListener("click", () => {
+    const [tab, sub] = b.dataset.todoGo.split(":");
+    state.tab = tab;
+    if (tab === "trade") tradeState();
+    const conf = TAB_SUBMENUS[tab];
+    if (sub && conf) state[conf.stateKey].screen = sub;
+    state.todo = null;
+    clearEditing();
+    renderApp();
+  }));
+}
+
 function renderDashboard() {
   const d = state.dashboard;
   return `
-    ${pageHead("대시보드", "스프레드시트 집계 구조를 웹앱 데이터로 정리한 운영 화면입니다.")}
+    ${pageHead("대시보드", "오늘 처리할 일과 입금요청 현황을 한눈에 봅니다.")}
+    ${renderTodo()}
     <section class="stats">
       <div class="stat"><span>입금요청</span><strong>${money.format(d.requestCount)}</strong></div>
       <div class="stat"><span>대기 건수</span><strong>${money.format(d.pendingCount)}</strong></div>
@@ -2741,6 +2772,7 @@ async function ensureTabData() {
 
 function bindCurrentTab() {
   ensureTabData();
+  if (state.tab === "dashboard") bindTodo();
   // 줄을 누르면 그 줄의 수정·상세 버튼을 누른 것처럼(버튼·입력칸을 누른 건 그대로).
   setTimeout(() => app.querySelectorAll("tr[data-row-edit]").forEach((tr) => {
     if (tr.dataset.rowBound) return;

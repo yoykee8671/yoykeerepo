@@ -11583,6 +11583,44 @@ async function routeApi(req, res, url) {
   }
 
   // --- v2 입점사 월정산 보드 ----------------------------------------------------
+  // 대시보드 '오늘 할 일': 여러 메뉴에 흩어진 대기 건을 권한에 맞게 모은다(이카운트의 미결 현황).
+  if (pathname === "/api/todo" && method === "GET") {
+    const owner = actor.role === "owner";
+    const items = [];
+    const push = (key, label, list, amountOf, go, tone = "") => {
+      if (!list.length) return;
+      items.push({ key, label, count: list.length, amount: amountOf ? list.reduce((s, x) => s + Number(amountOf(x) || 0), 0) : null, go, tone });
+    };
+    if (can(actor, "requests", "view")) {
+      push("requests", "입금 대기 입금요청", db.requests.filter((r) => ["pending", "await_deposit"].includes(r.status)), (r) => r.depositAmount, { tab: "requests" });
+    }
+    const pays = can(actor, "payments", "view") || owner ? await erp.list("payments") : [];
+    if (owner || can(actor, "payments", "approve")) push("approve", "대표 허가 필요 지급요청", pays.filter((p) => p.status === "awaiting_approval"), (p) => p.amount, { tab: "payments" }, "warn");
+    if (owner || can(actor, "payments", "confirm")) push("confirm", "확인 대기 지급요청", pays.filter((p) => p.status === "requested"), (p) => p.amount, { tab: "payments" });
+    if (owner || can(actor, "payments", "pay")) {
+      const today = kstToday();
+      push("pay", "지급할 지급요청", pays.filter((p) => p.status === "confirmed"), (p) => p.amount, { tab: "payments" });
+      push("payLate", "기한 지난 지급요청", pays.filter((p) => ["requested", "confirmed", "awaiting_approval"].includes(p.status) && p.dueDate && p.dueDate < today), (p) => p.amount, { tab: "payments" }, "danger");
+    }
+    if (owner || can(actor, "sales", "view")) {
+      const so = await erp.list("salesOrders").catch(() => []);
+      push("salesLate", "입금기한 지난 판매 미수", so.filter((o) => o.dueDate && o.dueDate < kstToday() && sales.remaining(o) > 0 && !["cancelled", "on_hold"].includes(sales.deriveStage(o))), (o) => sales.remaining(o), { tab: "trade", sub: "sales" }, "danger");
+    }
+    if (owner || can(actor, "cash", "edit")) {
+      push("questions", "답할 확인 필요", (await erp.list("setupQuestions")).filter((q) => q.status === "open"), null, { tab: "setup" });
+    }
+    if (owner || can(actor, "payments", "view") || can(actor, "requests", "view") || can(actor, "cash", "view")) {
+      push("notices", "안 보낸 메신저 알림", (await erp.list("notices")).filter((n) => !(n.shares || []).length), null, { tab: "messenger" });
+    }
+    if (owner || can(actor, "settlement", "view")) {
+      const prev = closing.prevMonth(kstToday().slice(0, 7));
+      const c = await closingState();
+      if (!closing.isLocked(c, prev)) items.push({ key: "closing", label: `지난달(${prev}) 마감 전`, count: null, amount: null, go: { tab: "closing" }, tone: "" });
+    }
+    sendJson(res, 200, { items, today: kstToday() });
+    return;
+  }
+
   // 메신저 공유함: 알림 목록·복사/보내기 기록·채널톡 설정(설정은 대표만).
   if (pathname === "/api/notices" || pathname.startsWith("/api/notices/") || pathname.startsWith("/api/messenger/")) {
     const canSee = actor.role === "owner" || can(actor, "payments", "view") || can(actor, "requests", "view") || can(actor, "cash", "view");
