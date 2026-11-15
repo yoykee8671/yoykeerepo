@@ -1365,8 +1365,16 @@ function renderRequests() {
     <a href="/api/export/payment-log.xls"><button type="button">입금로그 Excel</button></a>
     <a href="/api/export/csv"><button type="button">CSV</button></a>
     <a href="/api/export/xls"><button type="button">Excel</button></a>
+    <button type="button" data-deleted-requests>삭제된 요청</button>
     <button class="primary" type="button" data-open-request-popup>새 창 입금요청</button>
   `;
+  const dr = state.deletedRequests;
+  const deletedModal = dr?.open ? v2Modal(`<div class="panel-head"><h2>삭제된 입금요청</h2><button data-deleted-close>닫기</button></div>
+    <div class="panel-body">${dr.list ? `<p class="muted" style="font-size:12px">실수로 지운 요청을 되돌립니다. 마감된 달의 요청은 되돌릴 수 없습니다.</p>
+      <div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>삭제 시각</th><th>브랜드</th><th>주문번호</th><th>주문자</th><th>입금액</th><th></th></tr></thead><tbody>
+      ${dr.list.map((r) => `<tr><td>${h(fmtDate(r.updatedAt))}</td><td>${h(r.brandName)}</td><td>${h(r.orderNo)}</td><td>${h(r.customerName)}</td><td class="num">${money.format(r.depositAmount || 0)}</td>
+        <td>${can("requests", "delete") ? `<button class="small" data-restore-request="${h(r.id)}">되돌리기</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">삭제된 요청이 없습니다.</td></tr>`}
+      </tbody></table></div>` : `<p class="muted">불러오는 중…</p>`}</div>`, "data-deleted-close") : "";
   const rows = filteredRequests();
   const selectableRows = rows.filter((item) => item.status !== "deleted");
   const allSelected = selectableRows.length > 0 && selectableRows.every((item) => state.selectedRequestIds.includes(item.id));
@@ -1375,7 +1383,7 @@ function renderRequests() {
     .filter((item) => selectedIdSet.has(item.id))
     .reduce((sum, item) => sum + finalDepositAmount(item), 0);
   return `
-    ${pageHead("입금요청", "주문번호, 업체 실 입금액, 입금 예정일과 정산 메모를 관리합니다.", actions)}
+    ${pageHead("입금요청", "주문번호, 업체 실 입금액, 입금 예정일과 정산 메모를 관리합니다.", actions)}${deletedModal}
     <section class="layout single">
       <div class="panel">
         <div class="panel-head"><h2>요청 목록</h2><span class="muted">${money.format(rows.length)}건</span></div>
@@ -3062,6 +3070,22 @@ function bindRequests() {
     syncSelectedRequestIds();
     renderApp();
   });
+  app.querySelector("[data-deleted-requests]")?.addEventListener("click", async () => {
+    state.deletedRequests = { open: true, list: null };
+    renderApp();
+    try { state.deletedRequests.list = (await api("/api/requests/deleted")).requests; } catch (e) { showToast(e.message, "error"); state.deletedRequests.list = []; }
+    renderApp();
+  });
+  app.querySelectorAll("[data-deleted-close]").forEach((b) => b.addEventListener("click", () => { state.deletedRequests = null; renderApp(); }));
+  bindV2Modal();
+  app.querySelectorAll("[data-restore-request]").forEach((b) => b.addEventListener("click", async () => {
+    try {
+      await api(`/api/requests/${encodeURIComponent(b.dataset.restoreRequest)}/restore`, { method: "POST", body: {} });
+      state.deletedRequests.list = state.deletedRequests.list.filter((r) => r.id !== b.dataset.restoreRequest);
+      showToast("되돌렸습니다.");
+      await refreshAndRender();
+    } catch (e) { showToast(e.message, "error"); }
+  }));
   app.querySelector("[data-open-request-popup]")?.addEventListener("click", () => {
     window.open("/?request-popup=1", "wooofpay-request", "width=760,height=940,resizable=yes,scrollbars=yes");
   });

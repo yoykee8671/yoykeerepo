@@ -8014,6 +8014,29 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // 삭제된 입금요청 되돌리기(이카운트 '삭제 취소'). 삭제는 상태만 'deleted' 로 바꾸므로 지운 그대로 남아 있다.
+  if (pathname === "/api/requests/deleted" && method === "GET") {
+    if (!requirePermission(actor, res, "requests", "view")) return;
+    const list = db.requests.filter((r) => r.status === "deleted").sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))).slice(0, 300);
+    sendJson(res, 200, { requests: list });
+    return;
+  }
+  const restoreMatch = pathname.match(/^\/api\/requests\/([^/]+)\/restore$/);
+  if (restoreMatch && method === "POST") {
+    if (!requirePermission(actor, res, "requests", "delete")) return;
+    const request = db.requests.find((r) => r.id === decodeURIComponent(restoreMatch[1]) && r.status === "deleted");
+    if (!request) { sendJson(res, 404, { error: "삭제된 입금요청을 찾을 수 없습니다." }); return; }
+    if (!(await guardOpenMonth(res, monthly.requestMonth(request)))) return;
+    const before = { ...request };
+    request.status = request.statusBeforeDelete && request.statusBeforeDelete !== "deleted" ? request.statusBeforeDelete : (request.paidAt ? "paid" : "pending");
+    delete request.statusBeforeDelete;
+    request.updatedAt = now();
+    addAudit(db, actor, "update", "request", request.id, `${request.orderNo} 입금요청 되돌리기(삭제 취소)`, before, request);
+    await writeDb(db);
+    sendJson(res, 200, { request });
+    return;
+  }
+
   if (pathname === "/api/requests" && method === "POST") {
     const body = await readBody(req);
     const brand = db.brands.find((item) => item.id === body.brandId);
@@ -8146,7 +8169,8 @@ async function routeApi(req, res, url) {
     const updated = [];
     for (const request of db.requests.filter((item) => ids.includes(item.id) && item.status !== "deleted")) {
       const before = { ...request };
-      request.status = "deleted";
+      request.statusBeforeDelete = request.status;
+    request.status = "deleted";
       request.updatedAt = now();
       addAudit(db, actor, "delete", "request", request.id, `${request.orderNo} 입금요청 삭제`, before, request);
       if (request.brandId) touchedBrands.add(request.brandId);
@@ -8301,6 +8325,7 @@ async function routeApi(req, res, url) {
     }
     if (!(await guardOpenMonth(res, monthly.requestMonth(request)))) return;
     const before = { ...request };
+    request.statusBeforeDelete = request.status;
     request.status = "deleted";
     request.updatedAt = now();
     addAudit(db, actor, "delete", "request", request.id, `${request.orderNo} 입금요청 삭제`, before, request);
