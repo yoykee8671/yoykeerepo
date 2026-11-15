@@ -5456,7 +5456,7 @@ const MENU_REGISTRY = [
   { key: "admins", label: "관리자", actions: ["view", "create", "edit", "delete"] },
   { key: "audits", label: "이력", actions: ["view"] },
   { key: "archive", label: "아카이브", actions: ["view", "edit"] },
-  { key: "settlement", label: "정산", actions: ["view", "export", "edit"] },
+  { key: "settlement", label: "정산(월 정산 생성·현황)", actions: ["view", "export", "edit"] },
   { key: "kpi", label: "KPI·손익", actions: ["view", "edit"] },
   { key: "pipeline", label: "주문매칭", actions: ["view", "apply"] },
   // 화면은 주문매칭 하나로 합쳤지만, 클로브 연결·대사 API 는 자기 권한을 그대로

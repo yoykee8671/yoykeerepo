@@ -180,6 +180,10 @@ a {
   color: #fff;
 }
 
+/* 중분류 안의 하위 화면(예: 정산 > npb정산 > 업로드) */
+.nav-sub .nav-sub { margin: 2px 0 4px 12px; }
+.nav-sub .nav-sub button { min-height: 28px; font-size: 12px; }
+
 /* 대분류 아래 딸려 나오는 하위 메뉴 — 선택된 대분류일 때만 펼친다. */
 .nav-sub {
   display: flex;

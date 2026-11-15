@@ -864,8 +864,8 @@ function renderAppInner() {
     // 자동화(카페24 수집)와 클로브ai(입금대사)는 결국 한 흐름이라 한 화면에서
     // 본다. 권한 키는 pipeline 하나로 묶고, 화면 안에서 두 단계를 이어 보여준다.
     ["pipeline", "주문매칭"],
-    ["settlement", "정산"],
-    ["monthly", "월정산"],
+    ["settlement", "월 정산 생성"],
+    ["monthly", "월 정산 현황"],
     ["npb", "npb정산"],
     ["productsync", "상품동기화"],
     ["setup", "확인 필요"]
@@ -879,10 +879,7 @@ function renderAppInner() {
           <span>선매입 브랜드 입금 관리</span>
         </div>
         <nav class="nav">
-          ${tabs.map(([key, label]) => `
-            <button data-tab="${key}" class="${state.tab === key ? "active" : ""}">${label}${key === "productsync" ? renderPsNavDot() : ""}</button>
-            ${state.tab === key ? renderTabSubmenu(key) : ""}
-          `).join("")}
+          ${renderNavItems(tabs)}
         </nav>
         <div class="sidebar-footer">
           <span>${h(state.admin.name)} · ${h(state.admin.role)}</span>
@@ -896,6 +893,14 @@ function renderAppInner() {
     button.addEventListener("click", () => {
       state.tab = button.dataset.tab;
       if (state.tab === "trade") tradeState();
+      clearEditing();
+      renderApp();
+    });
+  });
+  app.querySelectorAll("[data-nav-group]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.classList.contains("active")) return;
+      state.tab = button.dataset.firstTab;
       clearEditing();
       renderApp();
     });
@@ -935,6 +940,28 @@ const TAB_SUBMENUS = {
   npb: { screens: NPB_SCREENS, stateKey: "npb" },
   productsync: { screens: PRODUCT_SYNC_SCREENS, stateKey: "productSync" }
 };
+
+// 대분류 아래 중분류로 묶는 메뉴(대표 결정 2026-11-16). 중분류는 원래 탭 그대로(state.tab)라
+// 화면·권한·하위 화면은 바뀌지 않는다. 대분류를 누르면 볼 수 있는 첫 중분류로 간다.
+const NAV_GROUPS = [{ key: "settle", label: "정산", children: ["settlement", "monthly", "npb"] }];
+function renderNavItems(tabs) {
+  const visible = new Map(tabs);
+  const done = new Set();
+  const item = (key, label) => `
+    <button data-tab="${key}" class="${state.tab === key ? "active" : ""}">${label}${key === "productsync" ? renderPsNavDot() : ""}</button>
+    ${state.tab === key ? renderTabSubmenu(key) : ""}`;
+  return tabs.map(([key, label]) => {
+    const group = NAV_GROUPS.find((g) => g.children.includes(key));
+    if (!group) return item(key, label);
+    if (done.has(group.key)) return "";
+    done.add(group.key);
+    const kids = group.children.filter((k) => visible.has(k));
+    const open = kids.includes(state.tab);
+    return `
+      <button data-nav-group="${group.key}" data-first-tab="${kids[0]}" class="${open ? "active" : ""}">${group.label}</button>
+      ${open ? `<div class="nav-sub">${kids.map((k) => item(k, visible.get(k))).join("")}</div>` : ""}`;
+  }).join("");
+}
 
 function renderTabSubmenu(tabKey) {
   const config = TAB_SUBMENUS[tabKey];
@@ -6369,7 +6396,7 @@ function renderSettlement() {
     .map((b) => `<option value="${b.id}" ${s.brandId === b.id ? "selected" : ""}>${h(b.name)} · ${h(settlementLabel(b.settlementType))}${h(scanSuffix(b.id))}</option>`)
     .join("");
   return `
-    ${pageHead("정산", "카페24 주문내역 · 은행 거래내역 · 입금요청(자동)을 대조하여 월별 정산서를 생성합니다.")}
+    ${pageHead("월 정산 생성", "카페24 주문내역 · 은행 거래내역 · 입금요청(자동)을 대조하여 월별 정산서를 생성합니다.")}
     <section class="panel">
       <div class="panel-head"><h2>정산 조건</h2></div>
       <div class="panel-body">
@@ -12951,7 +12978,7 @@ const MONTHLY_FIELD_LABEL = { sales: "매출", shipping: "배송비", recovered:
 
 function renderMonthly() {
   const ms = monthlyState();
-  const head = pageHead("월정산", "입점 브랜드마다 이번 달 매출·배송비·채권 회수·마진을 보고, 확인 → 계산서 발행요청 → 정산서 발송을 체크합니다. 숫자는 입금요청에서 계산하고, 입금요청이 없는 위탁 브랜드는 직접 적습니다.");
+  const head = pageHead("월 정산 현황", "입점 브랜드마다 이번 달 매출·배송비·채권 회수·마진을 보고, 확인 → 계산서 발행요청 → 정산서 발송을 체크합니다. 숫자는 입금요청에서 계산하고, 입금요청이 없는 위탁 브랜드는 직접 적습니다.");
   const d = ms.data;
   if (!d) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   const t = d.totals || {};
