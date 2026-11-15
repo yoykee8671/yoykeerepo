@@ -54,4 +54,9 @@ setAtPath(state, conflicts[0].path, conflicts[0].prod);
 assert.equal(state.brands.find((b) => b.id === "b2").bankAccount, "999");
 setAtPath(m2.state, m2.conflicts[0].path, undefined);
 assert.equal(m2.state.partners.length, 0);
+// 입금 처리는 운영 값을 따른다(양쪽 모두 입금완료, 시각이 다름)
+const m3 = mergeState({ requests: [{ id: "q", status: "pending" }] }, { requests: [{ id: "q", status: "paid", paidAt: "2026-11-16T01:22" }] }, { requests: [{ id: "q", status: "paid", paidAt: "2026-11-15T18:35", receivableDeduction: 5 }] });
+assert.equal(m3.conflicts.length, 0);
+assert.equal(m3.state.requests[0].paidAt, "2026-11-16T01:22");
+assert.equal(m3.state.requests[0].receivableDeduction, 5);
 console.log("v2 sync merge: ok");
