@@ -2464,3 +2464,5 @@ button.star { border: none; background: none; font-size: 16px; padding: 0 4px; c
 button.star.on { color: #f5a623; }
 tr.acc-row { cursor: pointer; }
 tr.acc-row:hover td { background: #f8fafc; }
+tr.hub-go { cursor: pointer; }
+tr.hub-go:hover td { background: #f8fafc; }

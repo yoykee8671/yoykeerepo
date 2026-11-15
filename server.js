@@ -10399,6 +10399,56 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // --- v2 거래처(사업자) 허브: 한 사업자와 이어진 모든 것 ----------------------------
+  // 사업자와 브랜드는 다른 칸이다(사업구조 지침). 브랜드는 사업자번호가 같거나 사람이 이어 둔 것(brand.entityPartnerId).
+  const hubMatch = pathname.match(/^\/api\/partners\/([^/]+)\/hub$/);
+  if (hubMatch && method === "GET") {
+    if (!can(actor, "procurement", "view") && !can(actor, "sales", "view") && !can(actor, "stock", "view")) { sendJson(res, 403, { error: "거래처를 볼 권한이 없습니다." }); return; }
+    const partner = db.partners.find((x) => x.id === decodeURIComponent(hubMatch[1]));
+    if (!partner) { sendJson(res, 404, { error: "거래처를 찾을 수 없습니다." }); return; }
+    const dig = (v) => String(v || "").replace(/\D/g, "");
+    const biz = dig(partner.businessNumber);
+    const nameKey = (v) => String(v || "").replace(/주식회사|㈜|\(주\)|\s/g, "").toLowerCase();
+    const brands = db.brands.filter((b) => b.entityPartnerId === partner.id || (biz && dig(b.businessNumber) === biz))
+      .map((b) => ({ id: b.id, code: b.code || "", name: b.name, settlementType: b.settlementType, linked: b.entityPartnerId === partner.id ? "manual" : "bizno",
+        receivableRemaining: brandSummary(db, b.id).receivableRemaining, hasReceivable: !!b.hasReceivable }));
+    const docs = (db.purchaseOrders || []).filter((po) => po.partnerId === partner.id)
+      .map((po) => ({ id: po.id, docNo: po.docNo, docType: po.docType, date: po.orderDate || String(po.createdAt || "").slice(0, 10), total: po.total, title: (po.lineItems || [])[0]?.itemName || "" }))
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    const [salesOrders, pays, bills, prodPays, prodAdjs, plan] = await Promise.all([erp.list("salesOrders").catch(() => []), erp.list("payments").catch(() => []),
+      erp.list("prodBills"), erp.list("prodPayments"), erp.list("prodAdjustments"), erp.get("rehabPlan", "current")]);
+    const so = salesOrders.filter((o) => o.partnerId === partner.id).map((o) => ({ id: o.id, code: o.code, date: o.orderDate, title: o.title, total: o.total, stage: sales.deriveStage(o), remaining: sales.remaining(o) }))
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    const pk = nameKey(partner.name);
+    const pr = pays.filter((x) => x.sourcePartnerId === partner.id || (pk && nameKey(x.payeeName) === pk))
+      .map((x) => ({ id: x.id, code: x.code, title: x.title, amount: x.amount, status: x.status, dueDate: x.dueDate || "" }));
+    const mine = (l) => l.filter((x) => x.partnerId === partner.id);
+    const prodBills = mine(bills);
+    const prodSummary = prodBills.length ? production.partnerSummary({ bills: prodBills, payments: mine(prodPays), adjustments: mine(prodAdjs) }, kstToday()) : null;
+    const channels = (db.salesChannels || []).filter((c) => c.partnerId === partner.id).map((c) => ({ id: c.id, code: c.code || "", name: c.name }));
+    const materials = (db.materials || []).filter((m) => m.partnerId === partner.id).map((m) => ({ id: m.id, code: m.code || "", name: m.itemName }));
+    const creditor = plan ? legacy.matchCreditor({ name: partner.name, businessName: partner.businessName, depositorName: partner.depositorName }, plan.creditors || []) : null;
+    sendJson(res, 200, { partner, brands, docs, salesOrders: so, payments: pr, production: prodSummary, channels, materials,
+      rehab: creditor ? { creditor: creditor.creditor, cat: creditor.cat, total: creditor.total, cash: creditor.cash } : null,
+      linkableBrands: db.brands.filter((b) => (b.type || "brand") === "brand" && !brands.some((x) => x.id === b.id)).map((b) => ({ id: b.id, name: b.name, code: b.code || "" })) });
+    return;
+  }
+  const hubLink = pathname.match(/^\/api\/partners\/([^/]+)\/brands$/);
+  if (hubLink && method === "POST") {
+    if (!can(actor, "procurement", "edit") && actor.role !== "owner") { sendJson(res, 403, { error: "연결할 권한이 없습니다." }); return; }
+    const body = await readBody(req);
+    const partner = db.partners.find((x) => x.id === decodeURIComponent(hubLink[1]));
+    const brand = db.brands.find((b) => b.id === body.brandId);
+    if (!partner || !brand) { sendJson(res, 404, { error: "거래처나 브랜드가 없습니다." }); return; }
+    const before = { entityPartnerId: brand.entityPartnerId || "" };
+    brand.entityPartnerId = body.unlink ? "" : partner.id;
+    brand.updatedAt = now();
+    addAudit(db, actor, "update", "brand", brand.id, `${brand.name} ${body.unlink ? "사업자 연결 해제" : `사업자 '${partner.name}'에 연결`}`, before, { entityPartnerId: brand.entityPartnerId });
+    await writeDb(db);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
   const partnerMatch = pathname.match(/^\/api\/partners\/([^/]+)$/);
   if (partnerMatch && method === "PUT") {
     const body = await readBody(req);

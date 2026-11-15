@@ -145,6 +145,26 @@ const TRADE_DOC_TYPES = [
 const TRADE_DOC_LABELS = Object.fromEntries(TRADE_DOC_TYPES.map(([key, label]) => [key, label]));
 const TRADE_DOC_META = Object.fromEntries(TRADE_DOC_TYPES.map(([key, , meta]) => [key, meta]));
 const tradeDocMeta = (docType) => TRADE_DOC_META[docType] || TRADE_DOC_META.purchase_order;
+// '거래' 메뉴: 판매·생산/재고·거래관리를 한 메뉴로(대표 결정 2026-11-15). 화면 자체는 기존 것을 그대로 쓴다.
+const TRADE_SCREENS = [
+  ["partners", "거래처(사업자)"],
+  ["sales", "판매 주문·가격"],
+  ["stock", "생산·재고·생산비"],
+  ["orders", "명세서·발주서"],
+  ["materials", "원부자재"],
+  ["deliveryPlaces", "납품지"],
+  ["accounts", "입금계좌"]
+];
+function tradeCan(key) {
+  if (key === "sales") return can("sales", "view");
+  if (key === "stock") return can("stock", "view");
+  return can("procurement", "view");
+}
+function tradeState() {
+  if (!state.trade) state.trade = { screen: (TRADE_SCREENS.find(([k]) => tradeCan(k)) || ["partners"])[0] };
+  return state.trade;
+}
+
 const PROCUREMENT_SCREENS = [
   ["partners", "거래처관리"],
   ["materials", "원부자재관리"],
@@ -777,11 +797,9 @@ function renderApp() {
     ["cash", "자금"],
     ["requests", "입금요청"],
     ["payments", "지급요청"],
-    ["sales", "판매"],
-    ["stock", "생산·재고"],
+    ["trade", "거래"],
     ["prices", "단가표"],
     ["brands", "브랜드"],
-    ["procurement", "거래관리"],
     ["admins", "관리자"],
     ["audits", "이력"],
     ["archive", "아카이브"],
@@ -793,7 +811,7 @@ function renderApp() {
     ["npb", "npb정산"],
     ["productsync", "상품동기화"],
     ["setup", "확인 필요"]
-  ].filter(([key]) => (key === "monthly" ? can("settlement", "view") : can(key, "view")) || (key === "pipeline" && can("reconcile", "view"))
+  ].filter(([key]) => (key === "monthly" ? can("settlement", "view") : key === "trade" ? TRADE_SCREENS.some(([k]) => tradeCan(k)) : can(key, "view")) || (key === "pipeline" && can("reconcile", "view"))
     || (key === "setup" && (state.admin?.role === "owner" || can("cash", "edit"))));
   app.innerHTML = `
     <div class="shell">
@@ -819,6 +837,7 @@ function renderApp() {
   app.querySelectorAll("[data-tab]").forEach((button) => {
     button.addEventListener("click", () => {
       state.tab = button.dataset.tab;
+      if (state.tab === "trade") tradeState();
       clearEditing();
       renderApp();
     });
@@ -829,7 +848,7 @@ function renderApp() {
       if (!config) return;
       state[config.stateKey].screen = button.dataset.subtabKey;
       // 화면을 옮기면 이전 화면의 일회성 안내(엑셀 업로드 결과 등)는 지운다.
-      if (config.stateKey === "procurement") {
+      if (config.stateKey === "procurement" || config.stateKey === "trade") {
         state.procurement.importStatus = null;
         state.procurement.templateDownloadFor = null;
       }
@@ -853,6 +872,7 @@ function codeTag(item) {
 // 대분류에 하위 메뉴가 있으면 사이드바에서 그 아래로 펼친다. 대분류마다
 // 하위 메뉴 목록과, 선택 상태를 들고 있는 state 키를 여기 한 곳에 적는다.
 const TAB_SUBMENUS = {
+  trade: { screens: TRADE_SCREENS, stateKey: "trade", visible: (key) => tradeCan(key) },
   procurement: { screens: PROCUREMENT_SCREENS, stateKey: "procurement" },
   npb: { screens: NPB_SCREENS, stateKey: "npb" },
   productsync: { screens: PRODUCT_SYNC_SCREENS, stateKey: "productSync" }
@@ -861,10 +881,12 @@ const TAB_SUBMENUS = {
 function renderTabSubmenu(tabKey) {
   const config = TAB_SUBMENUS[tabKey];
   if (!config) return "";
+  if (tabKey === "trade") tradeState();
   const current = state[config.stateKey]?.screen;
   return `
     <div class="nav-sub">
       ${config.screens
+        .filter(([key]) => !config.visible || config.visible(key))
         .map(([key, label]) =>
           `<button data-subtab="${tabKey}" data-subtab-key="${key}" class="${current === key ? "active" : ""}">${label}</button>`)
         .join("")}
@@ -979,6 +1001,22 @@ function clearEditing() {
   state.procurement.editingPurchaseOrder = null;
 }
 
+// '거래' 메뉴: 고른 하위 화면에 맞는 기존 화면을 그린다.
+function renderTrade() {
+  const t = tradeState();
+  if (!tradeCan(t.screen)) t.screen = (TRADE_SCREENS.find(([k]) => tradeCan(k)) || ["partners"])[0];
+  if (t.screen === "sales") return renderSales();
+  if (t.screen === "stock") return renderStock();
+  state.procurement.screen = t.screen;
+  return renderProcurement();
+}
+function bindTrade() {
+  const t = tradeState();
+  if (t.screen === "sales") bindSales();
+  else if (t.screen === "stock") bindStock();
+  else bindProcurement();
+}
+
 function renderCurrentTab() {
   if (state.tab === "requests") return renderRequests();
   if (state.tab === "prices") return renderPrices();
@@ -990,6 +1028,7 @@ function renderCurrentTab() {
   if (state.tab === "stock") return renderStock();
   if (state.tab === "setup") return renderSetup();
   if (state.tab === "monthly") return renderMonthly();
+  if (state.tab === "trade") return renderTrade();
   if (state.tab === "kpi") return renderKpi();
   if (state.tab === "admins") return renderAdmins();
   if (state.tab === "audits") return renderAudits();
@@ -1243,7 +1282,7 @@ function filteredRequests() {
 
 function renderRequestRow(item) {
   return `
-    <tr>
+    <tr class="hub-go" data-row-edit="[data-open-edit-request-popup]">
       <td><input type="checkbox" data-select-request="${item.id}" ${state.selectedRequestIds.includes(item.id) ? "checked" : ""}></td>
       <td><div class="row-actions">${item.status !== "paid" ? `<button data-pay-request="${item.id}">입금완료</button>` : ""}<button data-open-edit-request-popup="${item.id}">수정</button><button class="danger icon-btn" data-delete-request="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
       <td>${renderRowStatusSelect(item)}</td>
@@ -1904,7 +1943,7 @@ function renderBulkUnmatchedItems(items) {
 function renderBrandRow(brand) {
   const share = `${location.origin}/share/${brand.shareToken}`;
   return `
-    <tr>
+    <tr class="hub-go" data-row-edit="[data-edit-brand]">
       <td>${codeTag(brand)}${brand.starred ? "★ " : ""}${h(brand.name)}${(state.brandActivity?.dormant || []).includes(brand.id) && brand.type !== "reference" ? ` <span class="badge muted" title="마지막 입금요청 ${h(state.brandActivity?.lastRequest?.[brand.id] || "없음")}">장기 미거래</span>` : ""}</td>
       <td><span class="badge">${brand.type === "reference" ? "참고시트" : settlementLabel(brand.settlementType)}</span></td>
       <td class="num">${money.format(brand.requestCount || 0)}건</td>
@@ -1992,9 +2031,16 @@ function renderBrandProfile(b) {
     ${row("공급사 아이디", p.supplierId)}${row("웹사이트", p.website)}${row("SNS", p.sns)}</table></details>`;
 }
 
+function brandEntity(b) {
+  if (!b?.id) return null;
+  const dig = (v) => String(v || "").replace(/\D/g, "");
+  return (state.partners || []).find((p) => p.id === b.entityPartnerId) || (dig(b.businessNumber) ? (state.partners || []).find((p) => dig(p.businessNumber) === dig(b.businessNumber)) : null) || null;
+}
 function renderBrandForm() {
   const b = state.editingBrand || {};
+  const ent = brandEntity(b);
   return `
+    ${b.id ? `<p class="muted" style="margin:0 0 8px">사업자(거래처): ${ent ? `<button class="ghost small" data-brand-entity="${h(ent.id)}">${h(ent.name)} 열기</button>` : "아직 이어진 거래처 없음 — 거래 > 거래처에서 이 브랜드를 이을 수 있습니다"}</p>` : ""}
     ${renderBrandProfile(b)}
     <form class="form-grid" data-brand-form>
       <div class="field"><label>브랜드명</label><input name="name" value="${h(b.name)}" required></div>
@@ -2483,6 +2529,15 @@ async function ensureTabData() {
 
 function bindCurrentTab() {
   ensureTabData();
+  // 줄을 누르면 그 줄의 수정·상세 버튼을 누른 것처럼(버튼·입력칸을 누른 건 그대로).
+  setTimeout(() => app.querySelectorAll("tr[data-row-edit]").forEach((tr) => {
+    if (tr.dataset.rowBound) return;
+    tr.dataset.rowBound = "1";
+    tr.addEventListener("click", (e) => {
+      if (e.target.closest("button, a, input, select, textarea, label")) return;
+      tr.querySelector(tr.dataset.rowEdit)?.click();
+    });
+  }), 0);
   setTimeout(() => alignV2Tables(), 0);
   if (state.tab === "requests") bindRequests();
   if (state.tab === "prices") bindPrices();
@@ -2494,6 +2549,7 @@ function bindCurrentTab() {
   if (state.tab === "stock") bindStock();
   if (state.tab === "setup") bindSetup();
   if (state.tab === "monthly") bindMonthly();
+  if (state.tab === "trade") bindTrade();
   if (state.tab === "kpi") bindKpi();
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
@@ -4194,6 +4250,7 @@ function bindBrands() {
       .finally(() => { state.brandActivityLoading = false; renderApp(); });
   }
   app.querySelectorAll("[data-brand-dormant]").forEach((b) => b.addEventListener("click", () => { state.brandDormantFilter = b.dataset.brandDormant; renderApp(); }));
+  app.querySelector("[data-brand-entity]")?.addEventListener("click", (e) => { const id = e.currentTarget.dataset.brandEntity; goTrade("partners"); openPartnerHub(id); });
   app.querySelector("[data-brand-info-upload]")?.addEventListener("click", () => app.querySelector("[data-brand-info-file]")?.click());
   app.querySelector("[data-brand-info-file]")?.addEventListener("change", async (e) => {
     const file = e.target.files?.[0];
@@ -4618,9 +4675,10 @@ function renderProcurement() {
   else if (p.screen === "orders") body = renderPurchaseOrders();
   else body = renderPartners();
   return `
-    ${pageHead("거래관리", "생산업체·판매납품처·매입공급처 거래처와 발주서를 관리합니다.")}
+    ${pageHead(state.tab === "trade" ? "거래" : "거래관리", "생산업체·판매납품처·매입공급처 거래처와 발주서를 관리합니다.")}
     ${p.screen === "partners" ? renderPartnerCategoryTabs() : ""}
     ${body}
+    ${state.partnerHub ? v2Modal(renderPartnerHub(), "data-hub-close") : ""}
   `;
 }
 
@@ -4643,6 +4701,7 @@ function renderPartnerCategoryTabs() {
 }
 
 function bindProcurement() {
+  bindPartnerHub();
   app.querySelectorAll("[data-partner-category-tab]").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.procurement.partnerFilterCategory = btn.dataset.partnerCategoryTab;
@@ -4682,9 +4741,106 @@ function renderPartners() {
   `;
 }
 
+// ===========================================================================
+// v2 거래처(사업자) 허브 — 한 사업자와 이어진 브랜드·명세서·판매·생산비·지급·판매처·원부자재·회생채권
+// ===========================================================================
+const HUB_TABS = [["overview", "개요"], ["brands", "브랜드"], ["docs", "명세서·발주서"], ["sales", "판매 주문"], ["production", "생산비"], ["payments", "지급요청"], ["links", "판매처·원부자재"]];
+function renderPartnerHub() {
+  const hub = state.partnerHub;
+  const d = hub?.data;
+  if (!d) return `<div class="panel-head"><h2>거래처</h2><button data-hub-close>닫기</button></div><div class="panel-body"><p class="muted">불러오는 중…</p></div>`;
+  const p = d.partner;
+  const count = { brands: d.brands.length, docs: d.docs.length, sales: d.salesOrders.length, production: d.production ? 1 : 0, payments: d.payments.length, links: d.channels.length + d.materials.length };
+  const tab = hub.tab || "overview";
+  const row = (cells, attrs = "") => `<tr ${attrs}>${cells.map((c) => `<td${c.num ? ' class="num"' : c.wrap ? ' class="wrap"' : ""}>${c.v}</td>`).join("")}</tr>`;
+  let body = "";
+  if (tab === "overview") {
+    const kv = [["분류", PARTNER_CATEGORY_LABELS[p.category] || p.category], ["상호", p.businessName], ["사업자번호", p.businessNumber], ["대표자", p.representativeName], ["주소", p.address],
+      ["담당자", [p.contactName, p.contactPhone, p.contactEmail].filter(Boolean).join(" · ")], ["세금계산서 이메일", p.invoiceEmail], ["계좌", [p.bankName, p.bankAccount, p.depositorName].filter(Boolean).join(" ")],
+      ["발주 방식", p.orderMethod], ["금액 기준", p.priceMode === "gross" ? "부가세 포함" : p.priceMode ? "부가세 별도" : ""], ["메모", p.note]].filter(([, v]) => v);
+    body = `<table class="kv compact"><tbody>${kv.map(([k, v]) => `<tr><th style="text-align:left;width:130px">${k}</th><td class="wrap">${h(v)}</td></tr>`).join("")}</tbody></table>
+      ${d.rehab ? `<p class="muted" style="margin-top:10px">회생채권자: ${h(d.rehab.creditor)} · ${h(d.rehab.cat)} · 채권 ${money.format(d.rehab.total)}원 · 현금변제 ${money.format(d.rehab.cash)}원</p>` : ""}
+      ${can("procurement", "edit") ? `<div class="toolbar" style="margin-top:10px"><button class="primary" data-hub-edit>정보 고치기</button></div>` : ""}`;
+  } else if (tab === "brands") {
+    body = `<p class="muted" style="font-size:12px">사업자와 브랜드는 다릅니다. 같은 사업자번호의 브랜드는 저절로 이어지고, 다른 것은 아래에서 직접 잇습니다.</p>
+      <table class="compact" data-unit="원"><thead><tr><th>브랜드</th><th>정산유형</th><th>채권잔액</th><th>연결</th><th></th></tr></thead><tbody>
+      ${d.brands.map((b) => row([{ v: `${b.code ? `<span class="code-tag">${h(b.code)}</span> ` : ""}${h(b.name)}` }, { v: h(settlementLabel(b.settlementType)) }, { v: b.hasReceivable ? money.format(b.receivableRemaining) : "", num: true },
+        { v: b.linked === "manual" ? "직접 연결" : "사업자번호" }, { v: `${b.linked === "manual" ? `<button class="small" data-hub-unlink="${h(b.id)}">해제</button>` : ""}` }], `class="hub-go" data-hub-brand="${h(b.id)}"`)).join("") || `<tr><td colspan="5" class="empty">연결된 브랜드가 없습니다.</td></tr>`}
+      </tbody></table>
+      ${can("procurement", "edit") ? `<div class="toolbar" style="margin-top:8px"><select data-hub-link-brand><option value="">브랜드 연결하기…</option>${d.linkableBrands.map((b) => `<option value="${h(b.id)}">${h(b.code ? `${b.code} · ` : "")}${h(b.name)}</option>`).join("")}</select></div>` : ""}`;
+  } else if (tab === "docs") {
+    body = `<table class="compact" data-unit="원"><thead><tr><th>번호</th><th>종류</th><th>날짜</th><th>품목</th><th>합계</th></tr></thead><tbody>
+      ${d.docs.map((x) => row([{ v: h(x.docNo) }, { v: h({ statement: "거래명세서", purchase: "발주서" }[x.docType] || x.docType || "") }, { v: h(x.date) }, { v: h(x.title), wrap: true }, { v: money.format(x.total || 0), num: true }], `class="hub-go" data-hub-doc="${h(x.id)}"`)).join("") || `<tr><td colspan="5" class="empty">명세서·발주서가 없습니다.</td></tr>`}</tbody></table>`;
+  } else if (tab === "sales") {
+    body = `<table class="compact" data-unit="원"><thead><tr><th>번호</th><th>주문일</th><th>내용</th><th>금액</th><th>남은 돈</th></tr></thead><tbody>
+      ${d.salesOrders.map((x) => row([{ v: h(x.code) }, { v: h(x.date) }, { v: h(x.title), wrap: true }, { v: money.format(x.total || 0), num: true }, { v: x.remaining ? money.format(x.remaining) : "", num: true }], `class="hub-go" data-hub-sale="${h(x.id)}"`)).join("") || `<tr><td colspan="5" class="empty">판매 주문이 없습니다.</td></tr>`}</tbody></table>`;
+  } else if (tab === "production") {
+    const s = d.production;
+    body = s ? `<p>미지급 <strong>${money.format(s.balance)}원</strong> · 청구 ${money.format(s.billed)}원 · 지급 ${money.format(s.paid)}원 · 가장 오래된 미지급 ${h(s.oldestDate || "-")}</p>
+      <button class="primary" data-hub-prod>생산비 원장 열기</button>` : `<p class="muted">생산비 기록이 없습니다.</p>`;
+  } else if (tab === "payments") {
+    body = `<table class="compact" data-unit="원"><thead><tr><th>번호</th><th>내용</th><th>금액</th><th>상태</th><th>기한</th></tr></thead><tbody>
+      ${d.payments.map((x) => row([{ v: h(x.code || "") }, { v: h(x.title), wrap: true }, { v: money.format(x.amount || 0), num: true }, { v: h(x.status) }, { v: h(x.dueDate) }])).join("") || `<tr><td colspan="5" class="empty">지급요청이 없습니다.</td></tr>`}</tbody></table>`;
+  } else {
+    body = `<h3>판매처(가격)</h3>${d.channels.map((c) => `<button class="ghost small" data-hub-channel="${h(c.id)}">${h(c.code)} ${h(c.name)}</button>`).join(" ") || `<p class="muted">이 거래처로 이어진 판매처가 없습니다.</p>`}
+      <h3>원부자재</h3>${d.materials.map((m) => `<button class="ghost small" data-hub-material="${h(m.id)}">${h(m.code)} ${h(m.name)}</button>`).join(" ") || `<p class="muted">이 거래처의 원부자재가 없습니다.</p>`}`;
+  }
+  return `<div class="panel-head"><h2>${codeTag(p)}${h(p.name)}</h2><button data-hub-close>닫기</button></div>
+    <div class="panel-body">
+      <div class="npb-subnav">${HUB_TABS.map(([k, l]) => `<button class="npb-subtab ${tab === k ? "active" : ""}" data-hub-tab="${k}">${l}${count[k] ? ` ${count[k]}` : ""}</button>`).join("")}</div>
+      ${body}
+    </div>`;
+}
+async function openPartnerHub(id, tab = "overview") {
+  state.partnerHub = { id, tab, data: null };
+  renderApp();
+  try { const data = await api(`/api/partners/${encodeURIComponent(id)}/hub`); if (state.partnerHub?.id === id) { state.partnerHub.data = data; renderApp(); } }
+  catch (e) { showToast(e.message, "error"); state.partnerHub = null; renderApp(); }
+}
+// 허브에서 다른 화면으로 넘어가기
+function goTrade(screen) { state.tab = "trade"; tradeState().screen = screen; state.partnerHub = null; }
+function bindPartnerHub() {
+  bindV2Modal();
+  app.querySelectorAll("[data-partner-hub]").forEach((tr) => tr.addEventListener("click", (e) => {
+    if (e.target.closest("button, a, input, select")) return;
+    openPartnerHub(tr.dataset.partnerHub);
+  }));
+  const hub = state.partnerHub;
+  if (!hub) return;
+  app.querySelector("[data-hub-close]")?.addEventListener("click", () => { state.partnerHub = null; renderApp(); });
+  app.querySelectorAll("[data-hub-tab]").forEach((b) => b.addEventListener("click", () => { hub.tab = b.dataset.hubTab; renderApp(); }));
+  app.querySelector("[data-hub-edit]")?.addEventListener("click", () => {
+    state.procurement.editingPartner = (state.partners || []).find((x) => x.id === hub.id) || null;
+    state.partnerHub = null; renderApp();
+  });
+  app.querySelectorAll("[data-hub-brand]").forEach((tr) => tr.addEventListener("click", (e) => {
+    if (e.target.closest("button")) return;
+    state.tab = "brands"; state.editingBrand = state.brands.find((b) => b.id === tr.dataset.hubBrand) || null; state.partnerHub = null; renderApp();
+  }));
+  app.querySelectorAll("[data-hub-unlink]").forEach((b) => b.addEventListener("click", async () => {
+    await api(`/api/partners/${encodeURIComponent(hub.id)}/brands`, { method: "POST", body: { brandId: b.dataset.hubUnlink, unlink: true } }).catch((e) => showToast(e.message, "error"));
+    openPartnerHub(hub.id, "brands");
+  }));
+  app.querySelector("[data-hub-link-brand]")?.addEventListener("change", async (e) => {
+    if (!e.target.value) return;
+    await api(`/api/partners/${encodeURIComponent(hub.id)}/brands`, { method: "POST", body: { brandId: e.target.value } }).catch((err) => showToast(err.message, "error"));
+    openPartnerHub(hub.id, "brands");
+  });
+  app.querySelectorAll("[data-hub-doc]").forEach((tr) => tr.addEventListener("click", () => {
+    const po = (state.purchaseOrders || []).find((x) => x.id === tr.dataset.hubDoc);
+    goTrade("orders"); if (po) state.procurement.editingPurchaseOrder = JSON.parse(JSON.stringify(po)); renderApp();
+  }));
+  app.querySelectorAll("[data-hub-sale]").forEach((tr) => tr.addEventListener("click", () => { goTrade("sales"); const ss = salesState(); ss.view = "orders"; ss.selectedId = tr.dataset.hubSale; renderApp(); }));
+  app.querySelector("[data-hub-prod]")?.addEventListener("click", () => { const id = hub.id; goTrade("stock"); const st = stockState(); st.screen = "cost"; st.prodSel = id; st.prod = null; renderApp(); });
+  app.querySelectorAll("[data-hub-channel]").forEach((b) => b.addEventListener("click", () => { goTrade("sales"); const ss = salesState(); ss.view = "pricing"; ss.pricingSel = b.dataset.hubChannel; ss.pricing = null; renderApp(); }));
+  app.querySelectorAll("[data-hub-material]").forEach((b) => b.addEventListener("click", () => {
+    goTrade("materials"); state.procurement.editingMaterial = (state.materials || []).find((m) => m.id === b.dataset.hubMaterial) || null; renderApp();
+  }));
+}
+
 function renderPartnerRow(item) {
   return `
-    <tr>
+    <tr class="hub-go" data-partner-hub="${item.id}" title="누르면 이 거래처와 이어진 브랜드·명세서·판매·생산비가 보입니다">
       <td>${codeTag(item)}${h(item.name)}<br><span class="muted">${PARTNER_CATEGORY_LABELS[item.category] || item.category}</span></td>
       <td>${h(item.businessName)}</td>
       <td>${h(item.contactName)}${item.contactPhone ? ` · ${h(item.contactPhone)}` : ""}</td>
@@ -4856,7 +5012,7 @@ function renderMaterials() {
 function renderMaterialRow(item) {
   const partner = (state.partners || []).find((p) => p.id === item.partnerId);
   return `
-    <tr>
+    <tr class="hub-go" data-row-edit="[data-edit-material]">
       <td>${codeTag(item)}${h(item.itemName)}${item.itemCode ? `<br><span class="muted" style="font-size:11px">${h(item.itemCode)}</span>` : ""}</td>
       <td>${h(item.category)}</td>
       <td>${h(partner?.name || "")}</td>
@@ -5092,7 +5248,7 @@ function renderDeliveryPlaces() {
 
 function renderDeliveryPlaceRow(item) {
   return `
-    <tr>
+    <tr class="hub-go" data-row-edit="[data-edit-delivery-place]">
       <td>${codeTag(item)}${h(item.name)}</td>
       <td>${h(item.address)}</td>
       <td>${h(item.contactName)}${item.contactPhone ? ` · ${h(item.contactPhone)}` : ""}</td>
