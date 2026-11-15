@@ -1884,10 +1884,11 @@ async function readDb() {
 // 명세서·발주서는 이미 문서번호(docNo)가 있어 그것을 코드로 쓴다.
 // ---------------------------------------------------------------------------
 // --- v2 자금 도우미 ---
-// 자금보고를 내는 회사. 클로브에 두 회사가 따로 있다(우프컴퍼니, 베럴즈).
+// 자금보고를 내는 사업자. 클로브에 둘이 따로 있다.
+// 'betters' = 개인사업자 Betters(교영). 브랜드 Betters(PB) 매출은 우프컴퍼니 것이다 — 섞지 말 것(사업구조 지침 2026-11-15).
 const CASH_COMPANIES = [
   { key: "wooof", name: "우프컴퍼니", match: "우프" },
-  { key: "betters", name: "베럴즈", match: "베럴즈" }
+  { key: "betters", name: "Betters(개인사업자)", match: "베럴즈" }
 ];
 let clobeContextCache = { at: 0, companies: [] };
 
@@ -11512,7 +11513,7 @@ async function routeApi(req, res, url) {
         } catch (error) { balanceError = error.message || "클로브 잔액을 불러오지 못했습니다."; }
       }
       sendJson(res, 200, { month, company: companyKey, today, ...grid, balances: cashFlow.balances(grid.days, grid.totals, opening, today),
-        opening, balanceError, actualSyncedAt: actualDoc?.syncedAt || "", hasRows: rows.length > 0, canEdit, isOwner: actor.role === "owner" });
+        opening, balanceError, actualSyncedAt: actualDoc?.syncedAt || "", hasRows: rows.length > 0, canEdit, isOwner: actor.role === "owner", revenueTypes: cashFlow.REVENUE_TYPES });
       return;
     }
 
@@ -11557,6 +11558,7 @@ async function routeApi(req, res, url) {
       if ("order" in body) rec.order = number(body.order);
       if ("active" in body) rec.active = body.active !== false && body.active !== "false";
       if ("company" in body) rec.company = ["wooof", "betters"].includes(body.company) ? body.company : "";
+      if ("revenueType" in body) rec.revenueType = cashFlow.REVENUE_TYPES[body.revenueType] ? body.revenueType : "";
       if ("match" in body) rec.match = String(Array.isArray(body.match) ? body.match.join(",") : body.match || "").split(",").map((x) => x.trim()).filter(Boolean).slice(0, 20);
       rec.updatedBy = who;
       rec.updatedAt = now();
@@ -11615,8 +11617,20 @@ async function routeApi(req, res, url) {
       for (const r of ex.rows || []) {
         const prev = await erp.get("cashRows", rowId(r.side, r.label));
         const match = prev?.match?.length ? prev.match : (r.side === "in" ? SAFE_MATCH[r.label] || [] : []);
-        await erp.put("cashRows", { ...(prev || { company: "", active: true }), match, id: rowId(r.side, r.label), side: r.side, label: prev?.label || r.label,
+        const revenueType = prev?.revenueType ?? (r.side === "in" ? (/외주/.test(r.label) ? "service_fee" : /^기타/.test(r.label) ? "" : "product_sales") : "");
+        await erp.put("cashRows", { ...(prev || { company: "", active: true }), match, revenueType, id: rowId(r.side, r.label), side: r.side, label: prev?.label || r.label,
           order: prev?.order ?? r.order, source: "현금흐름표 시트", importedAt: stamp });
+      }
+      // 사업구조 지침(2026-11-15)에 따라 시트에 없던 행을 더한다. 이미 있으면(고쳤으면) 그대로.
+      const EXTRA_ROWS = [
+        { side: "in", label: "픽키파크 운영대행비·실비", order: 90, company: "wooof", revenueType: "agency_fee", match: ["박상민", "픽키파크"] },
+        { side: "in", label: "MIH ITIT 운영 용역", order: 91, company: "betters", revenueType: "service_fee", match: ["엠아이", "MIH"] },
+        { side: "out", label: "비스타디아 측 재발행(ITIT)", order: 90, company: "betters", revenueType: "pass_through", match: ["공간사용료", "비스타디아"] }
+      ];
+      for (const r of EXTRA_ROWS) {
+        const rid = rowId(r.side, r.label);
+        if (await erp.get("cashRows", rid)) continue;
+        await erp.put("cashRows", { id: rid, ...r, active: true, source: "사업구조 지침", importedAt: stamp });
       }
       for (const c of ex.cells || []) {
         const rid = rowId(c.side, c.label);

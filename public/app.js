@@ -11731,7 +11731,7 @@ function renderCashFlow() {
   return `
     <div class="toolbar" style="margin:8px 0">
       <button data-cf-month="${ym(-1)}">‹</button><strong style="min-width:90px;text-align:center">${cf.month.replace("-", "년 ")}월</strong><button data-cf-month="${ym(1)}">›</button>
-      ${[["", "전체(두 회사)"], ["wooof", "우프컴퍼니"], ["betters", "베럴즈"]].map(([k, l]) => `<button class="npb-subtab ${cf.company === k ? "active" : ""}" data-cf-company="${k}">${l}</button>`).join("")}
+      ${[["", "전체(두 사업자)"], ["wooof", "우프컴퍼니"], ["betters", "Betters(개인)"]].map(([k, l]) => `<button class="npb-subtab ${cf.company === k ? "active" : ""}" data-cf-company="${k}">${l}</button>`).join("")}
       <span style="flex:1"></span>
       ${d.canEdit ? `<button data-cf-sync title="지난 날의 실제 입출금을 클로브에서 가져옵니다">클로브 실제 내역 불러오기</button><button data-cf-addrow>행 추가</button>` : ""}
       ${d.isOwner ? `<button data-cf-import title="옛 구글시트 값을 다시 가져옵니다(직접 입력한 칸은 그대로)">시트 다시 가져오기</button>` : ""}
@@ -11775,8 +11775,9 @@ function renderCashFlowRow() {
       <div class="field two"><div><label>이름</label><input name="label" value="${h(r.label)}" required></div>
         <div><label>구분</label><select name="side" ${r.id ? "disabled" : ""}><option value="in" ${r.side === "in" ? "selected" : ""}>현금 IN</option><option value="out" ${r.side === "out" ? "selected" : ""}>현금 OUT</option></select></div></div>
       ${r.id ? `<div class="field"><label>맞춤 낱말(쉼표) — 클로브 거래·v2 예정의 이름에 이 낱말이 있으면 이 행으로 모읍니다</label><input name="match" value="${h((r.match || []).join(", "))}" placeholder="예: 네이버파이낸셜, 스마트스토어"></div>
-      <div class="field two"><div><label>회사</label><select name="company"><option value="">두 회사</option><option value="wooof" ${r.company === "wooof" ? "selected" : ""}>우프컴퍼니</option><option value="betters" ${r.company === "betters" ? "selected" : ""}>베럴즈</option></select></div>
+      <div class="field two"><div><label>회사</label><select name="company"><option value="">두 사업자</option><option value="wooof" ${r.company === "wooof" ? "selected" : ""}>우프컴퍼니</option><option value="betters" ${r.company === "betters" ? "selected" : ""}>Betters(개인사업자)</option></select></div>
         <div><label>순서</label><input name="order" inputmode="numeric" value="${h(r.order ?? "")}"></div></div>
+      <div class="field"><label>매출 유형 <span class="muted" style="font-weight:400">— 대행 판매분·재발행 전달분은 우프 매출로 세지 않음</span></label><select name="revenueType"><option value="">(없음/출금)</option>${Object.entries(cf.data.revenueTypes || {}).map(([k, l]) => `<option value="${k}" ${r.revenueType === k ? "selected" : ""}>${h(l)}</option>`).join("")}</select></div>
       <label class="check"><input type="checkbox" name="hide"> 이 행 숨기기</label>` : ""}
       <div class="toolbar"><button class="primary" type="submit">저장</button></div></form></div>`;
 }
@@ -11819,7 +11820,7 @@ function bindCashFlow() {
     const form = e.currentTarget;
     const f = formObject(form);
     const rid = form.dataset.cfRowForm;
-    if (rid) run(() => api(`/api/cashflow/rows/${encodeURIComponent(rid)}`, { method: "PUT", body: { label: f.label, match: f.match, company: f.company, order: f.order, active: !form.querySelector('[name="hide"]').checked } }), "저장했습니다.");
+    if (rid) run(() => api(`/api/cashflow/rows/${encodeURIComponent(rid)}`, { method: "PUT", body: { label: f.label, match: f.match, company: f.company, order: f.order, revenueType: f.revenueType, active: !form.querySelector('[name="hide"]').checked } }), "저장했습니다.");
     else run(() => api("/api/cashflow/rows", { method: "POST", body: { label: f.label, side: f.side } }), "행을 추가했습니다.");
   });
 }
@@ -11829,7 +11830,7 @@ function renderCash() {
   const head = pageHead("자금", "오늘과 7일 안에 들어올 돈·나갈 돈, 계좌 잔액을 한 장으로 봅니다. 매일 아침 이 화면을 보고 채널톡에 공유하세요.");
   const tabs = `<div class="npb-subnav">${[["report", "일일 자금보고"], ["cashflow", "현금흐름표"], ["schedules", "고정비·자금 일정"], ["loans", "대출금"], ["rehab", "회생변제"], ["receivables", "채권원장"]].map(([k, l]) => `<button class="npb-subtab ${cs.screen === k ? "active" : ""}" data-cash-screen="${k}">${l}</button>`).join("")}
     <span style="flex:1"></span>
-    ${(cs.meta?.companies || [{ key: "wooof", name: "우프컴퍼니" }, { key: "betters", name: "베럴즈" }]).map((c) => `<button class="npb-subtab ${cs.company === c.key ? "active" : ""}" data-cash-company="${c.key}">${h(c.name)}</button>`).join("")}</div>`;
+    ${(cs.meta?.companies || [{ key: "wooof", name: "우프컴퍼니" }, { key: "betters", name: "Betters(개인사업자)" }]).map((c) => `<button class="npb-subtab ${cs.company === c.key ? "active" : ""}" data-cash-company="${c.key}">${h(c.name)}</button>`).join("")}</div>`;
   if (cs.screen === "loans") return `${head}${tabs}${renderLoans()}`;
   if (cs.screen === "rehab") return `${head}${tabs}${renderRehab()}`;
   if (cs.screen === "cashflow") return `${head}${tabs}${renderCashFlow()}`;
@@ -12732,7 +12733,7 @@ function renderProdCost() {
   const d = st.prod;
   if (!d) return `<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   const rows = d.partners.map((p) => `<tr class="${st.prodSel === p.id ? "selected" : ""}" data-prod-open="${p.id}">
-    <td>${p.code ? `<span class="code-tag">${h(p.code)}</span> ` : ""}${h(p.name)}${p.company === "betters_personal" ? ' <span class="badge muted">베럴즈(개인)</span>' : ""}</td>
+    <td>${p.code ? `<span class="code-tag">${h(p.code)}</span> ` : ""}${h(p.name)}${p.company === "betters_personal" ? ' <span class="badge muted">Betters(개인)</span>' : ""}</td>
     <td class="num"><strong>${money.format(p.balance)}</strong></td>
     <td class="num">${p.over60 ? `<span class="danger-text">${money.format(p.over60)}</span>` : ""}</td>
     <td>${h(p.oldestDate || "")}${p.oldestAge ? ` <span class="muted" style="font-size:11px">${p.oldestAge}일</span>` : ""}</td>
