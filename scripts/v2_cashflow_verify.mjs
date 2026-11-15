@@ -56,5 +56,7 @@ assert.equal(b['2026-11-14'], undefined);
 assert.equal(b['2026-11-20'], 10_000_000 - 6_000_000);
 assert.equal(b['2026-11-30'], 4_000_000 - 1_400_080);
 assert.equal(buildGrid({ rows, month: '2026-11', company: 'wooof' }).rows.some((r) => r.id === 'bshinhan'), false, 'company filter hides 베럴즈 rows');
+const bOnly = buildGrid({ rows, month: '2026-11', company: 'betters' }).rows.map((r) => r.id);
+assert.deepEqual(bOnly.sort(), ['bshinhan', 'etcin', 'etcout'], 'Betters view: B rows + shared 기타 rows only');
 
 console.log('v2 cashflow verify: all checks passed');

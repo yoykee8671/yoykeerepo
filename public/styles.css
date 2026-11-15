@@ -2466,3 +2466,10 @@ tr.acc-row { cursor: pointer; }
 tr.acc-row:hover td { background: #f8fafc; }
 tr.hub-go { cursor: pointer; }
 tr.hub-go:hover td { background: #f8fafc; }
+
+.period-nav { padding: 12px 16px 8px; align-items: center; gap: 6px; flex-wrap: wrap; }
+.period-nav input[type=date] { width: auto; }
+.period-label { font-weight: 600; margin-left: 6px; }
+tr.today-row td { background: #fff8e1; }
+tr.period-sub td { background: #f3f5f8; font-weight: 600; }
+tr.period-items > td { background: #fbfcfe; padding: 4px 16px 10px; }

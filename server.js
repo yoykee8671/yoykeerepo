@@ -11538,6 +11538,7 @@ async function routeApi(req, res, url) {
 
     if (pathname === "/api/cashflow" && method === "GET") {
       const month = monthOf(url.searchParams.get("month"));
+      // 기본은 두 사업자 합쳐 보기, 필터로 우프컴퍼니 / Betters(개인사업자)만.
       const companyKey = ["wooof", "betters"].includes(url.searchParams.get("company")) ? url.searchParams.get("company") : "";
       const [rows, allCells, actualDoc, plan] = await Promise.all([
         erp.list("cashRows"), erp.list("cashCells"), erp.get("cashActual", month), planLines(month, companyKey)]);
@@ -12480,6 +12481,96 @@ async function routeApi(req, res, url) {
   // --- v2 자금: 자금 일정 + 일일 자금보고 ---------------------------------------
   if (pathname === "/api/cash" || pathname.startsWith("/api/cash/")) {
     if (!requirePermission(actor, res, "cash", "view")) return;
+
+    // 기간 조회(일·주·월·직접): 지난 날은 클로브 실제 입출금, 오늘부터는 v2 예정. 잔액은 지금 클로브 잔액에서 거꾸로/앞으로 이어 간다.
+    if (pathname === "/api/cash/period" && method === "GET") {
+      const companyKey = CASH_COMPANIES.some((c) => c.key === url.searchParams.get("company")) ? url.searchParams.get("company") : "wooof";
+      const company = CASH_COMPANIES.find((c) => c.key === companyKey);
+      const today = kstToday();
+      let from = dateOnly(url.searchParams.get("from")) || today;
+      let to = dateOnly(url.searchParams.get("to")) || from;
+      if (to < from) [from, to] = [to, from];
+      const span = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000);
+      if (span > 92) to = payments.addDays(from, 92);
+      const dates = [];
+      for (let d = from; d <= to; d = payments.addDays(d, 1)) dates.push(d);
+      const byDay = Object.fromEntries(dates.map((d) => [d, { date: d, past: d < today, cashIn: 0, cashOut: 0, items: [] }]));
+      // 예정(오늘부터)
+      if (to >= today) {
+        const start = from > today ? from : today;
+        const days = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000);
+        const [schedules, pays, loans, loanPays, plan, rehabPays, so] = await Promise.all([
+          erp.list("cashSchedules"), erp.list("payments").catch(() => []), erp.list("loans"), erp.list("loanPayments"),
+          erp.get("rehabPlan", "current"), erp.list("rehabPayments"), erp.list("salesOrders").catch(() => [])]);
+        const report = cashReport.buildCashReport({
+          today: start, days, company: companyKey, openingBalance: null,
+          schedules: [...schedules, ...loansLib.loanScheduleLines(loans.filter((l) => l.company === companyKey), loanPays, start, to),
+            ...(companyKey === "wooof" ? rehab.rehabScheduleLines(plan, rehabPays, start, to) : [])],
+          payments: pays.filter((x) => (x.company || "wooof") === companyKey),
+          requests: companyKey === "wooof" ? db.requests : [],
+          receivables: companyKey === "wooof" ? sales.receivables(so, start) : []
+        });
+        for (const d of report.days) {
+          const day = byDay[d.date];
+          if (!day) continue;
+          for (const it of d.items) {
+            day.items.push({ ...it, kind: "plan" });
+            if (it.direction === "in") day.cashIn += Number(it.amount || 0); else day.cashOut += Number(it.amount || 0);
+          }
+        }
+      }
+      // 실제(지난 날) + 잔액
+      let current = null;
+      let clobeError = "";
+      let txs = [];
+      try {
+        const companyId = await clobeCompanyIdFor(db, company);
+        if (!companyId) throw new Error("클로브에 이 사업자가 연결돼 있지 않습니다.");
+        const acc = await clobeCall(db, "get_bank_accounts", { companyId });
+        current = (acc.accounts || []).filter((a) => (a.currencyCode || "KRW") === "KRW").reduce((sum, a) => sum + Number(a.krwBalance || 0), 0);
+        if (from < today) {
+          let cursor = null;
+          for (let page = 0; page < 40; page += 1) {
+            const p = await clobeCall(db, "get_labeled_transactions", { companyId, startDate: from, endDate: today, size: 100, ...(cursor ? { cursor } : {}) });
+            txs.push(...(p.content || []));
+            if (!p.hasNext || !p.nextCursor) break;
+            cursor = p.nextCursor;
+          }
+        }
+      } catch (error) { clobeError = error.message || "클로브를 불러오지 못했습니다."; }
+      const netOn = {};
+      for (const t of txs) {
+        const date = String(t.transactionAt || "").slice(0, 10);
+        const inA = Number(t.inAmount || 0);
+        const outA = Number(t.outAmount || 0);
+        netOn[date] = (netOn[date] || 0) + inA - outA;
+        const day = byDay[date];
+        if (!day || !day.past || /계좌간/.test(String(t.category || ""))) continue; // 내 계좌끼리 옮긴 돈은 들어오고 나간 돈으로 치지 않는다
+        const direction = inA > 0 ? "in" : "out";
+        const amount = inA > 0 ? inA : outA;
+        if (!amount) continue;
+        day.items.push({ kind: "actual", direction, amount, title: t.transactionName || t.transactionDescription || t.businessEntityName || "", category: t.customLabel || t.category || "",
+          memo: t.transactionDescription && t.transactionDescription !== t.transactionName ? t.transactionDescription : "" });
+        if (direction === "in") day.cashIn += amount; else day.cashOut += amount;
+      }
+      // 잔액: 지난 날 = 지금 잔액 − 그날 다음부터 지금까지의 순입출금, 오늘부터 = 지금 잔액에서 예정을 더해 간다.
+      let opening = null;
+      if (current != null) {
+        const after = (d) => Object.entries(netOn).filter(([date]) => date > d).reduce((sum, [, v]) => sum + v, 0);
+        let running = current;
+        for (const d of dates) {
+          const day = byDay[d];
+          if (day.past) day.balance = Math.round(current - after(d));
+          else { running += day.cashIn - day.cashOut; day.balance = Math.round(running); }
+        }
+        opening = Math.round(dates[0] < today ? current - after(payments.addDays(dates[0], -1)) : current);
+      }
+      const list = dates.map((d) => byDay[d]);
+      const sum = (f) => list.reduce((a, x) => a + x[f], 0);
+      sendJson(res, 200, { company, from, to: dates.at(-1), today, days: list, totals: { cashIn: sum("cashIn"), cashOut: sum("cashOut") },
+        opening, closing: list.at(-1)?.balance ?? null, current, clobeError, shortfallDate: list.find((x) => !x.past && x.balance != null && x.balance < 0)?.date || "" });
+      return;
+    }
 
     // 계좌 보기 설정 저장
     const accPref = pathname.match(/^\/api\/cash\/accounts\/(wooof|betters)\/([^/]+)$/);

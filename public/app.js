@@ -11887,7 +11887,7 @@ function renderCashFlow() {
   return `
     <div class="toolbar" style="margin:8px 0">
       <button data-cf-month="${ym(-1)}">‹</button><strong style="min-width:90px;text-align:center">${cf.month.replace("-", "년 ")}월</strong><button data-cf-month="${ym(1)}">›</button>
-      ${[["", "전체(두 사업자)"], ["wooof", "우프컴퍼니"], ["betters", "Betters(개인)"]].map(([k, l]) => `<button class="npb-subtab ${cf.company === k ? "active" : ""}" data-cf-company="${k}">${l}</button>`).join("")}
+      ${[["", "전체(두 사업자)"], ["wooof", "우프컴퍼니"], ["betters", "Betters(개인사업자)"]].map(([k, l]) => `<button class="npb-subtab ${cf.company === k ? "active" : ""}" data-cf-company="${k}">${l}</button>`).join("")}
       <span style="flex:1"></span>
       ${d.canEdit ? `<button data-cf-sync title="지난 날의 실제 입출금을 클로브에서 가져옵니다">클로브 실제 내역 불러오기</button><button data-cf-addrow>행 추가</button>` : ""}
       ${d.isOwner ? `<button data-cf-import title="옛 구글시트 값을 다시 가져옵니다(직접 입력한 칸은 그대로)">시트 다시 가져오기</button>` : ""}
@@ -12014,6 +12014,90 @@ function renderAccountDetail() {
     </div>`;
 }
 
+// --- 일일 자금보고: 날짜 이동(‹ ›·달력)과 기간(일·7일·주·월·직접) 조회 ---
+const isoAdd = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+const kstTodayIso = () => new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+const PERIOD_UNITS = [["day", "일"], ["7d", "7일"], ["week", "주"], ["month", "월"], ["range", "기간"]];
+function periodState() {
+  const cs = cashState();
+  if (!cs.period) cs.period = { unit: "7d", anchor: kstTodayIso(), from: kstTodayIso(), to: isoAdd(kstTodayIso(), 6), open: "" };
+  return cs.period;
+}
+function periodRange(p) {
+  const a = p.anchor;
+  if (p.unit === "day") return [a, a];
+  if (p.unit === "7d") return [a, isoAdd(a, 6)];
+  if (p.unit === "week") { const dow = (new Date(`${a}T00:00:00Z`).getUTCDay() + 6) % 7; const mon = isoAdd(a, -dow); return [mon, isoAdd(mon, 6)]; }
+  if (p.unit === "month") { const [y, m] = a.split("-").map(Number); return [`${a.slice(0, 7)}-01`, new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10)]; }
+  return [p.from <= p.to ? p.from : p.to, p.from <= p.to ? p.to : p.from];
+}
+function shiftPeriod(p, dir) {
+  if (p.unit === "day") p.anchor = isoAdd(p.anchor, dir);
+  else if (p.unit === "7d" || p.unit === "week") p.anchor = isoAdd(p.anchor, 7 * dir);
+  else if (p.unit === "month") { const [y, m, d] = p.anchor.split("-").map(Number); const t = new Date(Date.UTC(y, m - 1 + dir, 1)); const last = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0)).getUTCDate(); p.anchor = `${t.toISOString().slice(0, 7)}-${String(Math.min(d, last)).padStart(2, "0")}`; }
+  else { const len = Math.round((Date.parse(`${p.to}T00:00:00Z`) - Date.parse(`${p.from}T00:00:00Z`)) / 86400000) + 1; p.from = isoAdd(p.from, len * dir); p.to = isoAdd(p.to, len * dir); p.anchor = p.from; }
+}
+async function loadCashPeriod() {
+  const cs = cashState();
+  const p = periodState();
+  const [from, to] = periodRange(p);
+  cs.periodLoading = true;
+  try { cs.periodData = await api(`/api/cash/period?company=${encodeURIComponent(cs.company)}&from=${from}&to=${to}`); }
+  catch (e) { cs.periodData = { days: [], totals: { cashIn: 0, cashOut: 0 }, clobeError: e.message }; }
+  finally { cs.periodLoading = false; }
+}
+function renderCashPeriod() {
+  const cs = cashState();
+  const p = periodState();
+  const d = cs.periodData;
+  const today = kstTodayIso();
+  const [from, to] = periodRange(p);
+  const label = p.unit === "day" ? cashDay(from) : `${cashDay(from)} ~ ${cashDay(to)}`;
+  const nav = `<div class="toolbar period-nav">
+      <button data-period-shift="-1" title="이전">‹</button>
+      <input type="date" data-period-date value="${h(p.anchor)}" title="날짜 고르기">
+      <button data-period-shift="1" title="다음">›</button>
+      <button class="ghost small" data-period-today>오늘</button>
+      <span class="period-label">${h(label)}</span>
+      <span style="flex:1"></span>
+      ${PERIOD_UNITS.map(([k, l]) => `<button class="npb-subtab ${p.unit === k ? "active" : ""}" data-period-unit="${k}">${l}</button>`).join("")}
+      ${p.unit === "range" ? `<input type="date" data-period-from value="${h(p.from)}"> ~ <input type="date" data-period-to value="${h(p.to)}">` : ""}
+    </div>`;
+  if (!d || cs.periodLoading) return `<section class="panel">${nav}<div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const net = d.totals.cashIn - d.totals.cashOut;
+  const card = (t, v, cls = "") => `<div class="sales-step"><span>${t}</span><strong class="${cls}">${v == null ? "-" : `${money.format(v)}원`}</strong></div>`;
+  const rows = [];
+  let wIn = 0; let wOut = 0;
+  const long = d.days.length > 14;
+  for (const day of d.days) {
+    const open = p.open === day.date;
+    rows.push(`<tr class="hub-go ${day.date === today ? "today-row" : ""} ${day.balance != null && day.balance < 0 ? "cash-short" : ""}" data-period-day="${day.date}">
+      <td>${h(cashDay(day.date))}${day.date === today ? ' <span class="badge">오늘</span>' : ""}</td><td><span class="badge ${day.past ? "muted" : ""}">${day.past ? "실제" : "예정"}</span></td>
+      <td class="num">${day.cashIn ? money.format(day.cashIn) : ""}</td><td class="num">${day.cashOut ? money.format(day.cashOut) : ""}</td>
+      <td class="num">${day.balance == null ? "-" : money.format(day.balance)}</td>
+      <td class="wrap muted" style="font-size:12px">${day.items.length ? `${day.items.length}건 · ${h(day.items.slice(0, 3).map((l) => l.title).join(", "))}${day.items.length > 3 ? " 외" : ""}` : ""}</td></tr>`);
+    if (open) rows.push(`<tr class="period-items"><td colspan="6"><table class="compact" data-unit="원"><tbody>${day.items.map((l) => `<tr><td class="${l.direction === "in" ? "cash-in" : "cash-out"}" style="width:1%">${l.direction === "in" ? "입금" : "출금"}</td>
+      <td class="wrap">${l.overdue ? '<span class="badge warn">기한지남</span> ' : ""}${h(l.title)}${l.memo ? ` <span class="muted" style="font-size:11px">${h(l.memo)}</span>` : ""}</td><td style="font-size:12px" class="muted">${h(l.category || "")}</td><td class="num">${money.format(l.amount)}</td></tr>`).join("") || `<tr><td class="empty">내역 없음</td></tr>`}</tbody></table></td></tr>`);
+    wIn += day.cashIn; wOut += day.cashOut;
+    const isSunday = new Date(`${day.date}T00:00:00Z`).getUTCDay() === 0;
+    if (long && (isSunday || day === d.days.at(-1))) {
+      rows.push(`<tr class="period-sub"><td colspan="2">주간 합계</td><td class="num">${money.format(wIn)}</td><td class="num">${money.format(wOut)}</td><td class="num">${money.format(wIn - wOut)}</td><td class="muted" style="font-size:12px">순현금</td></tr>`);
+      wIn = 0; wOut = 0;
+    }
+  }
+  return `<section class="panel">${nav}
+    ${d.clobeError ? `<p class="muted" style="margin:0 16px 8px">⚠ ${h(d.clobeError)} — 지난 날 실제 내역·잔액을 못 불러왔습니다.</p>` : ""}
+    <section class="sales-flow" style="padding:0 12px">
+      ${card("기초 잔액", d.opening)}${card("입금 합계", d.totals.cashIn)}${card("출금 합계", d.totals.cashOut)}${card("순현금", net, net < 0 ? "danger-text" : "")}${card("기말 잔액", d.closing, d.closing != null && d.closing < 0 ? "danger-text" : "")}
+      ${d.shortfallDate ? `<div class="sales-step"><span>⚠ 잔액 부족 예상</span><strong class="danger-text">${h(cashDay(d.shortfallDate))}</strong></div>` : ""}
+    </section>
+    <div class="table-wrap"><table class="compact cash-table" data-unit="원">
+      <thead><tr><th>날짜</th><th>구분</th><th>입금</th><th>출금</th><th>잔액</th><th>내역 (누르면 펼침)</th></tr></thead>
+      <tbody>${rows.join("")}</tbody></table></div>
+    <p class="muted" style="font-size:11px;margin:6px 16px 12px">지난 날 = 클로브 실제 입출금(내 계좌끼리 옮긴 돈 제외), 오늘부터 = 예정(고정비·지급요청·생산비·대출·회생·선매입·받을 돈). 잔액은 지금 클로브 잔액에서 이어 계산.</p>
+  </section>`;
+}
+
 function renderCashReport() {
   const cs = cashState();
   const { report: r, accounts = [], fund, clobeError } = cs.data || {};
@@ -12023,13 +12107,22 @@ function renderCashReport() {
     <td class="num">${money.format(l.amount)}</td></tr>`).join("") || `<tr><td colspan="2" class="empty">없음</td></tr>`;
   return `
     ${clobeError ? `<p class="muted" style="margin:8px 0">⚠ 잔액: ${h(clobeError)}</p>` : ""}
+    ${renderCashPeriod()}
     <section class="layout">
       <div class="panel">
-        <div class="panel-head"><h2>오늘 ${h(cashDay(r.start))}</h2><span class="muted">현 잔액 <strong>${r.openingBalance == null ? "-" : `${money.format(r.openingBalance)}원`}</strong></span></div>
-        <div class="panel-body cash-two">
-          <div><h3 class="cash-in">들어올 돈 ${money.format(r.today.cashIn)}원</h3><table class="compact cash-table" data-unit="원"><tbody>${itemRows(r.today.items, "in")}</tbody></table></div>
-          <div><h3 class="cash-out">나갈 돈 ${money.format(r.today.cashOut)}원</h3><table class="compact cash-table" data-unit="원"><tbody>${itemRows(r.today.items, "out")}</tbody></table></div>
-        </div>
+        ${(() => {
+          // 위 칸은 고른 날(‹ › 로 옮긴 날). 지난 날이면 실제(클로브), 오늘부터는 예정.
+          const p = periodState();
+          const want = p.unit === "day" ? p.anchor : (p.selected && (cs.periodData?.days || []).some((x) => x.date === p.selected) ? p.selected : (cs.periodData?.days || []).some((x) => x.date === kstTodayIso()) ? kstTodayIso() : p.anchor);
+          const sel = (cs.periodData?.days || []).find((x) => x.date === want);
+          const day = sel || { date: r.start, past: false, cashIn: r.today.cashIn, cashOut: r.today.cashOut, items: r.today.items };
+          const isToday = day.date === kstTodayIso();
+          return `<div class="panel-head"><h2>${isToday ? "오늘 " : ""}${h(cashDay(day.date))}${day.past ? ' <span class="badge muted">실제</span>' : ""}</h2><span class="muted">현 잔액 <strong>${r.openingBalance == null ? "-" : `${money.format(r.openingBalance)}원`}</strong>${sel?.balance != null && !isToday ? ` · 그날 잔액 ${money.format(sel.balance)}원` : ""}</span></div>
+          <div class="panel-body cash-two">
+            <div><h3 class="cash-in">${day.past ? "들어온 돈" : "들어올 돈"} ${money.format(day.cashIn)}원</h3><table class="compact cash-table" data-unit="원"><tbody>${itemRows(day.items, "in")}</tbody></table></div>
+            <div><h3 class="cash-out">${day.past ? "나간 돈" : "나갈 돈"} ${money.format(day.cashOut)}원</h3><table class="compact cash-table" data-unit="원"><tbody>${itemRows(day.items, "out")}</tbody></table></div>
+          </div>`;
+        })()}
       </div>
       <div class="panel">
         <div class="panel-head"><h2>계좌 잔액</h2><span class="muted">클로브 · ${fund ? `${h(fund.transactionDate)} 기준 어제 +${money.format(fund.cashIn || 0)} / ${money.format(fund.cashOut || 0)}` : ""}</span></div>
@@ -12050,14 +12143,6 @@ function renderCashReport() {
       </div>
     </section>
     <section class="panel">
-      <div class="panel-head"><h2>7일 예정</h2><span class="muted">들어올 돈 ${money.format(r.weekIn)}원 · 나갈 돈 ${money.format(r.weekOut)}원${r.shortfallDate ? ` · <strong class="danger-text">⚠ ${h(cashDay(r.shortfallDate))} 잔액 부족</strong>` : ""}</span></div>
-      <div class="table-wrap"><table class="compact cash-table" data-unit="원">
-        <thead><tr><th>날짜</th><th>들어올 돈</th><th>나갈 돈</th><th>예상 잔액</th><th>내역</th></tr></thead>
-        <tbody>${r.days.map((d) => `<tr class="${d.balance != null && d.balance < 0 ? "cash-short" : ""}">
-          <td>${h(cashDay(d.date))}</td><td class="num">${d.cashIn ? money.format(d.cashIn) : ""}</td><td class="num">${d.cashOut ? money.format(d.cashOut) : ""}</td>
-          <td class="num">${d.balance == null ? "-" : money.format(d.balance)}</td>
-          <td class="wrap muted" style="font-size:12px">${d.items.map((l) => `${l.direction === "in" ? "+" : "-"}${h(l.title)} ${money.format(l.amount)}`).join(" · ")}</td></tr>`).join("")}</tbody>
-      </table></div>
       <div class="toolbar" style="padding:12px 16px">
         <button class="primary" data-cash-copy>채널톡 보고 문구 복사</button>
         <button data-cash-print>인쇄·이미지 저장</button>
@@ -12147,6 +12232,18 @@ function bindCash() {
   bindV2Modal();
   app.querySelectorAll("[data-cash-company]").forEach((b) => b.addEventListener("click", async () => { cs.company = b.dataset.cashCompany; cs.editing = null; await reload(); }));
   app.querySelector("[data-cash-reload]")?.addEventListener("click", reload);
+  // 기간 조회: 처음 열 때와 회사를 바꿨을 때 불러온다.
+  const per = periodState();
+  const periodKey = `${cs.company}|${periodRange(per).join("~")}`;
+  if (cs.periodKey !== periodKey && !cs.periodLoading) { cs.periodKey = periodKey; loadCashPeriod().then(renderApp); }
+  const repaint = () => { cs.periodKey = ""; per.selected = per.unit === "day" ? per.anchor : per.selected; renderApp(); };
+  app.querySelectorAll("[data-period-shift]").forEach((b) => b.addEventListener("click", () => { shiftPeriod(per, Number(b.dataset.periodShift)); repaint(); }));
+  app.querySelector("[data-period-today]")?.addEventListener("click", () => { per.anchor = kstTodayIso(); if (per.unit === "range") { per.from = per.anchor; per.to = isoAdd(per.anchor, 6); } repaint(); });
+  app.querySelector("[data-period-date]")?.addEventListener("change", (e) => { if (!e.target.value) return; per.anchor = e.target.value; if (per.unit === "range") { per.from = per.anchor; } repaint(); });
+  app.querySelectorAll("[data-period-unit]").forEach((b) => b.addEventListener("click", () => { per.unit = b.dataset.periodUnit; if (per.unit === "range") { [per.from, per.to] = periodRange({ ...per, unit: "7d" }); } repaint(); }));
+  app.querySelector("[data-period-from]")?.addEventListener("change", (e) => { per.from = e.target.value || per.from; repaint(); });
+  app.querySelector("[data-period-to]")?.addEventListener("change", (e) => { per.to = e.target.value || per.to; repaint(); });
+  app.querySelectorAll("[data-period-day]").forEach((tr) => tr.addEventListener("click", () => { per.open = per.open === tr.dataset.periodDay ? "" : tr.dataset.periodDay; per.selected = tr.dataset.periodDay; renderApp(); }));
   // 계좌: 즐겨찾기 별, 숨긴 계좌 펼치기, 누르면 상세(최근 거래·설정)
   bindV2Modal();
   const accSave = async (accId, body) => {
