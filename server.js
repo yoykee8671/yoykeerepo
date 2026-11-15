@@ -7156,9 +7156,48 @@ function buildTradeDoc(db, body) {
   return { po };
 }
 
+// Several GET calls in one round trip. Each sub-path runs through routeApi with the
+// caller's cookies, so permissions are checked exactly as for a direct call.
+// Through the Cloudflare tunnel every round trip costs ~0.5s, so the app's start-up
+// and post-save reload (15+ lists) go through here.
+async function runBatch(req, res, url) {
+  const paths = url.searchParams.getAll("p").slice(0, 30);
+  // v = the hash the client already holds for that path; unchanged results come back as {same:true}.
+  const known = url.searchParams.getAll("v");
+  const results = await Promise.all(paths.map((p, i) => new Promise((done) => {
+    let finished = false;
+    const resolve = (v) => { if (!finished) { finished = true; done(v); } };
+    if (!/^\/api\//.test(p) || p.startsWith("/api/batch")) { resolve({ status: 400, data: { error: "bad path" } }); return; }
+    const subReq = { method: "GET", url: p, headers: { ...req.headers, "accept-encoding": "" } };
+    let status = 200;
+    const chunks = [];
+    const subRes = {
+      req: subReq, headersSent: false, statusCode: 200,
+      setHeader() {}, getHeader() { return undefined; }, removeHeader() {},
+      writeHead(s) { status = s; this.statusCode = s; this.headersSent = true; return this; },
+      write(c) { if (c) chunks.push(Buffer.from(c)); return true; },
+      end(c) {
+        if (c) chunks.push(Buffer.from(c));
+        const text = Buffer.concat(chunks).toString("utf8");
+        const st = this.statusCode || status;
+        const hash = crypto.createHash("sha1").update(text).digest("base64url").slice(0, 16);
+        if (st < 400 && known[i] && known[i] === hash) { resolve({ status: st, hash, same: true }); return; }
+        let data = text;
+        try { data = JSON.parse(text); } catch {}
+        resolve({ status: st, hash, data });
+      }
+    };
+    routeApi(subReq, subRes, new URL(p, "http://batch.local"))
+      .then(() => setTimeout(() => resolve({ status: 404, data: { error: "no response" } }), 50))
+      .catch((error) => resolve({ status: error.status || 500, data: { error: error.message } }));
+  })));
+  sendJson(res, 200, { results: Object.fromEntries(paths.map((p, i) => [p, results[i]])) });
+}
+
 async function routeApi(req, res, url) {
   const pathname = url.pathname;
   const method = req.method || "GET";
+  if (pathname === "/api/batch" && method === "GET") return runBatch(req, res, url);
 
   if (pathname === "/api/login" && method === "POST") {
     const body = await readBody(req);

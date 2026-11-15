@@ -389,6 +389,29 @@ async function api(path, options = {}) {
   return data;
 }
 
+// Several GETs in one round trip (/api/batch). Returns data in the same order;
+// a failed sub-call becomes an Error object unless `throwOnError`.
+async function apiBatch(paths, { throwOnError = true } = {}) {
+  // 이미 받아 둔 목록은 해시를 보내고, 서버는 바뀌지 않았으면 내용 없이 same 만 돌려준다
+  // (저장 뒤 다시 불러올 때 바뀐 목록만 내려온다). 기억은 이 탭의 메모리에만 둔다.
+  const cache = (state.batchCache ||= {});
+  const qs = paths.map((p) => `p=${encodeURIComponent(p)}&v=${encodeURIComponent(cache[p]?.hash || "")}`).join("&");
+  const { results } = await api(`/api/batch?${qs}`);
+  return paths.map((p) => {
+    const r = results[p] || { status: 500, data: {} };
+    if (r.status < 400 && r.same && cache[p]) return structuredClone(cache[p].data);
+    if (r.status < 400) {
+      if (r.hash) cache[p] = { hash: r.hash, data: structuredClone(r.data) };
+      return r.data;
+    }
+    const error = new Error(r.data?.error || "요청에 실패했습니다.");
+    error.status = r.status;
+    error.payload = r.data;
+    if (throwOnError) throw error;
+    return error;
+  });
+}
+
 function h(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -600,13 +623,14 @@ async function init() {
     await renderShare(location.pathname.split("/").pop());
     return;
   }
-  const session = await api("/api/session");
-  state.admin = session.admin;
+  // 세션 확인과 첫 목록을 한 번에 받는다. 로그인 전이면 목록은 401 로 와서 버린다.
+  const [session, ...lists] = await apiBatch(["/api/session", ...LOAD_ALL_PATHS], { throwOnError: false });
+  state.admin = session instanceof Error ? null : session.admin;
   if (!state.admin) {
     renderLogin();
     return;
   }
-  await loadAll();
+  await loadAll(lists);
   if (isRequestPopup) {
     state.tab = "requests";
     state.editingRequest = popupDraftPrefill
@@ -647,26 +671,19 @@ async function init() {
   renderApp();
 }
 
-async function loadAll() {
+const LOAD_ALL_PATHS = ["/api/dashboard", "/api/brands", "/api/requests", "/api/price-entries", "/api/price-aliases", "/api/promotion-rules",
+  "/api/payment-logs", "/api/admins", "/api/menus", "/api/partners", "/api/materials", "/api/purchase-orders", "/api/delivery-places", "/api/transfer-accounts"];
+
+async function loadAll(prefetched = null) {
   // 이력·아카이브는 화면을 열 때가 아니라 해당 탭을 눌렀을 때 부른다. 감사로그
   // 전체는 2MB가 넘어서, 매번 실어 보내면 나머지 응답까지 같이 밀린다.
-  const [dashboard, brands, requests, priceEntries, priceAliases, promotionRules, paymentLogs, admins, menus, partners, materials, purchaseOrders, deliveryPlaces] = await Promise.all([
-    api("/api/dashboard"),
-    api("/api/brands"),
-    api("/api/requests"),
-    api("/api/price-entries"),
-    api("/api/price-aliases"),
-    api("/api/promotion-rules"),
-    api("/api/payment-logs"),
-    api("/api/admins"),
-    api("/api/menus"),
-    api("/api/partners"),
-    api("/api/materials"),
-    api("/api/purchase-orders"),
-    api("/api/delivery-places")
-  ]);
+  // 목록 14개는 /api/batch 한 번으로 받는다(터널 왕복 한 번에 0.5초 안팎).
+  const lists = prefetched || await apiBatch(LOAD_ALL_PATHS, { throwOnError: false });
+  const firstError = lists.slice(0, 13).find((x) => x instanceof Error);
+  if (firstError) throw firstError;
+  const [dashboard, brands, requests, priceEntries, priceAliases, promotionRules, paymentLogs, admins, menus, partners, materials, purchaseOrders, deliveryPlaces, transferAccounts] = lists;
   // 입금계좌 목록. 브랜드 설정의 계좌 선택과 계좌관리 화면이 쓴다.
-  state.transferAccounts = (await api("/api/transfer-accounts").catch(() => ({}))).transferAccounts || [];
+  state.transferAccounts = (transferAccounts instanceof Error ? {} : transferAccounts).transferAccounts || [];
   state.menus = menus.menus || [];
   state.actionLabels = menus.actionLabels || {};
   state.dashboard = dashboard;
@@ -7929,12 +7946,13 @@ async function loadClobeStatus() {
   state.clobe.status = status;
   if (!status.connected) return;
   try {
-    if (!state.clobe.companies) {
-      state.clobe.companies = (await api("/api/clobe/companies")).companies || [];
-    }
-    if (status.companyId && !state.clobe.accounts) {
-      state.clobe.accounts = (await api("/api/clobe/accounts")).accounts || [];
-    }
+    // 두 목록을 한꺼번에 받는다(차례로 받으면 왕복이 두 번).
+    const [companies, accounts] = await Promise.all([
+      state.clobe.companies ? null : api("/api/clobe/companies"),
+      status.companyId && !state.clobe.accounts ? api("/api/clobe/accounts") : null
+    ]);
+    if (companies) state.clobe.companies = companies.companies || [];
+    if (accounts) state.clobe.accounts = accounts.accounts || [];
   } catch (error) {
     state.clobe.error = error.message || "클로브 데이터를 불러오지 못했습니다.";
   }
