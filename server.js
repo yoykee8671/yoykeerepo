@@ -7288,6 +7288,28 @@ async function routeApi(req, res, url) {
   }
   if (!requireActor(actor, res)) return;
 
+  // 옛(v1) 쓰기 API 의 권한 검사. 화면은 권한에 따라 버튼을 숨기지만 서버가 확인하지 않으면
+  // 권한 없는 계정도 직접 호출로 고칠 수 있다. 관리자 화면 권한표와 같은 기준으로 막는다.
+  if (method !== "GET") {
+    const LEGACY_WRITE_RULES = [
+      [/^\/api\/requests$/, "POST", "requests", "create"],
+      [/^\/api\/requests\/mark-paid$/, "POST", "requests", "pay"],
+      [/^\/api\/requests\/bulk-delete$/, "POST", "requests", "delete"],
+      [/^\/api\/requests\/(?!mark-paid|bulk-delete|set-status|transfer-xlsx)[^/]+$/, "PUT", "requests", "edit"],
+      [/^\/api\/requests\/(?!mark-paid|bulk-delete|set-status|transfer-xlsx)[^/]+$/, "DELETE", "requests", "delete"],
+      [/^\/api\/brands$/, "POST", "brands", "create"],
+      [/^\/api\/brands\/[^/]+$/, "PUT", "brands", "edit"],
+      [/^\/api\/brands\/[^/]+$/, "DELETE", "brands", "delete"],
+      [/^\/api\/price-entries$/, "POST", "prices", "create"],
+      [/^\/api\/price-entries\/[^/]+$/, "PUT", "prices", "edit"],
+      [/^\/api\/price-entries\/[^/]+$/, "DELETE", "prices", "delete"],
+      [/^\/api\/price-aliases(\/[^/]+)?$/, "*", "prices", "edit"],
+      [/^\/api\/promotion-rules(\/[^/]+)?$/, "*", "prices", "edit"]
+    ];
+    const rule = LEGACY_WRITE_RULES.find(([re, m]) => re.test(pathname) && (m === "*" || m === method));
+    if (rule && !requirePermission(actor, res, rule[2], rule[3])) return;
+  }
+
   const db = await readDb();
 
   if (pathname === "/api/dashboard" && method === "GET") {
@@ -8146,6 +8168,7 @@ async function routeApi(req, res, url) {
     const body = await readBody(req);
     const ids = Array.isArray(body.requestIds) ? body.requestIds : [];
     const status = String(body.status || "").trim();
+    if (!requirePermission(actor, res, "requests", status === "paid" ? "pay" : "edit")) return;
     const allowed = new Set(["pending", "await_deposit", "paid", "hold", "error", "consignment_unpaid"]);
     if (!ids.length) { sendJson(res, 400, { error: "상태를 변경할 요청을 선택하세요." }); return; }
     if (!allowed.has(status)) { sendJson(res, 400, { error: "허용되지 않은 상태입니다." }); return; }
