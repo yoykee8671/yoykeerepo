@@ -3,7 +3,7 @@
 #
 #   scripts/v2test-up.sh            # 지금 코드로 다시 빌드해 올린다(데이터는 그대로)
 #   scripts/v2test-up.sh --reset    # 운영 DB 를 새로 복사해 오고 v2 자료를 다시 넣는다
-#   scripts/v2test-up.sh --overrides  # 데이터는 그대로 두고 회생계획표·등록 제안·대출 고침(loan/overrides.json)만 다시 적용
+#   scripts/v2test-up.sh --overrides  # 데이터는 그대로 두고 등록 제안·대출/브랜드 고침·회생계획표만 다시 적용
 #
 # 운영(4173)은 건드리지 않는다. 복사본의 클로브·카페24 토큰은 비운다.
 # 비밀값은 ~/.cache/v2data/v2test.env (권한 600)에만 둔다.
@@ -56,6 +56,23 @@ apply_overrides() {
     rm -f "$DATA/.loans.json" "$DATA/.loan-overrides.tsv"
   fi
 }
+apply_brand_overrides() {
+  # 대표가 정해 준 브랜드 채권 구분(회생채권/별도 변제/현금변제만/채권자 아님 등).
+  if [ -f "$DATA/brand-overrides.json" ]; then
+    curl -s -b "$JAR" "$BASE/api/brands" > "$DATA/.brands.json"
+    node -e "
+      const fs=require('fs');const d=process.argv[1];
+      const brands=JSON.parse(fs.readFileSync(d+'/.brands.json','utf8')).brands||[];
+      for (const o of JSON.parse(fs.readFileSync(d+'/brand-overrides.json','utf8'))) {
+        const b=brands.find((x)=>x.name===o.name);
+        if (b) console.log(b.id+'\t'+JSON.stringify(o.set)); else console.error('  (없는 브랜드) '+o.name);
+      }" "$DATA" > "$DATA/.brand-overrides.tsv"
+    while IFS=$'\t' read -r bid body; do
+      echo "  brand $bid: $(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -X PUT -H 'content-type: application/json' --data "$body" "$BASE/api/brands/$bid")"
+    done < "$DATA/.brand-overrides.tsv"
+    rm -f "$DATA/.brands.json" "$DATA/.brand-overrides.tsv"
+  fi
+}
 seed_cleanup() {
   # 임시 오너는 지운다(기록은 이력에 'v2 자료 넣기'로 남는다).
   psql_test -c "update app_state set state = jsonb_set(state,'{admins}', (select coalesce(jsonb_agg(a),'[]'::jsonb) from jsonb_array_elements(state->'admins') a where a->>'id' <> 'admin_v2seed')) where id='primary'"
@@ -77,7 +94,6 @@ if [ "${1:-}" = "--reset" ]; then
   post /api/loans/import-sheet
   post /api/monthly/import-sheet
   post /api/pricing/seed
-  post /api/rehab/import-sheet
   if [ -f "$DATA/ledger_rows.json" ] && [ -f "$DATA/claims_final.json" ]; then
     node -e "
       const fs=require('fs');const d=process.argv[1];
@@ -89,14 +105,17 @@ if [ "${1:-}" = "--reset" ]; then
   fi
   [ -f "$DATA/ar/proposals.json" ] && post /api/setup/proposals "@$DATA/ar/proposals.json"
   apply_overrides
+  apply_brand_overrides
+  post /api/rehab/import-sheet
   seed_cleanup
 fi
 
 if [ "${1:-}" = "--overrides" ]; then
   seed_login
-  post /api/rehab/import-sheet
   [ -f "$DATA/ar/proposals.json" ] && post /api/setup/proposals "@$DATA/ar/proposals.json"
   apply_overrides
+  apply_brand_overrides
+  post /api/rehab/import-sheet
   seed_cleanup
 fi
 

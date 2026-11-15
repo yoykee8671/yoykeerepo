@@ -12899,7 +12899,10 @@ function renderReceivableLedger() {
         <div class="table-wrap"><table class="cash-table">
           <thead><tr><th>브랜드</th><th>채권총액</th><th>수수료 차감</th><th>회생 현금변제</th><th>잔액</th></tr></thead>
           <tbody>${cs.rec.map((r) => `<tr data-rec-open="${h(r.brandId)}" style="cursor:pointer" class="${detail?.brand?.id === r.brandId ? "selected" : ""}">
-            <td>${r.code ? `<span class="code-tag">${h(r.code)}</span>` : ""}${h(r.name)}${r.creditor ? `<br><span class="muted" style="font-size:11px">계획표: ${h(r.creditor)}</span>` : `<br><span class="danger-text" style="font-size:11px">계획표 채권자 못 찾음</span>`}</td>
+            <td>${r.code ? `<span class="code-tag">${h(r.code)}</span>` : ""}${h(r.name)}${r.creditor ? `<br><span class="muted" style="font-size:11px">회생채권 · 계획표: ${h(r.creditor)}</span>`
+              : r.claimKind === "separate" ? `<br><span class="muted" style="font-size:11px">회생채권 아님 · 별도 변제${r.claimNote ? ` — ${h(r.claimNote)}` : ""}</span>`
+              : r.claimKind === "none" ? `<br><span class="danger-text" style="font-size:11px">채권자 아님${r.claimNote ? ` — ${h(r.claimNote)}` : ""}</span>`
+              : `<br><span class="danger-text" style="font-size:11px">계획표 채권자 못 찾음</span>`}</td>
             <td class="num">${money.format(r.base)}</td><td class="num">${money.format(r.commission || 0)}</td><td class="num">${money.format(r.rehabCash || 0)}</td>
             <td class="num"><strong>${money.format(r.balance)}</strong></td></tr>`).join("")}</tbody>
         </table></div>

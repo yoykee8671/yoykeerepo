@@ -5556,7 +5556,7 @@ async function rehabPaidByBrand(db) {
   const [plan, pays] = await Promise.all([erp.get("rehabPlan", "current"), erp.list("rehabPayments")]);
   const map = {};
   if (plan) {
-    for (const b of db.brands.filter((x) => x.hasReceivable)) {
+    for (const b of db.brands.filter((x) => x.hasReceivable && !["separate", "none"].includes(x.claimKind))) {
       const c = legacy.matchCreditor(b, plan.creditors || []);
       if (c) map[b.id] = { creditor: c, paid: rehab.creditorCashPaid(plan, pays, c) };
     }
@@ -7808,10 +7808,15 @@ async function routeApi(req, res, url) {
       "withdrawMemo",
       "partnerCode",
       "businessUnit",
-      "priceBasis"
+      "priceBasis",
+      "claimKind",
+      "claimNote"
     ]) {
       if (key in body) brand[key] = body[key];
     }
+    // 채권 종류: rehab(회생채권 — 계획표 채권자), separate(회생채권 아님·별도 변제), cash-only(계획표 현금변제만, 차감 없음), none(채권자 아님)
+    if ("claimKind" in body && !["", "rehab", "separate", "cash-only", "none"].includes(brand.claimKind)) brand.claimKind = "";
+    if ("claimNote" in body) brand.claimNote = String(body.claimNote || "").slice(0, 300);
     if ("withdrawMemo" in body) brand.withdrawMemo = String(body.withdrawMemo || "").trim();
     if ("businessUnit" in body && !BUSINESS_UNITS[brand.businessUnit]) brand.businessUnit = "";
     applyTransferAccount(db, brand);
@@ -11104,6 +11109,7 @@ async function routeApi(req, res, url) {
         const l = legacy.receivableLedger(b, { legacyOrders, requests: db.requests, adjustments, rehabPaid: m?.paid || [], plan: m?.creditor || null });
         return { brandId: b.id, code: b.code || "", name: b.name, base: l.base, deducted: l.deducted, balance: l.balance,
           commission: l.commission, rehabCash: l.rehabCash, creditor: m?.creditor?.creditor || "", split: l.split,
+          claimKind: b.claimKind || (m ? "rehab" : ""), claimNote: b.claimNote || "",
           legacyCount: legacyOrders.filter((o) => o.brandId === b.id).length };
       }).sort((a, b) => b.balance - a.balance);
       sendJson(res, 200, { brands: rows });
