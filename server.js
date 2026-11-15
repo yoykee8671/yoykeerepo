@@ -27,6 +27,7 @@ import * as loansLib from "./lib/loans.mjs";
 import * as proposals from "./lib/setup-proposals.mjs";
 import * as monthly from "./lib/monthly-board.mjs";
 import * as closing from "./lib/closing.mjs";
+import * as notify from "./lib/notify.mjs";
 import * as brandInfo from "./lib/brand-info.mjs";
 import * as rehab from "./lib/rehab-plan.mjs";
 import * as cashFlow from "./lib/cash-flow.mjs";
@@ -1302,6 +1303,26 @@ const erp = createErpStore({ pool: pgPool, dataDir: DATA_DIR });
 async function closingState() {
   return (await erp.get("settings", "closing")) || { id: "closing", lockedThrough: "", history: [] };
 }
+// 메신저 공유함(lib/notify.mjs). 알림을 쌓고, 자동 발송이 켜진 종류면 채널톡으로도 보낸다.
+// 실패해도 원래 일(저장)은 막지 않는다.
+async function messengerSettings() {
+  return { ...notify.DEFAULT_MESSENGER, ...((await erp.get("settings", "messenger")) || {}) };
+}
+async function pushNotice(kind, data = {}, ref = {}) {
+  try {
+    const n = notify.noticeFor(kind, data);
+    const rec = { id: id("ntc"), kind, title: n.title, text: n.text, refType: ref.type || "", refId: ref.id || "", createdAt: now(), shares: [] };
+    const cfg = await messengerSettings();
+    if (cfg.mode !== "off" && (cfg.autoKinds || []).includes(kind)) {
+      const r = await notify.sendToChannel(cfg, rec.text);
+      rec.shares.push({ at: now(), by: "자동", via: r.ok ? `채널톡(${cfg.mode === "test" ? "시험" : "팀챗"})` : "채널톡 실패", error: r.ok ? "" : r.error });
+    }
+    await erp.put("notices", rec);
+  } catch (error) {
+    console.error("notice failed", error.message);
+  }
+}
+
 async function guardOpenMonth(res, month) {
   const c = await closingState();
   if (!closing.isLocked(c, month)) return true;
@@ -8049,6 +8070,7 @@ async function routeApi(req, res, url) {
     addAudit(db, actor, "create", "request", request.id, `${request.orderNo} 입금요청 생성`, null, request);
     await writeDb(db);
     sendJson(res, 201, { request });
+    pushNotice("request_new", { ...request, by: actor.name || "" }, { type: "request", id: request.id });
     syncArchiveInBackground(db, actor, request.brandId, "request_created");
     return;
   }
@@ -8086,6 +8108,7 @@ async function routeApi(req, res, url) {
     }
     if (updated.length) await writeDb(db);
     sendJson(res, 200, { updatedRequests: updated, skippedRequestIds: skipped.map((item) => item.id), batchId });
+    if (updated.length) pushNotice("request_paid", { items: updated, by: actor.name || "" }, { type: "request", id: updated[0].id });
     if (updated.length) syncArchiveInBackground(db, actor, [...touchedBrands], "request_paid");
     return;
   }
@@ -8149,6 +8172,7 @@ async function routeApi(req, res, url) {
     if (!updated.length) { sendJson(res, 200, { updatedRequests: [] }); return; }
     await writeDb(db);
     sendJson(res, 200, { updatedRequests: updated });
+    if (status === "paid") pushNotice("request_paid", { items: updated, by: actor.name || "" }, { type: "request", id: updated[0].id });
     syncArchiveInBackground(db, actor, [...touchedBrands], "status_changed");
     return;
   }
@@ -11502,6 +11526,63 @@ async function routeApi(req, res, url) {
   }
 
   // --- v2 입점사 월정산 보드 ----------------------------------------------------
+  // 메신저 공유함: 알림 목록·복사/보내기 기록·채널톡 설정(설정은 대표만).
+  if (pathname === "/api/notices" || pathname.startsWith("/api/notices/") || pathname.startsWith("/api/messenger/")) {
+    const canSee = actor.role === "owner" || can(actor, "payments", "view") || can(actor, "requests", "view") || can(actor, "cash", "view");
+    if (!canSee) { sendJson(res, 403, { error: "공유함을 볼 권한이 없습니다." }); return; }
+    const who = actor.name || actor.email || "";
+    if (pathname === "/api/notices" && method === "GET") {
+      const list = (await erp.list("notices")).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 300);
+      const cfg = await messengerSettings();
+      sendJson(res, 200, { notices: list, kinds: notify.NOTICE_KINDS, settings: actor.role === "owner" ? cfg : { mode: cfg.mode },
+        channelReady: notify.channelConfigured() && cfg.mode !== "off", keysPresent: notify.channelConfigured(), isOwner: actor.role === "owner" });
+      return;
+    }
+    if (pathname === "/api/notices" && method === "POST") {
+      const body = await readBody(req);
+      const text = String(body.text || "").trim().slice(0, 4000);
+      if (!text) { sendJson(res, 400, { error: "보낼 내용을 적어 주세요." }); return; }
+      const kind = body.kind === "daily" ? "daily" : "manual";
+      const rec = { id: id("ntc"), kind, title: String(body.title || text.split("\n")[0]).slice(0, 120), text, refType: "", refId: "", createdAt: now(), createdBy: who, shares: [] };
+      await erp.put("notices", rec);
+      sendJson(res, 201, { notice: rec });
+      return;
+    }
+    const share = pathname.match(/^\/api\/notices\/([^/]+)\/share$/);
+    if (share && method === "POST") {
+      const body = await readBody(req);
+      const rec = await erp.get("notices", decodeURIComponent(share[1]));
+      if (!rec) { sendJson(res, 404, { error: "알림을 찾을 수 없습니다." }); return; }
+      let entry = { at: now(), by: who, via: "복사" };
+      if (body.via === "channel") {
+        const r = await notify.sendToChannel(await messengerSettings(), rec.text);
+        if (!r.ok) { sendJson(res, 400, { error: r.error }); return; }
+        entry = { at: now(), by: who, via: `채널톡(${r.target === "test" ? "시험" : "팀챗"})` };
+      }
+      rec.shares = [...(rec.shares || []), entry].slice(-20);
+      await erp.put("notices", rec);
+      sendJson(res, 200, { notice: rec });
+      return;
+    }
+    if (pathname === "/api/messenger/settings" && method === "PUT") {
+      if (actor.role !== "owner") { sendJson(res, 403, { error: "대표만 바꿀 수 있습니다." }); return; }
+      const body = await readBody(req);
+      const cur = await messengerSettings();
+      const next = { ...cur, id: "messenger",
+        mode: ["off", "test", "live"].includes(body.mode) ? body.mode : cur.mode,
+        groupId: String(body.groupId ?? cur.groupId).replace(/\D/g, ""),
+        botName: String(body.botName ?? cur.botName).slice(0, 30),
+        testManagerId: String(body.testManagerId ?? cur.testManagerId).replace(/\D/g, ""),
+        autoKinds: Array.isArray(body.autoKinds) ? body.autoKinds.filter((k) => notify.NOTICE_KINDS[k]) : cur.autoKinds,
+        updatedBy: who, updatedAt: now() };
+      await erp.put("settings", next);
+      sendJson(res, 200, { settings: next });
+      return;
+    }
+    sendJson(res, 404, { error: "없는 기능입니다." });
+    return;
+  }
+
   if (pathname === "/api/closing" || pathname.startsWith("/api/closing/")) {
     if (!requirePermission(actor, res, "settlement", "view")) return;
     const who = actor.name || actor.email || "";
@@ -11534,6 +11615,7 @@ async function routeApi(req, res, url) {
       addAudit(db, actor, "update", "closing", month, `${month} 월 마감${body.note ? ` (${String(body.note).slice(0, 80)})` : ""}`, null, null);
       await writeDb(db);
       sendJson(res, 200, { closing: c });
+      pushNotice("closing", { month, note: String(body.note || "").slice(0, 80), by: who }, { type: "closing", id: month });
       return;
     }
     if (pathname === "/api/closing/unlock" && method === "POST") {
@@ -12966,6 +13048,7 @@ async function routeApi(req, res, url) {
       log(rec, "create", "", "requested");
       await erp.put("payments", rec);
       sendJson(res, 201, { payment: rec });
+      pushNotice("payment_new", { ...rec, by: who.name }, { type: "payment", id: rec.id });
       return;
     }
 
@@ -13013,6 +13096,8 @@ async function routeApi(req, res, url) {
       log(rec, body.action, from, to, String(body.note || "").slice(0, 300));
       await erp.put("payments", rec);
       sendJson(res, 200, { payment: rec });
+      const kind = to === "awaiting_approval" ? "payment_approval" : to === "paid" ? "payment_paid" : to === "confirmed" ? "payment_confirm" : "";
+      if (kind) pushNotice(kind, { ...rec, by: who.name }, { type: "payment", id: rec.id });
       return;
     }
 

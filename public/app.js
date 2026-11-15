@@ -870,9 +870,11 @@ function renderAppInner() {
     ["admins", "관리자"],
     ["audits", "이력"],
     ["archive", "아카이브"],
-    ["setup", "확인 필요"]
+    ["setup", "확인 필요"],
+    ["messenger", "메신저 공유"]
   ].filter(([key]) => (key === "monthly" || key === "closing" ? can("settlement", "view") : key === "trade" ? TRADE_SCREENS.some(([k]) => tradeCan(k)) : can(key, "view")) || (key === "pipeline" && can("reconcile", "view"))
-    || (key === "setup" && (state.admin?.role === "owner" || can("cash", "edit"))));
+    || (key === "setup" && (state.admin?.role === "owner" || can("cash", "edit")))
+    || (key === "messenger" && (state.admin?.role === "owner" || can("payments", "view") || can("requests", "view") || can("cash", "view"))));
   app.innerHTML = `
     <div class="shell">
       <aside class="sidebar">
@@ -982,7 +984,7 @@ const NAV_GROUPS = [
   { key: "settle", label: "정산", children: ["settlement", "monthly", "npb", "closing"] },
   { key: "mall", label: "자사몰관리", children: ["brands", "prices", "productsync"] },
   { key: "mgmt", label: "경영관리", children: ["kpi", "cash"] },
-  { key: "admin", label: "관리/설정", children: ["admins", "audits", "archive", "setup"] }
+  { key: "admin", label: "관리/설정", children: ["admins", "audits", "archive", "setup", "messenger"] }
 ];
 const navGroupOf = (tab) => NAV_GROUPS.find((g) => g.children.includes(tab));
 // 펼쳐 둔 대분류는 이 브라우저에 기억한다(편의용).
@@ -1185,6 +1187,7 @@ function renderCurrentTab() {
   if (state.tab === "setup") return renderSetup();
   if (state.tab === "monthly") return renderMonthly();
   if (state.tab === "closing") return renderClosing();
+  if (state.tab === "messenger") return renderMessenger();
   if (state.tab === "trade") return renderTrade();
   if (state.tab === "kpi") return renderKpi();
   if (state.tab === "admins") return renderAdmins();
@@ -2707,6 +2710,7 @@ function bindCurrentTab() {
   if (state.tab === "setup") bindSetup();
   if (state.tab === "monthly") bindMonthly();
   if (state.tab === "closing") bindClosing();
+  if (state.tab === "messenger") bindMessenger();
   if (state.tab === "trade") bindTrade();
   if (state.tab === "kpi") bindKpi();
   if (state.tab === "admins") bindAdmins();
@@ -12356,6 +12360,7 @@ function renderCashReport() {
     <section class="panel">
       <div class="toolbar" style="padding:12px 16px">
         <button class="primary" data-cash-copy>채널톡 보고 문구 복사</button>
+        <button data-cash-notice>공유함에 올리기</button>
         <button data-cash-print>인쇄·이미지 저장</button>
         <button data-cash-reload>새로고침</button>
       </div>
@@ -12484,6 +12489,12 @@ function bindCash() {
     showToast("저장했습니다.");
   });
   app.querySelector("[data-cash-print]")?.addEventListener("click", () => window.print());
+  app.querySelector("[data-cash-notice]")?.addEventListener("click", async () => {
+    try {
+      await api("/api/notices", { method: "POST", body: { kind: "daily", title: `일일 자금보고 ${cs.data?.report?.today || ""}`.trim(), text: cs.data?.text || "" } });
+      showToast("메신저 공유함에 올렸습니다.");
+    } catch (e) { showToast(e.message, "error"); }
+  });
   app.querySelector("[data-cash-copy]")?.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(cs.data?.text || "");
@@ -13035,6 +13046,109 @@ const qtyFmt = (n) => (Number(n || 0) % 1 ? Number(n).toLocaleString("ko-KR", { 
 // v2 입점사 월정산 보드 — 브랜드별 매출·배송비·회수·마진 + 확인/발행요청/발송 체크
 // ===========================================================================
 // ===========================================================================
+// v2 메신저 공유함 — 담당자가 봐야 할 알림(입금요청·지급요청·입금 완료·월 마감·일일 보고)을 모아
+// [복사]로 채널톡 팀챗에 붙여 넣는다. 채널톡 키·유료 플랜이 생기면 [채널톡 보내기]·자동 발송을 켠다.
+// ===========================================================================
+function messengerState() {
+  if (!state.messenger) state.messenger = { data: null, loading: false, filter: "unshared", writing: false, settingsOpen: false };
+  return state.messenger;
+}
+async function loadMessenger() {
+  const ms = messengerState();
+  ms.loading = true;
+  try { ms.data = await api("/api/notices"); ms.error = ""; } catch (e) { ms.error = e.message; ms.data = { notices: [], kinds: {}, settings: {} }; }
+  finally { ms.loading = false; }
+}
+function renderMessenger() {
+  const ms = messengerState();
+  const head = pageHead("메신저 공유", "담당자가 확인할 일을 한곳에 모읍니다. [복사]를 눌러 채널톡 팀챗에 붙여 넣으세요. (채널톡 무료 플랜은 자동 발송이 안 됩니다)");
+  const d = ms.data;
+  if (!d) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const unshared = d.notices.filter((n) => !(n.shares || []).length);
+  const list = ms.filter === "unshared" ? unshared : ms.filter === "all" ? d.notices : d.notices.filter((n) => n.kind === ms.filter);
+  const kindsUsed = [...new Set(d.notices.map((n) => n.kind))];
+  const chip = (key, label, n) => `<button class="npb-subtab ${ms.filter === key ? "active" : ""}" data-msg-filter="${key}">${h(label)}${n != null ? ` <span class="muted">${n}</span>` : ""}</button>`;
+  const rows = list.map((n) => {
+    const last = (n.shares || []).slice(-1)[0];
+    return `<tr>
+      <td class="nowrap">${h(fmtDate(n.createdAt))}</td>
+      <td class="nowrap"><span class="pill">${h(d.kinds[n.kind] || n.kind)}</span></td>
+      <td class="wrap"><strong>${h(n.title)}</strong><div class="msg-text">${h(n.text)}</div></td>
+      <td class="wrap muted" style="font-size:12px">${last ? `${h(last.via)} · ${h(last.by)}<br>${h(fmtDate(last.at))}${last.error ? `<br><span class="danger-text">${h(last.error)}</span>` : ""}` : "안 보냄"}</td>
+      <td class="nowrap"><button class="small" data-msg-copy="${h(n.id)}">복사</button>${d.channelReady ? ` <button class="small" data-msg-send="${h(n.id)}">채널톡</button>` : ""}</td></tr>`;
+  }).join("");
+  const cfg = d.settings || {};
+  const kindsList = Object.entries(d.kinds || {}).filter(([k]) => !["manual", "daily"].includes(k));
+  const settings = d.isOwner ? `<section class="panel" style="margin-top:14px"><div class="panel-head"><h2>채널톡 연결 설정</h2><button class="small" data-msg-settings-toggle>${ms.settingsOpen ? "접기" : "펼치기"}</button></div>
+    ${ms.settingsOpen ? `<div class="panel-body"><form data-msg-settings class="form-grid">
+      <p class="${d.keysPresent ? "" : "danger-text"}" style="grid-column:1/-1">${d.keysPresent ? "채널톡 키·비밀값이 서버에 있습니다." : "채널톡 키·비밀값이 없습니다. 무료 플랜은 Open API 를 쓸 수 없어 지금은 [복사]만 됩니다. (Startup 이상 + 설정 › 보안 및 개발 › API 키에서 키·비밀값 발급 → 서버 환경변수 CHANNEL_ACCESS_KEY / CHANNEL_ACCESS_SECRET)"}</p>
+      <div class="field"><label>보내기</label><select name="mode">
+        <option value="off" ${cfg.mode === "off" ? "selected" : ""}>끔 (복사만)</option>
+        <option value="test" ${cfg.mode === "test" ? "selected" : ""}>시험 — 내 계정에만 공지</option>
+        <option value="live" ${cfg.mode === "live" ? "selected" : ""}>실제 — 팀챗 그룹에 보냄</option></select></div>
+      <div class="field"><label>팀챗 그룹 ID</label><input name="groupId" value="${h(cfg.groupId || "")}" inputmode="numeric"></div>
+      <div class="field"><label>보내는 이름(봇)</label><input name="botName" value="${h(cfg.botName || "")}" maxlength="30"></div>
+      <div class="field"><label>시험용 내 매니저 ID</label><input name="testManagerId" value="${h(cfg.testManagerId || "")}" inputmode="numeric"></div>
+      <div class="field" style="grid-column:1/-1"><label>자동으로 보낼 알림</label><div class="chip-list">${kindsList.map(([k, label]) => `<label class="chip"><input type="checkbox" name="auto_${k}" ${(cfg.autoKinds || []).includes(k) ? "checked" : ""}> ${h(label)}</label>`).join("")}</div></div>
+      <div class="toolbar" style="grid-column:1/-1"><button class="primary" type="submit">저장</button></div>
+    </form></div>` : ""}</section>` : "";
+  const writer = ms.writing ? v2Modal(`<div class="panel-head"><h2>직접 써서 올리기</h2><button data-msg-close>닫기</button></div>
+    <div class="panel-body"><form data-msg-write class="form-grid"><div class="field" style="grid-column:1/-1"><label>내용</label><textarea name="text" rows="8" required></textarea></div>
+    <div class="toolbar" style="grid-column:1/-1"><button class="primary" type="submit">공유함에 올리기</button></div></form></div>`, "data-msg-close") : "";
+  return `${head}
+    <section class="panel"><div class="panel-head"><h2>알림</h2>
+      <div class="toolbar">${unshared.length ? `<button class="primary" data-msg-copy-all>안 보낸 것 ${unshared.length}건 한꺼번에 복사</button>` : ""}<button data-msg-write-open>+ 직접 쓰기</button></div></div>
+      <div class="panel-body">
+        ${ms.error ? `<p class="error-text">${h(ms.error)}</p>` : ""}
+        <div class="toolbar chip-row">${chip("unshared", "안 보낸 것", unshared.length)}${chip("all", "전체", d.notices.length)}${kindsUsed.map((k) => chip(k, d.kinds[k] || k, d.notices.filter((n) => n.kind === k).length)).join("")}</div>
+        <div class="table-wrap"><table class="compact msg-table"><thead><tr><th>시각</th><th>종류</th><th>내용</th><th>공유</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="5" class="empty">${ms.filter === "unshared" ? "안 보낸 알림이 없습니다." : "알림이 없습니다."}</td></tr>`}</tbody></table></div>
+      </div></section>${settings}${writer}`;
+}
+function bindMessenger() {
+  const ms = messengerState();
+  if (!ms.data && !ms.loading) { loadMessenger().then(renderApp); return; }
+  const reload = async () => { await loadMessenger(); renderApp(); };
+  const mark = (id, via) => api(`/api/notices/${encodeURIComponent(id)}/share`, { method: "POST", body: { via } });
+  app.querySelectorAll("[data-msg-filter]").forEach((b) => b.addEventListener("click", () => { ms.filter = b.dataset.msgFilter; renderApp(); }));
+  app.querySelectorAll("[data-msg-copy]").forEach((b) => b.addEventListener("click", async () => {
+    const n = ms.data.notices.find((x) => x.id === b.dataset.msgCopy);
+    try { await navigator.clipboard.writeText(n.text); } catch { showToast("복사하지 못했습니다. 글을 직접 선택해 복사하세요.", "error"); return; }
+    await mark(n.id, "copy").catch(() => {});
+    showToast("복사했습니다. 채널톡 팀챗에 붙여 넣으세요.");
+    reload();
+  }));
+  app.querySelector("[data-msg-copy-all]")?.addEventListener("click", async () => {
+    const list = ms.data.notices.filter((n) => !(n.shares || []).length).slice().reverse();
+    try { await navigator.clipboard.writeText(list.map((n) => n.text).join("\n\n")); } catch { showToast("복사하지 못했습니다.", "error"); return; }
+    for (const n of list) await mark(n.id, "copy").catch(() => {});
+    showToast(`${list.length}건을 복사했습니다. 채널톡 팀챗에 붙여 넣으세요.`);
+    reload();
+  });
+  app.querySelectorAll("[data-msg-send]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("채널톡으로 보낼까요?")) return;
+    try { await mark(b.dataset.msgSend, "channel"); showToast("채널톡으로 보냈습니다."); reload(); } catch (e) { showToast(e.message, "error"); }
+  }));
+  app.querySelector("[data-msg-write-open]")?.addEventListener("click", () => { ms.writing = true; renderApp(); });
+  app.querySelectorAll("[data-msg-close]").forEach((b) => b.addEventListener("click", () => { ms.writing = false; renderApp(); }));
+  bindV2Modal();
+  app.querySelector("[data-msg-write]")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = new FormData(e.currentTarget).get("text");
+    try { await api("/api/notices", { method: "POST", body: { text } }); ms.writing = false; showToast("올렸습니다."); reload(); } catch (err) { showToast(err.message, "error"); }
+  });
+  app.querySelector("[data-msg-settings-toggle]")?.addEventListener("click", () => { ms.settingsOpen = !ms.settingsOpen; renderApp(); });
+  app.querySelector("[data-msg-settings]")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.currentTarget);
+    const autoKinds = Object.keys(ms.data.kinds).filter((k) => f.get(`auto_${k}`));
+    if (f.get("mode") === "live" && !confirm("실제 모드는 팀챗 그룹 전체에 알림이 갑니다. 저장할까요?")) return;
+    try { await api("/api/messenger/settings", { method: "PUT", body: { mode: f.get("mode"), groupId: f.get("groupId"), botName: f.get("botName"), testManagerId: f.get("testManagerId"), autoKinds } }); showToast("저장했습니다."); reload(); }
+    catch (err) { showToast(err.message, "error"); }
+  });
+}
+
+// ===========================================================================
 // v2 월 마감 — 그 달에 끝나지 않은 일 점검 → 대표가 마감(잠금). 마감한 달은 서버가 수정을 거부한다.
 // ===========================================================================
 function closingUiState() {
@@ -13064,7 +13178,7 @@ function renderClosing() {
       <td class="wrap muted" style="font-size:12px">${h((it.sample || []).join(", "))}${it.count > (it.sample || []).length ? " …" : ""}</td>
       <td class="wrap" style="font-size:12px">${it.count ? h(it.hint) : ""}</td>
       <td>${it.count && it.go ? `<button class="small" data-closing-go="${h(it.go.tab)}${it.go.sub ? `:${h(it.go.sub)}` : ""}">가기</button>` : ""}</td></tr>`).join("");
-  const hist = (c.history || []).slice(0, 12).map((x) => `<tr><td>${h(String(x.at || "").slice(0, 16).replace("T", " "))}</td><td>${x.action === "lock" ? "마감" : "해제"}</td><td>${h(x.month)}</td><td>${h(x.by)}</td><td class="wrap">${h(x.note || "")}${x.open ? ` (남은 일 ${x.open}건)` : ""}</td></tr>`).join("");
+  const hist = (c.history || []).slice(0, 12).map((x) => `<tr><td>${h(fmtDate(x.at))}</td><td>${x.action === "lock" ? "마감" : "해제"}</td><td>${h(x.month)}</td><td>${h(x.by)}</td><td class="wrap">${h(x.note || "")}${x.open ? ` (남은 일 ${x.open}건)` : ""}</td></tr>`).join("");
   return `${head}
     <section class="panel"><div class="panel-head"><h2>점검할 달</h2>
       <div class="toolbar"><input type="month" data-closing-month value="${h(cs.month)}">
