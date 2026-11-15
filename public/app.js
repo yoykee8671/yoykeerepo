@@ -758,7 +758,48 @@ function renderLogin(error = "") {
   });
 }
 
+// 다시 그려도 보던 자리를 지킨다. 같은 화면(탭 + 하위 화면)이면 창과 스크롤되는 상자(표·사이드바·팝업)의
+// 위치를 되돌리고, 다른 화면으로 옮기면 맨 위에서 시작한다. 위치는 사용자가 스크롤할 때 기억하고,
+// 다시 그린 직후 잠깐(불러오는 중 화면이 짧아져 브라우저가 위치를 줄이는 동안)은 기억을 덮어쓰지 않는다.
+const scrollMemory = { view: "", win: 0, boxes: {} };
+let scrollQuietUntil = 0;
+function currentViewKey() {
+  const sub = TAB_SUBMENUS[state.tab];
+  return `${state.tab}|${sub ? state[sub.stateKey]?.screen || "" : ""}`;
+}
+function scrollBoxKey(el) {
+  const sig = `${el.tagName}.${[...el.classList].sort().join(".")}`;
+  return `${sig}#${[...app.querySelectorAll(el.tagName)].filter((x) => `${x.tagName}.${[...x.classList].sort().join(".")}` === sig).indexOf(el)}`;
+}
+document.addEventListener("scroll", (event) => {
+  if (Date.now() < scrollQuietUntil) return;
+  const el = event.target;
+  if (el === document || el === document.documentElement) scrollMemory.win = window.scrollY;
+  else if (el instanceof Element && app.contains(el)) scrollMemory.boxes[scrollBoxKey(el)] = [el.scrollTop, el.scrollLeft];
+}, { capture: true, passive: true });
+function restoreScroll(view) {
+  if (scrollMemory.view !== view) {
+    scrollMemory.view = view; scrollMemory.win = 0; scrollMemory.boxes = {};
+    scrollQuietUntil = Date.now() + 300;
+    window.scrollTo(0, 0);
+    return;
+  }
+  scrollQuietUntil = Date.now() + 300;
+  window.scrollTo(0, scrollMemory.win);
+  for (const [key, [top, left]] of Object.entries(scrollMemory.boxes)) {
+    const [sig, idx] = key.split("#");
+    const [tag, ...cls] = sig.split(".");
+    const el = [...app.querySelectorAll(tag)].filter((x) => [...x.classList].sort().join(".") === cls.join("."))[Number(idx)];
+    if (el) { el.scrollTop = top; el.scrollLeft = left; }
+  }
+}
+
 function renderApp() {
+  renderAppInner();
+  if (!isRequestPopup && !isBrandPopup && !PROCUREMENT_POPUPS[procurementPopupKind]) restoreScroll(currentViewKey());
+}
+
+function renderAppInner() {
   if (isRequestPopup) {
     app.innerHTML = renderRequestPopup();
     bindCurrentTab();
