@@ -595,6 +595,11 @@ def write_values(ws, doc_type, layout, spec, delivery=()):
     spell it out in the amount-in-words bar."""
     cfg = DOC_CONFIGS[doc_type]
     gross_mode = spec.get("priceMode") == "gross"
+    if gross_mode:
+        # 포함가 문서: 단가 x 수량 = 포함 합계가 그대로 맞아 보이도록 칸 이름을
+        # 바꾼다. 공급가액·부가세는 아래 합계 칸에서 포함 합계로부터 역산한다.
+        ws.cell(row=layout.table_header_row, column=7, value="단가(VAT포함)")
+        ws.cell(row=layout.table_header_row, column=8, value="합계(VAT포함)")
 
     ws.cell(row=layout.doc_no_row, column=7, value=spec.get("docNo", ""))
 

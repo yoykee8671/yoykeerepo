@@ -31,6 +31,7 @@ const state = {
   materials: [],
   purchaseOrders: [],
   deliveryPlaces: [],
+  transferAccounts: [],
   priceEntries: [],
   priceCatalog: [],
   aliasEntries: [],
@@ -144,10 +145,31 @@ const TRADE_DOC_TYPES = [
 const TRADE_DOC_LABELS = Object.fromEntries(TRADE_DOC_TYPES.map(([key, label]) => [key, label]));
 const TRADE_DOC_META = Object.fromEntries(TRADE_DOC_TYPES.map(([key, , meta]) => [key, meta]));
 const tradeDocMeta = (docType) => TRADE_DOC_META[docType] || TRADE_DOC_META.purchase_order;
+// '거래' 메뉴: 판매·생산/재고·거래관리를 한 메뉴로(대표 결정 2026-11-15). 화면 자체는 기존 것을 그대로 쓴다.
+const TRADE_SCREENS = [
+  ["partners", "거래처(사업자)"],
+  ["sales", "판매 주문·가격"],
+  ["stock", "생산·재고·생산비"],
+  ["orders", "명세서·발주서"],
+  ["materials", "원부자재"],
+  ["deliveryPlaces", "납품지"],
+  ["accounts", "입금계좌"]
+];
+function tradeCan(key) {
+  if (key === "sales") return can("sales", "view");
+  if (key === "stock") return can("stock", "view");
+  return can("procurement", "view");
+}
+function tradeState() {
+  if (!state.trade) state.trade = { screen: (TRADE_SCREENS.find(([k]) => tradeCan(k)) || ["partners"])[0] };
+  return state.trade;
+}
+
 const PROCUREMENT_SCREENS = [
   ["partners", "거래처관리"],
   ["materials", "원부자재관리"],
   ["deliveryPlaces", "납품지관리"],
+  ["accounts", "계좌관리"],
   ["orders", "명세서 발행"]
 ];
 
@@ -358,6 +380,9 @@ async function api(path, options = {}) {
   });
   const isJson = response.headers.get("content-type")?.includes("application/json");
   const data = isJson ? await response.json() : await response.text();
+  if (response.ok && data && typeof data === "object" && typeof data.warning === "string") {
+    setTimeout(() => showToast(data.warning, "error"), 0);
+  }
   if (!response.ok) {
     const error = new Error(data?.error || "요청에 실패했습니다.");
     if (data?.details) error.details = data.details;
@@ -365,6 +390,29 @@ async function api(path, options = {}) {
     throw error;
   }
   return data;
+}
+
+// Several GETs in one round trip (/api/batch). Returns data in the same order;
+// a failed sub-call becomes an Error object unless `throwOnError`.
+async function apiBatch(paths, { throwOnError = true } = {}) {
+  // 이미 받아 둔 목록은 해시를 보내고, 서버는 바뀌지 않았으면 내용 없이 same 만 돌려준다
+  // (저장 뒤 다시 불러올 때 바뀐 목록만 내려온다). 기억은 이 탭의 메모리에만 둔다.
+  const cache = (state.batchCache ||= {});
+  const qs = paths.map((p) => `p=${encodeURIComponent(p)}&v=${encodeURIComponent(cache[p]?.hash || "")}`).join("&");
+  const { results } = await api(`/api/batch?${qs}`);
+  return paths.map((p) => {
+    const r = results[p] || { status: 500, data: {} };
+    if (r.status < 400 && r.same && cache[p]) return structuredClone(cache[p].data);
+    if (r.status < 400) {
+      if (r.hash) cache[p] = { hash: r.hash, data: structuredClone(r.data) };
+      return r.data;
+    }
+    const error = new Error(r.data?.error || "요청에 실패했습니다.");
+    error.status = r.status;
+    error.payload = r.data;
+    if (throwOnError) throw error;
+    return error;
+  });
 }
 
 function h(value) {
@@ -522,12 +570,12 @@ function splitDirectTotal(total, brand) {
   return { product: value, shipping: 0 };
 }
 
-function renderCreditBalance(value) {
+function renderCreditBalance(value, withUnit = true) {
   const n = Number(value || 0);
   if (!n) return `<span class="muted">-</span>`;
   const color = n > 0 ? "var(--green)" : "var(--red)";
   const prefix = n > 0 ? "+" : "";
-  return `<strong style="color:${color}">${prefix}${money.format(n)}원</strong>`;
+  return `<strong style="color:${color}">${prefix}${money.format(n)}${withUnit ? "원" : ""}</strong>`;
 }
 
 function discountKindLabel(value) {
@@ -578,13 +626,14 @@ async function init() {
     await renderShare(location.pathname.split("/").pop());
     return;
   }
-  const session = await api("/api/session");
-  state.admin = session.admin;
+  // 세션 확인과 첫 목록을 한 번에 받는다. 로그인 전이면 목록은 401 로 와서 버린다.
+  const [session, ...lists] = await apiBatch(["/api/session", ...LOAD_ALL_PATHS], { throwOnError: false });
+  state.admin = session instanceof Error ? null : session.admin;
   if (!state.admin) {
     renderLogin();
     return;
   }
-  await loadAll();
+  await loadAll(lists);
   if (isRequestPopup) {
     state.tab = "requests";
     state.editingRequest = popupDraftPrefill
@@ -625,24 +674,19 @@ async function init() {
   renderApp();
 }
 
-async function loadAll() {
+const LOAD_ALL_PATHS = ["/api/dashboard", "/api/brands", "/api/requests", "/api/price-entries", "/api/price-aliases", "/api/promotion-rules",
+  "/api/payment-logs", "/api/admins", "/api/menus", "/api/partners", "/api/materials", "/api/purchase-orders", "/api/delivery-places", "/api/transfer-accounts"];
+
+async function loadAll(prefetched = null) {
   // 이력·아카이브는 화면을 열 때가 아니라 해당 탭을 눌렀을 때 부른다. 감사로그
   // 전체는 2MB가 넘어서, 매번 실어 보내면 나머지 응답까지 같이 밀린다.
-  const [dashboard, brands, requests, priceEntries, priceAliases, promotionRules, paymentLogs, admins, menus, partners, materials, purchaseOrders, deliveryPlaces] = await Promise.all([
-    api("/api/dashboard"),
-    api("/api/brands"),
-    api("/api/requests"),
-    api("/api/price-entries"),
-    api("/api/price-aliases"),
-    api("/api/promotion-rules"),
-    api("/api/payment-logs"),
-    api("/api/admins"),
-    api("/api/menus"),
-    api("/api/partners"),
-    api("/api/materials"),
-    api("/api/purchase-orders"),
-    api("/api/delivery-places")
-  ]);
+  // 목록 14개는 /api/batch 한 번으로 받는다(터널 왕복 한 번에 0.5초 안팎).
+  const lists = prefetched || await apiBatch(LOAD_ALL_PATHS, { throwOnError: false });
+  const firstError = lists.slice(0, 13).find((x) => x instanceof Error);
+  if (firstError) throw firstError;
+  const [dashboard, brands, requests, priceEntries, priceAliases, promotionRules, paymentLogs, admins, menus, partners, materials, purchaseOrders, deliveryPlaces, transferAccounts] = lists;
+  // 입금계좌 목록. 브랜드 설정의 계좌 선택과 계좌관리 화면이 쓴다.
+  state.transferAccounts = (transferAccounts instanceof Error ? {} : transferAccounts).transferAccounts || [];
   state.menus = menus.menus || [];
   state.actionLabels = menus.actionLabels || {};
   state.dashboard = dashboard;
@@ -683,8 +727,8 @@ function renderLogin(error = "") {
   app.innerHTML = `
     <main class="login">
       <form class="login-panel" data-login>
-        <h1>WooofPay</h1>
-        <p>입금 요청, 브랜드 아카이브, 관리자 이력을 한 곳에서 관리합니다.</p>
+        <h1>WOOOF ERP</h1>
+        <p>우프 통합 관리 시스템 — 결제·거래·정산·자금을 한 곳에서 관리합니다.</p>
         <div class="form-grid" style="margin-top:16px">
           <div class="field">
             <label>이메일</label>
@@ -717,7 +761,92 @@ function renderLogin(error = "") {
   });
 }
 
+// 다시 그려도 보던 자리를 지킨다. 같은 화면(탭 + 하위 화면)이면 창과 스크롤되는 상자(표·사이드바·팝업)의
+// 위치를 되돌리고, 다른 화면으로 옮기면 맨 위에서 시작한다. 위치는 사용자가 스크롤할 때 기억하고,
+// 다시 그린 직후 잠깐(불러오는 중 화면이 짧아져 브라우저가 위치를 줄이는 동안)은 기억을 덮어쓰지 않는다.
+const scrollMemory = { view: "", win: 0, boxes: {} };
+let scrollQuietUntil = 0;
+function currentViewKey() {
+  const sub = TAB_SUBMENUS[state.tab];
+  return `${state.tab}|${sub ? state[sub.stateKey]?.screen || "" : ""}`;
+}
+function scrollBoxKey(el) {
+  const sig = `${el.tagName}.${[...el.classList].sort().join(".")}`;
+  return `${sig}#${[...app.querySelectorAll(el.tagName)].filter((x) => `${x.tagName}.${[...x.classList].sort().join(".")}` === sig).indexOf(el)}`;
+}
+document.addEventListener("scroll", (event) => {
+  if (Date.now() < scrollQuietUntil) return;
+  const el = event.target;
+  if (el === document || el === document.documentElement) scrollMemory.win = window.scrollY;
+  else if (el instanceof Element && app.contains(el)) scrollMemory.boxes[scrollBoxKey(el)] = [el.scrollTop, el.scrollLeft];
+}, { capture: true, passive: true });
+function restoreScroll(view) {
+  if (scrollMemory.view !== view) {
+    scrollMemory.view = view; scrollMemory.win = 0; scrollMemory.boxes = {};
+    scrollQuietUntil = Date.now() + 300;
+    window.scrollTo(0, 0);
+    return;
+  }
+  scrollQuietUntil = Date.now() + 300;
+  window.scrollTo(0, scrollMemory.win);
+  for (const [key, [top, left]] of Object.entries(scrollMemory.boxes)) {
+    const [sig, idx] = key.split("#");
+    const [tag, ...cls] = sig.split(".");
+    const el = [...app.querySelectorAll(tag)].filter((x) => [...x.classList].sort().join(".") === cls.join("."))[Number(idx)];
+    if (el) { el.scrollTop = top; el.scrollLeft = left; }
+  }
+}
+
+// 목록 + 입력칸 2단 화면: 입력칸을 접으면 목록이 화면 전체를 쓴다(1920 모니터에서도 표가 잘리지 않게).
+// 기준정보 화면(거래처·원부자재·납품지·입금계좌·명세서·단가표·브랜드)은 기본 접힘, 입금요청·지급요청처럼
+// 입력이 잦은 화면은 기본 펼침. 수정 중이면 항상 펼친다. 화면별 선택은 이 브라우저에 기억한다.
+const FORM_COLLAPSED_DEFAULT = new Set(["trade|partners", "trade|materials", "trade|deliveryPlaces", "trade|accounts", "trade|orders", "prices|", "brands|", "procurement|partners", "procurement|materials", "procurement|deliveryPlaces", "procurement|orders"]);
+function formPrefs() {
+  if (!state.formPrefs) { try { state.formPrefs = JSON.parse(localStorage.getItem("formCollapsed") || "{}"); } catch { state.formPrefs = {}; } }
+  return state.formPrefs;
+}
+function enhanceLayouts() {
+  const view = currentViewKey();
+  app.querySelectorAll(".main section.layout:not(.single)").forEach((layout, i) => {
+    const [list, side] = layout.children;
+    if (!list || !side || layout.children.length !== 2 || !side.querySelector("form")) return;
+    const key = `${view}#${i}`;
+    const editing = /수정/.test(side.querySelector(".panel-head h2, h2")?.textContent || "");
+    const pref = formPrefs()[key];
+    const collapsed = !editing && (pref ?? FORM_COLLAPSED_DEFAULT.has(view));
+    layout.classList.add("layout-collapsible");
+    layout.classList.toggle("form-collapsed", collapsed);
+    const set = (v) => { formPrefs()[key] = v; try { localStorage.setItem("formCollapsed", JSON.stringify(formPrefs())); } catch {} };
+    const sideHead = side.querySelector(".panel-head");
+    if (sideHead && !editing) {
+      const close = document.createElement("button");
+      close.type = "button"; close.className = "small ghost form-fold"; close.textContent = "접기 ⟩"; close.title = "입력칸을 접고 목록을 넓게 봅니다";
+      close.addEventListener("click", () => { set(true); layout.classList.add("form-collapsed"); });
+      sideHead.appendChild(close);
+    }
+    const listHead = list.querySelector(".panel-head") || list;
+    const open = document.createElement("button");
+    open.type = "button"; open.className = "small form-unfold";
+    open.textContent = `⟨ ${(side.querySelector(".panel-head h2, h2")?.textContent || "입력").trim()}`;
+    open.addEventListener("click", () => { set(false); layout.classList.remove("form-collapsed"); side.scrollIntoView({ block: "nearest" }); });
+    listHead.appendChild(open);
+    // 목록의 '새 ○○' 버튼은 입력칸을 펼친 채로 열리게 한다(원래 동작보다 먼저 돈다).
+    list.querySelectorAll("button").forEach((btn) => {
+      const t = btn.textContent.trim();
+      if (/^(새 |\+ ?새|＋)/.test(t) && !/새 ?창/.test(t)) btn.addEventListener("click", () => set(false), { capture: true });
+    });
+  });
+}
+
 function renderApp() {
+  renderAppInner();
+  if (!isRequestPopup && !isBrandPopup && !PROCUREMENT_POPUPS[procurementPopupKind]) {
+    enhanceLayouts();
+    restoreScroll(currentViewKey());
+  }
+}
+
+function renderAppInner() {
   if (isRequestPopup) {
     app.innerHTML = renderRequestPopup();
     bindCurrentTab();
@@ -768,33 +897,40 @@ function renderApp() {
     return;
   }
   const tabs = [
+    // 순서 = 좌측 메뉴 순서. 묶음(대분류)은 NAV_GROUPS 로 정하고, 첫 중분류 자리에 나온다.
     ["dashboard", "대시보드"],
-    ["requests", "입금요청"],
-    ["prices", "단가표"],
-    ["brands", "브랜드"],
-    ["procurement", "거래관리"],
-    ["admins", "관리자"],
-    ["audits", "이력"],
-    ["archive", "아카이브"],
     // 자동화(카페24 수집)와 클로브ai(입금대사)는 결국 한 흐름이라 한 화면에서
     // 본다. 권한 키는 pipeline 하나로 묶고, 화면 안에서 두 단계를 이어 보여준다.
     ["pipeline", "주문매칭"],
-    ["settlement", "정산"],
+    ["requests", "입금요청"],
+    ["payments", "지급요청"],
+    ["trade", "거래"],
+    ["settlement", "월 정산 생성"],
+    ["monthly", "월 정산 현황"],
     ["npb", "npb정산"],
-    ["productsync", "상품동기화"]
-  ].filter(([key]) => can(key, "view") || (key === "pipeline" && can("reconcile", "view")));
+    ["closing", "월 마감"],
+    ["brands", "브랜드"],
+    ["prices", "단가표"],
+    ["productsync", "상품동기화"],
+    ["kpi", "KPI·손익"],
+    ["cash", "자금"],
+    ["admins", "관리자"],
+    ["audits", "이력"],
+    ["archive", "아카이브"],
+    ["setup", "확인 필요"],
+    ["messenger", "메신저 공유"]
+  ].filter(([key]) => (key === "monthly" || key === "closing" ? can("settlement", "view") : key === "trade" ? TRADE_SCREENS.some(([k]) => tradeCan(k)) : can(key, "view")) || (key === "pipeline" && can("reconcile", "view"))
+    || (key === "setup" && (state.admin?.role === "owner" || can("cash", "edit")))
+    || (key === "messenger" && (state.admin?.role === "owner" || can("payments", "view") || can("requests", "view") || can("cash", "view"))));
   app.innerHTML = `
     <div class="shell">
       <aside class="sidebar">
-        <div class="brandmark">
-          <strong>WooofPay</strong>
-          <span>선매입 브랜드 입금 관리</span>
-        </div>
+        <button type="button" class="brandmark" data-go-home title="홈(대시보드)">
+          <strong>WOOOF ERP</strong>
+          <span>우프 통합 관리 시스템</span>
+        </button>
         <nav class="nav">
-          ${tabs.map(([key, label]) => `
-            <button data-tab="${key}" class="${state.tab === key ? "active" : ""}">${label}${key === "productsync" ? renderPsNavDot() : ""}</button>
-            ${state.tab === key ? renderTabSubmenu(key) : ""}
-          `).join("")}
+          ${renderNavItems(tabs)}
         </nav>
         <div class="sidebar-footer">
           <span>${h(state.admin.name)} · ${h(state.admin.role)}</span>
@@ -807,9 +943,50 @@ function renderApp() {
   app.querySelectorAll("[data-tab]").forEach((button) => {
     button.addEventListener("click", () => {
       state.tab = button.dataset.tab;
+      state.navKeepClosed = null;
+      if (state.tab === "trade") tradeState();
       clearEditing();
       renderApp();
     });
+  });
+  app.querySelectorAll("[data-nav-group]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const open = navOpenSet();
+      const key = button.dataset.navGroup;
+      // 보고 있는 화면의 대분류를 접으면, 다른 화면으로 옮길 때까지 접힌 채로 둔다.
+      if (open.has(key)) { open.delete(key); if (navGroupOf(state.tab)?.key === key) state.navKeepClosed = key; }
+      else { open.add(key); if (state.navKeepClosed === key) state.navKeepClosed = null; }
+      saveNavOpen();
+      renderApp();
+    });
+  });
+  app.querySelectorAll("[data-nav-star]").forEach((star) => {
+    star.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const key = star.dataset.navStar;
+      const list = navFavorites();
+      const next = list.includes(key) ? list.filter((x) => x !== key) : [...list, key];
+      state.admin.navFavorites = next;
+      renderApp();
+      try { state.admin.navFavorites = (await api("/api/me/nav-favorites", { method: "PUT", body: { favorites: next } })).favorites; }
+      catch (error) { state.admin.navFavorites = list; renderApp(); showToast(error.message, "error"); }
+    });
+  });
+  app.querySelectorAll("[data-nav-fav]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const [tab, sub] = button.dataset.navFav.split(":");
+      state.tab = tab;
+      if (tab === "trade") tradeState();
+      const conf = TAB_SUBMENUS[tab];
+      if (sub && conf) state[conf.stateKey].screen = sub;
+      clearEditing();
+      renderApp();
+    });
+  });
+  app.querySelector("[data-go-home]")?.addEventListener("click", () => {
+    state.tab = "dashboard";
+    clearEditing();
+    renderApp();
   });
   app.querySelectorAll("[data-subtab]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -817,7 +994,7 @@ function renderApp() {
       if (!config) return;
       state[config.stateKey].screen = button.dataset.subtabKey;
       // 화면을 옮기면 이전 화면의 일회성 안내(엑셀 업로드 결과 등)는 지운다.
-      if (config.stateKey === "procurement") {
+      if (config.stateKey === "procurement" || config.stateKey === "trade") {
         state.procurement.importStatus = null;
         state.procurement.templateDownloadFor = null;
       }
@@ -833,23 +1010,90 @@ function renderApp() {
   startPsBadgePolling();
 }
 
+// 우프코드(v2 통합 고유코드) 표시. 없으면 빈칸.
+function codeTag(item) {
+  return item?.code ? `<span class="code-tag">${h(item.code)}</span> ` : "";
+}
+
 // 대분류에 하위 메뉴가 있으면 사이드바에서 그 아래로 펼친다. 대분류마다
 // 하위 메뉴 목록과, 선택 상태를 들고 있는 state 키를 여기 한 곳에 적는다.
 const TAB_SUBMENUS = {
+  trade: { screens: TRADE_SCREENS, stateKey: "trade", visible: (key) => tradeCan(key) },
   procurement: { screens: PROCUREMENT_SCREENS, stateKey: "procurement" },
   npb: { screens: NPB_SCREENS, stateKey: "npb" },
   productsync: { screens: PRODUCT_SYNC_SCREENS, stateKey: "productSync" }
 };
 
+// 대분류 아래 중분류로 묶는 메뉴(대표 결정 2026-11-16). 중분류는 원래 탭 그대로(state.tab)라
+// 화면·권한·하위 화면은 바뀌지 않는다. 대분류는 눌러서 펼치고 접는다(▸/▾).
+const NAV_GROUPS = [
+  { key: "buy", label: "결제/구매", children: ["pipeline", "requests", "payments"] },
+  { key: "settle", label: "정산", children: ["settlement", "monthly", "npb", "closing"] },
+  { key: "mall", label: "자사몰관리", children: ["brands", "prices", "productsync"] },
+  { key: "mgmt", label: "경영관리", children: ["kpi", "cash"] },
+  { key: "admin", label: "관리/설정", children: ["admins", "audits", "archive", "setup", "messenger"] }
+];
+const navGroupOf = (tab) => NAV_GROUPS.find((g) => g.children.includes(tab));
+// 펼쳐 둔 대분류는 이 브라우저에 기억한다(편의용).
+function navOpenSet() {
+  if (!state.navOpen) {
+    let saved = [];
+    try { saved = JSON.parse(localStorage.getItem("navOpen") || "[]"); } catch {}
+    state.navOpen = new Set(Array.isArray(saved) ? saved : []);
+  }
+  return state.navOpen;
+}
+function saveNavOpen() { try { localStorage.setItem("navOpen", JSON.stringify([...navOpenSet()])); } catch {} }
+const navFavorites = () => (Array.isArray(state.admin?.navFavorites) ? state.admin.navFavorites : []);
+const navStar = (favKey) => `<span class="nav-star ${navFavorites().includes(favKey) ? "on" : ""}" data-nav-star="${h(favKey)}" title="자주 쓰는 메뉴">${navFavorites().includes(favKey) ? "★" : "☆"}</span>`;
+
+function renderNavItems(tabs) {
+  const visible = new Map(tabs);
+  const open = navOpenSet();
+  const activeGroup = navGroupOf(state.tab);
+  if (activeGroup && state.navKeepClosed !== activeGroup.key) open.add(activeGroup.key);
+  const done = new Set();
+  const item = (key, label) => {
+    const hasSub = Boolean(TAB_SUBMENUS[key]);
+    return `
+    <button data-tab="${key}" class="nav-item ${state.tab === key ? "active" : ""}"><span class="nav-label">${label}${key === "productsync" ? renderPsNavDot() : ""}</span>${hasSub ? `<span class="nav-caret">${state.tab === key ? "▾" : "▸"}</span>` : ""}${navStar(key)}</button>
+    ${state.tab === key ? renderTabSubmenu(key) : ""}`;
+  };
+  // ★ 자주 쓰는 메뉴: 맨 위에 따로. 'tab' 또는 'tab:하위화면'.
+  const favs = navFavorites().map((fk) => {
+    const [tab, sub] = fk.split(":");
+    if (!visible.has(tab)) return "";
+    const conf = TAB_SUBMENUS[tab];
+    const subLabel = sub && conf ? (conf.screens.find(([k]) => k === sub) || [])[1] : "";
+    if (sub && !subLabel) return "";
+    const active = state.tab === tab && (!sub || state[conf.stateKey]?.screen === sub);
+    return `<button data-nav-fav="${h(fk)}" class="nav-item ${active ? "active" : ""}"><span class="nav-label">${h(subLabel || visible.get(tab))}${subLabel ? `<small class="nav-from"> · ${h(visible.get(tab))}</small>` : ""}</span>${navStar(fk)}</button>`;
+  }).filter(Boolean);
+  const favBlock = favs.length ? `<div class="nav-favs"><div class="nav-section">자주 쓰는 메뉴</div>${favs.join("")}</div>` : "";
+  return favBlock + tabs.map(([key, label]) => {
+    const group = navGroupOf(key);
+    if (!group) return item(key, label);
+    if (done.has(group.key)) return "";
+    done.add(group.key);
+    const kids = group.children.filter((k) => visible.has(k));
+    const isOpen = open.has(group.key);
+    return `
+      <button data-nav-group="${group.key}" class="nav-item ${kids.includes(state.tab) ? "active" : ""}"><span class="nav-label">${group.label}</span><span class="nav-caret">${isOpen ? "▾" : "▸"}</span></button>
+      ${isOpen ? `<div class="nav-sub">${kids.map((k) => item(k, visible.get(k))).join("")}</div>` : ""}`;
+  }).join("");
+}
+
 function renderTabSubmenu(tabKey) {
   const config = TAB_SUBMENUS[tabKey];
   if (!config) return "";
+  if (tabKey === "trade") tradeState();
   const current = state[config.stateKey]?.screen;
   return `
     <div class="nav-sub">
       ${config.screens
+        .filter(([key]) => !config.visible || config.visible(key))
         .map(([key, label]) =>
-          `<button data-subtab="${tabKey}" data-subtab-key="${key}" class="${current === key ? "active" : ""}">${label}</button>`)
+          `<button data-subtab="${tabKey}" data-subtab-key="${key}" class="nav-item ${current === key ? "active" : ""}"><span class="nav-label">${label}</span>${navStar(`${tabKey}:${key}`)}</button>`)
         .join("")}
     </div>`;
 }
@@ -962,11 +1206,37 @@ function clearEditing() {
   state.procurement.editingPurchaseOrder = null;
 }
 
+// '거래' 메뉴: 고른 하위 화면에 맞는 기존 화면을 그린다.
+function renderTrade() {
+  const t = tradeState();
+  if (!tradeCan(t.screen)) t.screen = (TRADE_SCREENS.find(([k]) => tradeCan(k)) || ["partners"])[0];
+  if (t.screen === "sales") return renderSales();
+  if (t.screen === "stock") return renderStock();
+  state.procurement.screen = t.screen;
+  return renderProcurement();
+}
+function bindTrade() {
+  const t = tradeState();
+  if (t.screen === "sales") bindSales();
+  else if (t.screen === "stock") bindStock();
+  else bindProcurement();
+}
+
 function renderCurrentTab() {
   if (state.tab === "requests") return renderRequests();
   if (state.tab === "prices") return renderPrices();
   if (state.tab === "brands") return renderBrands();
   if (state.tab === "procurement") return renderProcurement();
+  if (state.tab === "payments") return renderPayments();
+  if (state.tab === "cash") return renderCash();
+  if (state.tab === "sales") return renderSales();
+  if (state.tab === "stock") return renderStock();
+  if (state.tab === "setup") return renderSetup();
+  if (state.tab === "monthly") return renderMonthly();
+  if (state.tab === "closing") return renderClosing();
+  if (state.tab === "messenger") return renderMessenger();
+  if (state.tab === "trade") return renderTrade();
+  if (state.tab === "kpi") return renderKpi();
   if (state.tab === "admins") return renderAdmins();
   if (state.tab === "audits") return renderAudits();
   if (state.tab === "archive") return renderArchive();
@@ -1067,10 +1337,41 @@ function renderMultiFilter({ key, title, allLabel, options, selectedValues }) {
   `;
 }
 
+// 오늘 할 일: 여러 메뉴의 대기 건(권한에 맞게). 누르면 그 화면으로.
+function renderTodo() {
+  const t = state.todo;
+  if (!t) return `<section class="panel todo-panel"><div class="panel-head"><h2>오늘 할 일</h2></div><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const cards = t.items.map((it) => `<button type="button" class="todo-card ${it.tone ? `tone-${h(it.tone)}` : ""}" data-todo-go="${h(it.go.tab)}${it.go.sub ? `:${h(it.go.sub)}` : ""}">
+      <span class="todo-label">${h(it.label)}</span>
+      <strong>${it.count != null ? `${money.format(it.count)}건` : "확인"}</strong>
+      ${it.amount != null ? `<span class="todo-amount">${money.format(Math.round(it.amount))}원</span>` : ""}</button>`).join("");
+  return `<section class="panel todo-panel"><div class="panel-head"><h2>오늘 할 일</h2><button class="small ghost" data-todo-refresh>새로고침</button></div>
+    <div class="panel-body">${cards ? `<div class="todo-grid">${cards}</div>` : `<p class="muted">처리할 일이 없습니다. 👍</p>`}</div></section>`;
+}
+function bindTodo() {
+  if (state.todo && Date.now() - (state.todoAt || 0) > 60000 && !state.todoLoading) state.todo = null;
+  if (!state.todo && !state.todoLoading) {
+    state.todoLoading = true;
+    api("/api/todo").then((r) => { state.todo = r; state.todoAt = Date.now(); }).catch(() => { state.todo = { items: [] }; state.todoAt = Date.now(); }).finally(() => { state.todoLoading = false; if (state.tab === "dashboard") renderApp(); });
+  }
+  app.querySelector("[data-todo-refresh]")?.addEventListener("click", () => { state.todo = null; renderApp(); });
+  app.querySelectorAll("[data-todo-go]").forEach((b) => b.addEventListener("click", () => {
+    const [tab, sub] = b.dataset.todoGo.split(":");
+    state.tab = tab;
+    if (tab === "trade") tradeState();
+    const conf = TAB_SUBMENUS[tab];
+    if (sub && conf) state[conf.stateKey].screen = sub;
+    state.todo = null;
+    clearEditing();
+    renderApp();
+  }));
+}
+
 function renderDashboard() {
   const d = state.dashboard;
   return `
-    ${pageHead("대시보드", "스프레드시트 집계 구조를 웹앱 데이터로 정리한 운영 화면입니다.")}
+    ${pageHead("대시보드", "오늘 처리할 일과 입금요청 현황을 한눈에 봅니다.")}
+    ${renderTodo()}
     <section class="stats">
       <div class="stat"><span>입금요청</span><strong>${money.format(d.requestCount)}</strong></div>
       <div class="stat"><span>대기 건수</span><strong>${money.format(d.pendingCount)}</strong></div>
@@ -1098,8 +1399,16 @@ function renderRequests() {
     <a href="/api/export/payment-log.xls"><button type="button">입금로그 Excel</button></a>
     <a href="/api/export/csv"><button type="button">CSV</button></a>
     <a href="/api/export/xls"><button type="button">Excel</button></a>
+    <button type="button" data-deleted-requests>삭제된 요청</button>
     <button class="primary" type="button" data-open-request-popup>새 창 입금요청</button>
   `;
+  const dr = state.deletedRequests;
+  const deletedModal = dr?.open ? v2Modal(`<div class="panel-head"><h2>삭제된 입금요청</h2><button data-deleted-close>닫기</button></div>
+    <div class="panel-body">${dr.list ? `<p class="muted" style="font-size:12px">실수로 지운 요청을 되돌립니다. 마감된 달의 요청은 되돌릴 수 없습니다.</p>
+      <div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>삭제 시각</th><th>브랜드</th><th>주문번호</th><th>주문자</th><th>입금액</th><th></th></tr></thead><tbody>
+      ${dr.list.map((r) => `<tr><td>${h(fmtDate(r.updatedAt))}</td><td>${h(r.brandName)}</td><td>${h(r.orderNo)}</td><td>${h(r.customerName)}</td><td class="num">${money.format(r.depositAmount || 0)}</td>
+        <td>${can("requests", "delete") ? `<button class="small" data-restore-request="${h(r.id)}">되돌리기</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">삭제된 요청이 없습니다.</td></tr>`}
+      </tbody></table></div>` : `<p class="muted">불러오는 중…</p>`}</div>`, "data-deleted-close") : "";
   const rows = filteredRequests();
   const selectableRows = rows.filter((item) => item.status !== "deleted");
   const allSelected = selectableRows.length > 0 && selectableRows.every((item) => state.selectedRequestIds.includes(item.id));
@@ -1108,7 +1417,7 @@ function renderRequests() {
     .filter((item) => selectedIdSet.has(item.id))
     .reduce((sum, item) => sum + finalDepositAmount(item), 0);
   return `
-    ${pageHead("입금요청", "주문번호, 업체 실 입금액, 입금 예정일과 정산 메모를 관리합니다.", actions)}
+    ${pageHead("입금요청", "주문번호, 업체 실 입금액, 입금 예정일과 정산 메모를 관리합니다.", actions)}${deletedModal}
     <section class="layout single">
       <div class="panel">
         <div class="panel-head"><h2>요청 목록</h2><span class="muted">${money.format(rows.length)}건</span></div>
@@ -1124,6 +1433,7 @@ function renderRequests() {
             </span>
             <button type="button" class="danger" data-delete-selected-requests ${state.selectedRequestIds.length ? "" : "disabled"}>선택 삭제</button>
             <button type="button" data-clear-selection ${state.selectedRequestIds.length ? "" : "disabled"}>선택 해제</button>
+            ${can("requests", "pay") ? `<button type="button" data-transfer-xlsx ${state.selectedRequestIds.length ? "" : "disabled"}>하나은행 이체양식</button>` : ""}
             <span class="muted">선택 ${state.selectedRequestIds.length}건</span>
             ${state.selectedRequestIds.length ? `<span class="muted">· 선택 합계 <strong class="amount-emphasis">${money.format(selectedTotal)}원</strong></span>` : ""}
           </div>
@@ -1218,7 +1528,7 @@ function filteredRequests() {
 
 function renderRequestRow(item) {
   return `
-    <tr>
+    <tr class="hub-go" data-row-edit="[data-open-edit-request-popup]">
       <td><input type="checkbox" data-select-request="${item.id}" ${state.selectedRequestIds.includes(item.id) ? "checked" : ""}></td>
       <td><div class="row-actions">${item.status !== "paid" ? `<button data-pay-request="${item.id}">입금완료</button>` : ""}<button data-open-edit-request-popup="${item.id}">수정</button><button class="danger icon-btn" data-delete-request="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
       <td>${renderRowStatusSelect(item)}</td>
@@ -1416,6 +1726,16 @@ function renderRequestForm() {
         <label>주문 메모</label>
         <textarea name="notes" placeholder="해당 입금건에 대한 메모 (예: 통화 내용, 특이사항 등)">${h(item.notes || "")}</textarea>
       </div>
+      <div class="field two">
+        <div>
+          <label>출금통장표시 <span class="muted" style="font-weight:400">(이체양식 · 비우면 브랜드 기본값)</span></label>
+          <input name="withdrawMemo" data-manual="${item.withdrawMemo ? "1" : ""}" oninput="this.dataset.manual='1'" value="${h(item.withdrawMemo ?? selectedBrand?.withdrawMemoDefault ?? "")}" placeholder="${h(selectedBrand?.withdrawMemoDefault || "브랜드명선매입")}">
+        </div>
+        <div>
+          <label>입금통장표시 <span class="muted" style="font-weight:400">(이체양식 · 기본 공란)</span></label>
+          <input name="depositMemo" value="${h(item.depositMemo || "")}">
+        </div>
+      </div>
       <details class="fixed-summary collapsible-summary" ${
         Number(item.overpaidAmount || 0) > 0 || Number(item.creditUsedAmount || 0) > 0 || item.overpaidNote || item.creditUsedNote ? "open" : ""
       }>
@@ -1494,23 +1814,24 @@ function renderBrands() {
   const rules = filteredPromotionRules();
   const brandRows = filteredBrands();
   return `
-    ${pageHead("브랜드", "시트별 업체 정보를 관리하고 공유 링크와 Google Sheets 아카이브 링크를 지정합니다.", `<button class="primary" data-new-brand>새 브랜드</button>`)}
-    <section class="layout">
+    ${pageHead("브랜드", "시트별 업체 정보를 관리하고 공유 링크와 Google Sheets 아카이브 링크를 지정합니다.", `${state.admin?.role === "owner" ? `<button data-brand-info-upload>브랜드 설문 응답 올리기</button><input type="file" accept=".xlsx,.xls" data-brand-info-file hidden>` : ""}<button class="primary" data-new-brand>새 브랜드</button>`)}
+    <section class="layout brands-layout">
       <div class="panel">
         <div class="panel-head"><h2>브랜드 목록</h2><span class="muted">${money.format(brandRows.length)}개</span></div>
         <div class="panel-body" style="padding-bottom:0">
           <input data-brand-filter-q placeholder="브랜드명, 사업자명 검색" value="${h(state.brandFilterQ)}">
+          <div class="npb-subnav" style="margin:8px 0 0">${[["all", "전체"], ["active", "최근 6개월 거래"], ["dormant", `장기 미거래 ${(state.brandActivity?.dormant || []).length || ""}`]].map(([k, l]) => `<button class="npb-subtab ${(state.brandDormantFilter || "all") === k ? "active" : ""}" data-brand-dormant="${k}">${l}</button>`).join("")}</div>
         </div>
         <div class="table-wrap">
-          <table class="brands-table">
-            <thead><tr><th>브랜드</th><th>정산유형</th><th>요청</th><th>금액/채권잔액</th><th>외상잔액</th><th>사업자</th><th>프로모션</th><th>공유</th><th>작업</th></tr></thead>
+          <table class="compact brands-table" data-unit="원">
+            <thead><tr><th>브랜드</th><th>정산유형</th><th data-nounit="1">요청</th><th>금액/채권잔액</th><th>외상잔액</th><th>사업자</th><th>프로모션</th><th>공유</th><th>작업</th></tr></thead>
             <tbody>${brandRows.map(renderBrandRow).join("") || `<tr><td colspan="9" class="empty">표시할 브랜드가 없습니다.</td></tr>`}</tbody>
           </table>
         </div>
         <div class="panel-body">
           <h3 style="margin-top:0">프로모션 규칙 (수수료 / 가격할인)</h3>
           <div class="table-wrap" style="max-height:280px">
-            <table class="promotion-rules-table">
+            <table class="compact promotion-rules-table">
               <thead><tr><th>브랜드</th><th>프로모션</th><th>범위</th><th>수수료율</th><th>가격 할인</th><th>기간</th><th>상태</th><th>작업</th></tr></thead>
               <tbody>
                 ${rules.map((item) => `
@@ -1581,7 +1902,7 @@ function renderPrices() {
                 <tr>
                   <td>${h(item.brandName)}</td>
                   <td>${h(item.itemCode)}</td>
-                  <td>${h(item.itemName)}</td>
+                  <td>${codeTag(item)}${h(item.itemName)}</td>
                   <td>${h(item.spec || item.unit || "")}</td>
                   <td>${money.format(Number(item.supplyPrice || 0))}원</td>
                   <td>${money.format(Number(item.originalPrice || item.consumerPrice || 0))}원</td>
@@ -1604,7 +1925,7 @@ function renderPrices() {
                   <tr>
                     <td>${h(item.brandName)}</td>
                     <td>${h(item.itemCode)}</td>
-                    <td>${h(item.itemName)}</td>
+                    <td>${codeTag(item)}${h(item.itemName)}</td>
                     <td>${money.format(Number(item.supplyPrice || 0))}원</td>
                     <td>${money.format(Number(item.originalPrice || item.consumerPrice || 0))}원</td>
                     <td>${money.format(Number(item.discountPrice || 0))}원</td>
@@ -1702,7 +2023,11 @@ function filteredPriceAliases() {
 
 function filteredBrands() {
   const q = normalizeSearchText(state.brandFilterQ);
+  const dormant = new Set(state.brandActivity?.dormant || []);
+  const mode = state.brandDormantFilter || "all";
   return state.brands.filter((brand) => {
+    if (mode === "dormant" && !dormant.has(brand.id)) return false;
+    if (mode === "active" && (dormant.has(brand.id) || brand.type === "reference")) return false;
     if (!q) return true;
     return normalizeSearchText(`${brand.name || ""} ${brand.businessName || ""} ${brand.rawSheetName || ""}`).includes(q);
   });
@@ -1864,12 +2189,12 @@ function renderBulkUnmatchedItems(items) {
 function renderBrandRow(brand) {
   const share = `${location.origin}/share/${brand.shareToken}`;
   return `
-    <tr>
-      <td>${brand.starred ? "★ " : ""}${h(brand.name)}</td>
+    <tr class="hub-go" data-row-edit="[data-edit-brand]">
+      <td>${codeTag(brand)}${brand.starred ? "★ " : ""}${h(brand.name)}${(state.brandActivity?.dormant || []).includes(brand.id) && brand.type !== "reference" ? ` <span class="badge muted" title="마지막 입금요청 ${h(state.brandActivity?.lastRequest?.[brand.id] || "없음")}">장기 미거래</span>` : ""}</td>
       <td><span class="badge">${brand.type === "reference" ? "참고시트" : settlementLabel(brand.settlementType)}</span></td>
-      <td>${money.format(brand.requestCount || 0)}건</td>
-      <td>${brand.hasReceivable ? `${money.format(brand.receivableRemaining || 0)}원` : `${money.format(brand.totalAmount || 0)}원`}</td>
-      <td>${renderCreditBalance(brand.creditBalance)}</td>
+      <td class="num">${money.format(brand.requestCount || 0)}건</td>
+      <td class="num">${brand.hasReceivable ? money.format(brand.receivableRemaining || 0) : money.format(brand.totalAmount || 0)}</td>
+      <td class="num">${renderCreditBalance(brand.creditBalance, false)}</td>
       <td class="wrap">${h(brand.businessName || "-")}<br><span class="muted">${h(cutoffLabel(brand))}</span></td>
       <td class="wrap">${h(brand.promotionSummary || "-")}</td>
       <td><a href="${share}" target="_blank" rel="noreferrer">공유 보기</a></td>
@@ -1937,9 +2262,32 @@ function renderBrandRuleSection(brand) {
   `;
 }
 
+// 설문으로 받은 업체 정보(담당자·세금계산서 이메일·반품지 등). 보기 전용.
+function renderBrandProfile(b) {
+  const p = b.profile;
+  if (!p) return "";
+  const c = p.contacts || {};
+  const person = (label, x) => x && (x.name || x.email || x.mobile || x.phone)
+    ? `<tr><th>${label}</th><td>${h(x.name || "")} ${h(x.mobile || x.phone || "")} ${x.email ? `<a href="mailto:${h(x.email)}">${h(x.email)}</a>` : ""}</td></tr>` : "";
+  const row = (label, v) => v ? `<tr><th>${label}</th><td class="wrap">${h(v)}</td></tr>` : "";
+  return `<details class="brand-profile" open><summary>업체 정보 (브랜드 설문${b.profileUpdatedAt ? ` ${h(String(b.profileUpdatedAt).slice(0, 10))}` : ""})</summary>
+    <table class="kv">${person("메인 담당자", c.main)}${person("정산 담당자", c.settlement)}${person("CS 담당자", c.cs)}${person("배송 담당자", c.delivery)}
+    ${row("세금계산서 이메일", p.invoiceEmail)}${row("대표 전화", p.phone)}${row("사업자유형", p.businessType)}${row("공급형태", p.supplyType)}
+    ${row("사업장 주소", p.address)}${row("반품지", p.returnAddress)}${row("택배사", p.courier)}${row("배송비 정책", p.shippingPolicyText)}${row("발송 마감", p.cutoffText)}
+    ${row("공급사 아이디", p.supplierId)}${row("웹사이트", p.website)}${row("SNS", p.sns)}</table></details>`;
+}
+
+function brandEntity(b) {
+  if (!b?.id) return null;
+  const dig = (v) => String(v || "").replace(/\D/g, "");
+  return (state.partners || []).find((p) => p.id === b.entityPartnerId) || (dig(b.businessNumber) ? (state.partners || []).find((p) => dig(p.businessNumber) === dig(b.businessNumber)) : null) || null;
+}
 function renderBrandForm() {
   const b = state.editingBrand || {};
+  const ent = brandEntity(b);
   return `
+    ${b.id ? `<p class="muted" style="margin:0 0 8px">사업자(거래처): ${ent ? `<button class="ghost small" data-brand-entity="${h(ent.id)}">${h(ent.name)} 열기</button>` : "아직 이어진 거래처 없음 — 거래 > 거래처에서 이 브랜드를 이을 수 있습니다"}</p>` : ""}
+    ${renderBrandProfile(b)}
     <form class="form-grid" data-brand-form>
       <div class="field"><label>브랜드명</label><input name="name" value="${h(b.name)}" required></div>
       <div class="field two">
@@ -2032,8 +2380,37 @@ function renderBrandForm() {
       </div>
       <div class="field"><label>대표자명</label><input name="representativeName" value="${h(b.representativeName)}"></div>
       <div class="field two">
+        <div>
+          <label>연결 거래처 <span class="muted" style="font-weight:400">(같은 회사면 연결)</span></label>
+          <select name="partnerCode">
+            <option value="">연결 안 함</option>
+            ${(state.partners || []).filter((p) => p.code).map((p) => `<option value="${h(p.code)}" ${b.partnerCode === p.code ? "selected" : ""}>${h(p.code)} · ${h(p.name)}</option>`).join("")}
+          </select>
+        </div>
+        <div>
+          <label>사업부 <span class="muted" style="font-weight:400">(손익·KPI 구분)</span></label>
+          <select name="businessUnit">
+            <option value="">미지정</option>
+            ${[["wooof", "우프(입점)"], ["pb", "PB"], ["npb", "NPB"], ["service", "용역"]].map(([k, l]) => `<option value="${k}" ${b.businessUnit === k ? "selected" : ""}>${l}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>입금계좌 <span class="muted" style="font-weight:400">(거래관리 &gt; 계좌관리 목록에서 선택 · 이체양식 기본값)</span></label>
+        <select name="transferAccountId" data-brand-transfer-account>
+          <option value="">직접 입력</option>
+          ${(state.transferAccounts || []).slice()
+            .sort((x, y) => String(x.alias || "").localeCompare(String(y.alias || ""), "ko"))
+            .map((a) => `<option value="${h(a.id)}" ${b.transferAccountId === a.id ? "selected" : ""}>${h(a.alias || a.holder)} · ${h(a.bankName)} ${h(a.accountNumber)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field two">
         <div><label>입금은행명</label><input name="bankName" value="${h(b.bankName)}"></div>
         <div><label>통장계좌번호</label><input name="bankAccount" value="${h(b.bankAccount)}"></div>
+      </div>
+      <div class="field">
+        <label>출금통장표시 기본값 <span class="muted" style="font-weight:400">(비우면 "${h((b.name || "브랜드명") + "선매입")}" · 입금요청마다 고칠 수 있음)</span></label>
+        <input name="withdrawMemo" value="${h(b.withdrawMemo || "")}" placeholder="${h((b.name || "브랜드명") + "선매입")}">
       </div>
       <div class="field"><label>계좌예금주명</label><input name="depositorName" value="${h(b.depositorName)}"></div>
       <div class="field two">
@@ -2246,7 +2623,7 @@ function renderPermissionGrid(admin) {
 function renderAdminRow(admin) {
   return `
     <tr>
-      <td>${h(admin.name)}</td>
+      <td>${codeTag(admin)}${h(admin.name)}</td>
       <td>${h(admin.email)}</td>
       <td><span class="badge">${h(admin.role)}</span></td>
       <td>${admin.isActive ? "Y" : "N"}</td>
@@ -2398,10 +2775,31 @@ async function ensureTabData() {
 
 function bindCurrentTab() {
   ensureTabData();
+  if (state.tab === "dashboard") bindTodo();
+  // 줄을 누르면 그 줄의 수정·상세 버튼을 누른 것처럼(버튼·입력칸을 누른 건 그대로).
+  setTimeout(() => app.querySelectorAll("tr[data-row-edit]").forEach((tr) => {
+    if (tr.dataset.rowBound) return;
+    tr.dataset.rowBound = "1";
+    tr.addEventListener("click", (e) => {
+      if (e.target.closest("button, a, input, select, textarea, label")) return;
+      tr.querySelector(tr.dataset.rowEdit)?.click();
+    });
+  }), 0);
+  setTimeout(() => alignV2Tables(), 0);
   if (state.tab === "requests") bindRequests();
   if (state.tab === "prices") bindPrices();
   if (state.tab === "brands") bindBrands();
   if (state.tab === "procurement") bindProcurement();
+  if (state.tab === "payments") bindPayments();
+  if (state.tab === "cash") bindCash();
+  if (state.tab === "sales") bindSales();
+  if (state.tab === "stock") bindStock();
+  if (state.tab === "setup") bindSetup();
+  if (state.tab === "monthly") bindMonthly();
+  if (state.tab === "closing") bindClosing();
+  if (state.tab === "messenger") bindMessenger();
+  if (state.tab === "trade") bindTrade();
+  if (state.tab === "kpi") bindKpi();
   if (state.tab === "admins") bindAdmins();
   if (state.tab === "archive") bindArchive();
   if (state.tab === "settlement") bindSettlement();
@@ -2707,6 +3105,22 @@ function bindRequests() {
     syncSelectedRequestIds();
     renderApp();
   });
+  app.querySelector("[data-deleted-requests]")?.addEventListener("click", async () => {
+    state.deletedRequests = { open: true, list: null };
+    renderApp();
+    try { state.deletedRequests.list = (await api("/api/requests/deleted")).requests; } catch (e) { showToast(e.message, "error"); state.deletedRequests.list = []; }
+    renderApp();
+  });
+  app.querySelectorAll("[data-deleted-close]").forEach((b) => b.addEventListener("click", () => { state.deletedRequests = null; renderApp(); }));
+  bindV2Modal();
+  app.querySelectorAll("[data-restore-request]").forEach((b) => b.addEventListener("click", async () => {
+    try {
+      await api(`/api/requests/${encodeURIComponent(b.dataset.restoreRequest)}/restore`, { method: "POST", body: {} });
+      state.deletedRequests.list = state.deletedRequests.list.filter((r) => r.id !== b.dataset.restoreRequest);
+      showToast("되돌렸습니다.");
+      await refreshAndRender();
+    } catch (e) { showToast(e.message, "error"); }
+  }));
   app.querySelector("[data-open-request-popup]")?.addEventListener("click", () => {
     window.open("/?request-popup=1", "wooofpay-request", "width=760,height=940,resizable=yes,scrollbars=yes");
   });
@@ -2715,6 +3129,34 @@ function bindRequests() {
   });
   app.querySelector("[data-mark-selected-paid]")?.addEventListener("click", async () => {
     await markRequestsPaid(state.selectedRequestIds, state.bulkPaidAt);
+  });
+  // 선택한 입금요청 → 하나은행 이체등록 엑셀.
+  app.querySelector("[data-transfer-xlsx]")?.addEventListener("click", async () => {
+    try {
+      const res = await fetch("/api/requests/transfer-xlsx", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ids: state.selectedRequestIds })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return showToast(err.error || "이체 양식을 만들지 못했습니다.", "error");
+      }
+      const blob = await res.blob();
+      const name = decodeURIComponent((res.headers.get("content-disposition") || "").match(/filename\*=UTF-8''([^;]+)/)?.[1] || "") || "하나은행_이체등록.xlsx";
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast(`${state.selectedRequestIds.length}건 이체양식을 받았습니다.`);
+    } catch (error) {
+      showToast(error.message || "이체 양식을 만들지 못했습니다.", "error");
+    }
   });
   app.querySelector("[data-clear-selection]")?.addEventListener("click", () => {
     state.selectedRequestIds = [];
@@ -3425,6 +3867,12 @@ function applyBrandDefaults(form, brand) {
   setValue("businessName", brand.businessName || "");
   setValue("businessNumber", brand.businessNumber || "");
   setValue("depositorName", brand.depositorName || "");
+  // 브랜드를 바꾸면 출금통장표시도 그 브랜드 기본값으로 바꾼다. 건별로 손댄
+  // 값(또는 이미 저장된 요청의 값)은 덮지 않는다.
+  const withdrawInput = form.querySelector("[name='withdrawMemo']");
+  if (withdrawInput && withdrawInput.dataset.manual !== "1") {
+    withdrawInput.value = brand.withdrawMemoDefault || `${brand.name || ""}선매입`;
+  }
   const baseShippingInput = form.querySelector("[name='baseShippingFee']");
   if (baseShippingInput) baseShippingInput.dataset.manual = "";
   updateRequestCalculation(form);
@@ -4061,6 +4509,25 @@ function bindBrands() {
   bindSearchInput("[data-brand-filter-q]", (value) => {
     state.brandFilterQ = value;
   });
+  if (!state.brandActivity && !state.brandActivityLoading) {
+    state.brandActivityLoading = true;
+    api("/api/brands/activity").then((r) => { state.brandActivity = r; }).catch(() => { state.brandActivity = { dormant: [], lastRequest: {} }; })
+      .finally(() => { state.brandActivityLoading = false; renderApp(); });
+  }
+  app.querySelectorAll("[data-brand-dormant]").forEach((b) => b.addEventListener("click", () => { state.brandDormantFilter = b.dataset.brandDormant; renderApp(); }));
+  app.querySelector("[data-brand-entity]")?.addEventListener("click", (e) => { const id = e.currentTarget.dataset.brandEntity; goTrade("partners"); openPartnerHub(id); });
+  app.querySelector("[data-brand-info-upload]")?.addEventListener("click", () => app.querySelector("[data-brand-info-file]")?.click());
+  app.querySelector("[data-brand-info-file]")?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const fileBase64 = await new Promise((ok, bad) => { const r = new FileReader(); r.onload = () => ok(String(r.result)); r.onerror = bad; r.readAsDataURL(file); });
+    try {
+      const r = await api("/api/brands/info-upload", { method: "POST", body: { fileBase64, fileName: file.name } });
+      showToast(`응답 ${r.responses}곳을 읽어 ${r.filled}곳의 빈 정보를 채웠습니다. 값이 다른 ${r.conflicts}곳·새 브랜드 ${r.newBrands}곳은 '확인 필요'에서 확인하세요.`);
+      state.brands = (await api("/api/brands")).brands || state.brands;
+      renderApp();
+    } catch (error) { showToast(error.message || "올리지 못했습니다.", "error"); }
+  });
   app.querySelector("[data-new-brand]")?.addEventListener("click", () => {
     state.editingBrand = null;
     state.editingPromotionRule = null;
@@ -4103,6 +4570,27 @@ function bindBrands() {
       await refreshAndRender();
     });
   });
+  app.querySelector("[data-brand-transfer-account]")?.addEventListener("change", (event) => {
+    const account = (state.transferAccounts || []).find((a) => a.id === event.target.value);
+    if (!account) return;
+    const form = event.target.closest("[data-brand-form]");
+    const set = (name, value) => { const el = form?.querySelector(`[name='${name}']`); if (el) el.value = value; };
+    set("bankName", account.bankName);
+    set("bankAccount", account.accountNumber);
+    if (account.holder) set("depositorName", account.holder);
+  });
+  // 목록에서 계좌를 고른 동안은 은행·계좌번호를 손으로 못 고치게 한다 — 저장하면
+  // 서버가 고른 계좌 값으로 맞추므로, 입력해도 사라진다.
+  const lockBankFields = () => {
+    const form = app.querySelector("[data-brand-form]");
+    const picked = Boolean(form?.querySelector("[data-brand-transfer-account]")?.value);
+    for (const name of ["bankName", "bankAccount"]) {
+      const el = form?.querySelector(`[name='${name}']`);
+      if (el) el.readOnly = picked;
+    }
+  };
+  lockBankFields();
+  app.querySelector("[data-brand-transfer-account]")?.addEventListener("change", lockBankFields);
   app.querySelector("[data-brand-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = formObject(event.currentTarget);
@@ -4448,12 +4936,14 @@ function renderProcurement() {
   let body = "";
   if (p.screen === "materials") body = renderMaterials();
   else if (p.screen === "deliveryPlaces") body = renderDeliveryPlaces();
+  else if (p.screen === "accounts") body = renderTransferAccounts();
   else if (p.screen === "orders") body = renderPurchaseOrders();
   else body = renderPartners();
   return `
-    ${pageHead("거래관리", "생산업체·판매납품처·매입공급처 거래처와 발주서를 관리합니다.")}
+    ${pageHead(state.tab === "trade" ? "거래" : "거래관리", "생산업체·판매납품처·매입공급처 거래처와 발주서를 관리합니다.")}
     ${p.screen === "partners" ? renderPartnerCategoryTabs() : ""}
     ${body}
+    ${state.partnerHub ? v2Modal(renderPartnerHub(), "data-hub-close") : ""}
   `;
 }
 
@@ -4476,6 +4966,7 @@ function renderPartnerCategoryTabs() {
 }
 
 function bindProcurement() {
+  bindPartnerHub();
   app.querySelectorAll("[data-partner-category-tab]").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.procurement.partnerFilterCategory = btn.dataset.partnerCategoryTab;
@@ -4484,6 +4975,7 @@ function bindProcurement() {
   });
   if (state.procurement.screen === "materials") bindMaterials();
   else if (state.procurement.screen === "deliveryPlaces") bindDeliveryPlaces();
+  else if (state.procurement.screen === "accounts") bindTransferAccounts();
   else if (state.procurement.screen === "orders") bindPurchaseOrders();
   else bindPartners();
 }
@@ -4514,10 +5006,115 @@ function renderPartners() {
   `;
 }
 
+// ===========================================================================
+// v2 거래처(사업자) 허브 — 한 사업자와 이어진 브랜드·명세서·판매·생산비·지급·판매처·원부자재·회생채권
+// ===========================================================================
+const HUB_TABS = [["overview", "개요"], ["brands", "브랜드"], ["docs", "명세서·발주서"], ["sales", "판매 주문"], ["production", "생산비"], ["payments", "지급요청"], ["links", "판매처·원부자재"]];
+function renderPartnerHub() {
+  const hub = state.partnerHub;
+  const d = hub?.data;
+  if (!d) return `<div class="panel-head"><h2>거래처</h2><button data-hub-close>닫기</button></div><div class="panel-body"><p class="muted">불러오는 중…</p></div>`;
+  const p = d.partner;
+  const count = { brands: d.brands.length, docs: d.docs.length, sales: d.salesOrders.length, production: d.production ? 1 : 0, payments: d.payments.length, links: d.channels.length + d.materials.length };
+  const tab = hub.tab || "overview";
+  const row = (cells, attrs = "") => `<tr ${attrs}>${cells.map((c) => `<td${c.num ? ' class="num"' : c.wrap ? ' class="wrap"' : ""}>${c.v}</td>`).join("")}</tr>`;
+  let body = "";
+  if (tab === "overview") {
+    const kv = [["분류", PARTNER_CATEGORY_LABELS[p.category] || p.category], ["상호", p.businessName], ["사업자번호", p.businessNumber], ["대표자", p.representativeName], ["주소", p.address],
+      ["담당자", [p.contactName, p.contactPhone, p.contactEmail].filter(Boolean).join(" · ")], ["세금계산서 이메일", p.invoiceEmail], ["계좌", [p.bankName, p.bankAccount, p.depositorName].filter(Boolean).join(" ")],
+      ["발주 방식", p.orderMethod], ["금액 기준", p.priceMode === "gross" ? "부가세 포함" : p.priceMode ? "부가세 별도" : ""], ["메모", p.note]].filter(([, v]) => v);
+    const bal = d.balance || {};
+    const tile = (label, v, sub = "") => `<div class="stat"><span>${label}</span><strong>${money.format(Math.round(v || 0))}원</strong>${sub ? `<small class="muted">${sub}</small>` : ""}</div>`;
+    body = `<div class="stats hub-balance">
+        ${tile("받을 돈 (판매 미수)", bal.receivable, bal.receivableOverdue ? `<span class="danger-text">기한 지남 ${money.format(bal.receivableOverdue)}원</span>` : "")}
+        ${tile("줄 돈 (생산비 미지급)", bal.productionUnpaid)}
+        ${tile("처리 전 지급요청", bal.openPayments, bal.openPaymentCount ? `${bal.openPaymentCount}건` : "")}
+        ${bal.brandClaims ? tile("브랜드 채권잔액", bal.brandClaims) : ""}
+      </div>
+      <table class="kv compact"><tbody>${kv.map(([k, v]) => `<tr><th style="text-align:left;width:130px">${k}</th><td class="wrap">${h(v)}</td></tr>`).join("")}</tbody></table>
+      ${d.rehab ? `<p class="muted" style="margin-top:10px">회생채권자: ${h(d.rehab.creditor)} · ${h(d.rehab.cat)} · 채권 ${money.format(d.rehab.total)}원 · 현금변제 ${money.format(d.rehab.cash)}원</p>` : ""}
+      ${can("procurement", "edit") ? `<div class="toolbar" style="margin-top:10px"><button class="primary" data-hub-edit>정보 고치기</button></div>` : ""}`;
+  } else if (tab === "brands") {
+    body = `<p class="muted" style="font-size:12px">사업자와 브랜드는 다릅니다. 같은 사업자번호의 브랜드는 저절로 이어지고, 다른 것은 아래에서 직접 잇습니다.</p>
+      <table class="compact" data-unit="원"><thead><tr><th>브랜드</th><th>정산유형</th><th>채권잔액</th><th>연결</th><th></th></tr></thead><tbody>
+      ${d.brands.map((b) => row([{ v: `${b.code ? `<span class="code-tag">${h(b.code)}</span> ` : ""}${h(b.name)}` }, { v: h(settlementLabel(b.settlementType)) }, { v: b.hasReceivable ? money.format(b.receivableRemaining) : "", num: true },
+        { v: b.linked === "manual" ? "직접 연결" : "사업자번호" }, { v: `${b.linked === "manual" ? `<button class="small" data-hub-unlink="${h(b.id)}">해제</button>` : ""}` }], `class="hub-go" data-hub-brand="${h(b.id)}"`)).join("") || `<tr><td colspan="5" class="empty">연결된 브랜드가 없습니다.</td></tr>`}
+      </tbody></table>
+      ${can("procurement", "edit") ? `<div class="toolbar" style="margin-top:8px"><select data-hub-link-brand><option value="">브랜드 연결하기…</option>${d.linkableBrands.map((b) => `<option value="${h(b.id)}">${h(b.code ? `${b.code} · ` : "")}${h(b.name)}</option>`).join("")}</select></div>` : ""}`;
+  } else if (tab === "docs") {
+    body = `<table class="compact" data-unit="원"><thead><tr><th>번호</th><th>종류</th><th>날짜</th><th>품목</th><th>합계</th></tr></thead><tbody>
+      ${d.docs.map((x) => row([{ v: h(x.docNo) }, { v: h({ statement: "거래명세서", purchase: "발주서" }[x.docType] || x.docType || "") }, { v: h(x.date) }, { v: h(x.title), wrap: true }, { v: money.format(x.total || 0), num: true }], `class="hub-go" data-hub-doc="${h(x.id)}"`)).join("") || `<tr><td colspan="5" class="empty">명세서·발주서가 없습니다.</td></tr>`}</tbody></table>`;
+  } else if (tab === "sales") {
+    body = `<table class="compact" data-unit="원"><thead><tr><th>번호</th><th>주문일</th><th>내용</th><th>금액</th><th>남은 돈</th></tr></thead><tbody>
+      ${d.salesOrders.map((x) => row([{ v: h(x.code) }, { v: h(x.date) }, { v: h(x.title), wrap: true }, { v: money.format(x.total || 0), num: true }, { v: x.remaining ? money.format(x.remaining) : "", num: true }], `class="hub-go" data-hub-sale="${h(x.id)}"`)).join("") || `<tr><td colspan="5" class="empty">판매 주문이 없습니다.</td></tr>`}</tbody></table>`;
+  } else if (tab === "production") {
+    const s = d.production;
+    body = s ? `<p>미지급 <strong>${money.format(s.balance)}원</strong> · 청구 ${money.format(s.billed)}원 · 지급 ${money.format(s.paid)}원 · 가장 오래된 미지급 ${h(s.oldestDate || "-")}</p>
+      <button class="primary" data-hub-prod>생산비 원장 열기</button>` : `<p class="muted">생산비 기록이 없습니다.</p>`;
+  } else if (tab === "payments") {
+    body = `<table class="compact" data-unit="원"><thead><tr><th>번호</th><th>내용</th><th>금액</th><th>상태</th><th>기한</th></tr></thead><tbody>
+      ${d.payments.map((x) => row([{ v: h(x.code || "") }, { v: h(x.title), wrap: true }, { v: money.format(x.amount || 0), num: true }, { v: h(x.status) }, { v: h(x.dueDate) }])).join("") || `<tr><td colspan="5" class="empty">지급요청이 없습니다.</td></tr>`}</tbody></table>`;
+  } else {
+    body = `<h3>판매처(가격)</h3>${d.channels.map((c) => `<button class="ghost small" data-hub-channel="${h(c.id)}">${h(c.code)} ${h(c.name)}</button>`).join(" ") || `<p class="muted">이 거래처로 이어진 판매처가 없습니다.</p>`}
+      <h3>원부자재</h3>${d.materials.map((m) => `<button class="ghost small" data-hub-material="${h(m.id)}">${h(m.code)} ${h(m.name)}</button>`).join(" ") || `<p class="muted">이 거래처의 원부자재가 없습니다.</p>`}`;
+  }
+  return `<div class="panel-head"><h2>${codeTag(p)}${h(p.name)}</h2><button data-hub-close>닫기</button></div>
+    <div class="panel-body">
+      <div class="npb-subnav">${HUB_TABS.map(([k, l]) => `<button class="npb-subtab ${tab === k ? "active" : ""}" data-hub-tab="${k}">${l}${count[k] ? ` ${count[k]}` : ""}</button>`).join("")}</div>
+      ${body}
+    </div>`;
+}
+async function openPartnerHub(id, tab = "overview") {
+  state.partnerHub = { id, tab, data: null };
+  renderApp();
+  try { const data = await api(`/api/partners/${encodeURIComponent(id)}/hub`); if (state.partnerHub?.id === id) { state.partnerHub.data = data; renderApp(); } }
+  catch (e) { showToast(e.message, "error"); state.partnerHub = null; renderApp(); }
+}
+// 허브에서 다른 화면으로 넘어가기
+function goTrade(screen) { state.tab = "trade"; tradeState().screen = screen; state.partnerHub = null; }
+function bindPartnerHub() {
+  bindV2Modal();
+  app.querySelectorAll("[data-partner-hub]").forEach((tr) => tr.addEventListener("click", (e) => {
+    if (e.target.closest("button, a, input, select")) return;
+    openPartnerHub(tr.dataset.partnerHub);
+  }));
+  const hub = state.partnerHub;
+  if (!hub) return;
+  app.querySelector("[data-hub-close]")?.addEventListener("click", () => { state.partnerHub = null; renderApp(); });
+  app.querySelectorAll("[data-hub-tab]").forEach((b) => b.addEventListener("click", () => { hub.tab = b.dataset.hubTab; renderApp(); }));
+  app.querySelector("[data-hub-edit]")?.addEventListener("click", () => {
+    state.procurement.editingPartner = (state.partners || []).find((x) => x.id === hub.id) || null;
+    state.partnerHub = null; renderApp();
+  });
+  app.querySelectorAll("[data-hub-brand]").forEach((tr) => tr.addEventListener("click", (e) => {
+    if (e.target.closest("button")) return;
+    state.tab = "brands"; state.editingBrand = state.brands.find((b) => b.id === tr.dataset.hubBrand) || null; state.partnerHub = null; renderApp();
+  }));
+  app.querySelectorAll("[data-hub-unlink]").forEach((b) => b.addEventListener("click", async () => {
+    await api(`/api/partners/${encodeURIComponent(hub.id)}/brands`, { method: "POST", body: { brandId: b.dataset.hubUnlink, unlink: true } }).catch((e) => showToast(e.message, "error"));
+    openPartnerHub(hub.id, "brands");
+  }));
+  app.querySelector("[data-hub-link-brand]")?.addEventListener("change", async (e) => {
+    if (!e.target.value) return;
+    await api(`/api/partners/${encodeURIComponent(hub.id)}/brands`, { method: "POST", body: { brandId: e.target.value } }).catch((err) => showToast(err.message, "error"));
+    openPartnerHub(hub.id, "brands");
+  });
+  app.querySelectorAll("[data-hub-doc]").forEach((tr) => tr.addEventListener("click", () => {
+    const po = (state.purchaseOrders || []).find((x) => x.id === tr.dataset.hubDoc);
+    goTrade("orders"); if (po) state.procurement.editingPurchaseOrder = JSON.parse(JSON.stringify(po)); renderApp();
+  }));
+  app.querySelectorAll("[data-hub-sale]").forEach((tr) => tr.addEventListener("click", () => { goTrade("sales"); const ss = salesState(); ss.view = "orders"; ss.selectedId = tr.dataset.hubSale; renderApp(); }));
+  app.querySelector("[data-hub-prod]")?.addEventListener("click", () => { const id = hub.id; goTrade("stock"); const st = stockState(); st.screen = "cost"; st.prodSel = id; st.prod = null; renderApp(); });
+  app.querySelectorAll("[data-hub-channel]").forEach((b) => b.addEventListener("click", () => { goTrade("sales"); const ss = salesState(); ss.view = "pricing"; ss.pricingSel = b.dataset.hubChannel; ss.pricing = null; renderApp(); }));
+  app.querySelectorAll("[data-hub-material]").forEach((b) => b.addEventListener("click", () => {
+    goTrade("materials"); state.procurement.editingMaterial = (state.materials || []).find((m) => m.id === b.dataset.hubMaterial) || null; renderApp();
+  }));
+}
+
 function renderPartnerRow(item) {
   return `
-    <tr>
-      <td>${h(item.name)}<br><span class="muted">${PARTNER_CATEGORY_LABELS[item.category] || item.category}</span></td>
+    <tr class="hub-go" data-partner-hub="${item.id}" title="누르면 이 거래처와 이어진 브랜드·명세서·판매·생산비가 보입니다">
+      <td>${codeTag(item)}${h(item.name)}<br><span class="muted">${PARTNER_CATEGORY_LABELS[item.category] || item.category}</span></td>
       <td>${h(item.businessName)}</td>
       <td>${h(item.contactName)}${item.contactPhone ? ` · ${h(item.contactPhone)}` : ""}</td>
       <td>${h(item.orderMethod)}</td>
@@ -4688,8 +5285,8 @@ function renderMaterials() {
 function renderMaterialRow(item) {
   const partner = (state.partners || []).find((p) => p.id === item.partnerId);
   return `
-    <tr>
-      <td>${h(item.itemName)}${item.itemCode ? `<br><span class="muted" style="font-size:11px">${h(item.itemCode)}</span>` : ""}</td>
+    <tr class="hub-go" data-row-edit="[data-edit-material]">
+      <td>${codeTag(item)}${h(item.itemName)}${item.itemCode ? `<br><span class="muted" style="font-size:11px">${h(item.itemCode)}</span>` : ""}</td>
       <td>${h(item.category)}</td>
       <td>${h(partner?.name || "")}</td>
       <td>${h(item.orderUnit)}</td>
@@ -4778,6 +5375,176 @@ function bindMaterials() {
   });
 }
 
+// 입금계좌에 이어진 브랜드(BR-)·거래처(PT-). 연결은 브랜드의 transferAccountId 와 계좌의 partnerId 한 칸씩에만 둔다.
+function accountLinks(acc) {
+  const brands = state.brands.filter((b) => b.transferAccountId === acc.id);
+  const partner = (state.partners || []).find((p) => p.id === acc.partnerId) || null;
+  const kind = brands.length && partner ? "both" : brands.length ? "brand" : partner ? "partner" : "none";
+  const codes = [...brands.map((b) => b.code || ""), partner?.code || ""].filter(Boolean).sort();
+  return { brands, partner, kind, codeKey: codes[0] || "ZZZ" };
+}
+const ACCOUNT_KIND = { brand: "브랜드", partner: "거래처", both: "브랜드+거래처", none: "미연결" };
+function renderTransferAccounts() {
+  const q = String(state.procurement.accountQuery || "").trim().toLowerCase();
+  const f = state.procurement.accountFilter || "";
+  const sort = state.procurement.accountSort || "alias";
+  const all = (state.transferAccounts || []).map((acc) => ({ acc, link: accountLinks(acc) }));
+  const counts = all.reduce((m, x) => { m[x.link.kind] = (m[x.link.kind] || 0) + 1; return m; }, {});
+  const sorters = {
+    alias: (x, y) => String(x.acc.alias || "").localeCompare(String(y.acc.alias || ""), "ko"),
+    code: (x, y) => x.link.codeKey.localeCompare(y.link.codeKey) || String(x.acc.alias || "").localeCompare(String(y.acc.alias || ""), "ko"),
+    bank: (x, y) => String(x.acc.bankName || "").localeCompare(String(y.acc.bankName || ""), "ko") || String(x.acc.alias || "").localeCompare(String(y.acc.alias || ""), "ko"),
+    holder: (x, y) => String(x.acc.holder || "").localeCompare(String(y.acc.holder || ""), "ko"),
+    recent: (x, y) => String(y.acc.registeredAt || y.acc.createdAt || "").localeCompare(String(x.acc.registeredAt || x.acc.createdAt || ""))
+  };
+  const rowsAll = all
+    .filter((x) => !f || (f === "brand" ? ["brand", "both"].includes(x.link.kind) : f === "partner" ? ["partner", "both"].includes(x.link.kind) : x.link.kind === f))
+    .filter((x) => !q || [x.acc.alias, x.acc.holder, x.acc.bankName, x.acc.accountNumber, x.acc.code, ...x.link.brands.flatMap((b) => [b.name, b.code]), x.link.partner?.name, x.link.partner?.code]
+      .some((v) => String(v || "").toLowerCase().includes(q)))
+    .sort(sorters[sort] || sorters.alias);
+  const a = state.procurement.editingAccount || {};
+  return `
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>자주 쓰는 입금계좌</h2><span class="muted">${money.format(all.length)}개</span></div>
+        <div class="panel-body" style="padding-bottom:0">
+          <div class="toolbar">
+            <label>하나은행 목록 업로드 <input type="file" accept=".xlsx,.xls" data-account-import></label>
+            <input data-account-q placeholder="별칭·예금주·계좌번호·브랜드·코드 검색" value="${h(state.procurement.accountQuery || "")}">
+          </div>
+          <div class="toolbar" style="margin-top:6px">
+            ${[["", "전체", all.length], ["brand", "브랜드 연결", (counts.brand || 0) + (counts.both || 0)], ["partner", "거래처 연결", (counts.partner || 0) + (counts.both || 0)], ["none", "미연결", counts.none || 0]]
+              .map(([k, l, n]) => `<button class="npb-subtab ${f === k ? "active" : ""}" data-account-filter="${k}">${l} ${n}</button>`).join("")}
+            <span style="flex:1"></span>
+            <label class="muted" style="font-size:12px">정렬 <select data-account-sort style="width:auto">${[["alias", "별칭"], ["code", "회사 코드"], ["bank", "은행"], ["holder", "예금주"], ["recent", "최근 등록"]].map(([k, l]) => `<option value="${k}" ${sort === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+          </div>
+          <p class="muted">하나은행 '자주쓰는입금계좌관리'에서 내려받은 엑셀을 올리면 목록이 그 파일로 바뀝니다.
+            같은 계좌번호는 브랜드 연결이 그대로 유지됩니다.</p>
+        </div>
+        <div class="table-wrap">
+          <table class="compact accounts-table">
+            <thead><tr><th>별칭</th><th>은행</th><th>계좌번호</th><th>예금주</th><th>구분</th><th>연결(회사 코드)</th><th></th></tr></thead>
+            <tbody>${rowsAll.map(({ acc, link }) => `
+              <tr class="hub-go ${state.procurement.editingAccount?.id === acc.id ? "selected" : ""}" data-row-edit="[data-edit-account]">
+                <td>${codeTag(acc)}${h(acc.alias)}</td>
+                <td>${h(acc.bankName)}</td>
+                <td><code>${h(acc.accountNumber)}</code></td>
+                <td>${h(acc.holder)}</td>
+                <td><span class="badge ${link.kind === "none" ? "muted" : ""}">${ACCOUNT_KIND[link.kind]}</span></td>
+                <td class="wrap">${link.brands.map((b) => `${b.code ? `<span class="code-tag">${h(b.code)}</span>` : ""}${h(b.name)}`).join("<br>")}${link.partner ? `${link.brands.length ? "<br>" : ""}${link.partner.code ? `<span class="code-tag">${h(link.partner.code)}</span>` : ""}${h(link.partner.name)} <span class="muted" style="font-size:11px">거래처</span>` : ""}</td>
+                <td><div class="row-actions"><button data-edit-account="${h(acc.id)}">수정</button><button class="danger icon-btn" data-delete-account="${h(acc.id)}" aria-label="삭제" title="삭제">×</button></div></td>
+              </tr>`).join("") || `<tr><td colspan="7" class="empty">해당하는 계좌가 없습니다.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>${a.id ? "계좌 수정" : "계좌 추가"}</h2></div>
+        <div class="panel-body">
+          <form class="form-grid" data-account-form>
+            <div class="field"><label>별칭</label><input name="alias" value="${h(a.alias)}" placeholder="예: (주)안스펫"></div>
+            <div class="field two">
+              <div><label>은행</label><input name="bankName" value="${h(a.bankName)}" required placeholder="예: 기업은행"></div>
+              <div><label>계좌번호 <span class="muted" style="font-weight:400">(하이픈은 자동으로 뺍니다)</span></label><input name="accountNumber" value="${h(a.accountNumber)}" required inputmode="numeric"></div>
+            </div>
+            <div class="field"><label>예금주</label><input name="holder" value="${h(a.holder)}"></div>
+            ${a.id ? (() => {
+              const linked = state.procurement.accountBrandIds ?? state.brands.filter((b) => b.transferAccountId === a.id).map((b) => b.id);
+              const others = state.brands.filter((b) => (b.type || "brand") === "brand" && !linked.includes(b.id));
+              return `<div class="field"><label>연결 브랜드 <span class="muted" style="font-weight:400">(브랜드 화면의 입금계좌와 같은 연결 — 어느 쪽에서 바꿔도 같습니다)</span></label>
+                <div class="chip-list">${linked.map((id) => { const b = state.brands.find((x) => x.id === id); return b ? `<span class="chip">${b.code ? `<span class="code-tag">${h(b.code)}</span>` : ""}${h(b.name)}${b.transferAccountId && b.transferAccountId !== a.id ? ' <span class="muted" style="font-size:11px">(다른 계좌에서 옮겨 옴)</span>' : ""} <button type="button" class="chip-x" data-account-unlink="${h(id)}" title="연결 해제">×</button></span>` : ""; }).join("") || '<span class="muted">없음</span>'}</div>
+                <select data-account-link style="margin-top:6px"><option value="">브랜드 추가…</option>${others.map((b) => `<option value="${h(b.id)}">${h(b.code ? `${b.code} · ` : "")}${h(b.name)}${b.transferAccountId ? " (다른 계좌 사용 중)" : ""}</option>`).join("")}</select></div>
+                <div class="field"><label>거래처(사업자) 연결 <span class="muted" style="font-weight:400">(생산처·매입처 등 — 그 거래처 지급 계좌로 맞춰짐)</span></label>
+                <select name="partnerId"><option value="">없음</option>${(state.partners || []).filter((p) => p.isActive !== false).map((p) => `<option value="${h(p.id)}" ${a.partnerId === p.id ? "selected" : ""}>${h(p.code ? `${p.code} · ` : "")}${h(p.name)}</option>`).join("")}</select></div>`;
+            })() : `<p class="muted" style="font-size:12px">계좌를 추가한 뒤 브랜드·거래처를 연결할 수 있습니다.</p>`}
+            <div class="toolbar">
+              <button class="primary" type="submit">${a.id ? "수정 저장" : "계좌 추가"}</button>
+              ${a.id ? `<button type="button" data-cancel-edit-account>취소</button>` : ""}
+            </div>
+          </form>
+        </div>
+      </div>
+    </section>`;
+}
+
+function bindTransferAccounts() {
+  const reload = async () => {
+    state.transferAccounts = (await api("/api/transfer-accounts")).transferAccounts || [];
+    state.brands = (await api("/api/brands")).brands;
+    state.partners = (await api("/api/partners")).partners || state.partners;
+    renderApp();
+  };
+  app.querySelector("[data-account-q]")?.addEventListener("change", (e) => {
+    state.procurement.accountQuery = e.target.value;
+    renderApp();
+  });
+  app.querySelectorAll("[data-account-filter]").forEach((b) => b.addEventListener("click", () => { state.procurement.accountFilter = b.dataset.accountFilter; renderApp(); }));
+  app.querySelector("[data-account-sort]")?.addEventListener("change", (e) => { state.procurement.accountSort = e.target.value; renderApp(); });
+  const linkedNow = () => state.procurement.accountBrandIds ?? state.brands.filter((b) => b.transferAccountId === state.procurement.editingAccount?.id).map((b) => b.id);
+  app.querySelector("[data-account-link]")?.addEventListener("change", (e) => {
+    if (!e.target.value) return;
+    state.procurement.accountBrandIds = [...new Set([...linkedNow(), e.target.value])];
+    renderApp();
+  });
+  app.querySelectorAll("[data-account-unlink]").forEach((b) => b.addEventListener("click", () => {
+    state.procurement.accountBrandIds = linkedNow().filter((x) => x !== b.dataset.accountUnlink);
+    renderApp();
+  }));
+  app.querySelector("[data-account-import]")?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!confirm(`'${file.name}' 내용으로 계좌 목록을 바꿀까요?`)) { e.target.value = ""; return; }
+    try {
+      const res = await api("/api/transfer-accounts/import", {
+        method: "POST",
+        body: { fileBase64: await readFileAsBase64(file), fileName: file.name }
+      });
+      showToast(`계좌 ${res.total}개로 바꿨습니다 (추가 ${res.added} · 빠짐 ${res.removed}).`);
+      await reload();
+    } catch (error) {
+      showToast(error.message || "계좌 목록을 올리지 못했습니다.", "error");
+    }
+  });
+  app.querySelectorAll("[data-edit-account]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.procurement.editingAccount = (state.transferAccounts || []).find((x) => x.id === btn.dataset.editAccount) || null;
+      state.procurement.accountBrandIds = null;
+      renderApp();
+    });
+  });
+  app.querySelector("[data-cancel-edit-account]")?.addEventListener("click", () => {
+    state.procurement.editingAccount = null;
+    state.procurement.accountBrandIds = null;
+    renderApp();
+  });
+  app.querySelectorAll("[data-delete-account]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("이 계좌를 목록에서 삭제할까요? 브랜드에 입력된 은행·계좌번호는 그대로 남습니다.")) return;
+      try {
+        await api(`/api/transfer-accounts/${btn.dataset.deleteAccount}`, { method: "DELETE" });
+        await reload();
+      } catch (error) {
+        showToast(error.message || "삭제하지 못했습니다.", "error");
+      }
+    });
+  });
+  app.querySelector("[data-account-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = formObject(event.currentTarget);
+    const editing = state.procurement.editingAccount;
+    if (editing) body.brandIds = linkedNow();
+    try {
+      if (editing) await api(`/api/transfer-accounts/${editing.id}`, { method: "PUT", body });
+      else await api("/api/transfer-accounts", { method: "POST", body });
+      state.procurement.editingAccount = null;
+      state.procurement.accountBrandIds = null;
+      showToast(editing ? "수정했습니다." : "추가했습니다.");
+      await reload();
+    } catch (error) {
+      showToast(error.message || "저장하지 못했습니다.", "error");
+    }
+  });
+}
+
 function renderDeliveryPlaces() {
   const rows = (state.deliveryPlaces || []).slice().sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ko"));
   return `
@@ -4806,8 +5573,8 @@ function renderDeliveryPlaces() {
 
 function renderDeliveryPlaceRow(item) {
   return `
-    <tr>
-      <td>${h(item.name)}</td>
+    <tr class="hub-go" data-row-edit="[data-edit-delivery-place]">
+      <td>${codeTag(item)}${h(item.name)}</td>
       <td>${h(item.address)}</td>
       <td>${h(item.contactName)}${item.contactPhone ? ` · ${h(item.contactPhone)}` : ""}</td>
       <td><div class="row-actions"><button data-edit-delivery-place="${item.id}">수정</button><button data-edit-procurement-popup="deliveryPlace" data-record-id="${item.id}">새 창</button><button class="danger icon-btn" data-delete-delivery-place="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
@@ -5817,7 +6584,7 @@ function renderSettlement() {
     .map((b) => `<option value="${b.id}" ${s.brandId === b.id ? "selected" : ""}>${h(b.name)} · ${h(settlementLabel(b.settlementType))}${h(scanSuffix(b.id))}</option>`)
     .join("");
   return `
-    ${pageHead("정산", "카페24 주문내역 · 은행 거래내역 · 입금요청(자동)을 대조하여 월별 정산서를 생성합니다.")}
+    ${pageHead("월 정산 생성", "카페24 주문내역 · 은행 거래내역 · 입금요청(자동)을 대조하여 월별 정산서를 생성합니다.")}
     <section class="panel">
       <div class="panel-head"><h2>정산 조건</h2></div>
       <div class="panel-body">
@@ -6982,7 +7749,7 @@ function renderReconcileConnect() {
       <div class="panel-body">
         <p class="muted">
           연결하면 클로브에 등록된 회사 계좌의 입금내역을 읽어와 미입금 요청과 자동 대조합니다.
-          WooofPay는 <strong>읽기 전용</strong> 도구만 호출하며, 장부·전표를 수정하지 않습니다.
+          WOOOF ERP는 <strong>읽기 전용</strong> 도구만 호출하며, 장부·전표를 수정하지 않습니다.
         </p>
         <div class="toolbar"><button class="primary" data-clobe-connect>클로브ai 연결하기</button></div>
       </div>
@@ -7435,12 +8202,13 @@ async function loadClobeStatus() {
   state.clobe.status = status;
   if (!status.connected) return;
   try {
-    if (!state.clobe.companies) {
-      state.clobe.companies = (await api("/api/clobe/companies")).companies || [];
-    }
-    if (status.companyId && !state.clobe.accounts) {
-      state.clobe.accounts = (await api("/api/clobe/accounts")).accounts || [];
-    }
+    // 두 목록을 한꺼번에 받는다(차례로 받으면 왕복이 두 번).
+    const [companies, accounts] = await Promise.all([
+      state.clobe.companies ? null : api("/api/clobe/companies"),
+      status.companyId && !state.clobe.accounts ? api("/api/clobe/accounts") : null
+    ]);
+    if (companies) state.clobe.companies = companies.companies || [];
+    if (accounts) state.clobe.accounts = accounts.accounts || [];
   } catch (error) {
     state.clobe.error = error.message || "클로브 데이터를 불러오지 못했습니다.";
   }
@@ -10901,4 +11669,2286 @@ function startPsBadgePolling() {
   if (psBadgeTimer || !state.admin || !can("productsync", "view")) return;
   loadPsBadge();
   psBadgeTimer = setInterval(loadPsBadge, PS_BADGE_POLL_MS);
+}
+
+// ===========================================================================
+// v2 지급요청 — 채널톡 한 줄 요청 + 노션 결제요청 DB 를 대신한다.
+// ===========================================================================
+const PAYMENT_STATUS_BADGE = {
+  requested: "", confirmed: "ok", awaiting_approval: "warn", paid: "muted", on_hold: "warn", cancelled: "muted"
+};
+const PAYMENT_FILTERS = [
+  ["open", "처리 전", ["requested", "confirmed", "awaiting_approval"]],
+  ["paid", "처리완료", ["paid"]],
+  ["held", "보류·취소", ["on_hold", "cancelled"]],
+  ["all", "전체", null]
+];
+
+function paymentState() {
+  if (!state.payments) {
+    state.payments = { list: null, loading: false, filter: "open", q: "", editing: null, draft: null, selected: [] };
+  }
+  return state.payments;
+}
+
+async function loadPayments() {
+  const ps = paymentState();
+  ps.loading = true;
+  try {
+    const res = await api("/api/payments");
+    ps.list = res.payments || [];
+    ps.settings = res.settings || {};
+    ps.statuses = res.statuses || {};
+    ps.categories = res.categories || [];
+    ps.upcoming = res.upcoming || null;
+  } catch (error) {
+    ps.error = error.message;
+    ps.list = [];
+  } finally {
+    ps.loading = false;
+  }
+}
+
+function renderPayments() {
+  const ps = paymentState();
+  const head = pageHead("지급요청", "택배비·외주·생산비 등 선매입 외 결제 요청을 한곳에서 받고, 확인·처리하고, 영수증을 남깁니다.");
+  if (ps.list === null) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const statuses = ps.statuses || {};
+  const filter = PAYMENT_FILTERS.find(([k]) => k === ps.filter) || PAYMENT_FILTERS[0];
+  const q = String(ps.q || "").trim();
+  const rows = ps.list
+    .filter((p) => !filter[2] || filter[2].includes(p.status))
+    .filter((p) => !q || [p.code, p.title, p.payeeName, p.holder, p.accountNumber, p.memo].some((v) => String(v || "").includes(q)))
+    .sort((a, b) => String(a.plannedDate || a.dueDate || "9").localeCompare(String(b.plannedDate || b.dueDate || "9")) || String(b.createdAt).localeCompare(String(a.createdAt)));
+  const up = ps.upcoming || {};
+  const card = (label, amount, tone = "") => `<div class="fixed-card"><span>${label}</span><strong class="${tone}">${money.format(amount || 0)}원</strong></div>`;
+  const selectedTotal = ps.list.filter((p) => ps.selected.includes(p.id)).reduce((s, p) => s + Number(p.amount || 0), 0);
+  const actionsFor = (p) => {
+    const b = [];
+    if (["requested", "on_hold"].includes(p.status) && can("payments", "confirm")) b.push(`<button data-pay-act="confirm" data-id="${p.id}">확인</button>`);
+    if (p.status === "awaiting_approval" && can("payments", "approve")) b.push(`<button class="primary" data-pay-act="approve" data-id="${p.id}">허가</button>`);
+    if (p.status === "confirmed" && can("payments", "pay")) b.push(`<button class="primary" data-pay-act="pay" data-id="${p.id}">처리완료</button>`);
+    if (["requested", "confirmed", "awaiting_approval"].includes(p.status) && can("payments", "confirm")) b.push(`<button data-pay-act="hold" data-id="${p.id}">보류</button>`);
+    if (["on_hold", "cancelled", "paid"].includes(p.status) && can("payments", "confirm")) b.push(`<button data-pay-act="reopen" data-id="${p.id}">다시 요청</button>`);
+    if (can("payments", "edit")) b.push(`<button data-pay-edit="${p.id}">수정</button>`);
+    return b.join("");
+  };
+  const list = rows.map((p) => `
+    <tr>
+      <td><input type="checkbox" data-pay-select="${p.id}" ${ps.selected.includes(p.id) ? "checked" : ""}></td>
+      <td><span class="code-tag">${h(p.code)}</span><br><span class="badge ${PAYMENT_STATUS_BADGE[p.status] || ""}">${h(statuses[p.status] || p.status)}</span></td>
+      <td>${h(String(p.createdAt || "").slice(5, 10))}<br><span class="muted">${h(p.requestedBy?.name || "")}</span></td>
+      <td>${h(p.payeeName || p.holder || "")}<br><span class="muted" style="font-size:11px">${h(p.bankName || "")} ${h(p.accountNumber || "")}</span></td>
+      <td class="wrap">${h(p.title)}${p.memo ? `<br><span class="muted">${h(p.memo)}</span>` : ""}</td>
+      <td class="num"><strong>${money.format(p.amount || 0)}</strong></td>
+      <td>${p.plannedDate ? `예정 ${h(p.plannedDate.slice(5))}` : ""}${p.dueDate ? `<br><span class="muted">기한 ${h(p.dueDate.slice(5))}</span>` : ""}${p.paidAt ? `<br><span class="muted">지급 ${h(p.paidAt.slice(5))}</span>` : ""}</td>
+      <td>${h(p.category || "")}${p.withdrawAccount ? `<br><span class="muted" style="font-size:11px">${h(p.withdrawAccount)}</span>` : ""}</td>
+      <td>${(p.files || []).map((f) => `<a href="/api/payments/files/${h(f.id)}" target="_blank" rel="noreferrer">📎</a>`).join(" ")}
+        ${can("payments", "create") ? `<label class="file-mini" title="영수증·견적서 첨부">＋<input type="file" data-pay-file="${p.id}" hidden></label>` : ""}</td>
+      <td><div class="row-actions">${actionsFor(p)}</div></td>
+    </tr>`).join("") || `<tr><td colspan="10" class="empty">해당하는 지급요청이 없습니다.</td></tr>`;
+
+  return `
+    ${head}
+    <section class="fixed-summary">
+      <div class="fixed-summary-title">나갈 돈 (지급요청 기준 · ${h(up.start || "")} ~ ${h(up.end || "")})</div>
+      <div class="fixed-summary-grid">
+        ${card("기한 지남", up.overdueTotal, up.overdueTotal ? "danger-text" : "")}
+        ${card("오늘", up.todayTotal)}
+        ${card("7일 안", up.windowTotal)}
+        ${card("날짜 없음", up.undatedTotal)}
+      </div>
+    </section>
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head">
+          <div class="npb-subnav" style="margin:0">${PAYMENT_FILTERS.map(([k, l, st]) => `<button class="npb-subtab ${ps.filter === k ? "active" : ""}" data-pay-filter="${k}">${l} <span class="muted">${ps.list.filter((p) => !st || st.includes(p.status)).length}</span></button>`).join("")}</div>
+          <input data-pay-q placeholder="번호·내용·받는곳·계좌 검색" value="${h(q)}">
+        </div>
+        <div class="toolbar" style="padding:0 16px">
+          ${can("payments", "pay") ? `<button data-pay-transfer ${ps.selected.length ? "" : "disabled"}>하나은행 이체양식</button>` : ""}
+          <span class="muted">선택 ${ps.selected.length}건${ps.selected.length ? ` · ${money.format(selectedTotal)}원` : ""}</span>
+        </div>
+        <div class="table-wrap"><table class="compact payments-table" data-unit="원">
+          <thead><tr><th></th><th>번호·상태</th><th>작성</th><th>받는 곳</th><th>내용</th><th>금액</th><th>일정</th><th>분류</th><th>영수증</th><th>처리</th></tr></thead>
+          <tbody>${list}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>${ps.editing ? `지급요청 수정 · ${h(ps.editing.code)}` : "새 지급요청"}</h2></div>
+        <div class="panel-body">${can("payments", ps.editing ? "edit" : "create") ? renderPaymentForm() : `<p class="muted">요청 권한이 없습니다.</p>`}</div>
+      </div>
+    </section>`;
+}
+
+function renderPaymentForm() {
+  const ps = paymentState();
+  const p = { ...(ps.editing || {}), ...(ps.draft || {}) };
+  const accounts = state.transferAccounts || [];
+  const opt = (list, cur) => list.map((x) => `<option value="${h(x)}" ${cur === x ? "selected" : ""}>${h(x)}</option>`).join("");
+  return `
+    ${ps.editing ? "" : `
+    <div class="field">
+      <label>빠른 입력 <span class="muted" style="font-weight:400">(채널톡에 쓰던 대로 붙여넣기)</span></label>
+      <textarea data-pay-quick rows="2" placeholder="예: 041302 04 196113 국민 김성준 로젠택배 8,000원 세림 택배 착불비"></textarea>
+      <div class="toolbar" style="margin-top:4px"><button type="button" data-pay-parse>칸 채우기</button></div>
+    </div>`}
+    <form class="form-grid" data-pay-form>
+      <div class="field"><label>내용</label><input name="title" value="${h(p.title || "")}" required placeholder="예: 세림 택배 착불비"></div>
+      <div class="field two">
+        <div><label>금액(원)</label><input name="amount" inputmode="numeric" value="${h(p.amount ? money.format(p.amount) : "")}" required></div>
+        <div><label>분류</label><select name="category"><option value="">선택</option>${opt(ps.categories || [], p.category)}</select></div>
+      </div>
+      <div class="field">
+        <label>받는 곳 <span class="muted" style="font-weight:400">(계좌관리 목록에서 고르거나 직접 입력)</span></label>
+        <input name="payeeName" list="pay-account-options" value="${h(p.payeeName || "")}" data-pay-payee>
+        <datalist id="pay-account-options">${accounts.map((a) => `<option value="${h(a.alias || a.holder)}">${h(a.bankName)} ${h(a.accountNumber)}</option>`).join("")}</datalist>
+      </div>
+      <div class="field two">
+        <div><label>은행</label><input name="bankName" value="${h(p.bankName || "")}"></div>
+        <div><label>계좌번호</label><input name="accountNumber" inputmode="numeric" value="${h(p.accountNumber || "")}"></div>
+      </div>
+      <div class="field two">
+        <div><label>예금주</label><input name="holder" value="${h(p.holder || "")}"></div>
+        <div><label>계산서</label><select name="invoice">${opt(["", "발행", "미발행", "영수증", "해당없음"], p.invoice || "")}</select></div>
+      </div>
+      <div class="field two">
+        <div><label>요청 입금기한</label><input type="date" name="dueDate" value="${h(p.dueDate || "")}"></div>
+        <div><label>입금예정일 <span class="muted" style="font-weight:400">(담당자)</span></label><input type="date" name="plannedDate" value="${h(p.plannedDate || "")}"></div>
+      </div>
+      <div class="field two">
+        <div><label>사업부</label><select name="businessUnit">${[["", "미지정"], ["wooof", "우프(입점)"], ["pb", "PB"], ["npb", "NPB"], ["service", "용역"]].map(([k, l]) => `<option value="${k}" ${p.businessUnit === k ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+        <div><label>사용 출금계좌</label><select name="withdrawAccount"><option value="">선택</option>${opt(ps.settings?.withdrawAccounts || [], p.withdrawAccount)}</select></div>
+      </div>
+      <div class="field two">
+        <div><label>출금통장표시</label><input name="withdrawMemo" value="${h(p.withdrawMemo || "")}" placeholder="비우면 받는 곳 이름"></div>
+        <div><label>입금통장표시</label><input name="depositMemo" value="${h(p.depositMemo || "")}"></div>
+      </div>
+      <div class="field"><label>메모 <span class="muted" style="font-weight:400">(당시 단가·기준 등)</span></label><textarea name="memo" rows="2">${h(p.memo || "")}</textarea></div>
+      ${ps.editing?.history?.length ? `<details><summary class="muted">처리 기록 ${ps.editing.history.length}건</summary>${ps.editing.history.map((x) => `<div class="muted" style="font-size:12px">${h(String(x.at).slice(0, 16).replace("T", " "))} · ${h(x.by)} · ${h(x.action)} ${x.note ? `· ${h(x.note)}` : ""}</div>`).join("")}</details>` : ""}
+      <div class="toolbar">
+        <button class="primary" type="submit">${ps.editing ? "수정 저장" : "요청 올리기"}</button>
+        ${ps.editing || ps.draft ? `<button type="button" data-pay-cancel>취소</button>` : ""}
+        ${ps.editing && can("payments", "delete") ? `<button type="button" class="danger" data-pay-delete="${ps.editing.id}">삭제</button>` : ""}
+      </div>
+    </form>`;
+}
+
+function bindPayments() {
+  const ps = paymentState();
+  if (ps.list === null && !ps.loading) {
+    loadPayments().then(renderApp);
+    return;
+  }
+  const reload = async () => { await loadPayments(); renderApp(); };
+  const formDraft = () => {
+    const form = app.querySelector("[data-pay-form]");
+    return form ? formObject(form) : {};
+  };
+  app.querySelectorAll("[data-pay-filter]").forEach((b) => b.addEventListener("click", () => { ps.filter = b.dataset.payFilter; renderApp(); }));
+  app.querySelector("[data-pay-q]")?.addEventListener("change", (e) => { ps.q = e.target.value; renderApp(); });
+  app.querySelectorAll("[data-pay-select]").forEach((box) => box.addEventListener("change", () => {
+    const set = new Set(ps.selected);
+    if (box.checked) set.add(box.dataset.paySelect); else set.delete(box.dataset.paySelect);
+    ps.selected = [...set];
+    renderApp();
+  }));
+  app.querySelector("[data-pay-parse]")?.addEventListener("click", async () => {
+    const text = app.querySelector("[data-pay-quick]")?.value || "";
+    if (!text.trim()) return;
+    try {
+      const { parsed } = await api("/api/payments/parse", { method: "POST", body: { text } });
+      ps.draft = { ...formDraft(), ...Object.fromEntries(Object.entries(parsed).filter(([, v]) => v)) };
+      renderApp();
+      showToast("칸을 채웠습니다. 확인 후 '요청 올리기'를 누르세요.");
+    } catch (error) {
+      showToast(error.message || "읽지 못했습니다.", "error");
+    }
+  });
+  // 계좌관리 목록에서 받는 곳을 고르면 은행·계좌·예금주를 채운다.
+  app.querySelector("[data-pay-payee]")?.addEventListener("change", (e) => {
+    const acc = (state.transferAccounts || []).find((a) => (a.alias || a.holder) === e.target.value);
+    if (!acc) return;
+    const form = e.target.closest("form");
+    form.querySelector("[name=bankName]").value = acc.bankName;
+    form.querySelector("[name=accountNumber]").value = acc.accountNumber;
+    form.querySelector("[name=holder]").value = acc.holder || "";
+  });
+  app.querySelector("[data-pay-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = formObject(event.currentTarget);
+    try {
+      if (ps.editing) await api(`/api/payments/${ps.editing.id}`, { method: "PUT", body });
+      else {
+        try { await api("/api/payments", { method: "POST", body }); }
+        catch (dupErr) {
+          if (!dupErr.payload?.duplicate) throw dupErr;
+          if (!confirm(`${dupErr.message}\n\n그래도 새로 올릴까요?`)) return;
+          await api("/api/payments", { method: "POST", body: { ...body, allowDuplicate: true } });
+        }
+      }
+      showToast(ps.editing ? "수정했습니다." : "지급요청을 올렸습니다.");
+      ps.editing = null;
+      ps.draft = null;
+      await reload();
+    } catch (error) {
+      showToast(error.message || "저장하지 못했습니다.", "error");
+    }
+  });
+  app.querySelector("[data-pay-cancel]")?.addEventListener("click", () => { ps.editing = null; ps.draft = null; renderApp(); });
+  app.querySelectorAll("[data-pay-edit]").forEach((b) => b.addEventListener("click", () => {
+    ps.editing = ps.list.find((p) => p.id === b.dataset.payEdit) || null;
+    ps.draft = null;
+    renderApp();
+  }));
+  app.querySelector("[data-pay-delete]")?.addEventListener("click", async (e) => {
+    if (!confirm("이 지급요청을 삭제할까요? 첨부파일도 함께 지워집니다.")) return;
+    try {
+      await api(`/api/payments/${e.target.dataset.payDelete}`, { method: "DELETE" });
+      ps.editing = null;
+      await reload();
+    } catch (error) {
+      showToast(error.message || "삭제하지 못했습니다.", "error");
+    }
+  });
+  app.querySelectorAll("[data-pay-act]").forEach((b) => b.addEventListener("click", async () => {
+    const action = b.dataset.payAct;
+    const body = { action };
+    if (action === "pay") {
+      const rec = ps.list.find((p) => p.id === b.dataset.id);
+      const paidAt = prompt("지급일 (YYYY-MM-DD)", new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10));
+      if (paidAt === null) return;
+      body.paidAt = paidAt;
+      const acct = prompt(`사용 출금계좌\n${(ps.settings?.withdrawAccounts || []).join(", ")}`, rec?.withdrawAccount || "");
+      if (acct === null) return;
+      body.withdrawAccount = acct;
+    }
+    if (action === "hold") {
+      const note = prompt("보류 사유");
+      if (note === null) return;
+      body.note = note;
+    }
+    try {
+      const res = await api(`/api/payments/${b.dataset.id}/action`, { method: "POST", body });
+      const st = res.payment?.status;
+      showToast(st === "awaiting_approval" ? "확인했습니다. 고액이라 대표 허가가 필요합니다." : "처리했습니다.");
+      await reload();
+    } catch (error) {
+      showToast(error.message || "처리하지 못했습니다.", "error");
+    }
+  }));
+  app.querySelectorAll("[data-pay-file]").forEach((inp) => inp.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      await api(`/api/payments/${inp.dataset.payFile}/files`, {
+        method: "POST",
+        body: { fileBase64: await readFileAsBase64(file), fileName: file.name, type: file.type }
+      });
+      showToast("첨부했습니다.");
+      await reload();
+    } catch (error) {
+      showToast(error.message || "첨부하지 못했습니다.", "error");
+    }
+  }));
+  app.querySelector("[data-pay-transfer]")?.addEventListener("click", async () => {
+    try {
+      const res = await fetch("/api/payments/transfer-xlsx", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ids: ps.selected })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return showToast(err.error || "이체 양식을 만들지 못했습니다.", "error");
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `하나은행_이체등록_지급요청.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      showToast(error.message || "이체 양식을 만들지 못했습니다.", "error");
+    }
+  });
+}
+
+// ===========================================================================
+// v2 자금 — 일일 자금보고 + 자금 일정(정기 나갈 돈/들어올 돈)
+// ===========================================================================
+function cashState() {
+  if (!state.cash) state.cash = { screen: "report", company: "wooof", data: null, schedules: null, editing: null, loading: false };
+  return state.cash;
+}
+
+async function loadCash() {
+  const cs = cashState();
+  cs.loading = true;
+  try {
+    const [rep, sch] = await Promise.all([
+      api(`/api/cash/report?company=${encodeURIComponent(cs.company)}&days=7`),
+      api("/api/cash/schedules")
+    ]);
+    cs.data = rep;
+    cs.schedules = sch.schedules || [];
+    cs.meta = sch;
+  } catch (error) {
+    cs.error = error.message;
+    cs.data = cs.data || { report: null };
+    cs.schedules = cs.schedules || [];
+  } finally {
+    cs.loading = false;
+  }
+}
+
+const WEEKDAY_KO = ["일", "월", "화", "수", "목", "금", "토"];
+const cashDay = (d) => `${Number(d.slice(5, 7))}/${Number(d.slice(8, 10))}(${WEEKDAY_KO[new Date(`${d}T00:00:00Z`).getUTCDay()]})`;
+
+// ===========================================================================
+// v2 대출금 원장 — 시트 기준 잔액 − 상환 원금, 매월 상환 예정, 클로브 자동 반영
+// ===========================================================================
+const LOAN_STATUS = { active: ["정상", ""], "due-soon": ["만기 임박", "warn"], matured: ["만기 지남", "warn"], closed: ["종료", "muted"], rehab: ["회생채권", "muted"] };
+
+function renderLoans() {
+  const cs = cashState();
+  const d = cs.loans;
+  if (!d) return `<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const sync = d.lastSync;
+  const unconnected = new Set(sync?.unconnected || []);
+  const group = (key) => d.loans.filter((l) => l.company === key && (cs.loanShowClosed || l.status !== "closed"));
+  const table = (key) => `
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head"><h2>${h(d.companies[key])}</h2><span class="muted">남은 대출금 <strong>${money.format(d.totals[key] || 0)}원</strong>${d.rehabTotals?.[key] ? ` · 회생채권으로 전환 ${money.format(d.rehabTotals[key])}원` : ""}</span></div>
+      <div class="table-wrap"><table class="compact" data-unit="원">
+        <thead><tr><th>대출</th><th>남은 금액</th><th>다음 상환(추정)</th><th>만기</th></tr></thead>
+        <tbody>${group(key).map((l) => `<tr class="${cs.loanSel === l.id ? "selected" : ""}" data-loan-open="${h(l.id)}">
+          <td>${h(l.bank)} ${h(l.name)}<br><span class="muted" style="font-size:11px">연 ${l.rate || 0}% · 매월 ${h(l.payDay || "-")} · ${h(l.account || "")}${unconnected.has(l.id) ? ' · <span class="danger-text">클로브 미연결</span>' : ""}</span></td>
+          <td class="num">${l.status === "rehab" ? `<span class="muted">원래 대출 ${money.format(l.currentBalance)}</span><br><span class="muted" style="font-size:11px">회생계획으로 변제</span>` : `<strong>${money.format(l.currentBalance)}</strong>${l.paymentCount ? `<br><span class="muted" style="font-size:11px">상환 ${l.paymentCount}건 반영</span>` : `<br><span class="muted" style="font-size:11px">${h(l.asOf || "")} 기준</span>`}`}</td>
+          <td>${l.nextDate ? `${h(l.nextDate.slice(5))}<br><span class="muted" style="font-size:11px">${money.format(l.nextAmount)}원</span>` : ""}</td>
+          <td>${l.status === "rehab" ? `<span class="badge muted">회생채권</span><br><span class="muted" style="font-size:11px">${h(l.rehabCreditor)}${l.rehabPlan ? ` · 계획 채권 ${money.format(l.rehabPlan.total)} · 현금변제 ${money.format(l.rehabPlan.cash)}` : ""}</span>` : `${h(l.maturity || "")}<br><span class="badge ${LOAN_STATUS[l.status][1]}">${LOAN_STATUS[l.status][0]}</span>`}</td></tr>`).join("") || `<tr><td colspan="4" class="empty">대출이 없습니다.</td></tr>`}</tbody>
+      </table></div>
+    </div>`;
+  return `
+    <div class="toolbar" style="margin:8px 0">
+      ${d.canEdit ? `<button data-loan-sync>클로브에서 상환 찾기</button><button data-loan-import>대출금 관리대장에서 가져오기</button>` : ""}
+      <label class="check"><input type="checkbox" data-loan-closed ${cs.loanShowClosed ? "checked" : ""}> 종료된 대출도 보기</label>
+      <span class="muted" style="font-size:12px">${sync ? `마지막 상환 찾기 ${h(String(sync.at || "").slice(0, 16).replace("T", " "))} · ${sync.matched}건 반영${sync.unconnected?.length ? ` · 클로브에 출금계좌가 없는 대출 ${sync.unconnected.length}건은 직접 입력하세요` : ""}` : "상환은 클로브 출금 거래에서 자동으로 찾습니다. 출금계좌가 클로브에 없으면 직접 입력합니다."}</span>
+    </div>
+    <section class="v2-wide">${Object.keys(d.companies).map(table).join("")}</section>
+    ${cs.loanDetail ? v2Modal(renderLoanDetail(), "data-loan-close") : ""}`;
+}
+
+function renderLoanDetail() {
+  const cs = cashState();
+  const { loan: l, payments = [] } = cs.loanDetail;
+  const canEdit = cs.loans?.canEdit;
+  const today = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+  return `
+    <div class="panel-head"><h2>${h(l.bank)} ${h(l.name)}</h2><button data-loan-close>닫기</button></div>
+    <div class="panel-body">
+      ${l.status === "rehab" ? `<p class="muted">회생채권으로 전환(${h(l.rehabCreditor)} 대위변제)${l.rehabNote ? ` · ${h(l.rehabNote)}` : ""}. 은행 상환·이자 일정에서 빠지고 회생계획 변제로 갚습니다.</p>` : ""}
+      <p>남은 금액 <strong>${money.format(l.currentBalance)}원</strong> (${h(l.asOf || "")} 기준 ${money.format(l.balance)}원 − 이후 상환 원금)<br>
+      <span class="muted">원금 ${money.format(l.principal || 0)} · 실행 ${h(l.startDate || "")} · 연 ${l.rate}% · 매월 ${h(l.payDay || "")} · 예상 ${money.format(l.expected?.total || 0)}원(이자 ${money.format(l.expected?.interest || 0)}) · ${h(l.term || "")} ${h(l.memo || "")}</span></p>
+      ${canEdit ? `<h3>상환 직접 기록</h3><form class="form-grid" data-loan-pay>
+        <div class="field two"><div><label>날짜</label><input type="date" name="date" value="${today}"></div><div><label>메모</label><input name="memo"></div></div>
+        <div class="field two"><div><label>원금</label><input name="principal" inputmode="numeric" value="${l.expected?.principal ? money.format(l.expected.principal) : ""}"></div><div><label>이자</label><input name="interest" inputmode="numeric" value="${l.expected?.interest ? money.format(l.expected.interest) : ""}"></div></div>
+        <div class="toolbar"><button class="primary" type="submit">기록</button></div></form>` : ""}
+      <h3 style="margin-top:12px">상환 기록</h3>
+      <div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>날짜</th><th>원금</th><th>이자</th><th>근거</th><th></th></tr></thead><tbody>
+        ${payments.map((p) => `<tr class="${p.voided ? "muted" : ""}"><td>${h(p.date)}</td><td class="num">${money.format(p.principal || 0)}</td><td class="num">${money.format(p.interest || 0)}</td>
+          <td class="muted" style="font-size:11px">${h(p.source || "")} ${h(p.memo || "")}${p.voided ? " · 취소됨" : ""}</td>
+          <td>${canEdit && !p.voided ? `<button data-loan-pay-void="${h(p.id)}">취소</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">아직 기록이 없습니다.</td></tr>`}
+      </tbody></table></div>
+      ${canEdit ? `<details style="margin-top:12px"><summary>대출 정보 고치기</summary><form class="form-grid" data-loan-edit>
+        <div class="field two"><div><label>남은 금액(지금)</label><input name="balance" inputmode="numeric" value="${money.format(l.currentBalance)}"></div><div><label>만기</label><input type="date" name="maturity" value="${h(l.maturity || "")}"></div></div>
+        <div class="field two"><div><label>이율 %</label><input name="rate" value="${h(l.rate)}"></div><div><label>매월 상환일</label><input name="payDay" value="${h(l.payDay || "")}" placeholder="15일 / 말일"></div></div>
+        <div class="field two"><div><label>매월 원금상환</label><input name="principalPayment" inputmode="numeric" value="${h(l.principalPayment || "")}"></div><div><label>출금계좌</label><input name="account" value="${h(l.account || "")}"></div></div>
+        <div class="field two"><div><label>회생채권 전환 — 대위변제 기관</label><input name="rehabCreditor" value="${h(l.rehabCreditor || "")}" placeholder="예: 기술보증기금 (비우면 일반 대출)"></div><div><label>전환 메모</label><input name="rehabNote" value="${h(l.rehabNote || "")}"></div></div>
+        <label class="check"><input type="checkbox" name="closed" ${l.closed ? "checked" : ""}> 종료(다 갚음)</label>
+        <div class="toolbar"><button type="submit">저장</button><span class="muted" style="font-size:12px">남은 금액을 고치면 오늘 기준 잔액이 됩니다.</span></div></form></details>` : ""}
+    </div>`;
+}
+
+function bindLoans() {
+  const cs = cashState();
+  const load = async (sel) => {
+    cs.loans = await api("/api/loans");
+    const id = sel ?? cs.loanSel ?? "";
+    cs.loanSel = id;
+    cs.loanDetail = id ? await api(`/api/loans/item/${encodeURIComponent(id)}`) : null;
+  };
+  if (!cs.loans && !cs.loansLoading) {
+    cs.loansLoading = true;
+    load().catch((e) => showToast(e.message, "error")).finally(() => { cs.loansLoading = false; renderApp(); });
+    return;
+  }
+  const refresh = async (sel) => { await load(sel); renderApp(); };
+  const run = async (fn, ok) => { try { const r = await fn(); if (ok) showToast(typeof ok === "function" ? ok(r) : ok); await refresh(); } catch (e) { showToast(e.message || "처리하지 못했습니다.", "error"); } };
+  bindV2Modal();
+  app.querySelectorAll("[data-loan-open]").forEach((tr) => tr.addEventListener("click", () => refresh(tr.dataset.loanOpen).catch((e) => showToast(e.message, "error"))));
+  app.querySelector("[data-loan-close]")?.addEventListener("click", () => { cs.loanSel = ""; cs.loanDetail = null; renderApp(); });
+  app.querySelector("[data-loan-closed]")?.addEventListener("change", (e) => { cs.loanShowClosed = e.target.checked; renderApp(); });
+  app.querySelector("[data-loan-import]")?.addEventListener("click", () => {
+    if (!confirm("대출금 관리대장(구글시트)을 읽어 대출 목록과 기준일 잔액을 가져옵니다. 여기서 고친 대출은 그대로 둡니다. 진행할까요?")) return;
+    run(() => api("/api/loans/import-sheet", { method: "POST", body: {} }), (r) => `대출 ${r.loans}건을 가져왔습니다. 확인 필요 질문 ${r.questions}건.`);
+  });
+  app.querySelector("[data-loan-sync]")?.addEventListener("click", () => run(() => api("/api/loans/sync", { method: "POST", body: {} }),
+    (r) => `상환 ${r.matched}건을 반영했습니다.${r.unconnected.length ? ` 클로브에 출금계좌가 없는 대출 ${r.unconnected.length}건.` : ""}${r.errors.length ? ` 오류: ${r.errors.join(", ")}` : ""}`));
+  app.querySelector("[data-loan-pay]")?.addEventListener("submit", (e) => { e.preventDefault(); run(() => api(`/api/loans/item/${encodeURIComponent(cs.loanSel)}/payments`, { method: "POST", body: formObject(e.currentTarget) }), "기록했습니다."); });
+  app.querySelectorAll("[data-loan-pay-void]").forEach((b) => b.addEventListener("click", () => { if (confirm("이 상환 기록을 취소할까요?")) run(() => api(`/api/loans/payments/${encodeURIComponent(b.dataset.loanPayVoid)}/void`, { method: "POST", body: {} }), "취소했습니다."); }));
+  app.querySelector("[data-loan-edit]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = formObject(e.currentTarget);
+    f.closed = e.currentTarget.querySelector('[name="closed"]').checked;
+    const before = cs.loanDetail.loan;
+    if (Number(String(f.balance).replace(/,/g, "")) === before.currentBalance) delete f.balance; // 안 고쳤으면 기준일 유지
+    run(() => api(`/api/loans/item/${encodeURIComponent(cs.loanSel)}`, { method: "PUT", body: f }), "저장했습니다.");
+  });
+}
+
+// ===========================================================================
+// v2 회생계획 변제 — 연도별 계획·미리 낸 돈·남은 돈, 채권자별 금액, 지급 기록
+// ===========================================================================
+const REHAB_STATUS = { paid: ["완료", "muted"], overdue: ["기한 지남", "warn"], "this-year": ["올해 연말까지", ""], planned: ["예정", "muted"] };
+function renderRehab() {
+  const cs = cashState();
+  const d = cs.rehab;
+  if (!d) return `<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  if (!d.hasPlan) return `<section class="panel"><div class="panel-body"><p class="muted">회생 변제계획표를 아직 가져오지 않았습니다.</p>${state.admin?.role === "owner" ? `<button class="primary" data-rehab-import>회생 변제계획표 가져오기</button>` : ""}</div></section>`;
+  const t = d.totals;
+  const cur = d.years.find((y) => y.year === d.year) || {};
+  const cats = d.byCategory.map(([k, v]) => `${h(k)} ${v.count}곳 · 현금변제 ${money.format(v.cash)}`).join(" / ");
+  return `
+    <div class="toolbar" style="margin:8px 0">
+      ${state.admin?.role === "owner" ? `<button data-rehab-import>변제계획표 다시 가져오기</button>` : ""}
+      <span class="muted" style="font-size:12px">채권총액 ${money.format(t.total)}원 · 80% 출자전환(특수관계인 100%), 나머지를 2026~2035년 해마다 연말까지 현금변제(조세는 2028년까지) · ${cats}</span>
+    </div>
+    <section class="panel"><div class="table-wrap"><table class="compact fit" data-unit="원">
+      <thead><tr><th>연도</th><th>계획 변제액</th><th>미리 낸 돈</th><th>지급 기록</th><th>남은 금액</th><th>기한</th><th>상태</th></tr></thead>
+      <tbody>${d.years.map((y) => `<tr class="${y.year === d.year ? "selected" : ""}" data-rehab-year="${y.year}">
+        <td>${y.year}년</td><td class="num">${money.format(y.planned)}</td>
+        <td class="num">${y.prepaid ? `<span title="2025년에 2026년분 50% 선변제(조기졸업 조건). 실제 낸 돈 ${money.format(y.prepaidPaid)}원(현가할인 4.4%)">${money.format(y.prepaid)} <span class="muted">*</span></span>` : ""}</td>
+        <td class="num">${y.paid ? money.format(y.paid) : ""}</td><td class="num"><strong>${money.format(y.due)}</strong></td>
+        <td>${h(y.dueDate)}</td><td><span class="badge ${REHAB_STATUS[y.status][1]}">${REHAB_STATUS[y.status][0]}</span></td></tr>`).join("")}</tbody>
+    </table></div>
+    ${d.years.some((y) => y.prepaid) ? `<p class="muted" style="font-size:12px;margin:6px 12px">* 2026년분 50%를 2025년에 미리 냄(조기졸업 조건). 실제 낸 돈은 현가할인 4.4%를 적용한 ${money.format(d.years.find((y) => y.prepaid).prepaidPaid)}원.</p>` : ""}</section>
+    <section class="rehab-bottom">
+      <div class="panel">
+        <div class="panel-head"><h2>${h(d.year)}년 채권자별</h2><span class="muted">${d.creditors.length}곳 · 연도를 누르면 바뀝니다</span></div>
+        <div class="table-wrap" style="max-height:560px"><table class="compact" data-unit="원">
+          <thead><tr><th>채권자</th><th>구분</th><th>계획</th><th>미리 낸 돈</th><th>남은 금액</th></tr></thead>
+          <tbody>${d.creditors.map((c) => `<tr><td class="wrap">${h(c.creditor)}${c.biz ? `<br><span class="muted" style="font-size:11px">${h(c.biz)}</span>` : ""}</td>
+            <td style="font-size:12px">${h(c.cat)}</td><td class="num">${money.format(c.planned)}</td><td class="num">${c.prepaid ? money.format(c.prepaid) : ""}</td>
+            <td class="num"><strong>${money.format(c.remaining)}</strong></td></tr>`).join("")}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>지급 기록</h2></div>
+        <div class="panel-body">
+          ${d.canEdit ? `<form class="form-grid" data-rehab-pay>
+            <div class="field two"><div><label>연도</label><input name="year" value="${h(d.year)}"></div><div><label>지급일</label><input type="date" name="date" value="${new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10)}"></div></div>
+            <div class="field two"><div><label>금액</label><input name="amount" inputmode="numeric" value="${cur.due ? money.format(cur.due) : ""}"></div><div><label>메모</label><input name="memo" placeholder="예: 채권자 67곳 일괄 이체"></div></div>
+            <div class="toolbar"><button class="primary" type="submit">지급 기록</button></div></form>` : ""}
+          <div class="table-wrap"><table class="compact tight" data-unit="원"><thead><tr><th>연도</th><th>지급일</th><th>금액</th><th>메모</th><th></th></tr></thead><tbody>
+            ${d.payments.map((p) => `<tr><td>${h(p.year)}</td><td>${h(p.date)}</td><td class="num">${money.format(p.amount)}</td><td class="wrap">${h(p.memo || "")}</td>
+              <td>${d.canEdit ? `<button data-rehab-void="${h(p.id)}">취소</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">2025년 선변제는 계획표 값으로 반영돼 있습니다. 연말에 낸 뒤 여기에 기록하세요.</td></tr>`}
+          </tbody></table></div>
+        </div>
+      </div>
+    </section>`;
+}
+function bindRehab() {
+  const cs = cashState();
+  const load = async (year) => { cs.rehab = await api(`/api/rehab${year ? `?year=${year}` : ""}`); };
+  if (!cs.rehab && !cs.rehabLoading) {
+    cs.rehabLoading = true;
+    load().catch((e) => showToast(e.message, "error")).finally(() => { cs.rehabLoading = false; renderApp(); });
+    return;
+  }
+  const run = async (fn, ok) => { try { await fn(); if (ok) showToast(ok); await load(cs.rehab?.year); renderApp(); } catch (e) { showToast(e.message || "처리하지 못했습니다.", "error"); } };
+  app.querySelectorAll("[data-rehab-year]").forEach((tr) => tr.addEventListener("click", () => run(() => load(tr.dataset.rehabYear))));
+  app.querySelectorAll("[data-rehab-import]").forEach((b) => b.addEventListener("click", () => {
+    if (!confirm("회생채권 변제계획표(구글시트)를 다시 읽어 옵니다. 지급 기록은 그대로 둡니다. 진행할까요?")) return;
+    run(() => api("/api/rehab/import-sheet", { method: "POST", body: {} }), "변제계획표를 가져왔습니다.");
+  }));
+  app.querySelector("[data-rehab-pay]")?.addEventListener("submit", (e) => { e.preventDefault(); run(() => api("/api/rehab/payments", { method: "POST", body: formObject(e.currentTarget) }), "기록했습니다."); });
+  app.querySelectorAll("[data-rehab-void]").forEach((b) => b.addEventListener("click", () => { if (confirm("이 지급 기록을 취소할까요?")) run(() => api(`/api/rehab/payments/${encodeURIComponent(b.dataset.rehabVoid)}/void`, { method: "POST", body: {} }), "취소했습니다."); }));
+}
+
+// ===========================================================================
+// v2 현금흐름표 — 구글시트(2026_현금흐름표)와 같은 모양: 행=현금IN/OUT 항목, 열=날짜
+// ===========================================================================
+const CF_KIND = { manual: "직접 입력", actual: "실제(클로브)", sheet: "시트 값", plan: "예정" };
+function cfState() {
+  const cs = cashState();
+  if (!cs.cf) cs.cf = { month: new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 7), company: "", data: null, loading: false, cell: null, rowEdit: null };
+  return cs.cf;
+}
+const cfNum = (n) => (n ? money.format(n) : "");
+function renderCashFlow() {
+  const cf = cfState();
+  const d = cf.data;
+  if (!d) return `<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  if (!d.hasRows) return `<section class="panel"><div class="panel-body"><p>현금흐름표 행이 아직 없습니다. 쓰시던 구글시트(2026_현금흐름표)를 그대로 가져오면 행 이름·지난 값·고정비 목록이 들어옵니다.</p>
+    ${d.isOwner ? `<button class="primary" data-cf-import>현금흐름표 시트 가져오기</button>` : `<p class="muted">오너가 가져오기를 해야 합니다.</p>`}</div></section>`;
+  const days = d.days;
+  const sumRow = (side) => days.reduce((s, x) => s + (d.totals[x.date]?.[side] || 0), 0);
+  const monthIn = sumRow("in");
+  const monthOut = sumRow("out");
+  const head = `<tr><th class="cf-label">항목</th>${days.map((x) => `<th class="cf-day ${x.date === d.today ? "today" : ""} ${["토", "일"].includes(x.dow) ? "weekend" : ""}">${x.day}<br><small>${x.dow}</small></th>`).join("")}<th class="cf-total">월 합계</th></tr>`;
+  const rowHtml = (r) => {
+    const cells = d.grid[r.id] || {};
+    const total = Object.values(cells).reduce((s, c) => s + c.amount, 0);
+    return `<tr><th class="cf-label" data-cf-row="${h(r.id)}" title="행 이름·맞춤 낱말 고치기">${h(r.label)}</th>${days.map((x) => {
+      const c = cells[x.date];
+      return `<td class="cf-cell ${c ? `k-${c.kind}` : ""} ${x.date === d.today ? "today" : ""}" data-cf-cell="${h(r.id)}|${x.date}" ${c?.memo ? `title="${h(c.memo)}"` : ""}>${c ? cfNum(c.amount) : ""}</td>`;
+    }).join("")}<td class="cf-total">${cfNum(total)}</td></tr>`;
+  };
+  const section = (side, title) => {
+    const rows = d.rows.filter((r) => r.side === side);
+    return `<tr class="cf-section"><th class="cf-label">${title}</th><td colspan="${days.length + 1}"></td></tr>${rows.map(rowHtml).join("")}
+      <tr class="cf-sum"><th class="cf-label">${side === "in" ? "입금 합계" : "출금 합계"}</th>${days.map((x) => `<td class="${x.date === d.today ? "today" : ""}">${cfNum(d.totals[x.date]?.[side])}</td>`).join("")}<td class="cf-total">${cfNum(sumRow(side))}</td></tr>`;
+  };
+  const netRow = `<tr class="cf-sum"><th class="cf-label">순현금(입금−출금)</th>${days.map((x) => { const n = (d.totals[x.date]?.in || 0) - (d.totals[x.date]?.out || 0); return `<td class="${n < 0 ? "neg" : ""} ${x.date === d.today ? "today" : ""}">${n ? money.format(n) : ""}</td>`; }).join("")}<td class="cf-total ${monthIn - monthOut < 0 ? "neg" : ""}">${money.format(monthIn - monthOut)}</td></tr>`;
+  const balRow = Object.keys(d.balances || {}).length ? `<tr class="cf-sum cf-bal"><th class="cf-label">예상 잔액</th>${days.map((x) => { const b = d.balances[x.date]; return `<td class="${b < 0 ? "neg" : ""} ${x.date === d.today ? "today" : ""}">${b == null ? "" : money.format(b)}</td>`; }).join("")}<td class="cf-total"></td></tr>` : "";
+  const ym = (delta) => { const [y, m] = cf.month.split("-").map(Number); const dt = new Date(Date.UTC(y, m - 1 + delta, 1)); return dt.toISOString().slice(0, 7); };
+  return `
+    <div class="toolbar" style="margin:8px 0">
+      <button data-cf-month="${ym(-1)}">‹</button><strong style="min-width:90px;text-align:center">${cf.month.replace("-", "년 ")}월</strong><button data-cf-month="${ym(1)}">›</button>
+      ${[["", "전체(두 사업자)"], ["wooof", "우프컴퍼니"], ["betters", "Betters(개인사업자)"]].map(([k, l]) => `<button class="npb-subtab ${cf.company === k ? "active" : ""}" data-cf-company="${k}">${l}</button>`).join("")}
+      <span style="flex:1"></span>
+      ${d.canEdit ? `<button data-cf-sync title="지난 날의 실제 입출금을 클로브에서 가져옵니다">클로브 실제 내역 불러오기</button><button data-cf-addrow>행 추가</button>` : ""}
+      ${d.isOwner ? `<button data-cf-import title="옛 구글시트 값을 다시 가져옵니다(직접 입력한 칸은 그대로)">시트 다시 가져오기</button>` : ""}
+    </div>
+    <section class="sales-flow">
+      <div class="sales-step"><span>이달 입금</span><strong>${money.format(monthIn)}원</strong></div>
+      <div class="sales-step"><span>이달 출금</span><strong>${money.format(monthOut)}원</strong></div>
+      <div class="sales-step"><span>순현금</span><strong class="${monthIn - monthOut < 0 ? "danger-text" : ""}">${money.format(monthIn - monthOut)}원</strong></div>
+      ${d.opening != null ? `<div class="sales-step"><span>오늘 잔액(클로브)</span><strong>${money.format(d.opening)}원</strong></div>` : d.balanceError ? `<div class="sales-step"><span>잔액</span><em class="muted" style="font-size:12px;font-style:normal">${h(d.balanceError)}</em></div>` : ""}
+    </section>
+    <p class="cf-legend muted">단위: 원 · <span class="k-actual">실제(클로브)</span> <span class="k-sheet">시트 값</span> <span class="k-plan">예정</span> <span class="k-manual">직접 입력</span> · 칸을 누르면 내역을 보고 고칠 수 있습니다${d.actualSyncedAt ? ` · 클로브 ${h(String(d.actualSyncedAt).slice(5, 16).replace("T", " "))} 기준` : " · 지난 날은 클로브 실제 내역을 불러오기 전까지 시트 값으로 보입니다"}</p>
+    <section class="panel"><div class="cf-wrap"><table class="cf-grid"><thead>${head}</thead><tbody>${section("in", "현금 IN")}${section("out", "현금 OUT")}${netRow}${balRow}</tbody></table></div></section>
+    ${cf.cell ? v2Modal(renderCashFlowCell(), "data-cf-close") : ""}
+    ${cf.rowEdit ? v2Modal(renderCashFlowRow(), "data-cf-close") : ""}`;
+}
+function renderCashFlowCell() {
+  const cf = cfState();
+  const { rowId, date } = cf.cell;
+  const r = cf.data.rows.find((x) => x.id === rowId);
+  const c = cf.data.grid[rowId]?.[date];
+  const parts = c?.parts || { actual: [], plan: [], sheet: null };
+  // 실제(클로브) 줄은 '이 행으로 보내기'로 거래처 이름을 다른 행의 맞춤 낱말로 넣을 수 있다(다음부터 자동 분류).
+  const sameSide = cf.data.rows.filter((x) => x.side === r?.side && x.id !== rowId);
+  const sendTo = (p) => cf.data.canEdit && p.title ? `<select data-cf-send="${h(p.title)}"><option value="">이 행으로 보내기…</option>${sameSide.map((x) => `<option value="${h(x.id)}">${h(x.label)}</option>`).join("")}</select>` : "";
+  const list = (title, items, withSend) => items.length ? `<h3>${title}</h3><table class="compact" data-unit="원"><tbody>${items.map((p) => `<tr><td class="wrap">${h(p.title || "")}</td><td class="num">${money.format(p.amount)}</td>${withSend ? `<td>${sendTo(p)}</td>` : ""}</tr>`).join("")}</tbody></table>` : "";
+  return `<div class="panel-head"><h2>${h(r?.label || "")} · ${h(date)}</h2><button data-cf-close>닫기</button></div>
+    <div class="panel-body">
+      <p>지금 값: <strong>${c ? `${money.format(c.amount)}원` : "없음"}</strong>${c ? ` <span class="badge muted">${CF_KIND[c.kind]}</span>` : ""}${c?.memo ? ` · ${h(c.memo)}` : ""}</p>
+      ${list("실제(클로브)", parts.actual, true)}${list("예정(v2)", parts.plan, false)}${parts.sheet != null ? `<p class="muted">옛 시트 값: ${money.format(parts.sheet)}원</p>` : ""}
+      ${cf.data.canEdit ? `<form class="form-grid" data-cf-cell-form>
+        <div class="field two"><div><label>직접 입력(원)</label><input name="amount" inputmode="numeric" value="${c?.kind === "manual" ? money.format(c.amount) : ""}" placeholder="비우고 저장하면 직접 입력을 지웁니다"></div>
+        <div><label>메모</label><input name="memo" value="${h(c?.kind === "manual" ? c.memo || "" : "")}"></div></div>
+        <div class="toolbar"><button class="primary" type="submit">저장</button><span class="muted" style="font-size:12px">직접 입력한 값이 실제·시트·예정보다 먼저 보입니다.</span></div></form>` : ""}
+    </div>`;
+}
+function renderCashFlowRow() {
+  const cf = cfState();
+  const r = cf.rowEdit.id ? cf.data.rows.find((x) => x.id === cf.rowEdit.id) : { side: "out", label: "", match: [] };
+  return `<div class="panel-head"><h2>${r.id ? "행 고치기" : "행 추가"}</h2><button data-cf-close>닫기</button></div>
+    <div class="panel-body"><form class="form-grid" data-cf-row-form="${h(r.id || "")}">
+      <div class="field two"><div><label>이름</label><input name="label" value="${h(r.label)}" required></div>
+        <div><label>구분</label><select name="side" ${r.id ? "disabled" : ""}><option value="in" ${r.side === "in" ? "selected" : ""}>현금 IN</option><option value="out" ${r.side === "out" ? "selected" : ""}>현금 OUT</option></select></div></div>
+      ${r.id ? `<div class="field"><label>맞춤 낱말(쉼표) — 클로브 거래·v2 예정의 이름에 이 낱말이 있으면 이 행으로 모읍니다</label><input name="match" value="${h((r.match || []).join(", "))}" placeholder="예: 네이버파이낸셜, 스마트스토어"></div>
+      <div class="field two"><div><label>회사</label><select name="company"><option value="">두 사업자</option><option value="wooof" ${r.company === "wooof" ? "selected" : ""}>우프컴퍼니</option><option value="betters" ${r.company === "betters" ? "selected" : ""}>Betters(개인사업자)</option></select></div>
+        <div><label>순서</label><input name="order" inputmode="numeric" value="${h(r.order ?? "")}"></div></div>
+      <div class="field"><label>매출 유형 <span class="muted" style="font-weight:400">— 대행 판매분·재발행 전달분은 우프 매출로 세지 않음</span></label><select name="revenueType"><option value="">(없음/출금)</option>${Object.entries(cf.data.revenueTypes || {}).map(([k, l]) => `<option value="${k}" ${r.revenueType === k ? "selected" : ""}>${h(l)}</option>`).join("")}</select></div>
+      <label class="check"><input type="checkbox" name="hide"> 이 행 숨기기</label>` : ""}
+      <div class="toolbar"><button class="primary" type="submit">저장</button></div></form></div>`;
+}
+function bindCashFlow() {
+  const cf = cfState();
+  const load = async () => {
+    cf.loading = true;
+    try { cf.data = await api(`/api/cashflow?month=${cf.month}${cf.company ? `&company=${cf.company}` : ""}`); } catch (e) { showToast(e.message, "error"); cf.data = cf.data || { hasRows: false }; } finally { cf.loading = false; renderApp(); }
+  };
+  if (!cf.data && !cf.loading) { load(); return; }
+  bindV2Modal();
+  const run = async (fn, ok) => { try { const r = await fn(); if (ok) showToast(typeof ok === "function" ? ok(r) : ok); cf.cell = null; cf.rowEdit = null; await load(); } catch (e) { showToast(e.message || "처리하지 못했습니다.", "error"); } };
+  app.querySelectorAll("[data-cf-month]").forEach((b) => b.addEventListener("click", () => { cf.month = b.dataset.cfMonth; cf.data = null; load(); }));
+  app.querySelectorAll("[data-cf-company]").forEach((b) => b.addEventListener("click", () => { cf.company = b.dataset.cfCompany; cf.data = null; load(); }));
+  app.querySelectorAll("[data-cf-cell]").forEach((td) => td.addEventListener("click", () => { const [rowId, date] = td.dataset.cfCell.split("|"); cf.cell = { rowId, date }; renderApp(); }));
+  app.querySelectorAll("[data-cf-row]").forEach((th) => th.addEventListener("click", () => { if (cf.data.canEdit) { cf.rowEdit = { id: th.dataset.cfRow }; renderApp(); } }));
+  app.querySelector("[data-cf-addrow]")?.addEventListener("click", () => { cf.rowEdit = { id: "" }; renderApp(); });
+  app.querySelector("[data-cf-close]")?.addEventListener("click", () => { cf.cell = null; cf.rowEdit = null; renderApp(); });
+  app.querySelectorAll("[data-cf-import]").forEach((b) => b.addEventListener("click", () => {
+    if (!confirm("구글시트(2026_현금흐름표)의 행·1~11월 값·고정비 목록을 가져옵니다. 직접 입력한 칸과 고친 일정은 그대로 둡니다. 진행할까요?")) return;
+    run(() => api("/api/cashflow/import-sheet", { method: "POST", body: {} }), (r) => `행 ${r.rows}개, 칸 ${r.cells}개, 고정비 ${r.fixed}건을 가져왔습니다.`);
+  }));
+  app.querySelector("[data-cf-sync]")?.addEventListener("click", () => run(() => api("/api/cashflow/sync-clobe", { method: "POST", body: { month: cf.month } }),
+    (r) => `클로브 거래 ${r.lines}건을 불러왔습니다.${r.errors?.length ? ` (${r.errors.join(", ")})` : ""}`));
+  app.querySelectorAll("[data-cf-send]").forEach((sel) => sel.addEventListener("change", () => {
+    const target = cf.data.rows.find((x) => x.id === sel.value);
+    if (!target) return;
+    // 거래처 이름에서 지점·괄호 꼬리를 떼고 앞부분을 맞춤 낱말로 쓴다.
+    const term = sel.dataset.cfSend.replace(/\(.*$/, "").replace(/주식회사|㈜/g, "").trim().slice(0, 20);
+    if (!term || !confirm(`'${term}' 거래를 앞으로 '${target.label}' 행으로 모읍니다. 진행할까요?`)) { sel.value = ""; return; }
+    run(() => api(`/api/cashflow/rows/${encodeURIComponent(target.id)}`, { method: "PUT", body: { match: [...(target.match || []), term].join(",") } }), `'${term}' → ${target.label}`);
+  }));
+  app.querySelector("[data-cf-cell-form]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = formObject(e.currentTarget);
+    run(() => api("/api/cashflow/cell", { method: "PUT", body: { ...cf.cell, ...f } }), "저장했습니다.");
+  });
+  app.querySelector("[data-cf-row-form]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const f = formObject(form);
+    const rid = form.dataset.cfRowForm;
+    if (rid) run(() => api(`/api/cashflow/rows/${encodeURIComponent(rid)}`, { method: "PUT", body: { label: f.label, match: f.match, company: f.company, order: f.order, revenueType: f.revenueType, active: !form.querySelector('[name="hide"]').checked } }), "저장했습니다.");
+    else run(() => api("/api/cashflow/rows", { method: "POST", body: { label: f.label, side: f.side } }), "행을 추가했습니다.");
+  });
+}
+
+function renderCash() {
+  const cs = cashState();
+  const head = pageHead("자금", "오늘과 7일 안에 들어올 돈·나갈 돈, 계좌 잔액을 한 장으로 봅니다. 매일 아침 이 화면을 보고 채널톡에 공유하세요.");
+  const tabs = `<div class="npb-subnav">${[["report", "일일 자금보고"], ["cashflow", "현금흐름표"], ["schedules", "고정비·자금 일정"], ["loans", "대출금"], ["rehab", "회생변제"], ["receivables", "채권원장"]].map(([k, l]) => `<button class="npb-subtab ${cs.screen === k ? "active" : ""}" data-cash-screen="${k}">${l}</button>`).join("")}
+    <span style="flex:1"></span>
+    ${(cs.meta?.companies || [{ key: "wooof", name: "우프컴퍼니" }, { key: "betters", name: "Betters(개인사업자)" }]).map((c) => `<button class="npb-subtab ${cs.company === c.key ? "active" : ""}" data-cash-company="${c.key}">${h(c.name)}</button>`).join("")}</div>`;
+  if (cs.screen === "loans") return `${head}${tabs}${renderLoans()}`;
+  if (cs.screen === "rehab") return `${head}${tabs}${renderRehab()}`;
+  if (cs.screen === "cashflow") return `${head}${tabs}${renderCashFlow()}`;
+  if (!cs.data) return `${head}${tabs}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  return `${head}${tabs}${cs.screen === "schedules" ? renderCashSchedules() : cs.screen === "receivables" ? renderReceivableLedger() : renderCashReport()}`;
+}
+
+function renderAccountDetail() {
+  const cs = cashState();
+  const a = (cs.data?.accounts || []).find((x) => String(x.id) === String(cs.accDetail?.id));
+  if (!a) return "";
+  const tx = cs.accDetail.transactions;
+  return `<div class="panel-head"><h2>${h(a.name)}</h2><button data-acc-close>닫기</button></div>
+    <div class="panel-body">
+      <p>${h(a.bank || "")} ${h(a.number || "")} · 잔액 <strong>${money.format(a.balance)}원</strong>${a.clobeName && a.clobeName !== a.name ? ` <span class="muted">(클로브 이름: ${h(a.clobeName)})</span>` : ""}</p>
+      ${can("cash", "edit") ? `<form class="form-grid" data-acc-form>
+        <div class="field two"><div><label>별칭(우리가 부르는 이름)</label><input name="alias" value="${h(a.name === a.clobeName ? "" : a.name)}" placeholder="${h(a.clobeName || "")}"></div>
+          <div class="toolbar" style="align-items:flex-end"><label class="check"><input type="checkbox" name="favorite" ${a.favorite ? "checked" : ""}> 즐겨찾기(보고에 표시)</label><label class="check"><input type="checkbox" name="hidden" ${a.hidden ? "checked" : ""}> 숨기기</label></div></div>
+        <div class="toolbar"><button class="primary" type="submit">저장</button></div></form>` : ""}
+      <h3>최근 30일 거래</h3>
+      ${tx == null ? `<p class="muted">불러오는 중…</p>` : cs.accDetail.error ? `<p class="muted">${h(cs.accDetail.error)}</p>` : `<div class="table-wrap" style="max-height:420px"><table class="compact" data-unit="원">
+        <thead><tr><th>일시</th><th>거래처·적요</th><th>입금</th><th>출금</th><th>잔액</th><th>분류</th></tr></thead>
+        <tbody>${tx.map((t) => `<tr><td>${h(t.at.slice(5))}</td><td class="wrap">${h(t.name)}${t.desc && t.desc !== t.name ? `<br><span class="muted" style="font-size:11px">${h(t.desc)}</span>` : ""}${t.memo ? `<br><span class="muted" style="font-size:11px">메모: ${h(t.memo)}</span>` : ""}</td>
+          <td class="num">${t.inAmount ? money.format(t.inAmount) : ""}</td><td class="num">${t.outAmount ? money.format(t.outAmount) : ""}</td><td class="num">${money.format(t.balance)}</td><td style="font-size:12px">${h(t.category)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">거래가 없습니다.</td></tr>`}</tbody></table></div>`}
+    </div>`;
+}
+
+// --- 일일 자금보고: 날짜 이동(‹ ›·달력)과 기간(일·7일·주·월·직접) 조회 ---
+const isoAdd = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+const kstTodayIso = () => new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+const PERIOD_UNITS = [["day", "일"], ["7d", "7일"], ["week", "주"], ["month", "월"], ["range", "기간"]];
+function periodState() {
+  const cs = cashState();
+  if (!cs.period) cs.period = { unit: "7d", anchor: kstTodayIso(), from: kstTodayIso(), to: isoAdd(kstTodayIso(), 6), open: "" };
+  return cs.period;
+}
+function periodRange(p) {
+  const a = p.anchor;
+  if (p.unit === "day") return [a, a];
+  if (p.unit === "7d") return [a, isoAdd(a, 6)];
+  if (p.unit === "week") { const dow = (new Date(`${a}T00:00:00Z`).getUTCDay() + 6) % 7; const mon = isoAdd(a, -dow); return [mon, isoAdd(mon, 6)]; }
+  if (p.unit === "month") { const [y, m] = a.split("-").map(Number); return [`${a.slice(0, 7)}-01`, new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10)]; }
+  return [p.from <= p.to ? p.from : p.to, p.from <= p.to ? p.to : p.from];
+}
+function shiftPeriod(p, dir) {
+  if (p.unit === "day") p.anchor = isoAdd(p.anchor, dir);
+  else if (p.unit === "7d" || p.unit === "week") p.anchor = isoAdd(p.anchor, 7 * dir);
+  else if (p.unit === "month") { const [y, m, d] = p.anchor.split("-").map(Number); const t = new Date(Date.UTC(y, m - 1 + dir, 1)); const last = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0)).getUTCDate(); p.anchor = `${t.toISOString().slice(0, 7)}-${String(Math.min(d, last)).padStart(2, "0")}`; }
+  else { const len = Math.round((Date.parse(`${p.to}T00:00:00Z`) - Date.parse(`${p.from}T00:00:00Z`)) / 86400000) + 1; p.from = isoAdd(p.from, len * dir); p.to = isoAdd(p.to, len * dir); p.anchor = p.from; }
+}
+async function loadCashPeriod() {
+  const cs = cashState();
+  const p = periodState();
+  const [from, to] = periodRange(p);
+  cs.periodLoading = true;
+  try { cs.periodData = await api(`/api/cash/period?company=${encodeURIComponent(cs.company)}&from=${from}&to=${to}`); }
+  catch (e) { cs.periodData = { days: [], totals: { cashIn: 0, cashOut: 0 }, clobeError: e.message }; }
+  finally { cs.periodLoading = false; }
+}
+function renderCashPeriod() {
+  const cs = cashState();
+  const p = periodState();
+  const d = cs.periodData;
+  const today = kstTodayIso();
+  const [from, to] = periodRange(p);
+  const label = p.unit === "day" ? cashDay(from) : `${cashDay(from)} ~ ${cashDay(to)}`;
+  const nav = `<div class="toolbar period-nav">
+      <button data-period-shift="-1" title="이전">‹</button>
+      <input type="date" data-period-date value="${h(p.anchor)}" title="날짜 고르기">
+      <button data-period-shift="1" title="다음">›</button>
+      <button class="ghost small" data-period-today>오늘</button>
+      <span class="period-label">${h(label)}</span>
+      <span style="flex:1"></span>
+      ${PERIOD_UNITS.map(([k, l]) => `<button class="npb-subtab ${p.unit === k ? "active" : ""}" data-period-unit="${k}">${l}</button>`).join("")}
+      ${p.unit === "range" ? `<input type="date" data-period-from value="${h(p.from)}"> ~ <input type="date" data-period-to value="${h(p.to)}">` : ""}
+    </div>`;
+  if (!d || cs.periodLoading) return `<section class="panel">${nav}<div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const net = d.totals.cashIn - d.totals.cashOut;
+  const card = (t, v, cls = "") => `<div class="sales-step"><span>${t}</span><strong class="${cls}">${v == null ? "-" : `${money.format(v)}원`}</strong></div>`;
+  const rows = [];
+  let wIn = 0; let wOut = 0;
+  const long = d.days.length > 14;
+  for (const day of d.days) {
+    const open = p.open === day.date;
+    rows.push(`<tr class="hub-go ${day.date === today ? "today-row" : ""} ${day.balance != null && day.balance < 0 ? "cash-short" : ""}" data-period-day="${day.date}">
+      <td>${h(cashDay(day.date))}${day.date === today ? ' <span class="badge">오늘</span>' : ""}</td><td><span class="badge ${day.past ? "muted" : ""}">${day.past ? "실제" : "예정"}</span></td>
+      <td class="num">${day.cashIn ? money.format(day.cashIn) : ""}</td><td class="num">${day.cashOut ? money.format(day.cashOut) : ""}</td>
+      <td class="num">${day.balance == null ? "-" : money.format(day.balance)}</td>
+      <td class="wrap muted" style="font-size:12px">${day.items.length ? `${day.items.length}건 · ${h(day.items.slice(0, 3).map((l) => l.title).join(", "))}${day.items.length > 3 ? " 외" : ""}` : ""}</td></tr>`);
+    if (open) rows.push(`<tr class="period-items"><td colspan="6"><table class="compact" data-unit="원"><tbody>${day.items.map((l) => `<tr><td class="${l.direction === "in" ? "cash-in" : "cash-out"}" style="width:1%">${l.direction === "in" ? "입금" : "출금"}</td>
+      <td class="wrap">${l.overdue ? '<span class="badge warn">기한지남</span> ' : ""}${h(l.title)}${l.memo ? ` <span class="muted" style="font-size:11px">${h(l.memo)}</span>` : ""}</td><td style="font-size:12px" class="muted">${h(l.category || "")}</td><td class="num">${money.format(l.amount)}</td></tr>`).join("") || `<tr><td class="empty">내역 없음</td></tr>`}</tbody></table></td></tr>`);
+    wIn += day.cashIn; wOut += day.cashOut;
+    const isSunday = new Date(`${day.date}T00:00:00Z`).getUTCDay() === 0;
+    if (long && (isSunday || day === d.days.at(-1))) {
+      rows.push(`<tr class="period-sub"><td colspan="2">주간 합계</td><td class="num">${money.format(wIn)}</td><td class="num">${money.format(wOut)}</td><td class="num">${money.format(wIn - wOut)}</td><td class="muted" style="font-size:12px">순현금</td></tr>`);
+      wIn = 0; wOut = 0;
+    }
+  }
+  return `<section class="panel">${nav}
+    ${d.clobeError ? `<p class="muted" style="margin:0 16px 8px">⚠ ${h(d.clobeError)} — 지난 날 실제 내역·잔액을 못 불러왔습니다.</p>` : ""}
+    <section class="sales-flow" style="padding:0 12px">
+      ${card("기초 잔액", d.opening)}${card("입금 합계", d.totals.cashIn)}${card("출금 합계", d.totals.cashOut)}${card("순현금", net, net < 0 ? "danger-text" : "")}${card("기말 잔액", d.closing, d.closing != null && d.closing < 0 ? "danger-text" : "")}
+      ${d.shortfallDate ? `<div class="sales-step"><span>⚠ 잔액 부족 예상</span><strong class="danger-text">${h(cashDay(d.shortfallDate))}</strong></div>` : ""}
+    </section>
+    <div class="table-wrap"><table class="compact cash-table" data-unit="원">
+      <thead><tr><th>날짜</th><th>구분</th><th>입금</th><th>출금</th><th>잔액</th><th>내역 (누르면 펼침)</th></tr></thead>
+      <tbody>${rows.join("")}</tbody></table></div>
+    <p class="muted" style="font-size:11px;margin:6px 16px 12px">지난 날 = 클로브 실제 입출금(내 계좌끼리 옮긴 돈 제외), 오늘부터 = 예정(고정비·지급요청·생산비·대출·회생·선매입·받을 돈). 잔액은 지금 클로브 잔액에서 이어 계산.</p>
+  </section>`;
+}
+
+function renderCashReport() {
+  const cs = cashState();
+  const { report: r, accounts = [], fund, clobeError } = cs.data || {};
+  if (!r) return `<section class="panel"><div class="panel-body"><p class="muted">${h(cs.error || "보고서를 만들지 못했습니다.")}</p></div></section>`;
+  const itemRows = (items, dir) => items.filter((l) => l.direction === dir).map((l) => `
+    <tr><td>${l.overdue ? `<span class="badge warn">기한지남</span> ` : ""}${h(l.title)}<br><span class="muted" style="font-size:11px">${(() => { const src = { schedule: "자금일정", payment: "지급요청", request: "선매입", sales: "받을 돈" }[l.source] || ""; return h(l.category && l.category !== src ? `${l.category} · ${src}` : src); })()}</span></td>
+    <td class="num">${money.format(l.amount)}</td></tr>`).join("") || `<tr><td colspan="2" class="empty">없음</td></tr>`;
+  return `
+    ${clobeError ? `<p class="muted" style="margin:8px 0">⚠ 잔액: ${h(clobeError)}</p>` : ""}
+    ${renderCashPeriod()}
+    <section class="layout">
+      <div class="panel">
+        ${(() => {
+          // 위 칸은 고른 날(‹ › 로 옮긴 날). 지난 날이면 실제(클로브), 오늘부터는 예정.
+          const p = periodState();
+          const want = p.unit === "day" ? p.anchor : (p.selected && (cs.periodData?.days || []).some((x) => x.date === p.selected) ? p.selected : (cs.periodData?.days || []).some((x) => x.date === kstTodayIso()) ? kstTodayIso() : p.anchor);
+          const sel = (cs.periodData?.days || []).find((x) => x.date === want);
+          const day = sel || { date: r.start, past: false, cashIn: r.today.cashIn, cashOut: r.today.cashOut, items: r.today.items };
+          const isToday = day.date === kstTodayIso();
+          return `<div class="panel-head"><h2>${isToday ? "오늘 " : ""}${h(cashDay(day.date))}${day.past ? ' <span class="badge muted">실제</span>' : ""}</h2><span class="muted">현 잔액 <strong>${r.openingBalance == null ? "-" : `${money.format(r.openingBalance)}원`}</strong>${sel?.balance != null && !isToday ? ` · 그날 잔액 ${money.format(sel.balance)}원` : ""}</span></div>
+          <div class="panel-body cash-two">
+            <div><h3 class="cash-in">${day.past ? "들어온 돈" : "들어올 돈"} ${money.format(day.cashIn)}원</h3><table class="compact cash-table" data-unit="원"><tbody>${itemRows(day.items, "in")}</tbody></table></div>
+            <div><h3 class="cash-out">${day.past ? "나간 돈" : "나갈 돈"} ${money.format(day.cashOut)}원</h3><table class="compact cash-table" data-unit="원"><tbody>${itemRows(day.items, "out")}</tbody></table></div>
+          </div>`;
+        })()}
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>계좌 잔액</h2><span class="muted">클로브 · ${fund ? `${h(fund.transactionDate)} 기준 어제 +${money.format(fund.cashIn || 0)} / ${money.format(fund.cashOut || 0)}` : ""}</span></div>
+        <div class="table-wrap"><table class="compact cash-table" data-unit="원"><tbody>
+          ${(() => {
+            const shown = accounts.filter((a) => !a.hidden);
+            const hidden = accounts.filter((a) => a.hidden);
+            const row = (a) => `<tr class="acc-row ${a.hidden ? "muted" : ""}" data-acc-open="${h(a.id)}">
+              <td style="width:1%">${can("cash", "edit") ? `<button class="star ${a.favorite ? "on" : ""}" data-acc-star="${h(a.id)}" title="${a.favorite ? "즐겨찾기 해제" : "즐겨찾기(일일 보고에 표시)"}">${a.favorite ? "★" : "☆"}</button>` : (a.favorite ? "★" : "")}</td>
+              <td>${h(a.name)}<br><span class="muted" style="font-size:11px">${h(a.bank || "")} ${h(a.number || "")}</span></td><td class="num">${money.format(a.balance)}</td></tr>`;
+            const hiddenSum = hidden.reduce((s2, a) => s2 + a.balance, 0);
+            return (shown.map(row).join("") || `<tr><td class="empty" colspan="3">잔액 정보 없음</td></tr>`)
+              + (hidden.length ? `<tr><td colspan="3"><button class="ghost small" data-acc-toggle-hidden>${cs.showHiddenAccounts ? "숨긴 계좌 접기" : `숨긴 계좌 ${hidden.length}개 보기 (합계 ${money.format(hiddenSum)}원)`}</button></td></tr>${cs.showHiddenAccounts ? hidden.map(row).join("") : ""}` : "");
+          })()}
+        </tbody></table></div>
+        <p class="muted" style="font-size:11px;margin:6px 12px">★ 즐겨찾는 계좌만 일일 보고 문구에 나옵니다. 계좌를 누르면 최근 거래와 설정이 보입니다.</p>
+        ${fund?.summaryText ? `<div class="panel-body"><p class="muted" style="white-space:pre-line;font-size:12px">${h(fund.summaryText)}</p></div>` : ""}
+      </div>
+    </section>
+    <section class="panel">
+      <div class="toolbar" style="padding:12px 16px">
+        <button class="primary" data-cash-copy>채널톡 보고 문구 복사</button>
+        <button data-cash-notice>공유함에 올리기</button>
+        <button data-cash-print>인쇄·이미지 저장</button>
+        <button data-cash-reload>새로고침</button>
+      </div>
+      <details style="padding:0 16px 16px"><summary class="muted">보고 문구 미리보기</summary><pre class="cash-text">${h(cs.data.text || "")}</pre></details>
+    </section>
+    ${cs.accDetail ? v2Modal(renderAccountDetail(), "data-acc-close") : ""}`;
+}
+
+function renderCashSchedules() {
+  const cs = cashState();
+  const meta = cs.meta || {};
+  // 현금흐름표 시트 왼쪽 고정비 목록과 같은 순서: 나감 먼저, 날짜(일정) 순.
+  const dayKey = (s) => s.repeat === "monthly" ? Number(s.dayOfMonth || 0) : s.repeat === "weekly" ? 0 : 99;
+  const list = (cs.schedules || []).filter((s) => !s.company || s.company === cs.company)
+    .sort((a, b) => String(b.direction).localeCompare(String(a.direction)) || dayKey(a) - dayKey(b) || String(a.category).localeCompare(String(b.category), "ko"));
+  const when = (s) => s.repeat === "monthly" ? `매월 ${s.dayOfMonth}일` : s.repeat === "weekly" ? `매주 ${WEEKDAY_KO[s.weekday ?? 1]}요일` : (s.date || "");
+  const e = { direction: "out", repeat: "monthly", dayOfMonth: 25, company: cs.company, ...(cs.editing || {}) };
+  const cats = (meta.categories || {})[e.direction] || [];
+  return `
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>고정비·자금 일정</h2><span class="muted">${list.length}건 · 현금흐름표 시트 왼쪽 고정비 목록과 같은 것 · 현금흐름표와 일일 자금보고에 예정으로 들어갑니다</span></div>
+        <div class="table-wrap"><table class="compact cash-table" data-unit="원">
+          <thead><tr><th>No.</th><th>구분</th><th>유형</th><th>분류</th><th>항목</th><th>금액</th><th>결제방식</th><th>일정</th><th></th></tr></thead>
+          <tbody>${list.map((s, i) => `<tr class="${s.active === false ? "muted" : ""}">
+            <td class="center">${h(s.sheetNo || i + 1)}</td>
+            <td>${s.direction === "in" ? `<span class="cash-in">들어옴</span>` : `<span class="cash-out">나감</span>`}</td>
+            <td>${h(s.kind || "")}</td><td>${h(s.category || "")}</td>
+            <td class="wrap">${h(s.title)}${s.memo ? `<br><span class="muted" style="font-size:11px">${h(s.memo)}</span>` : ""}${s.active === false ? ` <span class="badge muted">꺼짐</span>` : ""}</td>
+            <td class="num">${s.variable && !s.amount ? "변동" : money.format(s.amount || 0)}</td><td>${h(s.method || "")}</td>
+            <td>${h(when(s))}${s.endDate ? `<br><span class="muted" style="font-size:11px">~${h(s.endDate)}</span>` : ""}</td>
+            <td><div class="row-actions">${can("cash", "edit") ? `<button data-cash-edit="${s.id}">수정</button><button class="danger icon-btn" data-cash-del="${s.id}" title="삭제">×</button>` : ""}</div></td></tr>`).join("") || `<tr><td colspan="9" class="empty">등록된 일정이 없습니다. 현금흐름표 화면에서 시트를 가져오면 고정비 목록이 들어옵니다.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>${cs.editing?.id ? "일정 수정" : "일정 추가"}</h2></div>
+        <div class="panel-body">${can("cash", "edit") ? `
+          <form class="form-grid" data-cash-form>
+            <input type="hidden" name="company" value="${h(e.company)}">
+            <div class="field two">
+              <div><label>구분</label><select name="direction" data-cash-dir><option value="out" ${e.direction === "out" ? "selected" : ""}>나갈 돈</option><option value="in" ${e.direction === "in" ? "selected" : ""}>들어올 돈</option></select></div>
+              <div><label>분류</label><select name="category"><option value="">선택</option>${cats.map((c) => `<option ${e.category === c ? "selected" : ""}>${h(c)}</option>`).join("")}</select></div>
+            </div>
+            <div class="field"><label>항목</label><input name="title" value="${h(e.title || "")}" required placeholder="예: 사무실 임대료"></div>
+            <div class="field two">
+              <div><label>금액(원)</label><input name="amount" inputmode="numeric" value="${h(e.amount ? money.format(e.amount) : "")}" required></div>
+              <div><label>결제방식</label><input name="method" value="${h(e.method || "")}" placeholder="자동이체 / 계좌이체 / 카드"></div>
+            </div>
+            <div class="field two">
+              <div><label>반복</label><select name="repeat" data-cash-repeat>${Object.entries(meta.repeats || { once: "1회", monthly: "매월", weekly: "매주" }).map(([k, l]) => `<option value="${k}" ${e.repeat === k ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+              <div>${e.repeat === "monthly" ? `<label>매월 며칠</label><input name="dayOfMonth" type="number" min="1" max="31" value="${h(e.dayOfMonth || 25)}">`
+                : e.repeat === "weekly" ? `<label>요일</label><select name="weekday">${WEEKDAY_KO.map((w, i) => `<option value="${i}" ${Number(e.weekday ?? 1) === i ? "selected" : ""}>${w}</option>`).join("")}</select>`
+                : `<label>날짜</label><input type="date" name="date" value="${h(e.date || "")}" required>`}</div>
+            </div>
+            ${e.repeat !== "once" ? `<div class="field two"><div><label>시작일</label><input type="date" name="startDate" value="${h(e.startDate || "")}"></div><div><label>종료일 <span class="muted" style="font-weight:400">(대출 만기 등)</span></label><input type="date" name="endDate" value="${h(e.endDate || "")}"></div></div>` : ""}
+            <div class="field"><label>메모</label><input name="memo" value="${h(e.memo || "")}"></div>
+            <div class="toolbar"><button class="primary" type="submit">${cs.editing?.id ? "수정 저장" : "일정 추가"}</button>${cs.editing ? `<button type="button" data-cash-cancel>취소</button>` : ""}</div>
+          </form>` : `<p class="muted">자금 수정 권한이 없습니다.</p>`}</div>
+      </div>
+    </section>`;
+}
+
+function bindCash() {
+  const cs = cashState();
+  if (cs.screen === "loans" || cs.screen === "rehab" || cs.screen === "cashflow") {
+    app.querySelectorAll("[data-cash-screen]").forEach((b) => b.addEventListener("click", () => { cs.screen = b.dataset.cashScreen; renderApp(); }));
+    if (cs.screen === "loans") bindLoans(); else if (cs.screen === "rehab") bindRehab(); else bindCashFlow();
+    return;
+  }
+  if (!cs.data && !cs.loading) {
+    loadCash().then(renderApp);
+    return;
+  }
+  const reload = async () => { await loadCash(); renderApp(); };
+  app.querySelectorAll("[data-cash-screen]").forEach((b) => b.addEventListener("click", () => { cs.screen = b.dataset.cashScreen; renderApp(); }));
+  if (cs.screen === "receivables" && !cs.rec && !cs.recLoading) {
+    cs.recLoading = true;
+    api("/api/receivables").then((r) => { cs.rec = r.brands || []; }).catch(() => { cs.rec = []; }).finally(() => { cs.recLoading = false; renderApp(); });
+  }
+  app.querySelectorAll("[data-rec-open]").forEach((tr) => tr.addEventListener("click", async () => {
+    cs.recDetail = await api(`/api/receivables/${tr.dataset.recOpen}`);
+    renderApp();
+  }));
+  app.querySelector("[data-rec-close]")?.addEventListener("click", () => { cs.recDetail = null; renderApp(); });
+  bindV2Modal();
+  app.querySelectorAll("[data-cash-company]").forEach((b) => b.addEventListener("click", async () => { cs.company = b.dataset.cashCompany; cs.editing = null; await reload(); }));
+  app.querySelector("[data-cash-reload]")?.addEventListener("click", reload);
+  // 기간 조회: 처음 열 때와 회사를 바꿨을 때 불러온다.
+  const per = periodState();
+  const periodKey = `${cs.company}|${periodRange(per).join("~")}`;
+  if (cs.periodKey !== periodKey && !cs.periodLoading) { cs.periodKey = periodKey; loadCashPeriod().then(renderApp); }
+  const repaint = () => { cs.periodKey = ""; per.selected = per.unit === "day" ? per.anchor : per.selected; renderApp(); };
+  app.querySelectorAll("[data-period-shift]").forEach((b) => b.addEventListener("click", () => { shiftPeriod(per, Number(b.dataset.periodShift)); repaint(); }));
+  app.querySelector("[data-period-today]")?.addEventListener("click", () => { per.anchor = kstTodayIso(); if (per.unit === "range") { per.from = per.anchor; per.to = isoAdd(per.anchor, 6); } repaint(); });
+  app.querySelector("[data-period-date]")?.addEventListener("change", (e) => { if (!e.target.value) return; per.anchor = e.target.value; if (per.unit === "range") { per.from = per.anchor; } repaint(); });
+  app.querySelectorAll("[data-period-unit]").forEach((b) => b.addEventListener("click", () => { per.unit = b.dataset.periodUnit; if (per.unit === "range") { [per.from, per.to] = periodRange({ ...per, unit: "7d" }); } repaint(); }));
+  app.querySelector("[data-period-from]")?.addEventListener("change", (e) => { per.from = e.target.value || per.from; repaint(); });
+  app.querySelector("[data-period-to]")?.addEventListener("change", (e) => { per.to = e.target.value || per.to; repaint(); });
+  app.querySelectorAll("[data-period-day]").forEach((tr) => tr.addEventListener("click", () => { per.open = per.open === tr.dataset.periodDay ? "" : tr.dataset.periodDay; per.selected = tr.dataset.periodDay; renderApp(); }));
+  // 계좌: 즐겨찾기 별, 숨긴 계좌 펼치기, 누르면 상세(최근 거래·설정)
+  bindV2Modal();
+  const accSave = async (accId, body) => {
+    try { await api(`/api/cash/accounts/${cs.company}/${encodeURIComponent(accId)}`, { method: "PUT", body }); await reload(); } catch (e) { showToast(e.message || "저장하지 못했습니다.", "error"); }
+  };
+  app.querySelectorAll("[data-acc-star]").forEach((b) => b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const a = (cs.data?.accounts || []).find((x) => String(x.id) === b.dataset.accStar);
+    accSave(b.dataset.accStar, { favorite: !a?.favorite });
+  }));
+  app.querySelector("[data-acc-toggle-hidden]")?.addEventListener("click", () => { cs.showHiddenAccounts = !cs.showHiddenAccounts; renderApp(); });
+  app.querySelectorAll("[data-acc-open]").forEach((tr) => tr.addEventListener("click", async () => {
+    const id = tr.dataset.accOpen;
+    cs.accDetail = { id, transactions: null };
+    renderApp();
+    const r = await api(`/api/cash/accounts/${cs.company}/${encodeURIComponent(id)}/transactions?days=30`).catch((e) => ({ transactions: [], error: e.message }));
+    if (cs.accDetail?.id === id) { cs.accDetail = { id, transactions: r.transactions || [], error: r.error || "" }; renderApp(); }
+  }));
+  app.querySelector("[data-acc-close]")?.addEventListener("click", () => { cs.accDetail = null; renderApp(); });
+  app.querySelector("[data-acc-form]")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const keep = cs.accDetail;
+    await accSave(keep.id, { alias: form.alias.value, favorite: form.favorite.checked, hidden: form.hidden.checked });
+    cs.accDetail = keep;
+    renderApp();
+    showToast("저장했습니다.");
+  });
+  app.querySelector("[data-cash-print]")?.addEventListener("click", () => window.print());
+  app.querySelector("[data-cash-notice]")?.addEventListener("click", async () => {
+    try {
+      await api("/api/notices", { method: "POST", body: { kind: "daily", title: `일일 자금보고 ${cs.data?.report?.today || ""}`.trim(), text: cs.data?.text || "" } });
+      showToast("메신저 공유함에 올렸습니다.");
+    } catch (e) { showToast(e.message, "error"); }
+  });
+  app.querySelector("[data-cash-copy]")?.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(cs.data?.text || "");
+      showToast("보고 문구를 복사했습니다. 채널톡에 붙여 넣으세요.");
+    } catch {
+      showToast("복사하지 못했습니다. 아래 미리보기를 길게 눌러 복사하세요.", "error");
+    }
+  });
+  // 구분·반복을 바꾸면 그에 맞는 칸을 다시 그린다(입력값은 유지).
+  const keep = (patch) => {
+    const form = app.querySelector("[data-cash-form]");
+    cs.editing = { ...(cs.editing || {}), ...(form ? formObject(form) : {}), ...patch };
+    renderApp();
+  };
+  app.querySelector("[data-cash-dir]")?.addEventListener("change", (e) => keep({ direction: e.target.value, category: "" }));
+  app.querySelector("[data-cash-repeat]")?.addEventListener("change", (e) => keep({ repeat: e.target.value }));
+  app.querySelector("[data-cash-cancel]")?.addEventListener("click", () => { cs.editing = null; renderApp(); });
+  app.querySelectorAll("[data-cash-edit]").forEach((b) => b.addEventListener("click", () => {
+    cs.editing = (cs.schedules || []).find((s) => s.id === b.dataset.cashEdit) || null;
+    renderApp();
+  }));
+  app.querySelectorAll("[data-cash-del]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("이 일정을 삭제할까요?")) return;
+    await api(`/api/cash/schedules/${b.dataset.cashDel}`, { method: "DELETE" });
+    await reload();
+  }));
+  app.querySelector("[data-cash-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = formObject(event.currentTarget);
+    try {
+      if (cs.editing?.id) await api(`/api/cash/schedules/${cs.editing.id}`, { method: "PUT", body });
+      else await api("/api/cash/schedules", { method: "POST", body });
+      cs.editing = null;
+      showToast("저장했습니다.");
+      await reload();
+    } catch (error) {
+      showToast(error.message || "저장하지 못했습니다.", "error");
+    }
+  });
+}
+
+// ===========================================================================
+// v2 판매 파이프라인 — 주문접수 → 명세서 → 업체전달 → 청구·계산서 → 입금확인
+// ===========================================================================
+function salesState() {
+  if (!state.sales) state.sales = { list: null, loading: false, filter: "open", selectedId: "", draft: null };
+  return state.sales;
+}
+
+async function loadSales() {
+  const ss = salesState();
+  ss.loading = true;
+  try {
+    const res = await api("/api/sales");
+    Object.assign(ss, { list: res.orders || [], meta: res });
+  } catch (error) {
+    ss.list = [];
+    ss.error = error.message;
+  } finally {
+    ss.loading = false;
+  }
+}
+
+// 품목 이름 → 최근 단가. 이 거래처에 예전에 낸 명세서에서 찾는다.
+function salesItemHints(partnerId) {
+  const map = new Map();
+  for (const po of state.purchaseOrders || []) {
+    if (po.docType !== "statement" || (partnerId && po.partnerId !== partnerId)) continue;
+    for (const li of po.lineItems || []) {
+      if (li.itemName && !map.has(li.itemName)) map.set(li.itemName, li);
+    }
+  }
+  for (const m of state.materials || []) {
+    if (m.itemName && !map.has(m.itemName)) map.set(m.itemName, { itemName: m.itemName, unitPrice: m.basePrice || 0, materialId: m.id });
+  }
+  return map;
+}
+
+// 서버와 같은 규칙: 거래처 기본값 → 지난 명세서 방식 → 부가세 별도.
+function salesGrossMode(partner) {
+  if (!partner) return false;
+  const mode = partner.priceMode || (state.purchaseOrders || []).find((p) => p.partnerId === partner.id && p.docType === "statement")?.priceMode;
+  return mode === "gross";
+}
+
+const SALES_NEXT_LABEL = { statement: "명세서 만들기", send: "업체 전달 표시", invoice: "청구·계산서 요청", issue: "계산서 발행 완료", receive: "입금 확인" };
+
+function salesViewNav(ss) {
+  return `<div class="npb-subnav">${[["orders", "주문"], ["pricing", "판매처 가격"]].map(([k, l]) => `<button class="npb-subtab ${(ss.view || "orders") === k ? "active" : ""}" data-sales-view="${k}">${l}</button>`).join("")}</div>`;
+}
+
+function renderSales() {
+  const ss = salesState();
+  if (ss.view === "pricing") return renderPricing();
+  const head = pageHead("판매", "주문이 들어오면 여기서 명세서 → 업체 전달 → 청구·계산서 → 입금 확인까지 한 번에 진행합니다.") + salesViewNav(ss);
+  if (ss.list === null) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const meta = ss.meta || {};
+  const labels = meta.stageLabels || {};
+  const counts = {};
+  for (const o of ss.list) counts[o.stage] = (counts[o.stage] || 0) + 1;
+  const rec = meta.receivables || [];
+  const recTotal = rec.reduce((s, r) => s + r.remaining, 0);
+  const recOver = rec.filter((r) => r.overdue).reduce((s, r) => s + r.remaining, 0);
+  const filters = [["open", "진행 중"], ...(meta.stages || []), ["on_hold", "보류"], ["cancelled", "취소"], ["all", "전체"]];
+  const rows = ss.list
+    .filter((o) => ss.filter === "all" || (ss.filter === "open" ? !["paid", "cancelled"].includes(o.stage) : o.stage === ss.filter))
+    .sort((a, b) => String(b.orderDate || "").localeCompare(String(a.orderDate || "")) || String(b.createdAt).localeCompare(String(a.createdAt)));
+  return `
+    ${head}
+    <section class="sales-flow">
+      ${(meta.stages || []).map(([k, l], i) => `<button class="sales-step ${ss.filter === k ? "active" : ""}" data-sales-filter="${k}"><span>${i + 1}. ${l}</span><strong>${counts[k] || 0}</strong></button>`).join('<span class="sales-arrow">›</span>')}
+      <div class="sales-step sales-rec"><span>받을 돈</span><strong>${money.format(recTotal)}원</strong>${recOver ? `<em class="danger-text">기한지남 ${money.format(recOver)}원</em>` : ""}</div>
+    </section>
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head">
+          <div class="npb-subnav" style="margin:0">${filters.filter(([k]) => ["open", "on_hold", "cancelled", "all"].includes(k)).map(([k, l]) => `<button class="npb-subtab ${ss.filter === k ? "active" : ""}" data-sales-filter="${k}">${l}</button>`).join("")}</div>
+          ${can("sales", "create") ? `<button class="primary" data-sales-new>새 주문</button>` : ""}
+        </div>
+        <div class="table-wrap"><table class="compact sales-table" data-unit="원">
+          <thead><tr><th>번호</th><th>주문일</th><th>거래처</th><th>내용</th><th>금액</th><th>단계</th><th>다음 할 일</th></tr></thead>
+          <tbody>${rows.map((o) => `<tr class="${ss.selectedId === o.id ? "selected" : ""}" data-sales-open="${o.id}">
+            <td><span class="code-tag">${h(o.code)}</span></td><td>${h(String(o.orderDate || "").slice(5))}</td>
+            <td>${h(o.partnerName)}</td><td class="wrap">${h(o.title)}${o.statementNo ? `<br><span class="muted" style="font-size:11px">${h(o.statementNo)}</span>` : ""}</td>
+            <td class="num">${money.format(o.total || 0)}${o.paid && o.remaining ? `<br><span class="muted" style="font-size:11px">남음 ${money.format(o.remaining)}</span>` : ""}</td>
+            <td><span class="badge ${o.stage === "paid" ? "muted" : o.stage === "on_hold" ? "warn" : ""}">${h(labels[o.stage] || o.stage)}</span></td>
+            <td>${o.next ? `<span class="muted">${h(SALES_NEXT_LABEL[o.next] || "")}</span>` : ""}</td></tr>`).join("") || `<tr><td colspan="7" class="empty">해당하는 주문이 없습니다.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">${ss.selectedId ? renderSalesDetail() : renderSalesForm()}</div>
+    </section>`;
+}
+
+function renderSalesForm() {
+  const ss = salesState();
+  if (!can("sales", "create")) return `<div class="panel-body"><p class="muted">주문을 고르면 진행 상황이 보입니다.</p></div>`;
+  const d = ss.draft || { orderDate: new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10), lines: [{}, {}, {}] };
+  const partners = (state.partners || []).filter((p) => p.isActive !== false && p.category !== "issuer");
+  const partner = partners.find((p) => p.id === d.partnerId);
+  const gross = salesGrossMode(partner);
+  const hints = salesItemHints(d.partnerId);
+  const pricingData = ss.pricing || {};
+  const channels = (pricingData.channels || []).filter((c) => c.active !== false);
+  for (const it of pricingData.items || []) if (!hints.has(it.name)) hints.set(it.name, { itemName: it.name });
+  return `
+    <div class="panel-head"><h2>새 주문</h2></div>
+    <div class="panel-body">
+      <form class="form-grid" data-sales-form>
+        <div class="field two">
+          <div><label>거래처</label><select name="partnerId" data-sales-partner required><option value="">선택</option>
+          ${partners.map((p) => `<option value="${p.id}" ${d.partnerId === p.id ? "selected" : ""}>${h(p.code ? `${p.code} · ` : "")}${h(p.name)}</option>`).join("")}</select></div>
+          <div><label>판매처 <span class="muted" style="font-weight:400">(가격 자동)</span></label><select name="salesChannelId" data-sales-channel><option value="">없음</option>
+          ${channels.map((c) => `<option value="${c.id}" ${d.salesChannelId === c.id ? "selected" : ""}>${h(c.code ? `${c.code} · ` : "")}${h(c.name)}</option>`).join("")}</select></div>
+        </div>
+        <div class="field two">
+          <div><label>주문일</label><input type="date" name="orderDate" value="${h(d.orderDate || "")}"></div>
+          <div><label>입금기한</label><input type="date" name="dueDate" value="${h(d.dueDate || "")}"></div>
+        </div>
+        <div class="field two">
+          <div><label>주문 경로</label><input name="channel" value="${h(d.channel || "")}" placeholder="전화 / 카톡 / 메일 / 발주서"></div>
+          <div><label>납품지</label><input name="deliveryPlaceName" list="sales-dp" value="${h(d.deliveryPlaceName || "")}">
+            <datalist id="sales-dp">${(state.deliveryPlaces || []).map((p) => `<option value="${h(p.name)}">`).join("")}</datalist></div>
+        </div>
+        <div class="field">
+          <label>품목 <span class="muted" style="font-weight:400">(${gross ? "단가는 부가세 포함" : "단가는 부가세 별도"} · 예전 명세서 품목을 고르면 단가가 채워집니다)</span></label>
+          <datalist id="sales-items">${[...hints.keys()].map((n) => `<option value="${h(n)}">`).join("")}</datalist>
+          <table class="sales-lines"><thead><tr><th>품목명</th><th>수량</th><th>단가</th><th>금액</th></tr></thead><tbody>
+            ${d.lines.map((l, i) => `<tr>
+              <td><input data-sl-name="${i}" list="sales-items" value="${h(l.itemName || "")}"></td>
+              <td><input data-sl-qty="${i}" inputmode="numeric" value="${h(l.quantity || "")}" style="width:70px"></td>
+              <td><input data-sl-price="${i}" inputmode="numeric" value="${h(l.price ? money.format(l.price) : "")}" style="width:100px"></td>
+              <td class="num">${l.quantity && l.price ? money.format(Number(l.quantity) * Number(l.price)) : ""}${l.priceNote ? `<br><span class="muted" style="font-size:11px">${h(l.priceNote)}</span>` : ""}</td></tr>`).join("")}
+          </tbody></table>
+          <button type="button" data-sl-add>줄 추가</button>
+        </div>
+        <div class="field"><label>메모</label><input name="memo" value="${h(d.memo || "")}"></div>
+        <div class="toolbar"><button class="primary" type="submit">주문 등록</button></div>
+      </form>
+    </div>`;
+}
+
+function renderSalesDetail() {
+  const ss = salesState();
+  const o = (ss.list || []).find((x) => x.id === ss.selectedId);
+  if (!o) return `<div class="panel-body"><p class="muted">주문을 찾을 수 없습니다.</p></div>`;
+  const meta = ss.meta || {};
+  const done = (k) => {
+    const order = ["received", "statement", "sent", "invoiced", "paid"];
+    return order.indexOf(o.stage) >= order.indexOf(k) && !["on_hold", "cancelled"].includes(o.stage);
+  };
+  const step = (k, label, body) => `<div class="sales-stage ${done(k) ? "done" : ""}"><div class="sales-stage-title">${done(k) ? "✓" : "○"} ${label}</div><div>${body}</div></div>`;
+  const partner = (state.partners || []).find((p) => p.id === o.partnerId);
+  const today = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+  return `
+    <div class="panel-head"><h2>${h(o.code)} · ${h(o.partnerName)}</h2><button data-sales-close>닫기</button></div>
+    <div class="panel-body">
+      <p><strong>${money.format(o.total || 0)}원</strong> <span class="muted">(공급가 ${money.format(o.subtotal || 0)} + 부가세 ${money.format(o.vat || 0)})</span><br>
+        <span class="muted">${h(o.title)} · 주문일 ${h(o.orderDate || "")}${o.dueDate ? ` · 입금기한 ${h(o.dueDate)}` : ""}</span></p>
+      ${step("statement", "명세서", o.statementId
+        ? `${h(o.statementNo)} <a href="/api/purchase-orders/${h(o.statementId)}/excel">엑셀</a> · <a href="/api/purchase-orders/${h(o.statementId)}/pdf" target="_blank">PDF</a>`
+        : can("sales", "edit") ? `<button class="primary" data-sales-step="statement">명세서 만들기</button>` : "")}
+      ${step("sent", "업체 전달", o.sentAt ? `${h(o.sentAt)} · ${h(o.sentMethod || "")}`
+        : o.statementId && can("sales", "edit") ? `<select data-sales-send-method>${(meta.sendMethods || []).map((m) => `<option>${h(m)}</option>`).join("")}</select> <button data-sales-step="send">전달했음</button>` : "")}
+      ${step("invoiced", "청구·계산서", o.invoice?.requestedAt
+        ? `${h(o.invoice.type)} · <span class="badge ${o.invoice.status === "issued" ? "muted" : "warn"}">${h((meta.invoiceStatuses || {})[o.invoice.status] || o.invoice.status)}</span>
+           ${o.invoice.issuedAt ? ` ${h(o.invoice.issuedAt)} 발행` : ""}${o.invoice.email ? `<br><span class="muted">${h(o.invoice.email)}</span>` : ""}${o.invoice.content ? `<br><span class="muted">${h(o.invoice.content)}</span>` : ""}
+           ${o.invoice.status === "requested" && can("sales", "invoice") ? `<br><button data-sales-step="issue">발행 완료</button>` : ""}`
+        : o.sentAt && can("sales", "edit") ? `
+          <div class="field two"><div><select data-sales-inv-type>${(meta.invoiceTypes || []).map((t) => `<option>${h(t)}</option>`).join("")}</select></div>
+          <div><input type="date" data-sales-inv-due value="${h(o.dueDate || "")}" title="입금기한"></div></div>
+          <input data-sales-inv-email value="${h(partner?.invoiceEmail || "")}" placeholder="발행용 이메일">
+          <input data-sales-inv-content placeholder="발행내용(필요시)">
+          <button data-sales-step="invoice">청구·계산서 요청</button>` : "")}
+      ${step("paid", "입금 확인", `${(o.receipts || []).map((r) => `<div>${h(r.date)} ${money.format(r.amount)}원 ${r.memo ? `· ${h(r.memo)}` : ""}</div>`).join("")}
+        ${o.remaining > 0 && o.stage !== "cancelled" && can("sales", "receive") ? `<div class="toolbar"><input data-sales-rcv-amount inputmode="numeric" value="${money.format(o.remaining)}" style="width:120px"><input type="date" data-sales-rcv-date value="${today}"><button data-sales-step="receive">입금 확인</button></div>` : ""}`)}
+      <div class="toolbar" style="margin-top:12px">
+        ${can("sales", "edit") && !["paid", "cancelled", "on_hold"].includes(o.stage) ? `<button data-sales-step="hold">보류</button>` : ""}
+        ${can("sales", "edit") && ["on_hold", "cancelled"].includes(o.stage) ? `<button data-sales-step="reopen">다시 진행</button>` : ""}
+        ${can("sales", "edit") && !["paid", "cancelled"].includes(o.stage) ? `<button class="danger" data-sales-step="cancel">취소</button>` : ""}
+      </div>
+      ${(o.history || []).length ? `<details><summary class="muted">기록 ${o.history.length}건</summary>${o.history.map((x) => `<div class="muted" style="font-size:12px">${h(String(x.at).slice(0, 16).replace("T", " "))} · ${h(x.by)} · ${h(x.action)} ${x.note ? `· ${h(x.note)}` : ""}</div>`).join("")}</details>` : ""}
+    </div>`;
+}
+
+function bindSales() {
+  const ss = salesState();
+  app.querySelectorAll("[data-sales-view]").forEach((b) => b.addEventListener("click", () => { ss.view = b.dataset.salesView; renderApp(); }));
+  if (ss.view === "pricing") { bindPricing(); return; }
+  if (!ss.pricing && !ss.pricingLoading) {
+    // 주문 입력에서 판매처를 고를 수 있게 판매처 목록도 불러 둔다.
+    ss.pricingLoading = true;
+    api("/api/pricing").then((r) => { ss.pricing = r; }).catch(() => { ss.pricing = { channels: [] }; }).finally(() => { ss.pricingLoading = false; renderApp(); });
+  }
+  if (ss.list === null && !ss.loading) {
+    loadSales().then(renderApp);
+    return;
+  }
+  const reload = async () => { await loadSales(); renderApp(); };
+  const readDraft = () => {
+    const form = app.querySelector("[data-sales-form]");
+    if (!form) return ss.draft;
+    const f = formObject(form);
+    const lines = [...form.querySelectorAll("[data-sl-name]")].map((el) => {
+      const i = el.dataset.slName;
+      return {
+        itemName: el.value.trim(),
+        quantity: Number(String(form.querySelector(`[data-sl-qty="${i}"]`).value).replace(/,/g, "")) || "",
+        price: Number(String(form.querySelector(`[data-sl-price="${i}"]`).value).replace(/,/g, "")) || "",
+        priceNote: ss.draft?.lines?.[i]?.priceNote || ""
+      };
+    });
+    return { ...f, lines };
+  };
+  app.querySelectorAll("[data-sales-filter]").forEach((b) => b.addEventListener("click", () => { ss.filter = b.dataset.salesFilter; renderApp(); }));
+  app.querySelector("[data-sales-new]")?.addEventListener("click", () => { ss.selectedId = ""; ss.draft = null; renderApp(); });
+  app.querySelector("[data-sales-close]")?.addEventListener("click", () => { ss.selectedId = ""; renderApp(); });
+  app.querySelectorAll("[data-sales-open]").forEach((tr) => tr.addEventListener("click", () => { ss.selectedId = tr.dataset.salesOpen; renderApp(); }));
+  app.querySelector("[data-sales-partner]")?.addEventListener("change", () => { ss.draft = readDraft(); renderApp(); });
+  app.querySelector("[data-sales-channel]")?.addEventListener("change", () => {
+    const d = readDraft();
+    const ch = (ss.pricing?.channels || []).find((c) => c.id === d.salesChannelId);
+    if (ch?.partnerId && !d.partnerId) d.partnerId = ch.partnerId;
+    ss.draft = d;
+    renderApp();
+  });
+  app.querySelector("[data-sl-add]")?.addEventListener("click", () => { const d = readDraft(); d.lines.push({}); ss.draft = d; renderApp(); });
+  // 품목을 고르면 예전 단가를 채운다.
+  app.querySelectorAll("[data-sl-name]").forEach((el) => el.addEventListener("change", async () => {
+    const d = readDraft();
+    const partner = (state.partners || []).find((p) => p.id === d.partnerId);
+    const gross = salesGrossMode(partner);
+    const hint = salesItemHints(d.partnerId).get(el.value.trim());
+    const i = Number(el.dataset.slName);
+    // 판매처를 골랐으면 판매처 가격 체계에서 먼저 찾는다.
+    if (d.salesChannelId && el.value.trim() && !d.lines[i].price) {
+      try {
+        const q = new URLSearchParams({ channelId: d.salesChannelId, itemName: el.value.trim(), date: d.orderDate || "" });
+        const r = await api(`/api/pricing/lookup?${q}`);
+        if (r.found) {
+          d.lines[i].price = gross ? r.gross : r.supply;
+          d.lines[i].priceNote = `판매처 가격 · ${r.note}`;
+        }
+      } catch { /* fall back to past statements */ }
+    }
+    if (hint && !d.lines[i].price && hint.unitPrice != null) d.lines[i].price = gross ? (hint.grossUnitPrice || hint.unitPrice) : hint.unitPrice;
+    if (hint) d.lines[i].materialId = hint.materialId || "";
+    ss.draft = d;
+    renderApp();
+  }));
+  app.querySelectorAll("[data-sl-qty], [data-sl-price]").forEach((el) => el.addEventListener("change", () => { ss.draft = readDraft(); renderApp(); }));
+  app.querySelector("[data-sales-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const d = readDraft();
+    const partner = (state.partners || []).find((p) => p.id === d.partnerId);
+    const gross = salesGrossMode(partner);
+    const dp = (state.deliveryPlaces || []).find((p) => p.name === d.deliveryPlaceName) || (d.deliveryPlaceName ? { name: d.deliveryPlaceName } : null);
+    const lineItems = d.lines.filter((l) => l.itemName && l.quantity).map((l) => ({
+      itemName: l.itemName, quantity: l.quantity, materialId: l.materialId || "",
+      unitPrice: gross ? Math.round(Number(l.price || 0) / 1.1) : Number(l.price || 0),
+      grossUnitPrice: gross ? Number(l.price || 0) : Math.round(Number(l.price || 0) * 1.1)
+    }));
+    try {
+      const res = await api("/api/sales", { method: "POST", body: { partnerId: d.partnerId, salesChannelId: d.salesChannelId || "", orderDate: d.orderDate, dueDate: d.dueDate, channel: d.channel, memo: d.memo, deliveryPlace: dp, lineItems } });
+      ss.draft = null;
+      ss.selectedId = res.order.id;
+      showToast(`${res.order.code} 주문을 등록했습니다. 이어서 명세서를 만드세요.`);
+      await reload();
+    } catch (error) {
+      showToast(error.message || "등록하지 못했습니다.", "error");
+    }
+  });
+  app.querySelectorAll("[data-sales-step]").forEach((b) => b.addEventListener("click", async () => {
+    const step = b.dataset.salesStep;
+    const q = (sel) => app.querySelector(sel)?.value;
+    const body = {};
+    if (step === "send") body.method = q("[data-sales-send-method]");
+    if (step === "invoice") Object.assign(body, { type: q("[data-sales-inv-type]"), dueDate: q("[data-sales-inv-due]"), email: q("[data-sales-inv-email]"), content: q("[data-sales-inv-content]") });
+    if (step === "receive") Object.assign(body, { amount: q("[data-sales-rcv-amount]"), date: q("[data-sales-rcv-date]") });
+    if (step === "cancel" && !confirm("이 주문을 취소할까요?")) return;
+    if (step === "hold") { const note = prompt("보류 사유"); if (note === null) return; body.note = note; }
+    try {
+      await api(`/api/sales/${ss.selectedId}/${step}`, { method: "POST", body });
+      if (step === "statement") state.purchaseOrders = (await api("/api/purchase-orders")).purchaseOrders;
+      showToast("처리했습니다.");
+      await reload();
+    } catch (error) {
+      showToast(error.message || "처리하지 못했습니다.", "error");
+    }
+  }));
+}
+
+// ===========================================================================
+// v2 판매처 가격 — 판매처 기본 규칙 + 판매처 × 품목 예외 (docs/v2 §9)
+// ===========================================================================
+const PRICE_SOURCE_LABEL = { exception: "예외", rule: "규칙", list: "정가" };
+
+// v2 화면 공통: 상세는 팝업으로 띄운다(목록은 넓게, 좌우 스크롤 없이). closeAttr 은 닫기 버튼의 data- 속성.
+function v2Modal(inner, closeAttr) {
+  return `<div class="v2-modal-backdrop" data-modal-close="${closeAttr}"><div class="v2-modal panel" role="dialog" aria-modal="true">${inner}</div></div>`;
+}
+// 팝업 바깥을 누르거나 Esc 를 누르면 닫기 버튼을 누른 것처럼.
+function bindV2Modal() {
+  const bd = app.querySelector(".v2-modal-backdrop");
+  if (!bd) return;
+  const close = () => bd.querySelector(`[${bd.dataset.modalClose}]`)?.click();
+  bd.addEventListener("click", (e) => { if (e.target === bd) close(); });
+  if (!window.__v2EscBound) {
+    window.__v2EscBound = true;
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      const b = document.querySelector(".v2-modal-backdrop");
+      b?.querySelector(`[${b.dataset.modalClose}]`)?.click();
+    });
+  }
+}
+// 표 머리글을 값 정렬에 맞춘다: 숫자 열이면 머리글도 오른쪽, 금액 표(data-unit)면 '원' 표시.
+function alignV2Tables(root = app) {
+  root.querySelectorAll("table.compact").forEach((t) => {
+    const head = t.tHead?.rows?.[0];
+    const body = t.tBodies?.[0];
+    if (!head || !body) return;
+    [...head.cells].forEach((th, i) => {
+      const cells = [...body.rows].map((r) => r.cells[i]).filter(Boolean);
+      const nums = cells.filter((c) => c.classList.contains("num")).length;
+      if (cells.length && nums >= cells.length / 2) {
+        th.classList.add("num");
+        // 클로브처럼 금액 칸마다 '원'을 붙인다(머리글이 아니라 값에).
+        if (t.dataset.unit && !th.dataset.nounit) {
+          for (const c of cells) {
+            if (!c.classList.contains("num") || c.dataset.unitDone) continue;
+            c.dataset.unitDone = "1";
+            const walker = document.createTreeWalker(c, NodeFilter.SHOW_TEXT);
+            const first = walker.nextNode();
+            if (first && /^\s*[+-]?[\d,]+\s*$/.test(first.nodeValue) && /\d/.test(first.nodeValue)) first.nodeValue = `${first.nodeValue.trim()}${t.dataset.unit}`;
+          }
+        }
+      }
+    });
+  });
+}
+
+async function loadPricing(selectId) {
+  const ss = salesState();
+  ss.pricing = await api("/api/pricing");
+  const id = selectId ?? ss.pricingSel ?? "";
+  ss.pricingSel = id;
+  ss.pricingSheet = id ? await api(`/api/pricing/channels/${id}/sheet`) : null;
+}
+
+function renderPricing() {
+  const ss = salesState();
+  const head = pageHead("판매", "판매처마다 기본 가격 규칙을 정하고, 다른 품목만 예외로 적습니다. 값은 예외 → 판매처 규칙 → 정가 순서로 찾습니다.") + salesViewNav(ss);
+  const p = ss.pricing;
+  if (!p) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const modes = p.modes || {};
+  const types = p.types || {};
+  const rows = (p.channels || []).map((c) => `<tr class="${ss.pricingSel === c.id ? "selected" : ""}" data-pricing-open="${c.id}">
+    <td><span class="code-tag">${h(c.code || "")}</span></td><td>${h(c.name)}${c.active === false ? ' <span class="badge muted">중지</span>' : ""}</td>
+    <td>${c.pricingMode ? `${h(modes[c.pricingMode])}${c.rate ? ` ${c.rate}%` : ""}` : '<span class="badge warn">미지정</span>'}<br><span class="muted" style="font-size:11px">${h(types[c.type] || "")} · VAT ${c.vatMode === "excluded" ? "별도" : "포함"}${c.exceptionCount ? ` · 예외 ${c.exceptionCount}` : ""}</span></td>
+    <td class="num">${c.feeRate ? `${Math.round(c.feeRate * 100) / 100}%` : ""}</td>
+    <td class="num">${c.missing ? `<span class="danger-text">${c.missing}</span>` : ""}</td></tr>`).join("");
+  return `${head}
+    <section class="v2-wide">
+      <div class="panel">
+        <div class="panel-head"><h2>판매처</h2>
+          ${p.canEdit ? `<div class="toolbar"><button data-pricing-seed>NPB 채널에서 가져오기</button><button class="primary" data-pricing-new>판매처 추가</button></div>` : ""}</div>
+        <div class="table-wrap"><table class="compact">
+          <thead><tr><th>코드</th><th>판매처</th><th>기본 가격</th><th>수수료</th><th>가격 없음</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="5" class="empty">판매처가 없습니다. 'NPB 채널에서 가져오기'로 시작하세요. 모르는 칸은 '확인 필요'에 질문으로 쌓입니다.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+    </section>
+    ${ss.pricingSel === "new" ? v2Modal(`<div class="panel-head"><h2>판매처 추가</h2><button data-pricing-close>닫기</button></div><div class="panel-body">${renderPricingChannelForm({})}</div>`, "data-pricing-close")
+      : ss.pricingSheet ? v2Modal(renderPricingSheet(), "data-pricing-close") : ""}`;
+}
+
+function renderPricingChannelForm(c) {
+  const p = salesState().pricing;
+  const opt = (obj, cur) => Object.entries(obj).map(([k, l]) => `<option value="${k}" ${cur === k ? "selected" : ""}>${h(l)}</option>`).join("");
+  const partners = (state.partners || []).filter((x) => x.isActive !== false && x.category !== "issuer");
+  return `<form class="form-grid" data-pricing-channel-form="${h(c.id || "")}">
+    <div class="field two"><div><label>판매처 이름</label><input name="name" value="${h(c.name || "")}" required></div>
+      <div><label>유형</label><select name="type">${opt(p.types, c.type)}</select></div></div>
+    <div class="field two"><div><label>기본 가격 방식</label><select name="pricingMode"><option value="">미지정</option>${opt(p.modes, c.pricingMode)}</select></div>
+      <div><label>할인율·공급률 %</label><input name="rate" inputmode="decimal" value="${h(c.rate || "")}"></div></div>
+    <div class="field two"><div><label>금액 기준</label><select name="vatMode">${opt({ included: "VAT 포함", excluded: "VAT 별도" }, c.vatMode)}</select></div>
+      <div><label>판매수수료 %</label><input name="feeRate" inputmode="decimal" value="${h(c.feeRate || "")}"></div></div>
+    <div class="field two"><div><label>끝전 단위</label><select name="roundUnit">${(p.roundUnits || [1]).map((u) => `<option value="${u}" ${Number(c.roundUnit || 1) === u ? "selected" : ""}>${u}원</option>`).join("")}</select></div>
+      <div><label>끝전 처리</label><select name="roundMethod">${opt(p.roundMethods, c.roundMethod || "round")}</select></div></div>
+    <div class="field two"><div><label>거래처(명세서 상대)</label><select name="partnerId"><option value="">없음</option>
+      ${partners.map((x) => `<option value="${x.id}" ${c.partnerId === x.id ? "selected" : ""}>${h(x.name)}</option>`).join("")}</select></div>
+      <div><label>NPB 채널 코드 <span class="muted" style="font-weight:400">(쉼표)</span></label><input name="npbChannelCodes" value="${h((c.npbChannelCodes || []).join(", "))}"></div></div>
+    ${c.id ? `<label class="check"><input type="checkbox" name="active" ${c.active !== false ? "checked" : ""}> 사용 중</label>` : ""}
+    <div class="toolbar"><button class="primary" type="submit">${c.id ? "규칙 저장" : "추가"}</button></div>
+  </form>`;
+}
+
+function renderPricingSheet() {
+  const ss = salesState();
+  const { channel: c, rows = [], exceptions = [], date } = ss.pricingSheet;
+  const canEdit = ss.pricing?.canEdit;
+  const items = ss.pricing?.items || [];
+  return `
+    <div class="panel-head"><h2>${h(c.code || "")} ${h(c.name)}</h2><button data-pricing-close>닫기</button></div>
+    <div class="panel-body">
+      ${canEdit ? `<details ${c.pricingMode ? "" : "open"}><summary>기본 규칙 고치기</summary>${renderPricingChannelForm(c)}</details>` : ""}
+      <h3 style="margin-top:16px">품목별 가격 <span class="muted" style="font-weight:400;font-size:12px">${h(date)} 기준 · ${c.vatMode === "excluded" ? "단가는 VAT 별도" : "단가는 VAT 포함"}</span></h3>
+      <div class="table-wrap"><table class="compact" data-unit="원">
+        <thead><tr><th>품목</th><th>정가</th><th>단가</th><th>공급가</th><th>세액</th><th data-nounit="1">수수료</th><th>근거</th></tr></thead>
+        <tbody>${rows.map((r) => `<tr>
+          <td class="wrap pricing-item">${h(r.name)}</td><td class="num">${money.format(r.listPrice || 0)}</td>
+          ${r.status === "ok" ? `<td class="num"><strong>${money.format(r.unitPrice)}</strong></td><td class="num">${money.format(r.supply)}</td><td class="num">${money.format(r.vat)}</td>`
+            : `<td colspan="3"><span class="badge warn">${h(r.note)}</span></td>`}
+          <td class="num">${r.feeRate ? `${Math.round(r.feeRate * 100) / 100}%` : ""}</td>
+          <td>${r.source ? `<span class="badge ${r.source === "exception" ? "" : "muted"}">${h(PRICE_SOURCE_LABEL[r.source])}</span> <span class="muted" style="font-size:11px">${h(r.status === "ok" && r.source !== "list" ? r.note : "")}</span>` : ""}</td></tr>`).join("")
+          || `<tr><td colspan="7" class="empty">값을 매길 품목이 없습니다. NPB 제품과, 사업부가 PB·NPB인 브랜드의 단가표 품목이 여기 나옵니다.</td></tr>`}</tbody>
+      </table></div>
+      ${canEdit ? `<h3 style="margin-top:16px">예외 추가</h3>
+      <form class="form-grid" data-pricing-ex-form>
+        <div class="field"><label>품목</label><select name="itemRef" required><option value="">선택</option>${items.map((it) => `<option value="${h(it.ref)}">${h(it.name)}</option>`).join("")}</select></div>
+        <div class="field two"><div><label>방식</label><select name="mode"><option value="fixed">고정가</option><option value="discount">할인율 %</option><option value="supply_rate">공급률 %</option><option value="">가격은 규칙대로(수수료만)</option></select></div>
+          <div><label>고정가 또는 %</label><input name="value" inputmode="decimal"></div></div>
+        <div class="field two"><div><label>고정가 기준</label><select name="vatMode"><option value="">판매처 기준 따름</option><option value="included">VAT 포함</option><option value="excluded">VAT 별도</option></select></div>
+          <div><label>수수료 % (다를 때만)</label><input name="feeRate" inputmode="decimal"></div></div>
+        <div class="field two"><div><label>시작일 (행사)</label><input type="date" name="from"></div><div><label>종료일</label><input type="date" name="to"></div></div>
+        <div class="field"><label>메모</label><input name="note"></div>
+        <div class="toolbar"><button class="primary" type="submit">예외 저장</button></div>
+      </form>` : ""}
+      <h3 style="margin-top:16px">예외 목록</h3>
+      <div class="table-wrap"><table class="compact">
+        <thead><tr><th>품목</th><th>내용</th><th>기간</th><th>근거</th><th></th></tr></thead>
+        <tbody>${exceptions.map((x) => `<tr class="${x.active === false ? "muted" : ""}">
+          <td class="wrap">${h(x.itemName || (items.find((it) => it.ref === x.itemRef) || {}).name || x.itemRef)}</td>
+          <td>${x.mode === "fixed" ? `${money.format(x.price)}원${x.vatMode === "excluded" ? "(VAT별도)" : x.vatMode === "included" ? "(VAT포함)" : ""}` : x.mode ? `${h((ss.pricing.modes || {})[x.mode])} ${x.rate}%` : ""}${x.feeRate !== undefined ? ` · 수수료 ${x.feeRate}%` : ""}</td>
+          <td>${x.from || x.to ? `${h(x.from || "")}~${h(x.to || "")}` : "상시"}</td>
+          <td class="muted" style="font-size:11px">${h(x.source || "")}${x.active === false ? " · 해제됨" : ""}</td>
+          <td>${canEdit && x.active !== false ? `<button data-pricing-ex-off="${h(x.id)}">해제</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">예외가 없습니다.</td></tr>`}</tbody>
+      </table></div>
+    </div>`;
+}
+
+function bindPricing() {
+  const ss = salesState();
+  if (!ss.pricing && !ss.pricingLoading) {
+    ss.pricingLoading = true;
+    loadPricing().catch((e) => showToast(e.message, "error")).finally(() => { ss.pricingLoading = false; renderApp(); });
+    return;
+  }
+  const refresh = async (sel) => { await loadPricing(sel); renderApp(); };
+  bindV2Modal();
+  app.querySelectorAll("[data-pricing-open]").forEach((tr) => tr.addEventListener("click", () => refresh(tr.dataset.pricingOpen).catch((e) => showToast(e.message, "error"))));
+  app.querySelector("[data-pricing-close]")?.addEventListener("click", () => { ss.pricingSel = ""; ss.pricingSheet = null; renderApp(); });
+  app.querySelector("[data-pricing-new]")?.addEventListener("click", () => { ss.pricingSel = "new"; ss.pricingSheet = null; renderApp(); });
+  app.querySelector("[data-pricing-seed]")?.addEventListener("click", async () => {
+    if (!confirm("NPB 채널 설정에서 판매처·공급가·수수료를 가져옵니다. 이미 있는 판매처와 고친 예외는 그대로 둡니다. 진행할까요?")) return;
+    try {
+      const r = await api("/api/pricing/seed", { method: "POST", body: {} });
+      showToast(`판매처 ${r.channels}곳, 예외 ${r.exceptions}건을 만들었습니다. 확인 필요 질문 ${r.questions}건(새 질문 ${r.newQuestions}건).`);
+      await refresh();
+    } catch (e) { showToast(e.message || "가져오지 못했습니다.", "error"); }
+  });
+  app.querySelector("[data-pricing-channel-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const body = formObject(form);
+    body.active = form.querySelector('[name="active"]') ? form.querySelector('[name="active"]').checked : true;
+    const cid = form.dataset.pricingChannelForm;
+    try {
+      const r = await api(cid ? `/api/pricing/channels/${cid}` : "/api/pricing/channels", { method: cid ? "PUT" : "POST", body });
+      showToast("저장했습니다.");
+      await refresh(r.channel.id);
+    } catch (e) { showToast(e.message || "저장하지 못했습니다.", "error"); }
+  });
+  app.querySelector("[data-pricing-ex-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const f = formObject(event.currentTarget);
+    const body = { channelId: ss.pricingSel, itemRef: f.itemRef, mode: f.mode, vatMode: f.vatMode, from: f.from, to: f.to, note: f.note, feeRate: f.feeRate };
+    if (f.mode === "fixed") body.price = f.value; else if (f.mode) body.rate = f.value;
+    try {
+      await api("/api/pricing/exceptions", { method: "POST", body });
+      showToast("예외를 저장했습니다.");
+      await refresh();
+    } catch (e) { showToast(e.message || "저장하지 못했습니다.", "error"); }
+  });
+  app.querySelectorAll("[data-pricing-ex-off]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("이 예외를 해제할까요? 기록은 남습니다.")) return;
+    try {
+      await api(`/api/pricing/exceptions/${encodeURIComponent(b.dataset.pricingExOff)}`, { method: "DELETE" });
+      await refresh();
+    } catch (e) { showToast(e.message, "error"); }
+  }));
+}
+
+// ===========================================================================
+// v2 생산·재고 — 원부자재 재고 / 입출고 / 생산 기록 / 제품 구성(BOM)
+// ===========================================================================
+function stockState() {
+  if (!state.stock) state.stock = { screen: "status", data: null, loading: false, editingProduct: null, settingFor: "" };
+  return state.stock;
+}
+async function loadStock() {
+  const st = stockState();
+  st.loading = true;
+  try { st.data = await api("/api/stock"); } catch (error) { st.error = error.message; st.data = { status: [], moves: [], runs: [], products: [], locations: [], settings: {} }; } finally { st.loading = false; }
+}
+const qtyFmt = (n) => (Number(n || 0) % 1 ? Number(n).toLocaleString("ko-KR", { maximumFractionDigits: 3 }) : money.format(Number(n || 0)));
+
+// ===========================================================================
+// v2 입점사 월정산 보드 — 브랜드별 매출·배송비·회수·마진 + 확인/발행요청/발송 체크
+// ===========================================================================
+// ===========================================================================
+// v2 메신저 공유함 — 담당자가 봐야 할 알림(입금요청·지급요청·입금 완료·월 마감·일일 보고)을 모아
+// [복사]로 채널톡 팀챗에 붙여 넣는다. 채널톡 키·유료 플랜이 생기면 [채널톡 보내기]·자동 발송을 켠다.
+// ===========================================================================
+function messengerState() {
+  if (!state.messenger) state.messenger = { data: null, loading: false, filter: "unshared", writing: false, settingsOpen: false };
+  return state.messenger;
+}
+async function loadMessenger() {
+  const ms = messengerState();
+  ms.loading = true;
+  try { ms.data = await api("/api/notices"); ms.error = ""; } catch (e) { ms.error = e.message; ms.data = { notices: [], kinds: {}, settings: {} }; }
+  finally { ms.loading = false; }
+}
+function renderMessenger() {
+  const ms = messengerState();
+  const head = pageHead("메신저 공유", "담당자가 확인할 일을 한곳에 모읍니다. [복사]를 눌러 채널톡 팀챗에 붙여 넣으세요. (채널톡 무료 플랜은 자동 발송이 안 됩니다)");
+  const d = ms.data;
+  if (!d) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const unshared = d.notices.filter((n) => !(n.shares || []).length);
+  const list = ms.filter === "unshared" ? unshared : ms.filter === "all" ? d.notices : d.notices.filter((n) => n.kind === ms.filter);
+  const kindsUsed = [...new Set(d.notices.map((n) => n.kind))];
+  const chip = (key, label, n) => `<button class="npb-subtab ${ms.filter === key ? "active" : ""}" data-msg-filter="${h(key)}">${h(label)}${n != null ? ` <span class="muted">${n}</span>` : ""}</button>`;
+  const rows = list.map((n) => {
+    const last = (n.shares || []).slice(-1)[0];
+    return `<tr>
+      <td class="nowrap">${h(fmtDate(n.createdAt))}</td>
+      <td class="nowrap"><span class="pill">${h(d.kinds[n.kind] || n.kind)}</span></td>
+      <td class="wrap"><strong>${h(n.title)}</strong><div class="msg-text">${h(n.text)}</div></td>
+      <td class="wrap muted" style="font-size:12px">${last ? `${h(last.via)} · ${h(last.by)}<br>${h(fmtDate(last.at))}${last.error ? `<br><span class="danger-text">${h(last.error)}</span>` : ""}` : "안 보냄"}</td>
+      <td class="nowrap"><button class="small" data-msg-copy="${h(n.id)}">복사</button>${d.channelReady ? ` <button class="small" data-msg-send="${h(n.id)}">채널톡</button>` : ""}</td></tr>`;
+  }).join("");
+  const cfg = d.settings || {};
+  const kindsList = Object.entries(d.kinds || {}).filter(([k]) => !["manual", "daily"].includes(k));
+  const settings = d.isOwner ? `<section class="panel" style="margin-top:14px"><div class="panel-head"><h2>채널톡 연결 설정</h2><button class="small" data-msg-settings-toggle>${ms.settingsOpen ? "접기" : "펼치기"}</button></div>
+    ${ms.settingsOpen ? `<div class="panel-body"><form data-msg-settings class="form-grid">
+      <p class="${d.keysPresent ? "" : "danger-text"}" style="grid-column:1/-1">${d.keysPresent ? "채널톡 키·비밀값이 서버에 있습니다." : "채널톡 키·비밀값이 없습니다. 무료 플랜은 Open API 를 쓸 수 없어 지금은 [복사]만 됩니다. (Startup 이상 + 설정 › 보안 및 개발 › API 키에서 키·비밀값 발급 → 서버 환경변수 CHANNEL_ACCESS_KEY / CHANNEL_ACCESS_SECRET)"}</p>
+      <div class="field"><label>보내기</label><select name="mode">
+        <option value="off" ${cfg.mode === "off" ? "selected" : ""}>끔 (복사만)</option>
+        <option value="test" ${cfg.mode === "test" ? "selected" : ""}>시험 — 내 계정에만 공지</option>
+        <option value="live" ${cfg.mode === "live" ? "selected" : ""}>실제 — 팀챗 그룹에 보냄</option></select></div>
+      <div class="field"><label>팀챗 그룹 ID</label><input name="groupId" value="${h(cfg.groupId || "")}" inputmode="numeric"></div>
+      <div class="field"><label>보내는 이름(봇)</label><input name="botName" value="${h(cfg.botName || "")}" maxlength="30"></div>
+      <div class="field"><label>시험용 내 매니저 ID</label><input name="testManagerId" value="${h(cfg.testManagerId || "")}" inputmode="numeric"></div>
+      <div class="field" style="grid-column:1/-1"><label>자동으로 보낼 알림</label><div class="chip-list">${kindsList.map(([k, label]) => `<label class="chip"><input type="checkbox" name="auto_${k}" ${(cfg.autoKinds || []).includes(k) ? "checked" : ""}> ${h(label)}</label>`).join("")}</div></div>
+      <div class="toolbar" style="grid-column:1/-1"><button class="primary" type="submit">저장</button></div>
+    </form></div>` : ""}</section>` : "";
+  const writer = ms.writing ? v2Modal(`<div class="panel-head"><h2>직접 써서 올리기</h2><button data-msg-close>닫기</button></div>
+    <div class="panel-body"><form data-msg-write class="form-grid"><div class="field" style="grid-column:1/-1"><label>내용</label><textarea name="text" rows="8" required></textarea></div>
+    <div class="toolbar" style="grid-column:1/-1"><button class="primary" type="submit">공유함에 올리기</button></div></form></div>`, "data-msg-close") : "";
+  return `${head}
+    <section class="panel"><div class="panel-head"><h2>알림</h2>
+      <div class="toolbar">${unshared.length ? `<button class="primary" data-msg-copy-all>안 보낸 것 ${unshared.length}건 한꺼번에 복사</button>` : ""}<button data-msg-write-open>+ 직접 쓰기</button></div></div>
+      <div class="panel-body">
+        ${ms.error ? `<p class="error-text">${h(ms.error)}</p>` : ""}
+        <div class="toolbar chip-row">${chip("unshared", "안 보낸 것", unshared.length)}${chip("all", "전체", d.notices.length)}${kindsUsed.map((k) => chip(k, d.kinds[k] || k, d.notices.filter((n) => n.kind === k).length)).join("")}</div>
+        <div class="table-wrap"><table class="compact msg-table"><thead><tr><th>시각</th><th>종류</th><th>내용</th><th>공유</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="5" class="empty">${ms.filter === "unshared" ? "안 보낸 알림이 없습니다." : "알림이 없습니다."}</td></tr>`}</tbody></table></div>
+      </div></section>${settings}${writer}`;
+}
+function bindMessenger() {
+  const ms = messengerState();
+  if (!ms.data && !ms.loading) { loadMessenger().then(renderApp); return; }
+  const reload = async () => { await loadMessenger(); renderApp(); };
+  const mark = (id, via) => api(`/api/notices/${encodeURIComponent(id)}/share`, { method: "POST", body: { via } });
+  app.querySelectorAll("[data-msg-filter]").forEach((b) => b.addEventListener("click", () => { ms.filter = b.dataset.msgFilter; renderApp(); }));
+  app.querySelectorAll("[data-msg-copy]").forEach((b) => b.addEventListener("click", async () => {
+    const n = ms.data.notices.find((x) => x.id === b.dataset.msgCopy);
+    try { await navigator.clipboard.writeText(n.text); } catch { showToast("복사하지 못했습니다. 글을 직접 선택해 복사하세요.", "error"); return; }
+    await mark(n.id, "copy").catch(() => {});
+    showToast("복사했습니다. 채널톡 팀챗에 붙여 넣으세요.");
+    reload();
+  }));
+  app.querySelector("[data-msg-copy-all]")?.addEventListener("click", async () => {
+    const list = ms.data.notices.filter((n) => !(n.shares || []).length).slice().reverse();
+    try { await navigator.clipboard.writeText(list.map((n) => n.text).join("\n\n")); } catch { showToast("복사하지 못했습니다.", "error"); return; }
+    for (const n of list) await mark(n.id, "copy").catch(() => {});
+    showToast(`${list.length}건을 복사했습니다. 채널톡 팀챗에 붙여 넣으세요.`);
+    reload();
+  });
+  app.querySelectorAll("[data-msg-send]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("채널톡으로 보낼까요?")) return;
+    try { await mark(b.dataset.msgSend, "channel"); showToast("채널톡으로 보냈습니다."); reload(); } catch (e) { showToast(e.message, "error"); }
+  }));
+  app.querySelector("[data-msg-write-open]")?.addEventListener("click", () => { ms.writing = true; renderApp(); });
+  app.querySelectorAll("[data-msg-close]").forEach((b) => b.addEventListener("click", () => { ms.writing = false; renderApp(); }));
+  bindV2Modal();
+  app.querySelector("[data-msg-write]")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = new FormData(e.currentTarget).get("text");
+    try { await api("/api/notices", { method: "POST", body: { text } }); ms.writing = false; showToast("올렸습니다."); reload(); } catch (err) { showToast(err.message, "error"); }
+  });
+  app.querySelector("[data-msg-settings-toggle]")?.addEventListener("click", () => { ms.settingsOpen = !ms.settingsOpen; renderApp(); });
+  app.querySelector("[data-msg-settings]")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.currentTarget);
+    const autoKinds = Object.keys(ms.data.kinds).filter((k) => f.get(`auto_${k}`));
+    if (f.get("mode") === "live" && !confirm("실제 모드는 팀챗 그룹 전체에 알림이 갑니다. 저장할까요?")) return;
+    try { await api("/api/messenger/settings", { method: "PUT", body: { mode: f.get("mode"), groupId: f.get("groupId"), botName: f.get("botName"), testManagerId: f.get("testManagerId"), autoKinds } }); showToast("저장했습니다."); reload(); }
+    catch (err) { showToast(err.message, "error"); }
+  });
+}
+
+// ===========================================================================
+// v2 월 마감 — 그 달에 끝나지 않은 일 점검 → 대표가 마감(잠금). 마감한 달은 서버가 수정을 거부한다.
+// ===========================================================================
+function closingUiState() {
+  if (!state.closingUi) {
+    const d = new Date(Date.now() + 9 * 3600 * 1000);
+    d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - 1);
+    state.closingUi = { month: d.toISOString().slice(0, 7), data: null, loading: false };
+  }
+  return state.closingUi;
+}
+async function loadClosing() {
+  const cs = closingUiState();
+  cs.loading = true;
+  try { cs.data = await api(`/api/closing/check?month=${cs.month}`); cs.error = ""; }
+  catch (e) { cs.error = e.message; cs.data = { items: [], closing: { history: [] } }; }
+  finally { cs.loading = false; }
+}
+function renderClosing() {
+  const cs = closingUiState();
+  const head = pageHead("월 마감", "그 달에 끝나지 않은 일을 모아 보고, 다 정리되면 대표가 마감합니다. 마감한 달의 입금요청·처리완료 지급요청·월 정산 현황·현금흐름표는 고칠 수 없습니다(이카운트의 편집제한과 같은 방식).");
+  const d = cs.data;
+  if (!d) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const c = d.closing || {};
+  const locked = c.lockedThrough && cs.month <= c.lockedThrough;
+  const rows = (d.items || []).map((it) => `<tr class="${it.count ? "" : "row-done"}">
+      <td>${it.count ? "⚠️" : "✅"} ${h(it.label)}</td><td class="num">${money.format(it.count)}건</td>
+      <td class="wrap muted" style="font-size:12px">${h((it.sample || []).join(", "))}${it.count > (it.sample || []).length ? " …" : ""}</td>
+      <td class="wrap" style="font-size:12px">${it.count ? h(it.hint) : ""}</td>
+      <td>${it.count && it.go ? `<button class="small" data-closing-go="${h(it.go.tab)}${it.go.sub ? `:${h(it.go.sub)}` : ""}">가기</button>` : ""}</td></tr>`).join("");
+  const hist = (c.history || []).slice(0, 12).map((x) => `<tr><td>${h(fmtDate(x.at))}</td><td>${x.action === "lock" ? "마감" : "해제"}</td><td>${h(x.month)}</td><td>${h(x.by)}</td><td class="wrap">${h(x.note || "")}${x.open ? ` (남은 일 ${x.open}건)` : ""}</td></tr>`).join("");
+  return `${head}
+    <section class="panel"><div class="panel-head"><h2>점검할 달</h2>
+      <div class="toolbar"><input type="month" data-closing-month value="${h(cs.month)}">
+      <span class="${c.lockedThrough ? "pill" : "muted"}">${c.lockedThrough ? `${h(c.lockedThrough)} 까지 마감됨` : "마감한 달 없음"}</span></div></div>
+      <div class="panel-body">
+        ${cs.error ? `<p class="error-text">${h(cs.error)}</p>` : ""}
+        <p>${locked ? `🔒 <strong>${h(cs.month)}</strong> 은(는) 마감된 달입니다.` : d.open ? `<strong>${h(cs.month)}</strong>: 끝나지 않은 일 <strong>${money.format(d.open)}건</strong>` : `<strong>${h(cs.month)}</strong>: 끝나지 않은 일이 없습니다. 마감할 수 있습니다.`}</p>
+        <div class="table-wrap"><table class="compact"><thead><tr><th>점검 항목</th><th>건수</th><th>예시</th><th>할 일</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+        ${d.canClose ? `<div class="toolbar" style="margin-top:12px">
+          ${locked ? `<button data-closing-unlock>${h(cs.month)} 마감 풀기</button>` : `<button class="primary" data-closing-lock>${h(cs.month)} 마감하기</button>`}
+          <span class="muted" style="font-size:12px">마감은 그 달까지 한꺼번에 잠급니다. 풀 때는 이유를 남깁니다.</span></div>` : `<p class="muted" style="margin-top:10px">마감·해제는 대표만 할 수 있습니다.</p>`}
+      </div></section>
+    <section class="panel" style="margin-top:14px"><div class="panel-head"><h2>마감 기록</h2></div><div class="panel-body">
+      <div class="table-wrap"><table class="compact"><thead><tr><th>시각</th><th>구분</th><th>달</th><th>누가</th><th>메모</th></tr></thead><tbody>${hist || `<tr><td colspan="5" class="empty">기록이 없습니다.</td></tr>`}</tbody></table></div>
+    </div></section>`;
+}
+function bindClosing() {
+  const cs = closingUiState();
+  if (!cs.data && !cs.loading) { loadClosing().then(renderApp); return; }
+  const reload = async () => { await loadClosing(); renderApp(); };
+  app.querySelector("[data-closing-month]")?.addEventListener("change", (e) => { if (/^\d{4}-\d{2}$/.test(e.target.value)) { cs.month = e.target.value; reload(); } });
+  app.querySelectorAll("[data-closing-go]").forEach((b) => b.addEventListener("click", () => {
+    const [tab, sub] = b.dataset.closingGo.split(":");
+    state.tab = tab;
+    if (tab === "trade") tradeState();
+    const conf = TAB_SUBMENUS[tab];
+    if (sub && conf) state[conf.stateKey].screen = sub;
+    if (tab === "monthly") { monthlyState().month = cs.month; monthlyState().data = null; }
+    renderApp();
+  }));
+  app.querySelector("[data-closing-lock]")?.addEventListener("click", async () => {
+    let note = "";
+    if (cs.data.open) {
+      note = prompt(`${cs.month}에 끝나지 않은 일이 ${cs.data.open}건 있습니다. 그래도 마감하려면 이유를 적어 주세요.`) || "";
+      if (!note.trim()) return;
+    } else if (!confirm(`${cs.month} 까지 마감할까요? 마감한 달은 고칠 수 없습니다.`)) return;
+    try { await api("/api/closing/lock", { method: "POST", body: { month: cs.month, note, open: cs.data.open } }); showToast(`${cs.month} 마감했습니다.`); await reload(); }
+    catch (e) { showToast(e.message, "error"); }
+  });
+  app.querySelector("[data-closing-unlock]")?.addEventListener("click", async () => {
+    const reason = prompt(`${cs.month} 마감을 푸는 이유를 적어 주세요. (이 달부터 뒤의 마감이 풀립니다)`) || "";
+    if (!reason.trim()) return;
+    try { await api("/api/closing/unlock", { method: "POST", body: { month: cs.month, reason } }); showToast("마감을 풀었습니다."); await reload(); }
+    catch (e) { showToast(e.message, "error"); }
+  });
+}
+
+function monthlyState() {
+  if (!state.monthly) state.monthly = { data: null, loading: false, month: "", filter: "all", editing: "" };
+  return state.monthly;
+}
+async function loadMonthly() {
+  const ms = monthlyState();
+  ms.loading = true;
+  try {
+    ms.data = await api(`/api/monthly${ms.month ? `?month=${ms.month}` : ""}`);
+    ms.month = ms.data.month;
+  } catch (e) { ms.data = { rows: [], months: [], totals: {}, error: e.message }; } finally { ms.loading = false; }
+}
+
+const MONTHLY_FIELD_LABEL = { sales: "매출", shipping: "배송비", recovered: "회수", margin: "마진" };
+
+function renderMonthly() {
+  const ms = monthlyState();
+  const head = pageHead("월 정산 현황", "입점 브랜드마다 이번 달 매출·배송비·채권 회수·마진을 보고, 확인 → 계산서 발행요청 → 정산서 발송을 체크합니다. 숫자는 입금요청에서 계산하고, 입금요청이 없는 위탁 브랜드는 직접 적습니다.");
+  const d = ms.data;
+  if (!d) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const t = d.totals || {};
+  const rows = d.rows.filter((r) => ms.filter === "all" || (ms.filter === "todo" ? !(r.checked && r.sent) : ms.filter === "diff" ? r.diffs.length : true));
+  const cell = (r, f) => {
+    const sheet = r.sheet ? r.sheet[f] : null;
+    const diff = r.diffs.includes(f);
+    return `<td class="num">${money.format(r[f] || 0)}${diff ? `<br><span class="danger-text" style="font-size:11px">시트 ${money.format(sheet || 0)}</span>` : ""}</td>`;
+  };
+  const chk = (r, k) => `<input type="checkbox" data-monthly-check="${h(r.brandId)}:${k}" ${r[k] ? "checked" : ""} ${d.canEdit ? "" : "disabled"}>`;
+  return `${head}
+    <div class="toolbar" style="margin:8px 0">
+      <select data-monthly-month style="width:auto">${(d.months.includes(d.month) ? d.months : [d.month, ...d.months]).map((m) => `<option value="${m}" ${m === d.month ? "selected" : ""}>${m.replace("-", "년 ")}월</option>`).join("")}</select>
+      ${[["all", "전체"], ["todo", "안 끝난 것"], ["diff", "시트와 다른 것"]].map(([k, l]) => `<button class="npb-subtab ${ms.filter === k ? "active" : ""}" data-monthly-filter="${k}">${l}</button>`).join("")}
+      <span style="flex:1"></span>
+      ${d.canEdit ? `<button data-monthly-add>브랜드 줄 추가</button>` : ""}
+      ${state.admin?.role === "owner" ? `<button data-monthly-import>월정산 시트에서 가져오기</button>` : ""}
+    </div>
+    <section class="sales-flow">
+      <div class="sales-step"><span>매출</span><strong>${money.format(t.sales || 0)}원</strong></div>
+      <div class="sales-step"><span>채권 회수</span><strong>${money.format(t.recovered || 0)}원</strong></div>
+      <div class="sales-step"><span>마진(위탁 등)</span><strong>${money.format(t.margin || 0)}원</strong></div>
+      <div class="sales-step"><span>확인 / 정산서 발송</span><strong>${t.checked || 0} / ${t.sent || 0} <span class="muted" style="font-size:12px">(${d.rows.length}곳)</span></strong></div>
+      ${t.diffs ? `<div class="sales-step"><span>시트와 다름</span><strong class="danger-text">${t.diffs}곳</strong></div>` : ""}
+    </section>
+    <section class="panel"><div class="table-wrap"><table class="compact monthly-table" data-unit="원">
+      <thead><tr><th>브랜드</th><th data-nounit="1">건수</th><th>매출</th><th>배송비</th><th>회수</th><th>마진</th><th class="center">확인</th><th class="center">발행요청</th><th class="center">정산서 발송</th><th>메모 / 수정요청</th></tr></thead>
+      <tbody>${rows.map((r) => `<tr>
+        <td>${r.code ? `<span class="code-tag">${h(r.code)}</span> ` : ""}${h(r.brandName)}<br><span class="muted" style="font-size:11px">${h(/^[a-z_]+$/.test(r.kind || "") ? settlementLabel(r.kind) : (r.kind || ""))}${r.source === "manual" ? " · 직접 입력" : r.source === "sheet-only" ? " · 시트 값만" : ""}</span></td>
+        <td class="num">${r.count || ""}</td>${cell(r, "sales")}${cell(r, "shipping")}${cell(r, "recovered")}${cell(r, "margin")}
+        <td class="center">${chk(r, "checked")}</td><td class="center">${chk(r, "invoiceRequested")}</td><td class="center">${chk(r, "sent")}</td>
+        <td class="wrap memo-cell">${h(r.memo)}${r.fixRequest ? `<br><span class="danger-text">${h(r.fixRequest)}</span>` : ""}${d.canEdit ? ` <button class="ghost small" data-monthly-open="${h(r.brandId)}">고치기</button>` : ""}</td>
+      </tr>`).join("") || `<tr><td colspan="10" class="empty">이 달 내역이 없습니다.</td></tr>`}</tbody>
+    </table></div></section>
+    ${(() => {
+      const r = d.rows.find((x) => x.brandId === ms.editing);
+      if (!r) return "";
+      return v2Modal(`<div class="panel-head"><h2>${h(r.brandName)} · ${h(d.month)}</h2><button data-monthly-cancel>닫기</button></div>
+        <div class="panel-body"><form data-monthly-edit="${h(r.brandId)}" class="form-grid">
+          <div class="field"><label>메모</label><input name="memo" value="${h(r.memo)}"></div>
+          <div class="field"><label>수정요청</label><input name="fixRequest" value="${h(r.fixRequest)}"></div>
+          ${r.source !== "requests" ? `<p class="muted" style="font-size:12px">입금요청이 없는 브랜드라 숫자를 직접 적습니다(원).</p><div class="field two">${["sales", "shipping", "recovered", "margin"].map((f) => `<div><label>${MONTHLY_FIELD_LABEL[f]}</label><input name="m_${f}" inputmode="numeric" value="${r[f] ? money.format(r[f]) : ""}"></div>`).join("")}</div>` : `<p class="muted" style="font-size:12px">숫자는 입금요청에서 계산합니다. 틀리면 입금요청을 고치세요.</p>`}
+          <div class="toolbar"><button class="primary" type="submit">저장</button></div></form></div>`, "data-monthly-cancel");
+    })()}`;
+}
+
+function bindMonthly() {
+  const ms = monthlyState();
+  if (!ms.data && !ms.loading) { loadMonthly().then(renderApp); return; }
+  const reload = async () => { await loadMonthly(); renderApp(); };
+  const put = async (brandId, body) => {
+    try { await api(`/api/monthly/${ms.month}/${encodeURIComponent(brandId)}`, { method: "PUT", body }); await reload(); } catch (e) { showToast(e.message || "저장하지 못했습니다.", "error"); }
+  };
+  app.querySelector("[data-monthly-month]")?.addEventListener("change", (e) => { ms.month = e.target.value; ms.editing = ""; reload(); });
+  app.querySelectorAll("[data-monthly-filter]").forEach((b) => b.addEventListener("click", () => { ms.filter = b.dataset.monthlyFilter; renderApp(); }));
+  app.querySelectorAll("[data-monthly-check]").forEach((el) => el.addEventListener("change", () => {
+    const [brandId, key] = el.dataset.monthlyCheck.split(":");
+    put(brandId, { [key]: el.checked });
+  }));
+  bindV2Modal();
+  app.querySelectorAll("[data-monthly-open]").forEach((b) => b.addEventListener("click", () => { ms.editing = b.dataset.monthlyOpen; renderApp(); }));
+  app.querySelector("[data-monthly-cancel]")?.addEventListener("click", () => { ms.editing = ""; renderApp(); });
+  app.querySelector("[data-monthly-edit]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = formObject(e.currentTarget);
+    const body = { memo: f.memo, fixRequest: f.fixRequest };
+    if ("m_sales" in f) body.manual = { sales: f.m_sales, shipping: f.m_shipping, recovered: f.m_recovered, margin: f.m_margin };
+    ms.editing = "";
+    put(e.currentTarget.dataset.monthlyEdit, body);
+  });
+  app.querySelector("[data-monthly-add]")?.addEventListener("click", () => {
+    const name = prompt("추가할 브랜드 이름(위탁 등 입금요청이 없는 브랜드)");
+    if (!name) return;
+    const b = (ms.data.brands || []).find((x) => x.name.replace(/\s/g, "").includes(name.replace(/\s/g, "")));
+    if (!b) { showToast("그 이름의 브랜드가 없습니다. 브랜드 메뉴에서 먼저 등록하세요.", "error"); return; }
+    ms.editing = b.id;
+    put(b.id, { memo: "" });
+  });
+  app.querySelector("[data-monthly-import]")?.addEventListener("click", async () => {
+    if (!confirm("월정산 구글시트(2025-08~)를 읽어 체크·메모·시트 값을 가져옵니다. 여기서 고친 줄은 시트 값만 갱신합니다. 진행할까요?")) return;
+    try {
+      const r = await api("/api/monthly/import-sheet", { method: "POST", body: {} });
+      showToast(`${r.months}개월 ${r.records}줄을 가져왔습니다. 확인 필요 질문 ${r.questions}건.`);
+      await reload();
+    } catch (e) { showToast(e.message || "가져오지 못했습니다.", "error"); }
+  });
+}
+
+// ===========================================================================
+// v2 경영 KPI·손익 — 공헌이익 계산기(kpi.html) + v2에서 모은 이번 달 참고값
+// ===========================================================================
+function kpiState() {
+  if (!state.kpi) state.kpi = { month: new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 7), summary: null, loading: false };
+  return state.kpi;
+}
+function renderKpi() {
+  const ks = kpiState();
+  const head = pageHead("KPI·손익", "공헌이익 KPI 계산기입니다. 이제 값이 서버에 저장돼 어느 기기에서 열어도 같습니다. 위 칸은 v2에 쌓인 이번 달 숫자로, 계산기에 넣을 때 맞춰 보는 참고값입니다.");
+  const s = ks.summary;
+  const card = (label, value, sub = "") => `<div class="sales-step"><span>${label}</span><strong>${money.format(value || 0)}원</strong>${sub ? `<em class="muted" style="font-size:11px;font-style:normal">${sub}</em>` : ""}</div>`;
+  const months = [];
+  const now = new Date(Date.now() + 9 * 3600 * 1000);
+  for (let i = 0; i < 12; i += 1) months.push(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1)).toISOString().slice(0, 7));
+  return `${head}
+    <div class="toolbar" style="margin:8px 0">
+      <select data-kpi-month style="width:auto">${months.map((m) => `<option value="${m}" ${m === ks.month ? "selected" : ""}>${m.replace("-", "년 ")}월 참고값</option>`).join("")}</select>
+      <a class="button ghost" href="/kpi/" target="_blank" rel="noopener">계산기 새 창으로</a>
+    </div>
+    ${s ? `<section class="sales-flow">
+      ${card("입점 매출(월정산)", s.wooof.sales, `${s.wooof.brands}곳 · 회수 ${money.format(s.wooof.recovered)} · 마진 ${money.format(s.wooof.margin)}`)}
+      ${card("판매(B2B 주문)", s.sales.total, `${s.sales.orders}건 · 공급가 ${money.format(s.sales.supply)}`)}
+      ${card("생산비 청구", s.production.total, s.production.byPartner.map(([n, v]) => `${n} ${money.format(v)}`).join(" · "))}
+      ${card("대출 이자(추정)", s.loans.interest, `대출 ${s.loans.count}건`)}
+      ${card("매월 고정 지출(자금 일정)", s.fixedCosts.total, Object.entries(s.fixedCosts.byCategory).map(([k, v]) => `${k} ${money.format(v)}`).join(" · "))}
+    </section>` : `<p class="muted">참고값을 불러오는 중…</p>`}
+    <iframe class="kpi-frame" src="/kpi/" title="KPI 계산기"></iframe>`;
+}
+function bindKpi() {
+  const ks = kpiState();
+  const load = async () => {
+    ks.loading = true;
+    try { ks.summary = await api(`/api/kpi/v2-summary?month=${ks.month}`); } catch (e) { showToast(e.message, "error"); } finally { ks.loading = false; renderApp(); }
+  };
+  if (!ks.summary && !ks.loading) { load(); return; }
+  app.querySelector("[data-kpi-month]")?.addEventListener("change", (e) => { ks.month = e.target.value; ks.summary = null; load(); });
+}
+
+// ===========================================================================
+// v2 생산비 — 생산처별 청구·지급 원장, 미지급, 공임 대조
+// ===========================================================================
+const PROD_KIND_LABEL = { bill: "청구", payment: "지급", adjust: "조정" };
+
+async function loadProdCost(selectId) {
+  const st = stockState();
+  st.prod = await api("/api/production");
+  const pid = selectId ?? st.prodSel ?? "";
+  st.prodSel = pid;
+  st.prodDetail = pid ? await api(`/api/production/partners/${pid}`) : null;
+}
+
+function renderProdCost() {
+  const st = stockState();
+  const d = st.prod;
+  if (!d) return `<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const rows = d.partners.map((p) => `<tr class="${st.prodSel === p.id ? "selected" : ""}" data-prod-open="${p.id}">
+    <td>${p.code ? `<span class="code-tag">${h(p.code)}</span> ` : ""}${h(p.name)}${p.company === "betters_personal" ? ' <span class="badge muted">Betters(개인)</span>' : ""}</td>
+    <td class="num"><strong>${money.format(p.balance)}</strong></td>
+    <td class="num">${p.over60 ? `<span class="danger-text">${money.format(p.over60)}</span>` : ""}</td>
+    <td>${h(p.oldestDate || "")}${p.oldestAge ? ` <span class="muted" style="font-size:11px">${p.oldestAge}일</span>` : ""}</td>
+    <td>${h(p.lastPayment || "")}</td></tr>`).join("");
+  return `
+    <section class="sales-flow">
+      <div class="sales-step"><span>우프 생산비 미지급</span><strong>${money.format(d.total)}원</strong></div>
+      <div class="sales-step"><span>60일 넘은 미지급</span><strong class="${d.over60 ? "danger-text" : ""}">${money.format(d.over60)}원</strong></div>
+    </section>
+    <section class="v2-wide">
+      <div class="panel">
+        <div class="panel-head"><h2>생산처</h2>${d.canEdit ? `<button data-prod-import>생산비 시트에서 가져오기</button>` : ""}</div>
+        <div class="table-wrap"><table class="compact" data-unit="원">
+          <thead><tr><th>생산처</th><th>미지급</th><th>60일 넘음</th><th>가장 오래된 청구</th><th>마지막 지급</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="5" class="empty">아직 기록이 없습니다. '생산비 시트에서 가져오기'로 시작하세요.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+    </section>
+    ${st.prodDetail ? v2Modal(renderProdPartner(), "data-prod-close") : ""}`;
+}
+
+function renderProdPartner() {
+  const st = stockState();
+  const { partner: p, summary: s, open = [], entries = [], details = [], rates = [], checks = {} } = st.prodDetail;
+  const canEdit = st.prod?.canEdit;
+  const tab = st.prodTab || "open";
+  const sub = [["open", `미지급 ${open.length}`], ["ledger", "원장"], ["check", `공임 대조 ${(checks.mismatches || []).length + (checks.unknown || []).length}`], ["details", "상세내역"]];
+  let body = "";
+  if (tab === "open") {
+    body = `<div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>청구일</th><th>내용</th><th>남은 금액</th><th>경과</th></tr></thead><tbody>
+      ${open.map((b) => `<tr><td>${h(b.date)}</td><td class="wrap">${h(b.memo || (b.lines || []).map((l) => l.item).join(", "))}${b.partial ? ' <span class="badge muted">일부 지급</span>' : ""}</td>
+        <td class="num">${money.format(b.remaining)}</td><td class="${b.ageDays > 60 ? "danger-text" : ""}">${b.ageDays}일</td></tr>`).join("") || `<tr><td colspan="4" class="empty">미지급 청구가 없습니다.</td></tr>`}
+    </tbody></table></div>
+    ${st.prod?.canRequestPay && s.balance > 0 ? `<form class="form-grid" data-prod-payreq style="margin-top:12px">
+      <div class="field two"><div><label>지급요청 금액</label><input name="amount" inputmode="numeric" value="${money.format(s.balance)}"></div>
+        <div><label>지급 기한</label><input type="date" name="dueDate"></div></div>
+      <div class="toolbar"><button class="primary" type="submit">지급요청 만들기</button><span class="muted" style="font-size:12px">지급요청이 '지급완료'가 되면 여기 지급으로 자동 기록됩니다.</span></div>
+    </form>` : ""}`;
+  } else if (tab === "ledger") {
+    body = `${canEdit ? `<form class="form-grid" data-prod-add>
+      <div class="field two"><div><label>구분</label><select name="kind"><option value="bills">청구(받은 계산서·명세서)</option><option value="payments">지급(보낸 돈)</option><option value="adjustments">조정(± 불량·상계)</option></select></div>
+        <div><label>날짜</label><input type="date" name="date" value="${h(new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10))}"></div></div>
+      <div class="field two"><div><label>금액(VAT 포함)</label><input name="amount" inputmode="numeric" required></div><div><label>메모</label><input name="memo"></div></div>
+      <div class="toolbar"><button class="primary" type="submit">기록</button></div></form>` : ""}
+      <div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>날짜</th><th>구분</th><th>내용</th><th>금액</th><th>잔액</th><th></th></tr></thead><tbody>
+      ${entries.map((e) => `<tr><td>${h(e.date)}</td><td>${PROD_KIND_LABEL[e.kind]}${e.assumed ? ' <span class="badge muted">추정</span>' : ""}</td><td class="wrap">${h(e.memo)}</td>
+        <td class="num">${money.format(e.amount)}</td><td class="num">${money.format(e.balance)}</td>
+        <td>${canEdit ? `<button data-prod-void="${h({ bill: "prodBills", payment: "prodPayments", adjust: "prodAdjustments" }[e.kind])}:${h(e.id)}">취소</button>` : ""}</td></tr>`).join("")}
+      </tbody></table></div>`;
+  } else if (tab === "check") {
+    const mm = checks.mismatches || [];
+    body = `<p class="muted" style="font-size:12px">올해 상세내역 단가를 약속한 공임(VAT 별도)과 맞춰 봅니다. 운임·샘플은 빼고 봅니다.</p>
+      <h3>단가가 다른 줄 ${mm.length}</h3>
+      <div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>날짜</th><th>품목</th><th data-nounit="1">수량</th><th>청구 단가</th><th>약속 단가</th><th>차액</th></tr></thead><tbody>
+      ${mm.map((m) => `<tr><td>${h(m.date)}</td><td>${h(m.item)}</td><td class="num">${m.qty}</td><td class="num">${money.format(m.unitPrice)}</td><td class="num">${money.format(m.rate)}</td><td class="num ${m.diff > 0 ? "danger-text" : ""}">${money.format(m.diff)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">다른 줄이 없습니다.</td></tr>`}
+      </tbody></table></div>
+      <h3 style="margin-top:12px">공임표에 없는 품목 ${(checks.unknown || []).length}</h3>
+      <p>${(checks.unknown || []).map((u) => `<span class="badge muted">${h(u.item)} ${money.format(u.lastPrice)}</span>`).join(" ") || '<span class="muted">없음</span>'}</p>
+      <h3 style="margin-top:12px">상세 합계 ≠ 청구 ${(checks.totals || []).length}</h3>
+      <p>${(checks.totals || []).map((t) => `${h(t.date)} 상세 ${money.format(t.detail)} / 청구 ${money.format(t.billed)}`).join("<br>") || '<span class="muted">없음</span>'}</p>
+      <h3 style="margin-top:12px">공임표</h3>
+      <div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>품목</th><th>옵션</th><th>단가(VAT별도)</th><th>시작일</th></tr></thead><tbody>
+      ${rates.map((r) => `<tr><td>${h(r.item)}</td><td>${h(r.option)}</td><td class="num">${money.format(r.unitPrice)}</td><td>${h(r.from || r.fromText || "")}</td></tr>`).join("")}
+      </tbody></table></div>
+      ${canEdit ? `<form class="form-grid" data-prod-rate style="margin-top:8px"><div class="field two"><div><label>품목</label><input name="item" required></div><div><label>옵션</label><input name="option"></div></div>
+        <div class="field two"><div><label>단가(VAT별도)</label><input name="unitPrice" inputmode="numeric" required></div><div><label>시작일</label><input type="date" name="from"></div></div>
+        <div class="toolbar"><button type="submit">공임 단가 추가</button></div></form>` : ""}`;
+  } else {
+    body = details.map((d) => `<div class="prod-detail"><strong>${h(d.date)}</strong> <span class="muted">합계 ${money.format(d.total || 0)}</span>
+      <table class="compact" data-unit="원"><tbody>${(d.lines || []).map((l) => `<tr><td>${h(l.item)}</td><td class="num">${l.qty}</td><td class="num">${money.format(l.unitPrice)}</td><td class="num">${money.format(l.gross || 0)}</td></tr>`).join("")}</tbody></table></div>`).join("")
+      || `<p class="muted">상세내역이 없습니다.</p>`;
+  }
+  return `
+    <div class="panel-head"><h2>${h(p.code || "")} ${h(p.name)}</h2><button data-prod-close>닫기</button></div>
+    <div class="panel-body">
+      <p>미지급 <strong>${money.format(s.balance)}원</strong> · 청구 ${money.format(s.billed)} · 지급 ${money.format(s.paid)}${p.bankAccount ? ` · <span class="muted">${h(p.bankName)} ${h(p.bankAccount)}</span>` : ""}</p>
+      <div class="npb-subnav">${sub.map(([k, l]) => `<button class="npb-subtab ${tab === k ? "active" : ""}" data-prod-tab="${k}">${l}</button>`).join("")}</div>
+      ${body}
+    </div>`;
+}
+
+function bindProdCost() {
+  const st = stockState();
+  if (!st.prod && !st.prodLoading) {
+    st.prodLoading = true;
+    loadProdCost().catch((e) => showToast(e.message, "error")).finally(() => { st.prodLoading = false; renderApp(); });
+    return;
+  }
+  const refresh = async (sel) => { await loadProdCost(sel); renderApp(); };
+  const run = async (fn, ok) => { try { await fn(); if (ok) showToast(ok); await refresh(); } catch (e) { showToast(e.message || "처리하지 못했습니다.", "error"); } };
+  bindV2Modal();
+  app.querySelectorAll("[data-prod-open]").forEach((tr) => tr.addEventListener("click", () => refresh(tr.dataset.prodOpen).catch((e) => showToast(e.message, "error"))));
+  app.querySelector("[data-prod-close]")?.addEventListener("click", () => { st.prodSel = ""; st.prodDetail = null; renderApp(); });
+  app.querySelectorAll("[data-prod-tab]").forEach((b) => b.addEventListener("click", () => { st.prodTab = b.dataset.prodTab; renderApp(); }));
+  app.querySelector("[data-prod-import]")?.addEventListener("click", async () => {
+    if (!confirm("생산비 구글시트를 읽어 청구·지급·상세내역·공임표를 가져옵니다. 이미 가져온 줄은 덮어쓰고, 여기서 고치거나 취소한 줄은 그대로 둡니다. 진행할까요?")) return;
+    try {
+      const r = await api("/api/production/import-sheet", { method: "POST", body: {} });
+      showToast(`청구 ${r.bills}건, 지급 ${r.payments}건을 가져왔습니다. 확인 필요 질문 ${r.questions}건(새 질문 ${r.newQuestions}건).`);
+      await refresh();
+    } catch (e) { showToast(e.message || "가져오지 못했습니다.", "error"); }
+  });
+  app.querySelector("[data-prod-add]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = formObject(e.currentTarget);
+    run(() => api(`/api/production/partners/${st.prodSel}/${f.kind}`, { method: "POST", body: f }), "기록했습니다.");
+  });
+  app.querySelector("[data-prod-rate]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    run(() => api(`/api/production/partners/${st.prodSel}/rates`, { method: "POST", body: formObject(e.currentTarget) }), "공임 단가를 추가했습니다.");
+  });
+  app.querySelectorAll("[data-prod-void]").forEach((b) => b.addEventListener("click", () => {
+    if (!confirm("이 기록을 취소할까요? 기록은 남고 잔액에서만 빠집니다.")) return;
+    const [col, rid] = b.dataset.prodVoid.split(/:(.+)/);
+    run(() => api(`/api/production/${col}/${encodeURIComponent(rid)}/void`, { method: "POST", body: {} }), "취소했습니다.");
+  }));
+  app.querySelector("[data-prod-payreq]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = formObject(e.currentTarget);
+    run(async () => {
+      const r = await api(`/api/production/partners/${st.prodSel}/pay-request`, { method: "POST", body: f });
+      showToast(`지급요청 ${r.payment.code}을 만들었습니다. 지급요청 메뉴에서 확인·승인하세요.`);
+    });
+  });
+}
+
+function renderStock() {
+  const st = stockState();
+  const head = pageHead("생산·재고", "원부자재를 어디에 얼마나 넣었고, 생산에 얼마나 썼고, 얼마나 남았는지, 언제 얼마나 발주해야 하는지 봅니다.");
+  const tabs = `<div class="npb-subnav">${[["status", "재고현황"], ["moves", "입출고 기록"], ["runs", "생산 기록"], ["products", "제품 구성(BOM)"], ["cost", "생산비"]].map(([k, l]) => `<button class="npb-subtab ${st.screen === k ? "active" : ""}" data-stock-screen="${k}">${l}</button>`).join("")}</div>`;
+  if (st.screen === "cost") return `${head}${tabs}${renderProdCost()}`;
+  if (!st.data) return `${head}${tabs}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const body = { status: renderStockStatus, moves: renderStockMoves, runs: renderStockRuns, products: renderStockProducts }[st.screen] || renderStockStatus;
+  return `${head}${tabs}${body()}`;
+}
+
+const stockLoc = (key) => (stockState().data?.locations || []).find((l) => l.key === key)?.name || key;
+const matName = (id) => (state.materials || []).find((m) => m.id === id)?.itemName || id;
+const materialOptions = (cur) => (state.materials || []).filter((m) => m.isActive !== false)
+  .map((m) => `<option value="${m.id}" ${cur === m.id ? "selected" : ""}>${h(m.code ? `${m.code} · ` : "")}${h(m.itemName)}</option>`).join("");
+const locationOptions = (cur) => (stockState().data?.locations || []).map((l) => `<option value="${h(l.key)}" ${cur === l.key ? "selected" : ""}>${h(l.name)}</option>`).join("");
+
+function renderStockStatus() {
+  const st = stockState();
+  const d = st.data;
+  const need = d.status.filter((r) => r.needOrder);
+  const editing = st.settingFor ? (d.settings[st.settingFor] || {}) : null;
+  const products = d.products || [];
+  return `
+    ${need.length ? `<section class="fixed-summary"><div class="fixed-summary-title danger-text">발주 필요 ${need.length}건</div>
+      <div class="muted">${need.map((r) => `${h(r.name)} <strong>${qtyFmt(r.suggestOrder)}${h(r.unit)}</strong>`).join(" · ")}</div></section>` : ""}
+    ${products.length ? `<section class="fixed-summary"><div class="fixed-summary-title">지금 재고로 만들 수 있는 수량</div><div class="muted">
+      ${products.map((p) => { const x = (d.producible || []).find((y) => y.productId === p.id); const best = (x?.byLocation || []).sort((a, b) => b.quantity - a.quantity)[0];
+        return `${h(p.name)} <strong>${best ? `${money.format(best.quantity)}${h(p.unit || "개")}` : "0"}</strong>${best ? ` (${h(stockLoc(best.location))}, ${h(matName(best.limitedBy))} 기준)` : ""}`; }).join(" · ")}</div></section>` : ""}
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>재고현황</h2><span class="muted">${d.status.length}개 품목 · 입출고나 제품 구성에 쓰인 원부자재만 보여요</span></div>
+        <div class="table-wrap"><table class="compact stock-table">
+          <thead><tr><th>원부자재</th><th>보관처별</th><th>보유</th><th>쓸 예정</th><th>쓸 수 있음</th><th>안전재고</th><th>발주</th><th></th></tr></thead>
+          <tbody>${d.status.map((r) => `<tr class="${r.needOrder ? "stock-need" : ""}">
+            <td>${r.code ? `<span class="code-tag">${h(r.code)}</span>` : ""}${h(r.name)}</td>
+            <td class="muted" style="font-size:12px">${r.locations.map((l) => `${h(stockLoc(l.location))} ${qtyFmt(l.qty)}`).join("<br>") || "-"}</td>
+            <td class="num">${qtyFmt(r.onHand)}${h(r.unit)}</td><td class="num">${r.plannedUse ? qtyFmt(r.plannedUse) : ""}</td>
+            <td class="num"><strong>${qtyFmt(r.available)}</strong></td><td class="num">${r.safetyStock ? qtyFmt(r.safetyStock) : ""}</td>
+            <td>${r.needOrder ? `<span class="badge warn">발주 ${qtyFmt(r.suggestOrder)}${h(r.unit)}</span>` : ""}${r.leadTimeDays ? `<br><span class="muted" style="font-size:11px">리드타임 ${r.leadTimeDays}일</span>` : ""}</td>
+            <td>${can("stock", "edit") ? `<button data-stock-setting="${r.materialId}">설정</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="8" class="empty">아직 재고 기록이 없습니다. '입출고 기록'에서 입고부터 넣거나, '제품 구성'에 원부자재를 등록하세요.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>${editing ? `재고 설정 · ${h(matName(st.settingFor))}` : "재고 설정"}</h2></div>
+        <div class="panel-body">${editing ? `
+          <form class="form-grid" data-stock-setting-form>
+            <div class="field two"><div><label>재고단위</label><input name="unit" value="${h(editing.unit || "")}" placeholder="개 / m / kg"></div>
+              <div><label>안전재고</label><input name="safetyStock" inputmode="decimal" value="${h(editing.safetyStock ?? "")}"></div></div>
+            <div class="field two"><div><label>발주단위(묶음)</label><input name="orderMultiple" inputmode="decimal" value="${h(editing.orderMultiple ?? "")}" placeholder="예: 1000"></div>
+              <div><label>리드타임(일)</label><input name="leadTimeDays" inputmode="numeric" value="${h(editing.leadTimeDays ?? "")}"></div></div>
+            <p class="muted" style="font-size:12px">쓸 수 있는 양(보유 − 예정 생산에 쓸 양)이 안전재고 아래로 가면 '발주 필요'가 뜨고, 모자란 만큼을 발주단위로 올려 추천합니다.</p>
+            <div class="toolbar"><button class="primary" type="submit">저장</button><button type="button" data-stock-setting-close>닫기</button></div>
+          </form>` : `<p class="muted">표에서 '설정'을 누르면 안전재고·발주단위·리드타임을 정할 수 있습니다.</p>`}</div>
+      </div>
+    </section>`;
+}
+
+function renderStockMoves() {
+  const st = stockState();
+  const d = st.data;
+  const f = st.moveDraft || { type: "in", date: new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10) };
+  return `
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>입출고 기록</h2><span class="muted">최근 ${d.moves.length}건</span></div>
+        <div class="table-wrap"><table class="compact stock-table">
+          <thead><tr><th>날짜</th><th>구분</th><th>원부자재</th><th>보관처</th><th>수량</th><th>메모</th><th></th></tr></thead>
+          <tbody>${d.moves.map((m) => `<tr class="${m.voided ? "muted stock-void" : ""}">
+            <td>${h(String(m.date || "").slice(5))}</td><td>${h(d.moveTypes[m.type] || m.type)}</td><td>${h(matName(m.materialId))}</td>
+            <td>${h(stockLoc(m.location))}</td><td class="num">${["use", "out", "move_out"].includes(m.type) ? "−" : m.type === "adjust" && m.qty > 0 ? "+" : ""}${qtyFmt(Math.abs(m.qty))}</td>
+            <td class="wrap muted" style="font-size:12px">${h(m.memo || "")}${m.voided ? " (무름)" : ""}</td>
+            <td>${!m.voided && m.refType !== "production" && can("stock", "edit") ? `<button data-stock-void="${m.id}" title="이 기록 무르기">무르기</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="7" class="empty">기록이 없습니다.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>기록 추가</h2></div>
+        <div class="panel-body">${can("stock", "edit") ? `
+          <form class="form-grid" data-stock-move-form>
+            <div class="field two">
+              <div><label>구분</label><select name="type" data-stock-move-type>${[["in", "입고(구매·넣어줌)"], ["move", "이동(창고→공장 등)"], ["out", "반출·폐기"], ["adjust", "실사 조정"]].map(([k, l]) => `<option value="${k}" ${f.type === k ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+              <div><label>날짜</label><input type="date" name="date" value="${h(f.date || "")}"></div>
+            </div>
+            <div class="field"><label>원부자재</label><select name="materialId" required><option value="">선택</option>${materialOptions(f.materialId)}</select></div>
+            <div class="field two">
+              <div><label>${f.type === "move" ? "보내는 곳" : "보관처"}</label><select name="location" required>${locationOptions(f.location)}</select></div>
+              <div>${f.type === "move" ? `<label>받는 곳</label><select name="toLocation">${locationOptions(f.toLocation)}</select>`
+                : f.type === "adjust" ? `<label>센 수량(실제 남은 양)</label><input name="counted" inputmode="decimal" required>`
+                : `<label>수량</label><input name="qty" inputmode="decimal" required>`}</div>
+            </div>
+            ${f.type === "move" ? `<div class="field"><label>수량</label><input name="qty" inputmode="decimal" required></div>` : ""}
+            <div class="field"><label>메모</label><input name="memo" placeholder="예: 발주서 PO-… / 공장 실사"></div>
+            <div class="toolbar"><button class="primary" type="submit">기록</button></div>
+          </form>` : `<p class="muted">수정 권한이 없습니다.</p>`}</div>
+      </div>
+    </section>`;
+}
+
+function renderStockRuns() {
+  const st = stockState();
+  const d = st.data;
+  const products = d.products || [];
+  const runs = (d.runs || []).slice().sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+  const label = { planned: "예정", done: "완료", cancelled: "취소" };
+  return `
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>생산 기록</h2><span class="muted">완료하면 제품 구성대로 그 생산처 재고에서 자동으로 빠집니다</span></div>
+        <div class="table-wrap"><table class="compact stock-table">
+          <thead><tr><th>날짜</th><th>제품</th><th>수량</th><th>생산처</th><th>상태</th><th></th></tr></thead>
+          <tbody>${runs.map((r) => `<tr class="${r.status === "cancelled" ? "muted" : ""}">
+            <td>${h(r.date || "")}</td><td>${h(r.productName)}${r.memo ? `<br><span class="muted" style="font-size:11px">${h(r.memo)}</span>` : ""}</td>
+            <td class="num">${money.format(r.quantity)}</td><td>${h(stockLoc(r.location))}</td>
+            <td><span class="badge ${r.status === "planned" ? "warn" : r.status === "done" ? "" : "muted"}">${label[r.status] || r.status}</span></td>
+            <td><div class="row-actions">${can("stock", "edit") && r.status === "planned" ? `<button class="primary" data-stock-run="complete" data-id="${r.id}">생산 완료</button>` : ""}
+              ${can("stock", "edit") && r.status !== "cancelled" ? `<button data-stock-run="cancel" data-id="${r.id}">취소</button>` : ""}</div></td></tr>`).join("") || `<tr><td colspan="6" class="empty">생산 기록이 없습니다.</td></tr>`}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>생산 등록</h2></div>
+        <div class="panel-body">${!products.length ? `<p class="muted">먼저 '제품 구성(BOM)'에서 제품을 만드세요.</p>` : can("stock", "edit") ? `
+          <form class="form-grid" data-stock-run-form>
+            <div class="field"><label>제품</label><select name="productId" required>${products.map((p) => `<option value="${p.id}">${h(p.name)}</option>`).join("")}</select></div>
+            <div class="field two"><div><label>수량</label><input name="quantity" inputmode="numeric" required></div>
+              <div><label>생산처</label><select name="location">${locationOptions((d.locations || [])[1]?.key)}</select></div></div>
+            <div class="field two"><div><label>날짜</label><input type="date" name="date" value="${new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10)}"></div>
+              <div><label>상태</label><select name="status"><option value="planned">예정(재고 미차감)</option><option value="done">완료(바로 차감)</option></select></div></div>
+            <div class="field"><label>메모</label><input name="memo"></div>
+            <div class="toolbar"><button class="primary" type="submit">등록</button></div>
+          </form>` : ""}</div>
+      </div>
+    </section>`;
+}
+
+function renderStockProducts() {
+  const st = stockState();
+  const d = st.data;
+  const e = st.editingProduct || { name: "", unit: "개", lines: [{}, {}, {}] };
+  return `
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-head"><h2>제품 구성(BOM)</h2><span class="muted">완제품 1개를 만들 때 드는 원부자재와 손실률</span></div>
+        <div class="table-wrap"><table class="compact stock-table">
+          <thead><tr><th>제품</th><th>원부자재 (1${"개"}당)</th><th></th></tr></thead>
+          <tbody>${(d.products || []).map((p) => `<tr><td>${h(p.name)}</td>
+            <td class="muted" style="font-size:12px">${(p.lines || []).map((l) => `${h(matName(l.materialId))} ${qtyFmt(l.perUnit)}${l.lossRate ? ` (+손실 ${l.lossRate}%)` : ""}`).join("<br>")}</td>
+            <td>${can("stock", "edit") ? `<button data-stock-product-edit="${p.id}">수정</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="3" class="empty">등록된 제품이 없습니다. 예: 포포타올 = 스텝온 1 + 옆솜 2 + 앞솜 1</td></tr>`}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>${e.id ? "제품 수정" : "제품 추가"}</h2></div>
+        <div class="panel-body">${can("stock", "edit") ? `
+          <form class="form-grid" data-stock-product-form>
+            <div class="field two"><div><label>제품명</label><input name="name" value="${h(e.name || "")}" required placeholder="예: 필바이츠 45g (5P)"></div>
+              <div><label>단위</label><input name="unit" value="${h(e.unit || "개")}"></div></div>
+            <table class="sales-lines"><thead><tr><th>원부자재</th><th>1개당 수량</th><th>손실률%</th></tr></thead><tbody>
+              ${(e.lines || []).map((l, i) => `<tr><td><select data-bom-mat="${i}"><option value="">선택</option>${materialOptions(l.materialId)}</select></td>
+                <td><input data-bom-per="${i}" inputmode="decimal" value="${h(l.perUnit ?? "")}" style="width:80px"></td>
+                <td><input data-bom-loss="${i}" inputmode="decimal" value="${h(l.lossRate ?? "")}" style="width:60px"></td></tr>`).join("")}
+            </tbody></table>
+            <div class="toolbar"><button type="button" data-bom-add>줄 추가</button></div>
+            <p class="muted" style="font-size:12px">원부자재가 목록에 없으면 거래관리 &gt; 원부자재관리에서 먼저 등록하세요(우프코드가 붙습니다).</p>
+            <div class="toolbar"><button class="primary" type="submit">저장</button>${e.id ? `<button type="button" data-stock-product-cancel>취소</button>` : ""}</div>
+          </form>` : ""}</div>
+      </div>
+    </section>`;
+}
+
+function bindStock() {
+  const st = stockState();
+  if (st.screen === "cost") {
+    app.querySelectorAll("[data-stock-screen]").forEach((b) => b.addEventListener("click", () => { st.screen = b.dataset.stockScreen; renderApp(); }));
+    bindProdCost();
+    return;
+  }
+  if (!st.data && !st.loading) { loadStock().then(renderApp); return; }
+  const reload = async () => { await loadStock(); renderApp(); };
+  const run = async (fn, ok) => { try { await fn(); if (ok) showToast(ok); await reload(); } catch (error) { showToast(error.message || "처리하지 못했습니다.", "error"); } };
+  app.querySelectorAll("[data-stock-screen]").forEach((b) => b.addEventListener("click", () => { st.screen = b.dataset.stockScreen; renderApp(); }));
+  app.querySelectorAll("[data-stock-setting]").forEach((b) => b.addEventListener("click", () => { st.settingFor = b.dataset.stockSetting; renderApp(); }));
+  app.querySelector("[data-stock-setting-close]")?.addEventListener("click", () => { st.settingFor = ""; renderApp(); });
+  app.querySelector("[data-stock-setting-form]")?.addEventListener("submit", (e) => { e.preventDefault(); const body = formObject(e.currentTarget); run(() => api(`/api/stock/settings/${st.settingFor}`, { method: "PUT", body }), "저장했습니다."); });
+  app.querySelector("[data-stock-move-type]")?.addEventListener("change", (e) => { st.moveDraft = { ...formObject(e.target.form), type: e.target.value }; renderApp(); });
+  app.querySelector("[data-stock-move-form]")?.addEventListener("submit", (e) => { e.preventDefault(); const body = formObject(e.currentTarget); run(async () => { await api("/api/stock/moves", { method: "POST", body }); st.moveDraft = { type: body.type, date: body.date, location: body.location }; }, "기록했습니다."); });
+  app.querySelectorAll("[data-stock-void]").forEach((b) => b.addEventListener("click", () => { if (confirm("이 기록을 무를까요? (지워지지 않고 '무름'으로 남습니다)")) run(() => api(`/api/stock/moves/${b.dataset.stockVoid}/void`, { method: "POST", body: {} }), "무렀습니다."); }));
+  app.querySelector("[data-stock-run-form]")?.addEventListener("submit", (e) => { e.preventDefault(); const body = formObject(e.currentTarget); run(() => api("/api/stock/runs", { method: "POST", body }), body.status === "done" ? "생산을 기록하고 재고에서 뺐습니다." : "생산 예정을 등록했습니다."); });
+  app.querySelectorAll("[data-stock-run]").forEach((b) => b.addEventListener("click", () => {
+    const action = b.dataset.stockRun;
+    const body = {};
+    if (action === "complete") { const q = prompt("실제 생산 수량 (예정과 같으면 그대로)", (st.data.runs.find((r) => r.id === b.dataset.id) || {}).quantity); if (q === null) return; body.quantity = q; }
+    if (action === "cancel" && !confirm("이 생산 기록을 취소할까요? 완료된 생산이면 차감한 재고가 되돌아갑니다.")) return;
+    run(() => api(`/api/stock/runs/${b.dataset.id}/${action}`, { method: "POST", body }), "처리했습니다.");
+  }));
+  const readBom = () => {
+    const form = app.querySelector("[data-stock-product-form]");
+    const f = formObject(form);
+    const lines = [...form.querySelectorAll("[data-bom-mat]")].map((el) => ({ materialId: el.value, perUnit: form.querySelector(`[data-bom-per="${el.dataset.bomMat}"]`).value, lossRate: form.querySelector(`[data-bom-loss="${el.dataset.bomMat}"]`).value }));
+    return { ...(st.editingProduct || {}), ...f, lines };
+  };
+  app.querySelector("[data-bom-add]")?.addEventListener("click", () => { const p = readBom(); p.lines.push({}); st.editingProduct = p; renderApp(); });
+  app.querySelectorAll("[data-stock-product-edit]").forEach((b) => b.addEventListener("click", () => { const p = st.data.products.find((x) => x.id === b.dataset.stockProductEdit); st.editingProduct = p ? { ...p, lines: [...p.lines, {}] } : null; renderApp(); }));
+  app.querySelector("[data-stock-product-cancel]")?.addEventListener("click", () => { st.editingProduct = null; renderApp(); });
+  app.querySelector("[data-stock-product-form]")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const p = readBom();
+    run(async () => { await api(p.id ? `/api/stock/products/${p.id}` : "/api/stock/products", { method: p.id ? "PUT" : "POST", body: { name: p.name, unit: p.unit, lines: p.lines } }); st.editingProduct = null; }, "저장했습니다.");
+  });
+}
+
+// ===========================================================================
+// v2 확인 필요(질문함) — 시스템이 모르는 값을 질문으로 띄우고 답하면 적용한다.
+// ===========================================================================
+function setupState() {
+  if (!state.setup) state.setup = { list: null, loading: false, show: "open" };
+  return state.setup;
+}
+async function loadSetup() {
+  const ss = setupState();
+  ss.loading = true;
+  try { const res = await api("/api/setup/questions"); ss.list = res.questions || []; ss.brands = res.brands || []; }
+  catch (error) { ss.list = []; ss.error = error.message; } finally { ss.loading = false; }
+}
+const SETUP_KIND_LABEL = { "claim-base": "채권총액", "request-deduction": "채권차감액", "amount-mismatch": "금액 차이", "tab-brand": "시트 탭 연결", "zero-deduction": "차감 방식", "channel-rule": "판매처 가격 방식", "channel-price": "판매처 단가", "prod-balance": "생산비 잔금", "prod-rate-change": "공임 변경", "prod-rate-new": "공임 등록", "prod-total": "상세 합계", "loan-maturity": "대출 만기", proposal: "등록 제안", "monthly-brand": "월정산 브랜드", "monthly-gap": "월정산 매출 차이", "brand-info": "브랜드 정보", "brand-new": "새 브랜드" };
+
+function renderSetup() {
+  const ss = setupState();
+  const head = pageHead("확인 필요", "시스템이 스스로 정할 수 없는 값을 질문으로 모았습니다. 답하면 바로 적용되고, 누가 언제 무엇으로 답했는지 남습니다.");
+  if (ss.list === null) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  // 큰돈이 걸린 것부터: 잔금·채권총액 → 차감·가격 방식 → 나머지.
+  const order = ["prod-balance", "loan-maturity", "proposal", "brand-info", "claim-base", "zero-deduction", "channel-rule", "prod-rate-change", "request-deduction", "amount-mismatch",
+    "tab-brand", "channel-price", "prod-rate-new", "prod-total"];
+  const rank = (q) => { const i = order.indexOf(q.kind); return i === -1 ? order.length : i; };
+  const open = ss.list.filter((q) => q.status !== "answered").sort((a, b) => rank(a) - rank(b));
+  const done = ss.list.filter((q) => q.status === "answered");
+  const shown = ss.show === "open" ? open : done;
+  const byKind = {};
+  for (const q of open) byKind[q.kind] = (byKind[q.kind] || 0) + 1;
+  const card = (q) => `
+    <div class="setup-card ${q.status === "answered" ? "answered" : ""}">
+      <div class="setup-kind">${h(SETUP_KIND_LABEL[q.kind] || q.kind)}</div>
+      <strong>${h(q.title)}</strong>
+      <p class="muted" style="white-space:pre-line">${h(q.detail || "")}</p>
+      ${q.kind === "proposal" && q.status !== "answered" ? `<ul class="setup-actions">${(q.choices || []).filter((c) => (c.actions || []).length).map((c) => `<li><strong>${h(c.label)}</strong>: ${(c.actions || []).map((a) => h(a.type === "cashSchedule" ? `자금일정 '${a.title}' ${a.repeat === "monthly" ? `매월 ${a.dayOfMonth}일(${a.startDate || ""}~${a.endDate || ""})` : a.date} ${money.format(a.amount)}원${a.direction === "in" ? " 받을 돈" : ""}` : a.type === "payment" ? `지급요청 '${a.title}' ${money.format(a.amount)}원` : `생산비 지급 기록 ${a.date} ${money.format(a.amount)}원`)).join(" · ")}</li>`).join("")}</ul>` : ""}
+      ${q.status === "answered"
+        ? `<div class="muted">✓ ${h(q.answer?.applied || q.answer?.label || "")} · ${h(q.answeredBy || "")} ${h(String(q.answeredAt || "").slice(0, 10))}</div>`
+        : `<div class="toolbar">${(q.choices || []).map((c) => c.input === "brand"
+            ? `<select data-setup-brand="${h(q.id)}"><option value="">브랜드 선택</option>${(ss.brands || []).map((b) => `<option value="${h(b.id)}">${h(b.code ? `${b.code} · ` : "")}${h(b.name)}</option>`).join("")}</select><button data-setup-answer="${h(q.id)}" data-choice="${h(c.key)}">이 브랜드로</button>`
+            : c.input === "date" ? `<input type="date" data-setup-input="${h(q.id)}:${h(c.key)}"><button data-setup-answer="${h(q.id)}" data-choice="${h(c.key)}">${h(c.label)}</button>`
+            : c.input ? `<input data-setup-input="${h(q.id)}:${h(c.key)}" inputmode="decimal" placeholder="${c.input === "rate" ? (q.topic === "pricing" ? "%" : "수수료율 %") : "금액"}" value="${c.value != null && c.input === "rate" ? h(c.value) : ""}" style="width:110px"><button data-setup-answer="${h(q.id)}" data-choice="${h(c.key)}">${h(c.label)}</button>`
+            : `<button class="${q.suggested === c.key ? "primary" : ""}" data-setup-answer="${h(q.id)}" data-choice="${h(c.key)}">${h(c.label)}</button>`).join("")}</div>`}
+    </div>`;
+  return `
+    ${head}
+    <div class="npb-subnav">
+      <button class="npb-subtab ${ss.show === "open" ? "active" : ""}" data-setup-show="open">남은 질문 <span class="muted">${open.length}</span></button>
+      <button class="npb-subtab ${ss.show === "done" ? "active" : ""}" data-setup-show="done">답한 질문 <span class="muted">${done.length}</span></button>
+      <span class="muted" style="align-self:center;margin-left:8px">${Object.entries(byKind).map(([k, n]) => `${SETUP_KIND_LABEL[k] || k} ${n}`).join(" · ")}</span>
+    </div>
+    <section class="setup-list">${shown.map(card).join("") || `<div class="panel"><div class="panel-body"><p class="muted">${ss.show === "open" ? "남은 질문이 없습니다." : "아직 답한 질문이 없습니다."}</p></div></div>`}</section>`;
+}
+
+function bindSetup() {
+  const ss = setupState();
+  if (ss.list === null && !ss.loading) { loadSetup().then(renderApp); return; }
+  app.querySelectorAll("[data-setup-show]").forEach((b) => b.addEventListener("click", () => { ss.show = b.dataset.setupShow; renderApp(); }));
+  app.querySelectorAll("[data-setup-answer]").forEach((b) => b.addEventListener("click", async () => {
+    const qid = b.dataset.setupAnswer;
+    const choice = b.dataset.choice;
+    const body = { choice };
+    const input = app.querySelector(`[data-setup-input="${CSS.escape(`${qid}:${choice}`)}"]`);
+    if (input) body.value = input.value;
+    const brandSel = app.querySelector(`[data-setup-brand="${CSS.escape(qid)}"]`);
+    if (brandSel) body.brandId = brandSel.value;
+    try {
+      const res = await api(`/api/setup/questions/${encodeURIComponent(qid)}/answer`, { method: "POST", body });
+      showToast(`적용했습니다: ${res.applied || ""}`);
+      await loadSetup();
+      renderApp();
+    } catch (error) {
+      showToast(error.message || "적용하지 못했습니다.", "error");
+    }
+  }));
+}
+
+// 자금 > 채권원장
+function renderReceivableLedger() {
+  const cs = cashState();
+  if (!cs.rec) return `<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const detail = cs.recDetail;
+  return `
+    <section class="v2-wide">
+      <div class="panel">
+        <div class="panel-head"><h2>채권원장</h2><span class="muted">채권총액 − (수수료 차감 + 회생 현금변제) = 잔액</span></div>
+        <div class="table-wrap"><table class="compact" data-unit="원">
+          <thead><tr><th>브랜드</th><th>채권총액</th><th>수수료 차감</th><th>회생 현금변제</th><th>잔액</th></tr></thead>
+          <tbody>${cs.rec.map((r) => `<tr data-rec-open="${h(r.brandId)}" style="cursor:pointer" class="${detail?.brand?.id === r.brandId ? "selected" : ""}">
+            <td>${r.code ? `<span class="code-tag">${h(r.code)}</span>` : ""}${h(r.name)}${r.creditor ? `<br><span class="muted" style="font-size:11px">회생채권 · 계획표: ${h(r.creditor)}</span>`
+              : r.claimKind === "separate" ? `<br><span class="muted" style="font-size:11px">회생채권 아님 · 별도 변제${r.claimNote ? ` — ${h(r.claimNote)}` : ""}</span>`
+              : r.claimKind === "none" ? `<br><span class="danger-text" style="font-size:11px">채권자 아님${r.claimNote ? ` — ${h(r.claimNote)}` : ""}</span>`
+              : `<br><span class="danger-text" style="font-size:11px">계획표 채권자 못 찾음</span>`}</td>
+            <td class="num">${money.format(r.base)}</td><td class="num">${money.format(r.commission || 0)}</td><td class="num">${money.format(r.rehabCash || 0)}</td>
+            <td class="num"><strong>${money.format(r.balance)}</strong></td></tr>`).join("")}</tbody>
+        </table></div>
+      </div>
+    </section>
+    ${detail ? v2Modal(`
+        <div class="panel-head"><h2>${h(detail.brand.name)} 채권원장</h2><button data-rec-close>닫기</button></div>
+        <div class="panel-body">${detail ? `
+          <p>채권총액 ${money.format(detail.ledger.base)} − 수수료 차감 ${money.format(detail.ledger.commission || 0)} − 회생 현금변제 ${money.format(detail.ledger.rehabCash || 0)} = <strong>${money.format(detail.ledger.balance)}원</strong></p>
+          ${detail.ledger.split ? `<table class="kv" style="min-width:0;margin-bottom:10px"><tbody>
+            <tr><th style="text-align:left">회생계획표(${h(detail.creditor)})</th><td class="num">채권 ${money.format(detail.ledger.split.planTotal)}${detail.ledger.split.planTotal !== detail.ledger.base ? ` <span class="danger-text">(채권총액과 다름)</span>` : ""}</td></tr>
+            <tr><th style="text-align:left">20% 현금변제(10년 계획)</th><td class="num">${money.format(detail.ledger.split.cashPlan)} 중 ${money.format(detail.ledger.split.cashPaid)} 냄 · 남음 <strong>${money.format(detail.ledger.split.cashLeft)}</strong></td></tr>
+            <tr><th style="text-align:left">80% (수수료 차감으로 갚는 몫)</th><td class="num">${money.format(detail.ledger.split.convertPart)} 중 ${money.format(detail.ledger.split.commission)} 차감 · 남음 <strong>${money.format(detail.ledger.split.convertLeft)}</strong></td></tr>
+          </tbody></table>` : `<p class="muted">회생계획표에서 이 브랜드의 채권자를 찾지 못했습니다(회생변제 화면에서 계획표를 가져왔는지 확인).</p>`}
+          <div class="table-wrap" style="max-height:520px"><table class="compact" data-unit="원"><thead><tr><th>날짜</th><th>구분</th><th>주문</th><th>차감</th><th>잔액</th></tr></thead><tbody>
+            ${detail.ledger.entries.slice().reverse().map((e) => `<tr><td>${h(String(e.date).slice(0, 10))}</td><td>${h(e.kind)}</td><td class="muted" style="font-size:12px">${h(e.orderNo || e.memo || "")}</td>
+              <td class="num">${money.format(e.amount)}</td><td class="num">${money.format(e.balance)}</td></tr>`).join("")}
+          </tbody></table></div>` : ""}</div>`, "data-rec-close") : ""}`;
 }

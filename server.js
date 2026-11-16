@@ -15,6 +15,23 @@ import * as cafe24 from "./lib/cafe24-api.mjs";
 import { cafe24OrdersToRows, compareRows } from "./lib/cafe24-rows.mjs";
 import { buildRequestDrafts, findShippedAwaiting } from "./lib/cafe24-collect.mjs";
 import { createProductSyncService } from "./lib/product-sync-service.mjs";
+import { createErpStore } from "./lib/erp-store.mjs";
+import * as payments from "./lib/payment-requests.mjs";
+import * as cashReport from "./lib/cash-report.mjs";
+import * as sales from "./lib/sales-orders.mjs";
+import * as inventory from "./lib/inventory.mjs";
+import * as legacy from "./lib/legacy-migration.mjs";
+import * as pricing from "./lib/channel-pricing.mjs";
+import * as production from "./lib/production-cost.mjs";
+import * as loansLib from "./lib/loans.mjs";
+import * as proposals from "./lib/setup-proposals.mjs";
+import * as monthly from "./lib/monthly-board.mjs";
+import * as closing from "./lib/closing.mjs";
+import * as notify from "./lib/notify.mjs";
+import * as brandInfo from "./lib/brand-info.mjs";
+import * as rehab from "./lib/rehab-plan.mjs";
+import * as cashFlow from "./lib/cash-flow.mjs";
+import { setAtPath } from "./lib/sync-merge.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -25,6 +42,21 @@ const SETTLEMENT_SCRIPT = path.join(__dirname, "scripts", "settlement_excel.py")
 const PURCHASE_ORDER_SCRIPT = path.join(__dirname, "scripts", "purchase_order_excel.py");
 const XLSX_PARSE_SCRIPT = path.join(__dirname, "scripts", "xlsx_to_json.py");
 const ROWS_TO_XLSX_SCRIPT = path.join(__dirname, "scripts", "rows_to_xlsx.py");
+const HANA_ACCOUNTS_SCRIPT = path.join(__dirname, "scripts", "hana_accounts.py");
+const PRODUCTION_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_production.py");
+// 생산비 구글시트(링크 공개). 시트를 다른 곳으로 옮기면 PRODUCTION_SHEET_ID 로 바꾼다.
+const PRODUCTION_SHEET_ID = process.env.PRODUCTION_SHEET_ID || "1xuvDKLTBZ4AgFsk3nYNnCKmRnz_-Z2os";
+const LOAN_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_loans.py");
+// 2026년 대출금 관리대장(구글드라이브 엑셀 파일). 옛 시트는 1_7bKONJvSWSH5wzciqHkfIRbZS6fmqVY.
+const LOAN_SHEET_ID = process.env.LOAN_SHEET_ID || "1gEQBHaYhgemwBEErrm6bwwfI5W5mPm6V";
+const MONTHLY_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_monthly.py");
+const MONTHLY_SHEET_ID = process.env.MONTHLY_SHEET_ID || "1_fg3KbjmZrJzFTf1w2LLkjoxYj2DuweYFdDIOp3Qumo";
+const REHAB_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_rehab.py");
+const REHAB_SHEET_ID = process.env.REHAB_SHEET_ID || "1p3cLIiqHzXsiNcbkRkNgv7LAwRvkXS_DkD3qiHd1_w4";
+const CASHFLOW_EXTRACT_SCRIPT = path.join(__dirname, "scripts", "v2_extract_cashflow.py");
+// 2026_현금흐름표(구글드라이브 엑셀 파일).
+const CASHFLOW_SHEET_ID = process.env.CASHFLOW_SHEET_ID || "1QPVZQ8aN0gVpFwoWTyxWXjddF6neJAGH";
+const HANA_TRANSFER_SCRIPT = path.join(__dirname, "scripts", "hana_transfer_xlsx.py");
 const NPB_PARSE_SCRIPT = path.join(__dirname, "scripts", "npb_parse.py");
 const NPB_XLSX_SCRIPT = path.join(__dirname, "scripts", "npb_settlement_xlsx.py");
 const NPB_INVOICE_SCRIPT = path.join(__dirname, "scripts", "npb_invoice_xlsx.py");
@@ -1235,6 +1267,7 @@ function buildInitialDb() {
     materials: [],
     purchaseOrders: [],
     deliveryPlaces: [],
+    transferAccounts: [],
     requests,
     auditLogs: [
       {
@@ -1263,6 +1296,61 @@ function buildInitialDb() {
 
 const MIGRATION_WRITE_ATTEMPTS = 5;
 
+// v2 레코드 저장소(지급요청 등). app_state 덩어리와 따로 한 건씩 저장한다.
+const erp = createErpStore({ pool: pgPool, dataDir: DATA_DIR });
+
+// 월 마감(lib/closing.mjs). 마감한 달이면 오류를 보내고 false.
+async function closingState() {
+  return (await erp.get("settings", "closing")) || { id: "closing", lockedThrough: "", history: [] };
+}
+// 메신저 공유함(lib/notify.mjs). 알림을 쌓고, 자동 발송이 켜진 종류면 채널톡으로도 보낸다.
+// 실패해도 원래 일(저장)은 막지 않는다.
+async function messengerSettings() {
+  return { ...notify.DEFAULT_MESSENGER, ...((await erp.get("settings", "messenger")) || {}) };
+}
+async function pushNotice(kind, data = {}, ref = {}) {
+  try {
+    const n = notify.noticeFor(kind, data);
+    const rec = { id: id("ntc"), kind, title: n.title, text: n.text, refType: ref.type || "", refId: ref.id || "", createdAt: now(), shares: [] };
+    const cfg = await messengerSettings();
+    if (cfg.mode !== "off" && (cfg.autoKinds || []).includes(kind)) {
+      const r = await notify.sendToChannel(cfg, rec.text);
+      rec.shares.push({ at: now(), by: "자동", via: r.ok ? `채널톡(${cfg.mode === "test" ? "시험" : "팀챗"})` : "채널톡 실패", error: r.ok ? "" : r.error });
+    }
+    await erp.put("notices", rec);
+  } catch (error) {
+    console.error("notice failed", error.message);
+  }
+}
+
+// 그 달 마감 점검(화면과 마감 요청이 같은 계산을 쓴다).
+async function computeClosingCheck(db, month) {
+  const brandList = db.brands.filter((b) => (b.type || "brand") === "brand");
+  const [records, pays, questions, moves, runs, products, settingsList, salesOrders] = await Promise.all([
+    erp.list("monthlyBoard"), erp.list("payments"), erp.list("setupQuestions"),
+    erp.list("stockMoves"), erp.list("stockRuns"), erp.list("stockProducts"), erp.list("stockSettings"), erp.list("salesOrders").catch(() => [])]);
+  const lastDay = `${month}-31`;
+  const overdueSales = salesOrders.filter((o) => o.dueDate && o.dueDate <= lastDay && sales.remaining(o) > 0 && !["cancelled", "on_hold"].includes(sales.deriveStage(o)))
+    .map((o) => `${o.code || ""} ${o.partnerName || ""} ${Math.round(sales.remaining(o)).toLocaleString("ko-KR")}원`.trim());
+  const boardRows = monthly.boardRows({ brands: brandList, requests: db.requests, records, ym: month });
+  const stock = inventory.stockStatus({ materials: db.materials || [], moves, runs, products, settings: Object.fromEntries(settingsList.map((x) => [x.id, x])) });
+  return closing.closingCheck({ month, requests: db.requests, requestMonth: monthly.requestMonth, payments: pays, boardRows, questions, stock, overdueSales });
+}
+
+// 여러 건을 한꺼번에 바꾸는 API: 마감한 달의 입금요청은 빼고 처리한다.
+async function lockedRequestFilter() {
+  const c = await closingState();
+  return (r) => closing.isLocked(c, monthly.requestMonth(r));
+}
+const lockedSkipMessage = (n) => `마감한 달의 입금요청 ${n}건은 바꾸지 않았습니다(대표가 정산 › 월 마감에서 풀어야 합니다).`;
+
+async function guardOpenMonth(res, month) {
+  const c = await closingState();
+  if (!closing.isLocked(c, month)) return true;
+  sendJson(res, 423, { error: closing.lockedMessage(month), locked: true });
+  return false;
+}
+
 let ensureDbPromise = null;
 async function ensureDb() {
   if (!ensureDbPromise) ensureDbPromise = doEnsureDb();
@@ -1271,8 +1359,10 @@ async function ensureDb() {
 async function doEnsureDb() {
   if (pgPool) {
     await ensurePostgresDb();
+    await erp.init();
     return;
   }
+  await erp.init();
   await mkdir(DATA_DIR, { recursive: true });
   try {
     await stat(DB_PATH);
@@ -1421,7 +1511,11 @@ function migrateDb(db) {
   touch(db, "partners", []);
   touch(db, "materials", []);
   touch(db, "purchaseOrders", []);
+  touch(db, "salesChannels", []);
   touch(db, "deliveryPlaces", []);
+  // 자주 쓰는 입금계좌(하나은행 목록). 브랜드가 여기서 계좌를 골라 이체등록
+  // 양식의 기본값으로 쓴다.
+  touch(db, "transferAccounts", []);
   // 발주서만 있던 시절에 저장된 문서는 docType이 없다 -- 전부 발주서로 본다.
   for (const po of db.purchaseOrders || []) {
     touch(po, "docType", "purchase_order");
@@ -1713,6 +1807,47 @@ function migrateDb(db) {
     const cafe24Seed = buildCafe24Namespace();
     for (const key of Object.keys(cafe24Seed)) touch(db.cafe24, key, cafe24Seed[key]);
   }
+  // v2 지급요청 권한. 이미 권한을 저장한 관리자는 새 메뉴가 비어 있으므로,
+  // 입금요청 권한에 맞춰 한 번 채운다(요청자 → 요청, 입금완료 처리자 → 확인·처리).
+  for (const admin of db.admins || []) {
+    const perms = admin.permissions;
+    if (!perms || typeof perms !== "object" || Array.isArray(perms.payments)) continue;
+    const req = Array.isArray(perms.requests) ? perms.requests : [];
+    const grant = [];
+    if (req.includes("view")) grant.push("view", "create", "edit");
+    if (req.includes("pay")) grant.push("confirm", "pay");
+    perms.payments = grant;
+    changed = true;
+  }
+  // v2 판매 메뉴: 거래관리를 쓰던 사람은 주문·명세서까지, 입금완료 처리 권한자는
+  // 계산서 발행·입금 확인까지.
+  for (const admin of db.admins || []) {
+    const perms = admin.permissions;
+    if (!perms || typeof perms !== "object" || Array.isArray(perms.sales)) continue;
+    const grant = [];
+    if (Array.isArray(perms.procurement) && perms.procurement.includes("view")) grant.push("view", "create", "edit");
+    if (Array.isArray(perms.requests) && perms.requests.includes("pay")) grant.push("invoice", "receive");
+    perms.sales = [...new Set(grant)];
+    changed = true;
+  }
+  // v2 생산·재고: 거래관리를 쓰던 사람에게 같은 범위로 연다.
+  for (const admin of db.admins || []) {
+    const perms = admin.permissions;
+    if (!perms || typeof perms !== "object" || Array.isArray(perms.stock)) continue;
+    const proc = Array.isArray(perms.procurement) ? perms.procurement : [];
+    perms.stock = proc.includes("view") ? (proc.includes("edit") ? ["view", "edit"] : ["view"]) : [];
+    changed = true;
+  }
+  // v2 자금 메뉴: 입금완료 처리 권한자(경영지원)에게 열어 둔다.
+  for (const admin of db.admins || []) {
+    const perms = admin.permissions;
+    if (!perms || typeof perms !== "object" || Array.isArray(perms.cash)) continue;
+    perms.cash = Array.isArray(perms.requests) && perms.requests.includes("pay") ? ["view", "edit"] : [];
+    changed = true;
+  }
+
+  // 우프코드 일괄 부여(처음 한 번). 이후에는 저장할 때마다 새 항목에 붙는다.
+  if (assignCodes(db) > 0) changed = true;
   return { db, changed };
 }
 
@@ -1796,7 +1931,125 @@ async function readDb() {
   return JSON.parse(await readFile(DB_PATH, "utf8"));
 }
 
+// ---------------------------------------------------------------------------
+// 우프코드 (v2 통합 고유코드). 브랜드·거래처·원부자재·납품지·관리자·단가표
+// 품목·입금계좌에 사람이 읽는 코드를 붙인다. 이름이 겹치거나 바뀌어도 연결은
+// 코드로 한다. 한 번 붙은 코드는 바뀌지 않고, 지운 코드도 다시 쓰지 않는다
+// (db.codeSeq 가 지금까지 쓴 가장 큰 번호를 기억한다).
+// 명세서·발주서는 이미 문서번호(docNo)가 있어 그것을 코드로 쓴다.
+// ---------------------------------------------------------------------------
+// --- v2 자금 도우미 ---
+// 자금보고를 내는 사업자. 클로브에 둘이 따로 있다.
+// 'betters' = 개인사업자 Betters(교영). 브랜드 Betters(PB) 매출은 우프컴퍼니 것이다 — 섞지 말 것(사업구조 지침 2026-11-15).
+const CASH_COMPANIES = [
+  { key: "wooof", name: "우프컴퍼니", match: "우프" },
+  { key: "betters", name: "Betters(개인사업자)", match: "베럴즈" }
+];
+let clobeContextCache = { at: 0, companies: [] };
+
+// 우프는 연결할 때 고정한 companyId, 그 밖의 회사는 클로브 계정의 회사 목록에서
+// 이름으로 찾는다(1시간 캐시).
+async function clobeCompanyIdFor(db, company) {
+  if (!db.clobe?.connectedAt && !db.clobe?.refreshToken) return "";
+  if (company.key === "wooof") return db.clobe.companyId || "";
+  if (Date.now() - clobeContextCache.at > 3600 * 1000) {
+    const ctx = await clobeCall(db, "get_my_context", {});
+    clobeContextCache = { at: Date.now(), companies: ctx.companies || [] };
+  }
+  return clobeContextCache.companies.find((c) => String(c.companyName || "").includes(company.match))?.companyId || "";
+}
+
+// --- v2 지급요청 도우미 ---
+const PAYMENT_SETTING_DEFAULTS = {
+  approvalThreshold: payments.DEFAULT_APPROVAL_THRESHOLD,
+  withdrawAccounts: payments.DEFAULT_WITHDRAW_ACCOUNTS
+};
+
+// 한국 시간 기준 오늘 (서버는 UTC 로 돈다).
+function kstToday() {
+  return new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+// 지급요청 번호: PR-YYMM-001 (한국 시간 기준 달). 지운 번호는 다시 쓰지 않도록
+// 그 달의 가장 큰 번호 다음을 쓴다.
+function nextPaymentCode(list, createdAt) {
+  const kst = new Date(new Date(createdAt).getTime() + 9 * 3600 * 1000).toISOString();
+  const prefix = `PR-${kst.slice(2, 4)}${kst.slice(5, 7)}-`;
+  const max = (list || []).reduce((m, p) => {
+    const code = String(p.code || "");
+    return code.startsWith(prefix) ? Math.max(m, Number(code.slice(prefix.length)) || 0) : m;
+  }, 0);
+  return `${prefix}${String(max + 1).padStart(3, "0")}`;
+}
+
+// 사업부(손익 단위). KPI 설계(kpi/DESIGN.md)·AI_CFO 지표정의와 같은 구분.
+export const BUSINESS_UNITS = {
+  wooof: "우프(입점)",
+  pb: "PB",
+  npb: "NPB",
+  service: "용역"
+};
+
+export const CODE_SCHEMES = [
+  { collection: "brands", prefix: "BR", width: 4, label: "브랜드" },
+  { collection: "partners", prefix: "PT", width: 4, label: "거래처" },
+  { collection: "materials", prefix: "MT", width: 4, label: "원부자재" },
+  { collection: "deliveryPlaces", prefix: "DP", width: 3, label: "납품지" },
+  { collection: "admins", prefix: "AD", width: 2, label: "관리자" },
+  // 단가표는 가격이 바뀔 때마다 줄이 새로 생긴다(가격 이력). 코드는 줄이 아니라
+  // 품목(같은 브랜드의 같은 상품코드, 없으면 같은 품목명)에 붙여 이력끼리 공유한다.
+  { collection: "priceEntries", prefix: "IT", width: 5, label: "단가표 품목",
+    groupKey: (e) => `${e.brandId || ""}|${String(e.itemCode || "").trim() || String(e.itemName || "").trim()}` },
+  { collection: "transferAccounts", prefix: "AC", width: 4, label: "입금계좌" },
+  { collection: "salesChannels", prefix: "CH", width: 3, label: "판매처" }
+];
+
+// 코드가 없는 항목에 번호를 붙인다. 만든 순서(createdAt)대로 붙여 오래된
+// 것이 작은 번호를 갖는다. 붙인 개수를 돌려준다.
+export function assignCodes(db) {
+  if (!db.codeSeq || typeof db.codeSeq !== "object") db.codeSeq = {};
+  let assigned = 0;
+  for (const scheme of CODE_SCHEMES) {
+    const list = Array.isArray(db[scheme.collection]) ? db[scheme.collection] : [];
+    const pattern = new RegExp(`^${scheme.prefix}-(\\d+)$`);
+    let seq = number(db.codeSeq[scheme.prefix]);
+    for (const item of list) {
+      const m = String(item?.code || "").match(pattern);
+      if (m) seq = Math.max(seq, Number(m[1]));
+    }
+    const missing = list
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => item && typeof item === "object" && !pattern.test(String(item.code || "")))
+      .sort((a, b) => String(a.item.createdAt || "").localeCompare(String(b.item.createdAt || "")) || a.index - b.index);
+    // 같은 품목끼리 코드를 나눠 쓰는 경우, 이미 코드가 있는 형제의 코드를 쓴다.
+    const shared = new Map();
+    if (scheme.groupKey) {
+      for (const item of list) {
+        if (item && pattern.test(String(item.code || ""))) {
+          const key = scheme.groupKey(item);
+          if (!shared.has(key)) shared.set(key, item.code);
+        }
+      }
+    }
+    for (const { item } of missing) {
+      const key = scheme.groupKey ? scheme.groupKey(item) : null;
+      if (key && shared.has(key)) {
+        item.code = shared.get(key);
+      } else {
+        seq += 1;
+        item.code = `${scheme.prefix}-${String(seq).padStart(scheme.width, "0")}`;
+        if (key) shared.set(key, item.code);
+      }
+      assigned += 1;
+    }
+    db.codeSeq[scheme.prefix] = seq;
+  }
+  return assigned;
+}
+
 async function writeDb(db) {
+  // 어떤 경로로 만들어졌든(화면·엑셀 일괄·카페24 자동 생성) 저장 전에 코드를 붙인다.
+  assignCodes(db);
   if (pgPool) {
     await writePostgresDb(db);
     cachedDb = db;
@@ -2009,6 +2262,85 @@ async function parsePriceWorkbookUpload(body = {}) {
 // matching on re-upload); everything else is one shared writer/reader.
 // ---------------------------------------------------------------------------
 
+// 생산비 시트를 내려받아 추출한다(구글시트 → xlsx → JSON).
+async function extractProductionSheet() {
+  return extractSheetWith(PRODUCTION_SHEET_ID, PRODUCTION_EXTRACT_SCRIPT, "생산비 시트");
+}
+
+// 링크 공개 구글시트를 xlsx 로 받아 추출 스크립트로 읽는다.
+async function extractSheetWith(sheetId, script, label) {
+  const resp = await fetch(`https://docs.google.com/spreadsheets/d/${sheetId}/export?format=xlsx`, { redirect: "follow" });
+  if (!resp.ok) throw new Error(`${label}를 받지 못했습니다(${resp.status}). 링크 공유가 켜져 있는지 확인하세요.`);
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  if (buffer.subarray(0, 2).toString() !== "PK") throw new Error(`${label}가 엑셀 파일로 오지 않았습니다. 링크 공유를 확인하세요.`);
+  const tmpPath = path.join(os.tmpdir(), `wooofpay-sheet-${crypto.randomBytes(8).toString("hex")}.xlsx`);
+  try {
+    await writeFile(tmpPath, buffer);
+    const { stdout } = await execFileAsync("python3", [script, "--input", tmpPath], { cwd: __dirname, maxBuffer: 50 * 1024 * 1024 });
+    return JSON.parse(stdout || "{}");
+  } finally {
+    await safeUnlink(tmpPath);
+  }
+}
+
+// 하나은행 '자주쓰는입금계좌관리' 파일을 읽는다.
+async function parseHanaAccountsUpload(base64, fileName = "") {
+  const given = path.extname(String(fileName || "")).toLowerCase();
+  const ext = [".xlsx", ".xls"].includes(given) ? given : ".xlsx";
+  const tmpPath = path.join(os.tmpdir(), `wooofpay-accts-${crypto.randomBytes(8).toString("hex")}${ext}`);
+  try {
+    await writeFile(tmpPath, Buffer.from(base64, "base64"));
+    const { stdout } = await execFileAsync("python3", [HANA_ACCOUNTS_SCRIPT, "--input", tmpPath], {
+      cwd: __dirname,
+      maxBuffer: 20 * 1024 * 1024
+    });
+    const parsed = JSON.parse(stdout || "{}");
+    if (parsed.error) throw new Error(parsed.error);
+    return Array.isArray(parsed.accounts) ? parsed.accounts : [];
+  } finally {
+    await safeUnlink(tmpPath);
+  }
+}
+
+// 하나은행 다계좌이체(이체등록) 엑셀.
+async function buildHanaTransferXlsx(rows) {
+  const tmpBase = path.join(os.tmpdir(), `wooofpay-transfer-${crypto.randomBytes(8).toString("hex")}`);
+  const inputPath = `${tmpBase}.json`;
+  const outputPath = `${tmpBase}.xlsx`;
+  try {
+    await writeFile(inputPath, JSON.stringify(rows), "utf8");
+    await execFileAsync("python3", [HANA_TRANSFER_SCRIPT, "--input", inputPath, "--output", outputPath], {
+      cwd: __dirname,
+      maxBuffer: 20 * 1024 * 1024
+    });
+    return await readFile(outputPath);
+  } finally {
+    await safeUnlink(inputPath);
+    await safeUnlink(outputPath);
+  }
+}
+
+// 입금요청 한 건의 이체등록 줄. 은행·계좌는 브랜드 설정, 금액은 이번에 보낼
+// 금액(업체실입금 − 외상차감 − 기지급), 출금통장표시는 건별 값이 없으면 브랜드 기본값.
+function transferRowForRequest(db, request) {
+  const brand = db.brands.find((item) => item.id === request.brandId);
+  const amount = Math.max(0, Math.round(
+    number(request.depositAmount) - number(request.creditUsedAmount) - number(request.priorPaidAmount)
+  ));
+  const account = normalizeAccountNumber(brand?.bankAccount);
+  const memo = String(request.withdrawMemo ?? "").trim();
+  return {
+    requestId: request.id,
+    brandName: brand?.name || request.brandName || "",
+    orderNo: request.orderNo || "",
+    bank: String(brand?.bankName || "").trim(),
+    account,
+    amount,
+    withdrawMemo: memo || (brand ? brandWithdrawMemo(brand) : ""),
+    depositMemo: String(request.depositMemo || "").trim()
+  };
+}
+
 async function buildRowsXlsx(sheetName, headers, rows, notes = null) {
   const tmpBase = path.join(os.tmpdir(), `wooofpay-rows-${crypto.randomBytes(8).toString("hex")}`);
   const inputPath = `${tmpBase}.json`;
@@ -2097,6 +2429,20 @@ function parseCafe24Csv(base64) {
     header.forEach((h, i) => { obj[h] = r[i] != null ? String(r[i]).trim() : ""; });
     return obj;
   });
+}
+
+// 업로드 엑셀의 모든 탭을 { 탭이름: [행 객체] } 로 읽는다(첫 줄 = 머리글).
+async function parseXlsxAllSheets(base64, fileName = "") {
+  const given = path.extname(String(fileName || "")).toLowerCase();
+  const ext = [".xlsx", ".xlsm", ".xls"].includes(given) ? given : ".xlsx";
+  const tmpPath = path.join(os.tmpdir(), `wooofpay-up-${crypto.randomBytes(8).toString("hex")}${ext}`);
+  try {
+    await writeFile(tmpPath, Buffer.from(base64, "base64"));
+    const { stdout } = await execFileAsync("python3", [XLSX_PARSE_SCRIPT, "--input", tmpPath], { cwd: __dirname, maxBuffer: 50 * 1024 * 1024 });
+    return JSON.parse(stdout || "{}").sheets || {};
+  } finally {
+    await safeUnlink(tmpPath);
+  }
 }
 
 // 업로드 파일을 임시로 떨어뜨려 xlsx_to_json.py 로 읽는다.
@@ -5165,7 +5511,8 @@ const MENU_REGISTRY = [
   { key: "admins", label: "관리자", actions: ["view", "create", "edit", "delete"] },
   { key: "audits", label: "이력", actions: ["view"] },
   { key: "archive", label: "아카이브", actions: ["view", "edit"] },
-  { key: "settlement", label: "정산", actions: ["view", "export"] },
+  { key: "settlement", label: "정산(월 정산 생성·현황)", actions: ["view", "export", "edit"] },
+  { key: "kpi", label: "KPI·손익", actions: ["view", "edit"] },
   { key: "pipeline", label: "주문매칭", actions: ["view", "apply"] },
   // 화면은 주문매칭 하나로 합쳤지만, 클로브 연결·대사 API 는 자기 권한을 그대로
   // 쓴다. 권한을 없애면 기존에 막아 둔 계정이 갑자기 열린다.
@@ -5174,7 +5521,15 @@ const MENU_REGISTRY = [
   { key: "procurement", label: "거래관리", actions: ["view", "create", "edit", "delete"] },
   // 공급사 상품 동기화. "실행·반영"은 우프 카페24 상품(재고·가격)을 실제로 바꾸고
   // 신규 상품을 등록한다.
-  { key: "productsync", label: "상품동기화", actions: ["view", "apply"] }
+  { key: "productsync", label: "상품동기화", actions: ["view", "apply"] },
+  // v2 지급요청. 요청은 누구나, 확인·처리완료는 경영지원, 허가는 대표.
+  { key: "payments", label: "지급요청", actions: ["view", "create", "edit", "delete", "confirm", "approve", "pay"] },
+  // v2 자금: 일일 자금보고·자금 일정(정기 나갈 돈/들어올 돈).
+  { key: "cash", label: "자금", actions: ["view", "edit"] },
+  // v2 판매: 주문접수 → 명세서 → 업체전달 → 청구·계산서 → 입금확인.
+  { key: "sales", label: "판매", actions: ["view", "create", "edit", "invoice", "receive"] },
+  // v2 생산: 원부자재 재고·제품 구성(BOM)·생산 기록.
+  { key: "stock", label: "생산·재고", actions: ["view", "edit"] }
 ];
 
 const ACTION_LABELS = {
@@ -5184,7 +5539,11 @@ const ACTION_LABELS = {
   delete: "삭제",
   pay: "입금완료 처리",
   export: "정산서 출력",
-  apply: "실행·반영"
+  apply: "실행·반영",
+  invoice: "계산서 발행 처리",
+  receive: "입금 확인",
+  confirm: "확인",
+  approve: "허가(고액)"
 };
 
 // 권한을 손대기 전의 동작. manager 는 지금까지 owner 와 같았고 operator 는
@@ -5201,6 +5560,10 @@ function defaultPermissions(role) {
     // 연동 메뉴는 막혀 있었고, 관리자 메뉴는 목록 조회만 열려 있었다
     // (GET /api/admins 에는 검사가 없었고 생성·수정·삭제만 막혀 있었다).
     if (menu.key === "reconcile" || menu.key === "pipeline" || menu.key === "productsync") all[menu.key] = [];
+    else if (menu.key === "payments") all[menu.key] = ["view", "create", "edit"];
+    else if (menu.key === "cash") all[menu.key] = [];
+    else if (menu.key === "sales") all[menu.key] = ["view", "create", "edit"];
+    else if (menu.key === "stock") all[menu.key] = ["view", "edit"];
     else if (menu.key === "admins") all[menu.key] = ["view"];
     else all[menu.key] = [...menu.actions];
   }
@@ -5249,6 +5612,28 @@ function finalDepositAmount(item) {
   return Math.max(0, Number(item.depositAmount || 0) - Number(item.creditUsedAmount || 0));
 }
 
+// 채권 브랜드 ↔ 회생계획표 채권자, 그리고 그 채권자에게 낸 현금변제(선변제 + 완료된 해).
+async function rehabPaidByBrand(db) {
+  const [plan, pays] = await Promise.all([erp.get("rehabPlan", "current"), erp.list("rehabPayments")]);
+  const map = {};
+  if (plan) {
+    for (const b of db.brands.filter((x) => x.hasReceivable && !["separate", "none"].includes(x.claimKind))) {
+      const c = legacy.matchCreditor(b, plan.creditors || []);
+      if (c) map[b.id] = { creditor: c, paid: rehab.creditorCashPaid(plan, pays, c) };
+    }
+  }
+  return { plan, map };
+}
+// 브랜드 요약(채권잔액)이 바로 쓰도록 브랜드에 합계를 적어 둔다(회생계획표 가져오기·지급 기록 때).
+async function recomputeRehabPaid(db) {
+  const { map } = await rehabPaidByBrand(db);
+  for (const b of db.brands) {
+    const m = map[b.id];
+    b.rehabCashPaid = m ? m.paid.reduce((s, p) => s + Number(p.amount || 0), 0) : 0;
+    b.rehabCreditor = m ? m.creditor.creditor : "";
+  }
+}
+
 function brandSummary(db, brandId) {
   const requests = db.requests.filter((item) => item.brandId === brandId);
   const pending = requests.filter((item) => PENDING_STATUSES.includes(item.status)).length;
@@ -5260,15 +5645,41 @@ function brandSummary(db, brandId) {
     0
   );
   const brand = db.brands.find((item) => item.id === brandId);
-  const receivableRemaining = Math.max(0, Number(brand?.receivableTotal || 0) - receivableDeducted);
+  // 옛 관리대장에서 이관한 주문의 차감(v2)도 함께 뺀다. 이관 때 브랜드에 합계를 적어 둔다.
+  const legacyDeducted = Number(brand?.legacyReceivableDeducted || 0);
+  // 회생 현금변제(연말에 계획표대로 낸 돈)도 채권총액에서 뺀다(대표 확인 2026-11-15).
+  const rehabCashPaid = Number(brand?.rehabCashPaid || 0);
+  const receivableRemaining = Math.max(0, Number(brand?.receivableTotal || 0) - receivableDeducted - legacyDeducted - rehabCashPaid);
   const latestCatalogCount = getLatestPriceCatalog(db, brandId).length;
-  return { requestCount: requests.length, pendingCount: pending, totalAmount: total, receivableDeducted, receivableRemaining, creditBalance, latestCatalogCount };
+  return { requestCount: requests.length, pendingCount: pending, totalAmount: total, receivableDeducted: receivableDeducted + legacyDeducted, legacyDeducted, rehabCashPaid, receivableRemaining, creditBalance, latestCatalogCount };
+}
+
+// 계좌번호는 숫자만 남긴다. 은행 이체등록 양식은 하이픈·공백을 받지 않고,
+// 0 으로 시작하는 번호가 있어 숫자로 바꾸면 앞자리가 사라진다 — 문자열로 둔다.
+function normalizeAccountNumber(value) {
+  return String(value ?? "").replace(/\D/g, "");
+}
+
+// 브랜드가 계좌관리 목록에서 계좌를 골랐으면 은행·계좌·예금주를 그 계좌로 맞춘다.
+function applyTransferAccount(db, brand) {
+  const account = (db.transferAccounts || []).find((a) => a.id === brand.transferAccountId);
+  if (!account) return;
+  brand.bankName = account.bankName;
+  brand.bankAccount = account.accountNumber;
+  if (account.holder) brand.depositorName = account.holder;
+}
+
+// 출금통장표시(적요) 기본값. 브랜드에서 따로 정하지 않으면 "브랜드명+선매입".
+function brandWithdrawMemo(brand) {
+  const custom = String(brand?.withdrawMemo || "").trim();
+  return custom || `${String(brand?.name || "").trim()}선매입`;
 }
 
 function hydrateBrand(db, brand) {
   const activePromotions = getActivePromotionRules(db, brand.id);
   return {
     ...brand,
+    withdrawMemoDefault: brandWithdrawMemo(brand),
     ...brandSummary(db, brand.id),
     promotionSummary:
       activePromotions.length === 1
@@ -5348,16 +5759,52 @@ function sanitizePurchaseOrderLineItems(raw) {
 // 공급가 합에서 부가세를 얹고, gross(부가세 포함)는 포함가 합이 곧 총액이라
 // 공급가액을 거꾸로 산출한다 — 어느 쪽이든 사용자가 입력한 기준 금액이
 // 1원도 틀어지지 않는 방향으로 반올림한다.
-function purchaseOrderTotals(lineItems, priceMode) {
+export function purchaseOrderTotals(lineItems, priceMode) {
+  let totals;
   if (priceMode === "gross") {
     const total = lineItems.reduce(
       (sum, item) => sum + Math.round(item.quantity * item.grossUnitPrice), 0);
     const subtotal = Math.round(total / 1.1);
-    return { subtotal, vat: total - subtotal, total };
+    totals = { subtotal, vat: total - subtotal, total };
+  } else {
+    const subtotal = lineItems.reduce((sum, item) => sum + item.totalPrice, 0);
+    const vat = Math.round(subtotal * 0.1);
+    totals = { subtotal, vat, total: subtotal + vat };
   }
-  const subtotal = lineItems.reduce((sum, item) => sum + item.totalPrice, 0);
-  const vat = Math.round(subtotal * 0.1);
-  return { subtotal, vat, total: subtotal + vat };
+  allocateLineAmounts(lineItems, priceMode, totals);
+  return totals;
+}
+
+// 줄마다 공급가액·세액·합계를 적는다. 문서 합계가 원본이고, 줄 값은 그것을
+// 나눈 것이다 — 줄마다 따로 반올림하면 줄의 합이 문서 합계와 몇 원씩 어긋난다.
+// 끝전은 마지막 줄에서 맞춘다.
+//  - 포함가(gross): 줄 포함합계 = 수량 x 포함단가, 줄 공급가액 = 줄 포함합계 / 1.1
+//    (반올림), 세액 = 포함합계 - 공급가액. totalPrice 도 줄 공급가액으로 둔다
+//    (반올림한 공급단가 x 수량으로 두면 100,450 처럼 합계와 어긋나 보였다).
+//  - 별도(supply): 줄 공급가액 = 수량 x 단가, 세액 = 공급가액 x 10%.
+export function allocateLineAmounts(lineItems, priceMode, totals) {
+  if (!Array.isArray(lineItems) || !lineItems.length) return;
+  let supplyLeft = totals.subtotal;
+  let vatLeft = totals.vat;
+  lineItems.forEach((item, index) => {
+    const last = index === lineItems.length - 1;
+    let supply;
+    let vat;
+    if (priceMode === "gross") {
+      const gross = Math.round(item.quantity * item.grossUnitPrice);
+      supply = last ? supplyLeft : Math.round(gross / 1.1);
+      vat = last ? vatLeft : gross - supply;
+      item.totalPrice = supply;
+    } else {
+      supply = item.totalPrice;
+      vat = last ? vatLeft : Math.round(supply * 0.1);
+    }
+    item.supplyAmount = supply;
+    item.vatAmount = vat;
+    item.amount = supply + vat;
+    supplyLeft -= supply;
+    vatLeft -= vat;
+  });
 }
 
 // 납품장소는 거래처와 달리 발주서 저장 시점의 스냅샷으로만 남는다 — 재사용
@@ -5548,6 +5995,49 @@ function priceEntryWithBrand(db, entry) {
     latest: getLatestPriceCatalog(db, entry.brandId).some((item) => item.id === entry.id)
   };
 }
+
+// v2 판매처 가격: 값을 매길 품목. NPB 제품 + PB/NPB 사업부 브랜드의 단가표 품목.
+function pricingItems(db) {
+  const npbBrand = new Map((db.npb?.brands || []).map((b) => [b.id, b.name]));
+  const items = (db.npb?.products || []).map((p) => ({ ref: `npb:${p.id}`, code: p.barcode || "", name: p.name,
+    brandId: p.brandId, brandName: npbBrand.get(p.brandId) || "", listPrice: number(p.listPrice), source: "NPB 제품" }));
+  const brandById = new Map((db.brands || []).map((b) => [b.id, b]));
+  for (const e of getLatestPriceCatalog(db)) {
+    const b = brandById.get(e.brandId);
+    if (!b || !["pb", "npb"].includes(b.businessUnit)) continue;
+    items.push({ ref: `it:${e.code || e.id}`, code: e.code || "", name: e.itemName || e.itemCode, brandId: b.id, brandName: b.name,
+      listPrice: number(e.originalPrice || e.consumerPrice), source: "단가표" });
+  }
+  return items;
+}
+
+// 판매처에 실제로 쓴 단가: 판매처와 연결된 거래처에 낸 명세서 + 판매처를 고른 판매 주문.
+async function pricingUsedPrices(db) {
+  const items = pricingItems(db);
+  const byName = new Map(items.map((it) => [normalizeItemKey("", it.name), it]));
+  const byCode = new Map(items.filter((it) => it.code).map((it) => [it.code, it]));
+  const match = (li) => byCode.get(String(li.itemCode || "").trim()) || byName.get(normalizeItemKey("", li.itemName));
+  const out = [];
+  const push = (channelId, li, priceMode, date, docNo) => {
+    const it = match(li);
+    if (!it) return;
+    const gross = priceMode === "gross";
+    out.push({ channelId, itemRef: it.ref, itemName: it.name, date, docNo,
+      unitPrice: gross ? number(li.grossUnitPrice) : number(li.unitPrice), vatMode: gross ? "included" : "excluded" });
+  };
+  for (const ch of db.salesChannels || []) {
+    if (!ch.partnerId) continue;
+    for (const po of (db.purchaseOrders || []).filter((p) => p.docType === "statement" && p.partnerId === ch.partnerId)) {
+      for (const li of po.lineItems || []) push(ch.id, li, po.priceMode, po.orderDate || String(po.createdAt || "").slice(0, 10), po.docNo);
+    }
+  }
+  for (const o of await erp.list("salesOrders")) {
+    if (!o.salesChannelId || o.status === "cancelled") continue;
+    for (const li of o.lineItems || []) push(o.salesChannelId, li, o.priceMode, o.orderDate, o.code);
+  }
+  return out;
+}
+
 
 // 목록을 한 번에 변환할 때 쓴다.
 //
@@ -6297,6 +6787,8 @@ function buildRequestFromDraft(db, brand, draft) {
     sourceSheet: "카페24 자동수집",
     sourceRow: 0,
     requiredMemo: brand.requiredMemo || "",
+    withdrawMemo: brandWithdrawMemo(brand),
+    depositMemo: "",
     businessName: brand.businessName || "",
     businessNumber: brand.businessNumber || "",
     depositorName: brand.depositorName || "",
@@ -6678,9 +7170,89 @@ async function cafe24KeepAlive() {
   }
 }
 
+// 명세서·발주서·청구서·견적서 한 건을 만든다(저장은 호출한 쪽). 명세서 발행
+// 화면과 v2 판매 파이프라인이 같이 쓴다.
+function buildTradeDoc(db, body) {
+  const partner = db.partners.find((item) => item.id === body.partnerId);
+  if (!partner) return { error: "거래처를 선택하세요." };
+  const issuerPartnerId = String(body.issuerPartnerId || "").trim();
+  const issuer = resolveIssuerSnapshot(db, issuerPartnerId);
+  if (!issuer) return { error: "발행자를 선택하세요." };
+    const docType = tradeDocTypes.has(body.docType) ? body.docType : "purchase_order";
+  const orderDate = dateOnly(body.orderDate) || now().slice(0, 10);
+  const lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
+  // 금액 기준: 요청에 없으면 거래처 기본값, 그것도 없으면 공급가 기준.
+  const priceMode = body.priceMode === "gross" || body.priceMode === "supply"
+    ? body.priceMode
+    : (partner.priceMode === "gross" ? "gross" : "supply");
+  const { subtotal, vat, total } = purchaseOrderTotals(lineItems, priceMode);
+  const po = {
+    id: id("po"),
+    docType,
+    docNo: nextPurchaseOrderDocNo(db, orderDate, docType),
+    partnerId: partner.id,
+    priceMode,
+    orderDate,
+    // 양식마다 뜻이 다른 두 번째 날짜 — 발주서는 납기일, 견적서는 유효기간,
+    // 청구서는 지급기일. 거래명세서는 쓰지 않는다.
+    dueDate: dateOnly(body.dueDate) || "",
+    status: purchaseOrderStatuses.has(body.status) ? body.status : "ordered",
+    lineItems,
+    issuerPartnerId,
+    issuer,
+    deliveryPlace: sanitizeDeliveryPlace(body.deliveryPlace),
+    subtotal,
+    vat,
+    total,
+    note: String(body.note || "").trim(),
+    createdAt: now(),
+    updatedAt: now()
+  };
+  return { po };
+}
+
+// Several GET calls in one round trip. Each sub-path runs through routeApi with the
+// caller's cookies, so permissions are checked exactly as for a direct call.
+// Through the Cloudflare tunnel every round trip costs ~0.5s, so the app's start-up
+// and post-save reload (15+ lists) go through here.
+async function runBatch(req, res, url) {
+  const paths = url.searchParams.getAll("p").slice(0, 30);
+  // v = the hash the client already holds for that path; unchanged results come back as {same:true}.
+  const known = url.searchParams.getAll("v");
+  const results = await Promise.all(paths.map((p, i) => new Promise((done) => {
+    let finished = false;
+    const resolve = (v) => { if (!finished) { finished = true; done(v); } };
+    if (!/^\/api\//.test(p) || p.startsWith("/api/batch")) { resolve({ status: 400, data: { error: "bad path" } }); return; }
+    const subReq = { method: "GET", url: p, headers: { ...req.headers, "accept-encoding": "" } };
+    let status = 200;
+    const chunks = [];
+    const subRes = {
+      req: subReq, headersSent: false, statusCode: 200,
+      setHeader() {}, getHeader() { return undefined; }, removeHeader() {},
+      writeHead(s) { status = s; this.statusCode = s; this.headersSent = true; return this; },
+      write(c) { if (c) chunks.push(Buffer.from(c)); return true; },
+      end(c) {
+        if (c) chunks.push(Buffer.from(c));
+        const text = Buffer.concat(chunks).toString("utf8");
+        const st = this.statusCode || status;
+        const hash = crypto.createHash("sha1").update(text).digest("base64url").slice(0, 16);
+        if (st < 400 && known[i] && known[i] === hash) { resolve({ status: st, hash, same: true }); return; }
+        let data = text;
+        try { data = JSON.parse(text); } catch {}
+        resolve({ status: st, hash, data });
+      }
+    };
+    routeApi(subReq, subRes, new URL(p, "http://batch.local"))
+      .then(() => setTimeout(() => resolve({ status: 404, data: { error: "no response" } }), 50))
+      .catch((error) => resolve({ status: error.status || 500, data: { error: error.message } }));
+  })));
+  sendJson(res, 200, { results: Object.fromEntries(paths.map((p, i) => [p, results[i]])) });
+}
+
 async function routeApi(req, res, url) {
   const pathname = url.pathname;
   const method = req.method || "GET";
+  if (pathname === "/api/batch" && method === "GET") return runBatch(req, res, url);
 
   if (pathname === "/api/login" && method === "POST") {
     const body = await readBody(req);
@@ -6736,6 +7308,30 @@ async function routeApi(req, res, url) {
     return;
   }
   if (!requireActor(actor, res)) return;
+
+  // 옛(v1) 쓰기 API 의 권한 검사. 화면은 권한에 따라 버튼을 숨기지만 서버가 확인하지 않으면
+  // 권한 없는 계정도 직접 호출로 고칠 수 있다. 관리자 화면 권한표와 같은 기준으로 막는다.
+  if (method !== "GET") {
+    const LEGACY_WRITE_RULES = [
+      [/^\/api\/requests$/, "POST", "requests", "create"],
+      [/^\/api\/requests\/mark-paid$/, "POST", "requests", "pay"],
+      [/^\/api\/requests\/bulk-delete$/, "POST", "requests", "delete"],
+      [/^\/api\/requests\/(?!mark-paid|bulk-delete|set-status|transfer-xlsx)[^/]+$/, "PUT", "requests", "edit"],
+      [/^\/api\/requests\/(?!mark-paid|bulk-delete|set-status|transfer-xlsx)[^/]+$/, "DELETE", "requests", "delete"],
+      [/^\/api\/brands$/, "POST", "brands", "create"],
+      [/^\/api\/brands\/[^/]+$/, "PUT", "brands", "edit"],
+      [/^\/api\/brands\/[^/]+$/, "DELETE", "brands", "delete"],
+      [/^\/api\/price-entries$/, "POST", "prices", "create"],
+      [/^\/api\/price-entries\/import$/, "POST", "prices", "create"],
+      [/^\/api\/brands\/[^/]+\/rules\/[^/]+$/, "DELETE", "brands", "edit"],
+      [/^\/api\/price-entries\/[^/]+$/, "PUT", "prices", "edit"],
+      [/^\/api\/price-entries\/[^/]+$/, "DELETE", "prices", "delete"],
+      [/^\/api\/price-aliases(\/[^/]+)?$/, "*", "prices", "edit"],
+      [/^\/api\/promotion-rules(\/[^/]+)?$/, "*", "prices", "edit"]
+    ];
+    const rule = LEGACY_WRITE_RULES.find(([re, m]) => re.test(pathname) && (m === "*" || m === method));
+    if (rule && !requirePermission(actor, res, rule[2], rule[3])) return;
+  }
 
   const db = await readDb();
 
@@ -7231,12 +7827,18 @@ async function routeApi(req, res, url) {
       cafe24Supplier: String(body.cafe24Supplier || "").trim(),
       autoCreateRequests: body.autoCreateRequests === true || body.autoCreateRequests === "true",
       bankLabel: String(body.bankLabel || "").trim(),
+      transferAccountId: String(body.transferAccountId || "").trim(),
+      withdrawMemo: String(body.withdrawMemo || "").trim(),
+      // v2: 같은 회사의 거래처(우프코드)와 손익을 나눌 사업부.
+      partnerCode: String(body.partnerCode || "").trim(),
+      businessUnit: BUSINESS_UNITS[body.businessUnit] ? body.businessUnit : "",
       priceBasis: body.priceBasis === "catalog" ? "catalog" : "cafe24",
       shareToken: crypto.randomBytes(12).toString("hex"),
       createdAt: now(),
       updatedAt: now()
     };
     Object.assign(brand, normalizeShippingPolicy(body, brand));
+    applyTransferAccount(db, brand);
     if (!brand.name) {
       sendJson(res, 400, { error: "브랜드명은 필수입니다." });
       return;
@@ -7245,6 +7847,44 @@ async function routeApi(req, res, url) {
     addAudit(db, actor, "create", "brand", brand.id, `${brand.name} 브랜드 생성`, null, brand);
     await writeDb(db);
     sendJson(res, 201, { brand: hydrateBrand(db, brand) });
+    return;
+  }
+
+  // --- v2 입점 브랜드 정보 정리(설문 응답 엑셀 올리기) + 마지막 거래일 ------------------
+  if (pathname === "/api/brands/activity" && method === "GET") {
+    if (!requirePermission(actor, res, "brands", "view")) return;
+    const plan = brandInfo.planBrandInfo({ brands: db.brands, sheets: {}, requests: db.requests, today: kstToday() });
+    sendJson(res, 200, { lastRequest: plan.lastRequest, dormant: plan.dormant.map((d) => d.brandId) });
+    return;
+  }
+  if (pathname === "/api/brands/info-upload" && method === "POST") {
+    if (actor.role !== "owner") { sendJson(res, 403, { error: "브랜드 정보 올리기는 오너만 할 수 있습니다." }); return; }
+    const body = await readBody(req);
+    let sheets;
+    try { sheets = await parseXlsxAllSheets(String(body.fileBase64 || "").split(",").pop(), body.fileName); } catch (error) { sendJson(res, 400, { error: "엑셀을 읽지 못했습니다." }); return; }
+    const plan = brandInfo.planBrandInfo({ brands: db.brands.filter((b) => (b.type || "brand") === "brand"), sheets, requests: db.requests, today: kstToday() });
+    if (!plan.responses) { sendJson(res, 400, { error: "설문 응답(브랜드명 칸)을 찾지 못했습니다. '우프 파트너 브랜드사 정보' 응답 시트를 엑셀로 받아 올려 주세요." }); return; }
+    let filled = 0;
+    for (const a of plan.auto) {
+      const brand = db.brands.find((b) => b.id === a.brandId);
+      if (!brand) continue;
+      const before = JSON.parse(JSON.stringify({ profile: brand.profile || {}, businessName: brand.businessName, bankAccount: brand.bankAccount }));
+      brandInfo.applyPaths(brand, a.set);
+      if (a.set["top.bankAccount"]) brand.bankAccount = normalizeAccountNumber(brand.bankAccount);
+      brand.profileUpdatedAt = a.time;
+      brand.updatedAt = now();
+      addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 빈 정보 ${Object.keys(a.set).length}칸 채움(브랜드 설문)`, before, null);
+      filled += 1;
+    }
+    const qs = brandInfo.brandInfoQuestions(plan);
+    const existingQ = new Map((await erp.list("setupQuestions")).map((x) => [x.id, x]));
+    const stamp = now();
+    for (const qn of qs) {
+      if (existingQ.get(qn.id)?.status === "answered") continue;
+      await erp.put("setupQuestions", { ...qn, status: "open", createdAt: existingQ.get(qn.id)?.createdAt || stamp, updatedAt: stamp });
+    }
+    await writeDb(db);
+    sendJson(res, 200, { responses: plan.responses, filled, conflicts: plan.conflicts.length, newBrands: plan.newBrands.length, dormant: plan.dormant.length, questions: qs.length });
     return;
   }
 
@@ -7288,10 +7928,22 @@ async function routeApi(req, res, url) {
       "googleSheetUrl",
       "cafe24Supplier",
       "bankLabel",
-      "priceBasis"
+      "transferAccountId",
+      "withdrawMemo",
+      "partnerCode",
+      "businessUnit",
+      "priceBasis",
+      "claimKind",
+      "claimNote"
     ]) {
       if (key in body) brand[key] = body[key];
     }
+    // 채권 종류: rehab(회생채권 — 계획표 채권자), separate(회생채권 아님·별도 변제), cash-only(계획표 현금변제만, 차감 없음), none(채권자 아님)
+    if ("claimKind" in body && !["", "rehab", "separate", "cash-only", "none"].includes(brand.claimKind)) brand.claimKind = "";
+    if ("claimNote" in body) brand.claimNote = String(body.claimNote || "").slice(0, 300);
+    if ("withdrawMemo" in body) brand.withdrawMemo = String(body.withdrawMemo || "").trim();
+    if ("businessUnit" in body && !BUSINESS_UNITS[brand.businessUnit]) brand.businessUnit = "";
+    applyTransferAccount(db, brand);
     if ("autoCreateRequests" in body) {
       brand.autoCreateRequests = body.autoCreateRequests === true || body.autoCreateRequests === "true";
     }
@@ -7370,7 +8022,8 @@ async function routeApi(req, res, url) {
       return;
     }
     const [before] = db.brands.splice(index, 1);
-    for (const request of db.requests.filter((item) => item.brandId === before.id)) {
+    const isLockedReq = await lockedRequestFilter();
+    for (const request of db.requests.filter((item) => item.brandId === before.id && !isLockedReq(item))) {
       request.brandId = "";
       request.updatedAt = now();
     }
@@ -7385,8 +8038,33 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // 삭제된 입금요청 되돌리기(이카운트 '삭제 취소'). 삭제는 상태만 'deleted' 로 바꾸므로 지운 그대로 남아 있다.
+  if (pathname === "/api/requests/deleted" && method === "GET") {
+    if (!requirePermission(actor, res, "requests", "view")) return;
+    const list = db.requests.filter((r) => r.status === "deleted").sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))).slice(0, 300);
+    sendJson(res, 200, { requests: list });
+    return;
+  }
+  const restoreMatch = pathname.match(/^\/api\/requests\/([^/]+)\/restore$/);
+  if (restoreMatch && method === "POST") {
+    if (!requirePermission(actor, res, "requests", "delete")) return;
+    const request = db.requests.find((r) => r.id === decodeURIComponent(restoreMatch[1]) && r.status === "deleted");
+    if (!request) { sendJson(res, 404, { error: "삭제된 입금요청을 찾을 수 없습니다." }); return; }
+    if (!(await guardOpenMonth(res, monthly.requestMonth(request)))) return;
+    const before = { ...request };
+    request.status = request.statusBeforeDelete && request.statusBeforeDelete !== "deleted" ? request.statusBeforeDelete : (request.paidAt ? "paid" : "pending");
+    delete request.statusBeforeDelete;
+    request.updatedAt = now();
+    addAudit(db, actor, "update", "request", request.id, `${request.orderNo} 입금요청 되돌리기(삭제 취소)`, before, request);
+    await writeDb(db);
+    sendJson(res, 200, { request });
+    if (request.brandId) syncArchiveInBackground(db, actor, [request.brandId], "request_restored");
+    return;
+  }
+
   if (pathname === "/api/requests" && method === "POST") {
     const body = await readBody(req);
+    if (!(await guardOpenMonth(res, monthly.requestMonth({ orderNo: normalizeOrderNo(body.orderNo), createdAt: now() })))) return;
     const brand = db.brands.find((item) => item.id === body.brandId);
     const promotionContext = brand ? buildPromotionContext(db, brand, sanitizeLineItems(body.lineItems), body.expectedDepositDate, body.promotionRuleId) : null;
     const calc = calculateSettlement({ ...body, _promotionContext: promotionContext }, brand);
@@ -7418,6 +8096,10 @@ async function routeApi(req, res, url) {
       sourceSheet: body.sourceSheet || brand?.rawSheetName || brand?.name || "",
       sourceRow: Number(body.sourceRow || 0),
       requiredMemo: body.requiredMemo || brand?.requiredMemo || "",
+      // 은행 이체등록 양식에 들어갈 표시 내용. 출금통장표시는 브랜드 기본값,
+      // 입금통장표시는 비워 두는 것이 기본이다. 둘 다 건별로 고칠 수 있다.
+      withdrawMemo: "withdrawMemo" in body ? String(body.withdrawMemo || "").trim() : brandWithdrawMemo(brand),
+      depositMemo: String(body.depositMemo || "").trim(),
       businessName: body.businessName || brand?.businessName || "",
       businessNumber: body.businessNumber || brand?.businessNumber || "",
       depositorName: body.depositorName || brand?.depositorName || "",
@@ -7459,6 +8141,7 @@ async function routeApi(req, res, url) {
     addAudit(db, actor, "create", "request", request.id, `${request.orderNo} 입금요청 생성`, null, request);
     await writeDb(db);
     sendJson(res, 201, { request });
+    pushNotice("request_new", { ...request, by: actor.name || "" }, { type: "request", id: request.id });
     syncArchiveInBackground(db, actor, request.brandId, "request_created");
     return;
   }
@@ -7475,7 +8158,10 @@ async function routeApi(req, res, url) {
     const touchedBrands = new Set();
     const updated = [];
     const skipped = [];
+    const isLockedReq = await lockedRequestFilter();
+    const lockedIds = [];
     for (const request of db.requests.filter((item) => ids.includes(item.id) && item.status !== "deleted")) {
+      if (isLockedReq(request)) { lockedIds.push(request.id); continue; }
       if (request.status === "paid" && request.paidAt) {
         skipped.push(request);
         continue;
@@ -7491,11 +8177,13 @@ async function routeApi(req, res, url) {
       updated.push(request);
     }
     if (!updated.length && !skipped.length) {
+      if (lockedIds.length) { sendJson(res, 423, { error: lockedSkipMessage(lockedIds.length), locked: true }); return; }
       sendJson(res, 404, { error: "처리할 입금요청을 찾지 못했습니다." });
       return;
     }
     if (updated.length) await writeDb(db);
-    sendJson(res, 200, { updatedRequests: updated, skippedRequestIds: skipped.map((item) => item.id), batchId });
+    sendJson(res, 200, { updatedRequests: updated, skippedRequestIds: skipped.map((item) => item.id), batchId, lockedRequestIds: lockedIds, ...(lockedIds.length ? { warning: lockedSkipMessage(lockedIds.length) } : {}) });
+    if (updated.length) pushNotice("request_paid", { items: updated, by: actor.name || "" }, { type: "request", id: updated[0].id });
     if (updated.length) syncArchiveInBackground(db, actor, [...touchedBrands], "request_paid");
     return;
   }
@@ -7509,8 +8197,12 @@ async function routeApi(req, res, url) {
     }
     const touchedBrands = new Set();
     const updated = [];
+    const isLockedReq = await lockedRequestFilter();
+    const lockedIds = [];
     for (const request of db.requests.filter((item) => ids.includes(item.id) && item.status !== "deleted")) {
+      if (isLockedReq(request)) { lockedIds.push(request.id); continue; }
       const before = { ...request };
+      request.statusBeforeDelete = request.status;
       request.status = "deleted";
       request.updatedAt = now();
       addAudit(db, actor, "delete", "request", request.id, `${request.orderNo} 입금요청 삭제`, before, request);
@@ -7518,11 +8210,12 @@ async function routeApi(req, res, url) {
       updated.push(request);
     }
     if (!updated.length) {
+      if (lockedIds.length) { sendJson(res, 423, { error: lockedSkipMessage(lockedIds.length), locked: true }); return; }
       sendJson(res, 404, { error: "삭제할 입금요청을 찾지 못했습니다." });
       return;
     }
     await writeDb(db);
-    sendJson(res, 200, { deletedRequests: updated });
+    sendJson(res, 200, { deletedRequests: updated, lockedRequestIds: lockedIds, ...(lockedIds.length ? { warning: lockedSkipMessage(lockedIds.length) } : {}) });
     syncArchiveInBackground(db, actor, [...touchedBrands], "request_deleted");
     return;
   }
@@ -7533,6 +8226,9 @@ async function routeApi(req, res, url) {
     const body = await readBody(req);
     const ids = Array.isArray(body.requestIds) ? body.requestIds : [];
     const status = String(body.status || "").trim();
+    // 입금완료로 바꾸거나 입금완료를 되돌리는 것은 입금완료 권한이 있어야 한다.
+    const touchesPaid = status === "paid" || db.requests.some((r) => ids.includes(r.id) && r.status === "paid");
+    if (!requirePermission(actor, res, "requests", touchesPaid ? "pay" : "edit")) return;
     const allowed = new Set(["pending", "await_deposit", "paid", "hold", "error", "consignment_unpaid"]);
     if (!ids.length) { sendJson(res, 400, { error: "상태를 변경할 요청을 선택하세요." }); return; }
     if (!allowed.has(status)) { sendJson(res, 400, { error: "허용되지 않은 상태입니다." }); return; }
@@ -7540,8 +8236,11 @@ async function routeApi(req, res, url) {
     const batchId = ids.length > 1 ? id("statusbatch") : "";
     const touchedBrands = new Set();
     const updated = [];
+    const isLockedReq = await lockedRequestFilter();
+    const lockedIds = [];
     for (const request of db.requests.filter((item) => ids.includes(item.id) && item.status !== "deleted")) {
       if (request.status === status) continue;
+      if (isLockedReq(request)) { lockedIds.push(request.id); continue; }
       const before = { ...request };
       if (status === "paid") {
         request.status = "paid";
@@ -7556,9 +8255,14 @@ async function routeApi(req, res, url) {
       if (request.brandId) touchedBrands.add(request.brandId);
       updated.push(request);
     }
-    if (!updated.length) { sendJson(res, 200, { updatedRequests: [] }); return; }
+    if (!updated.length) {
+      if (lockedIds.length) { sendJson(res, 423, { error: lockedSkipMessage(lockedIds.length), locked: true }); return; }
+      sendJson(res, 200, { updatedRequests: [] });
+      return;
+    }
     await writeDb(db);
-    sendJson(res, 200, { updatedRequests: updated });
+    sendJson(res, 200, { updatedRequests: updated, lockedRequestIds: lockedIds, ...(lockedIds.length ? { warning: lockedSkipMessage(lockedIds.length) } : {}) });
+    if (status === "paid") pushNotice("request_paid", { items: updated, by: actor.name || "" }, { type: "request", id: updated[0].id });
     syncArchiveInBackground(db, actor, [...touchedBrands], "status_changed");
     return;
   }
@@ -7571,6 +8275,17 @@ async function routeApi(req, res, url) {
       sendJson(res, 404, { error: "입금요청을 찾을 수 없습니다." });
       return;
     }
+    if (!(await guardOpenMonth(res, monthly.requestMonth(request)))) return;
+    // 주문번호를 바꿔 마감한 달로 옮기는 것도 막는다.
+    if ("orderNo" in body && !(await guardOpenMonth(res, monthly.requestMonth({ orderNo: normalizeOrderNo(body.orderNo), createdAt: request.createdAt })))) return;
+    // 상태는 정해진 값만. 삭제는 DELETE 로(삭제 권한), 입금완료로/에서 바꾸거나 입금액을 고치는 것은 입금완료 권한.
+    if ("status" in body) {
+      const allowedStatus = new Set(["pending", "await_deposit", "paid", "hold", "error", "consignment_unpaid"]);
+      if (!allowedStatus.has(String(body.status))) { sendJson(res, 400, { error: "허용되지 않은 상태입니다." }); return; }
+    }
+    const paidFlip = "status" in body && (body.status === "paid") !== (request.status === "paid");
+    const paidAmountChange = "paidAmount" in body && request.status === "paid" && number(body.paidAmount) !== number(request.paidAmount);
+    if ((paidFlip || paidAmountChange) && !requirePermission(actor, res, "requests", "pay")) return;
     const before = { ...request };
     for (const key of [
       "brandId",
@@ -7596,6 +8311,8 @@ async function routeApi(req, res, url) {
       "sourceSheet",
       "sourceRow",
       "requiredMemo",
+      "withdrawMemo",
+      "depositMemo",
       "businessName",
       "businessNumber",
       "depositorName",
@@ -7629,6 +8346,9 @@ async function routeApi(req, res, url) {
         }
       }
     }
+    for (const key of ["withdrawMemo", "depositMemo"]) {
+      if (key in body) request[key] = String(body[key] ?? "").trim().slice(0, 50);
+    }
     const brand = db.brands.find((item) => item.id === request.brandId);
     const promotionContext = brand ? buildPromotionContext(
       db, brand,
@@ -7656,7 +8376,9 @@ async function routeApi(req, res, url) {
       sendJson(res, 404, { error: "입금요청을 찾을 수 없습니다." });
       return;
     }
+    if (!(await guardOpenMonth(res, monthly.requestMonth(request)))) return;
     const before = { ...request };
+    request.statusBeforeDelete = request.status;
     request.status = "deleted";
     request.updatedAt = now();
     addAudit(db, actor, "delete", "request", request.id, `${request.orderNo} 입금요청 삭제`, before, request);
@@ -7668,6 +8390,18 @@ async function routeApi(req, res, url) {
 
   // 등록된 메뉴와 액션. 새 메뉴는 MENU_REGISTRY 에 넣기만 하면 권한 화면에
   // 자동으로 나타난다.
+  // 좌측 메뉴 즐겨찾기(★) — 관리자마다 따로. 값은 'tab' 또는 'tab:하위화면'.
+  if (pathname === "/api/me/nav-favorites" && method === "PUT") {
+    const body = await readBody(req);
+    const list = Array.isArray(body.favorites) ? body.favorites : [];
+    const clean = [...new Set(list.map(String).filter((x) => /^[a-zA-Z]+(:[a-zA-Z0-9_-]+)?$/.test(x)))].slice(0, 30);
+    const me = db.admins.find((a) => a.id === actor.id);
+    if (!me) { sendJson(res, 404, { error: "계정을 찾을 수 없습니다." }); return; }
+    me.navFavorites = clean;
+    await writeDb(db);
+    sendJson(res, 200, { favorites: clean });
+    return;
+  }
   if (pathname === "/api/menus" && method === "GET") {
     sendJson(res, 200, { menus: MENU_REGISTRY, actionLabels: ACTION_LABELS });
     return;
@@ -9856,6 +10590,65 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // --- v2 거래처(사업자) 허브: 한 사업자와 이어진 모든 것 ----------------------------
+  // 사업자와 브랜드는 다른 칸이다(사업구조 지침). 브랜드는 사업자번호가 같거나 사람이 이어 둔 것(brand.entityPartnerId).
+  const hubMatch = pathname.match(/^\/api\/partners\/([^/]+)\/hub$/);
+  if (hubMatch && method === "GET") {
+    if (!can(actor, "procurement", "view") && !can(actor, "sales", "view") && !can(actor, "stock", "view")) { sendJson(res, 403, { error: "거래처를 볼 권한이 없습니다." }); return; }
+    const partner = db.partners.find((x) => x.id === decodeURIComponent(hubMatch[1]));
+    if (!partner) { sendJson(res, 404, { error: "거래처를 찾을 수 없습니다." }); return; }
+    const dig = (v) => String(v || "").replace(/\D/g, "");
+    const biz = dig(partner.businessNumber);
+    const nameKey = (v) => String(v || "").replace(/주식회사|㈜|\(주\)|\s/g, "").toLowerCase();
+    const brands = db.brands.filter((b) => b.entityPartnerId === partner.id || (biz && dig(b.businessNumber) === biz))
+      .map((b) => ({ id: b.id, code: b.code || "", name: b.name, settlementType: b.settlementType, linked: b.entityPartnerId === partner.id ? "manual" : "bizno",
+        receivableRemaining: brandSummary(db, b.id).receivableRemaining, hasReceivable: !!b.hasReceivable }));
+    const docs = (db.purchaseOrders || []).filter((po) => po.partnerId === partner.id)
+      .map((po) => ({ id: po.id, docNo: po.docNo, docType: po.docType, date: po.orderDate || String(po.createdAt || "").slice(0, 10), total: po.total, title: (po.lineItems || [])[0]?.itemName || "" }))
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    const [salesOrders, pays, bills, prodPays, prodAdjs, plan] = await Promise.all([erp.list("salesOrders").catch(() => []), erp.list("payments").catch(() => []),
+      erp.list("prodBills"), erp.list("prodPayments"), erp.list("prodAdjustments"), erp.get("rehabPlan", "current")]);
+    const so = salesOrders.filter((o) => o.partnerId === partner.id).map((o) => ({ id: o.id, code: o.code, date: o.orderDate, title: o.title, total: o.total, stage: sales.deriveStage(o), remaining: sales.remaining(o) }))
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    const pk = nameKey(partner.name);
+    const pr = pays.filter((x) => x.sourcePartnerId === partner.id || (pk && nameKey(x.payeeName) === pk))
+      .map((x) => ({ id: x.id, code: x.code, title: x.title, amount: x.amount, status: x.status, dueDate: x.dueDate || "" }));
+    const mine = (l) => l.filter((x) => x.partnerId === partner.id);
+    const prodBills = mine(bills);
+    const prodSummary = prodBills.length ? production.partnerSummary({ bills: prodBills, payments: mine(prodPays), adjustments: mine(prodAdjs) }, kstToday()) : null;
+    const channels = (db.salesChannels || []).filter((c) => c.partnerId === partner.id).map((c) => ({ id: c.id, code: c.code || "", name: c.name }));
+    const materials = (db.materials || []).filter((m) => m.partnerId === partner.id).map((m) => ({ id: m.id, code: m.code || "", name: m.itemName }));
+    const creditor = plan ? legacy.matchCreditor({ name: partner.name, businessName: partner.businessName, depositorName: partner.depositorName }, plan.creditors || []) : null;
+    // 거래처 잔액 한눈에(이카운트 '거래처별 채권·채무 잔액'): 받을 돈 = 판매 미수, 줄 돈 = 생산비 미지급 + 처리 전 지급요청.
+    const openPay = pr.filter((x) => ["requested", "confirmed", "awaiting_approval", "on_hold"].includes(x.status));
+    const balance = {
+      receivable: so.filter((o) => o.stage !== "cancelled").reduce((s, o) => s + Number(o.remaining || 0), 0),
+      receivableOverdue: salesOrders.filter((o) => o.partnerId === partner.id && o.dueDate && o.dueDate < kstToday() && sales.remaining(o) > 0 && sales.deriveStage(o) !== "cancelled").reduce((s, o) => s + sales.remaining(o), 0),
+      productionUnpaid: prodSummary ? Number(prodSummary.balance || 0) : 0,
+      openPayments: openPay.reduce((s, x) => s + Number(x.amount || 0), 0), openPaymentCount: openPay.length,
+      brandClaims: brands.reduce((s, b) => s + (b.hasReceivable ? Number(b.receivableRemaining || 0) : 0), 0)
+    };
+    sendJson(res, 200, { partner, brands, docs, salesOrders: so, payments: pr, production: prodSummary, channels, materials, balance,
+      rehab: creditor ? { creditor: creditor.creditor, cat: creditor.cat, total: creditor.total, cash: creditor.cash } : null,
+      linkableBrands: db.brands.filter((b) => (b.type || "brand") === "brand" && !brands.some((x) => x.id === b.id)).map((b) => ({ id: b.id, name: b.name, code: b.code || "" })) });
+    return;
+  }
+  const hubLink = pathname.match(/^\/api\/partners\/([^/]+)\/brands$/);
+  if (hubLink && method === "POST") {
+    if (!can(actor, "procurement", "edit") && actor.role !== "owner") { sendJson(res, 403, { error: "연결할 권한이 없습니다." }); return; }
+    const body = await readBody(req);
+    const partner = db.partners.find((x) => x.id === decodeURIComponent(hubLink[1]));
+    const brand = db.brands.find((b) => b.id === body.brandId);
+    if (!partner || !brand) { sendJson(res, 404, { error: "거래처나 브랜드가 없습니다." }); return; }
+    const before = { entityPartnerId: brand.entityPartnerId || "" };
+    brand.entityPartnerId = body.unlink ? "" : partner.id;
+    brand.updatedAt = now();
+    addAudit(db, actor, "update", "brand", brand.id, `${brand.name} ${body.unlink ? "사업자 연결 해제" : `사업자 '${partner.name}'에 연결`}`, before, { entityPartnerId: brand.entityPartnerId });
+    await writeDb(db);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
   const partnerMatch = pathname.match(/^\/api\/partners\/([^/]+)$/);
   if (partnerMatch && method === "PUT") {
     const body = await readBody(req);
@@ -9911,7 +10704,7 @@ async function routeApi(req, res, url) {
   }
 
   const PARTNER_EXPORT_HEADERS = [
-    "ID", "분류", "거래처명", "상호명", "사업자등록번호", "대표자명", "주소",
+    "ID", "우프코드", "분류", "거래처명", "상호명", "사업자등록번호", "대표자명", "주소",
     "세금계산서 발행 메일", "은행", "계좌번호", "예금주명", "발주방식", "증빙구분",
     "담당자명", "담당자 연락처", "담당자 이메일", "메모", "사용상태"
   ];
@@ -9921,7 +10714,7 @@ async function routeApi(req, res, url) {
     // 기존 데이터가 딸려오면 오히려 지우는 품이 든다.
     const blank = url.searchParams.get("mode") === "blank";
     const rows = blank ? [] : (db.partners || []).map((p) => [
-      p.id, PARTNER_CATEGORY_LABELS[p.category] || p.category, p.name, p.businessName,
+      p.id, p.code || "", PARTNER_CATEGORY_LABELS[p.category] || p.category, p.name, p.businessName,
       p.businessNumber, p.representativeName, p.address, p.invoiceEmail, p.bankName,
       p.bankAccount, p.depositorName, p.orderMethod, p.invoiceTiming, p.contactName,
       p.contactPhone, p.contactEmail, p.note, p.isActive !== false ? "Y" : "N"
@@ -10075,14 +10868,14 @@ async function routeApi(req, res, url) {
   }
 
   const MATERIAL_EXPORT_HEADERS = [
-    "ID", "거래처명", "품목명", "코드(바코드)", "카테고리", "발주단위", "기본공급가", "리드타임(일)", "메모", "사용상태"
+    "ID", "우프코드", "거래처명", "품목명", "코드(바코드)", "카테고리", "발주단위", "기본공급가", "리드타임(일)", "메모", "사용상태"
   ];
 
   if (pathname === "/api/materials/export" && method === "GET") {
     const blank = url.searchParams.get("mode") === "blank";
     const partnerName = (partnerId) => (db.partners || []).find((p) => p.id === partnerId)?.name || "";
     const rows = blank ? [] : (db.materials || []).map((m) => [
-      m.id, partnerName(m.partnerId), m.itemName, m.itemCode || "", m.category, m.orderUnit,
+      m.id, m.code || "", partnerName(m.partnerId), m.itemName, m.itemCode || "", m.category, m.orderUnit,
       m.basePrice || "", m.leadTimeDays || "", m.note, m.isActive !== false ? "Y" : "N"
     ]);
     const buffer = await buildRowsXlsx("원부자재", MATERIAL_EXPORT_HEADERS, rows);
@@ -10168,47 +10961,12 @@ async function routeApi(req, res, url) {
 
   if (pathname === "/api/purchase-orders" && method === "POST") {
     const body = await readBody(req);
-    const partner = db.partners.find((item) => item.id === body.partnerId);
-    if (!partner) {
-      sendJson(res, 400, { error: "거래처를 선택하세요." });
+    const built = buildTradeDoc(db, body);
+    if (built.error) {
+      sendJson(res, 400, { error: built.error });
       return;
     }
-    const issuerPartnerId = String(body.issuerPartnerId || "").trim();
-    const issuer = resolveIssuerSnapshot(db, issuerPartnerId);
-    if (!issuer) {
-      sendJson(res, 400, { error: "발행자를 선택하세요." });
-      return;
-    }
-    const docType = tradeDocTypes.has(body.docType) ? body.docType : "purchase_order";
-    const orderDate = dateOnly(body.orderDate) || now().slice(0, 10);
-    const lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
-    // 금액 기준: 요청에 없으면 거래처 기본값, 그것도 없으면 공급가 기준.
-    const priceMode = body.priceMode === "gross" || body.priceMode === "supply"
-      ? body.priceMode
-      : (partner.priceMode === "gross" ? "gross" : "supply");
-    const { subtotal, vat, total } = purchaseOrderTotals(lineItems, priceMode);
-    const po = {
-      id: id("po"),
-      docType,
-      docNo: nextPurchaseOrderDocNo(db, orderDate, docType),
-      partnerId: partner.id,
-      priceMode,
-      orderDate,
-      // 양식마다 뜻이 다른 두 번째 날짜 — 발주서는 납기일, 견적서는 유효기간,
-      // 청구서는 지급기일. 거래명세서는 쓰지 않는다.
-      dueDate: dateOnly(body.dueDate) || "",
-      status: purchaseOrderStatuses.has(body.status) ? body.status : "ordered",
-      lineItems,
-      issuerPartnerId,
-      issuer,
-      deliveryPlace: sanitizeDeliveryPlace(body.deliveryPlace),
-      subtotal,
-      vat,
-      total,
-      note: String(body.note || "").trim(),
-      createdAt: now(),
-      updatedAt: now()
-    };
+    const po = built.po;
     db.purchaseOrders.unshift(po);
     addAudit(db, actor, "create", "purchaseOrder", po.id, `${po.docNo} ${TRADE_DOC_LABELS[docType]} 생성`, null, po);
     await writeDb(db);
@@ -10311,6 +11069,2482 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // --- v2 확인 필요(질문함) + 옛 관리대장 이관 + 채권원장 -----------------------
+  if (pathname.startsWith("/api/setup/") || pathname === "/api/receivables" || pathname.startsWith("/api/receivables/")) {
+    const isOwner = actor.role === "owner";
+    const canAnswer = isOwner || can(actor, "cash", "edit");
+    const who = actor.name || actor.email || "";
+    const recomputeLegacy = async () => {
+      const legacy = await erp.list("legacyOrders");
+      const sums = {};
+      for (const o of legacy) sums[o.brandId] = (sums[o.brandId] || 0) + Number(o.receivableDeduction || 0);
+      for (const b of db.brands) b.legacyReceivableDeducted = Math.round(sums[b.id] || 0);
+    };
+
+    // 이관 실행(오너). 같은 주문은 같은 id 로 덮어써서 여러 번 돌려도 안전하다.
+    if (pathname === "/api/setup/migration/run" && method === "POST") {
+      if (!isOwner) { sendJson(res, 403, { error: "이관은 오너만 실행할 수 있습니다." }); return; }
+      const body = await readBody(req);
+      const plan = legacy.planMigration({
+        brands: db.brands.filter((b) => b.type === "brand"), requests: db.requests,
+        tabs: body.tabs || {}, creditors: Array.isArray(body.creditors) ? body.creditors : []
+      });
+      const stamp = now();
+      for (const o of plan.legacyOrders) await erp.put("legacyOrders", { ...o, importedAt: stamp });
+      for (const d of plan.autoDeletes) {
+        const r = db.requests.find((x) => x.id === d.requestId);
+        if (!r || r.status === "deleted") continue;
+        const before = { ...r };
+        r.status = "deleted";
+        r.deletedReason = `중복 정리(같은 주문번호·금액, ${d.keepId} 남김)`;
+        r.updatedAt = stamp;
+        addAudit(db, actor, "delete", "request", r.id, `${r.brandName} ${r.orderNo} 중복 정리`, before, r);
+      }
+      const existing = new Map((await erp.list("setupQuestions")).map((x) => [x.id, x]));
+      let added = 0;
+      for (const qn of plan.questions) {
+        if (existing.get(qn.id)?.status === "answered") continue; // 답한 질문은 다시 열지 않는다
+        await erp.put("setupQuestions", { ...qn, createdAt: existing.get(qn.id)?.createdAt || stamp, updatedAt: stamp });
+        added += existing.has(qn.id) ? 0 : 1;
+      }
+      await recomputeLegacy();
+      addAudit(db, actor, "update", "migration", "legacy-ledger",
+        `옛 관리대장 이관: 주문 ${plan.legacyOrders.length}건, 중복정리 ${plan.autoDeletes.length}건, 확인필요 ${plan.questions.length}건`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { imported: plan.legacyOrders.length, autoDeleted: plan.autoDeletes.length, questions: plan.questions.length, newQuestions: added, perBrand: plan.perBrand });
+      return;
+    }
+
+    // 제안 질문 올리기(오너). 자료는 저장소 밖에 두고 배포 때 올린다.
+    if (pathname === "/api/setup/proposals" && method === "POST") {
+      if (!isOwner) { sendJson(res, 403, { error: "제안은 오너만 올릴 수 있습니다." }); return; }
+      const body = await readBody(req);
+      let list;
+      try { list = (Array.isArray(body.proposals) ? body.proposals : []).map(proposals.normalizeProposal); } catch (error) { sendJson(res, 400, { error: error.message }); return; }
+      const existingQ = new Map((await erp.list("setupQuestions")).map((x) => [x.id, x]));
+      const stamp = now();
+      let added = 0;
+      for (const qn of list) {
+        if (existingQ.get(qn.id)?.status === "answered") continue;
+        await erp.put("setupQuestions", { ...qn, status: "open", createdAt: existingQ.get(qn.id)?.createdAt || stamp, updatedAt: stamp });
+        added += existingQ.has(qn.id) ? 0 : 1;
+      }
+      sendJson(res, 200, { proposals: list.length, newQuestions: added });
+      return;
+    }
+
+    if (pathname === "/api/setup/questions" && method === "GET") {
+      if (!canAnswer) { sendJson(res, 403, { error: "확인 필요 항목을 볼 권한이 없습니다." }); return; }
+      const list = (await erp.list("setupQuestions")).map(({ payload, ...q }) => ({ ...q, hasPayload: Boolean(payload) }));
+      sendJson(res, 200, { questions: list, brands: db.brands.filter((b) => b.type === "brand").map((b) => ({ id: b.id, name: b.name, code: b.code })) });
+      return;
+    }
+
+    const ans = pathname.match(/^\/api\/setup\/questions\/([^/]+)\/answer$/);
+    if (ans && method === "POST") {
+      if (!canAnswer) { sendJson(res, 403, { error: "답할 권한이 없습니다." }); return; }
+      const body = await readBody(req);
+      const qn = await erp.get("setupQuestions", decodeURIComponent(ans[1]));
+      if (!qn) { sendJson(res, 404, { error: "질문을 찾을 수 없습니다." }); return; }
+      const choice = (qn.choices || []).find((c) => c.key === body.choice);
+      if (!choice) { sendJson(res, 400, { error: "답을 고르세요." }); return; }
+      const amountInput = Math.round(number(String(body.value ?? "").replace(/,/g, "")));
+      let applied = "";
+      if (qn.kind === "claim-base") {
+        const brand = db.brands.find((b) => b.id === qn.subjectId);
+        if (!brand) { sendJson(res, 404, { error: "브랜드가 없습니다." }); return; }
+        const next = choice.key === "plan" ? choice.value : choice.key === "input" ? amountInput : null;
+        if (choice.key === "input" && !(next > 0)) { sendJson(res, 400, { error: "금액을 입력하세요." }); return; }
+        if (next != null) {
+          const before = { receivableTotal: brand.receivableTotal };
+          brand.receivableTotal = next;
+          brand.updatedAt = now();
+          addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 채권총액 ${number(before.receivableTotal).toLocaleString()} → ${next.toLocaleString()} (확인 필요 답변)`, before, { receivableTotal: next });
+          applied = `채권총액 ${next.toLocaleString()}원`;
+        } else applied = "유지";
+      } else if (qn.kind === "request-deduction") {
+        const r = db.requests.find((x) => x.id === qn.subjectId);
+        if (r && choice.key === "use-sheet") {
+          const before = { receivableDeduction: r.receivableDeduction };
+          r.receivableDeduction = choice.value;
+          r.updatedAt = now();
+          addAudit(db, actor, "update", "request", r.id, `${r.brandName} ${r.orderNo} 채권차감 ${choice.value.toLocaleString()}원 (확인 필요 답변)`, before, { receivableDeduction: choice.value });
+          applied = `차감 ${choice.value.toLocaleString()}원`;
+        } else applied = "유지";
+      } else if (qn.kind === "tab-brand") {
+        if (choice.key === "pick-brand") {
+          const brand = db.brands.find((b) => b.id === body.brandId);
+          if (!brand) { sendJson(res, 400, { error: "브랜드를 고르세요." }); return; }
+          const plan = legacy.planMigration({ brands: [{ ...brand, rawSheetName: qn.payload.tab }], requests: db.requests, tabs: { [qn.payload.tab]: { rows: qn.payload.rows } } });
+          for (const o of plan.legacyOrders) await erp.put("legacyOrders", { ...o, importedAt: now() });
+          applied = `${brand.name}에 ${plan.legacyOrders.length}건 이관`;
+        } else applied = "옮기지 않음";
+      } else if (qn.kind === "amount-mismatch") {
+        if (choice.key === "import-too") {
+          const brand = db.brands.find((b) => b.id === qn.payload.brandId);
+          const row = qn.payload.row;
+          const ded = brand?.hasReceivable ? Math.round(number(row.margin)) : 0;
+          await erp.put("legacyOrders", { id: `lg_${brand.id}_${String(row.orderNo).slice(0, 16)}_q`, brandId: brand.id, brandName: brand.name, tab: qn.payload.tab,
+            orderNo: row.orderNo, customer: row.customer, month: row.month, date: row.date, goodsAmount: Math.round(number(row.goods)), shippingFee: Math.round(number(row.ship)),
+            depositAmount: Math.round(number(row.paid)), margin: Math.round(number(row.margin)), receivableDeduction: ded, source: "2026_선매입 브랜드 관리대장", importedAt: now() });
+          applied = "시트 건도 이관";
+        } else applied = "wooofpay 건만 남김";
+      } else if (qn.kind === "channel-rule") {
+        const ch = (db.salesChannels || []).find((c) => c.id === qn.subjectId);
+        if (!ch) { sendJson(res, 404, { error: "판매처가 없습니다." }); return; }
+        const rate = number(String(body.value ?? choice.value ?? "").replace(/,/g, ""));
+        if (["discount", "supply_rate"].includes(choice.key) && !(rate > 0 && rate <= 100)) { sendJson(res, 400, { error: "0~100 사이 %를 입력하세요." }); return; }
+        const before = { pricingMode: ch.pricingMode, rate: ch.rate };
+        ch.pricingMode = choice.key;
+        ch.rate = ["discount", "supply_rate"].includes(choice.key) ? rate : 0;
+        ch.updatedAt = now();
+        addAudit(db, actor, "update", "salesChannel", ch.id, `${ch.name} 가격 방식: ${choice.label}${ch.rate ? ` ${ch.rate}%` : ""} (확인 필요 답변)`, before, { pricingMode: ch.pricingMode, rate: ch.rate });
+        applied = `${pricing.PRICING_MODES[choice.key]}${ch.rate ? ` ${ch.rate}%` : ""}`;
+      } else if (qn.kind === "channel-price") {
+        const ch = (db.salesChannels || []).find((c) => c.id === qn.subjectId);
+        const item = pricingItems(db).find((it) => it.ref === qn.payload?.itemRef);
+        if (!ch || !item) { sendJson(res, 404, { error: "판매처나 품목이 없습니다." }); return; }
+        const price = choice.key === "fixed-used" ? choice.value : choice.key === "input" ? amountInput : 0;
+        if (choice.key === "input" && !(price > 0)) { sendJson(res, 400, { error: "금액을 입력하세요." }); return; }
+        if (price > 0) {
+          const x = { id: `q:${ch.id}:${item.ref}`, channelId: ch.id, itemRef: item.ref, itemName: item.name, mode: "fixed", price,
+            vatMode: qn.payload?.vatMode || ch.vatMode, from: "", to: "", source: "확인 필요 답변", createdBy: who, createdAt: now(), active: true };
+          await erp.put("channelPrices", x);
+          addAudit(db, actor, "create", "channelPrice", x.id, `${ch.name} · ${item.name} ${price.toLocaleString()}원 고정 (확인 필요 답변)`, null, x);
+          applied = `${price.toLocaleString()}원 고정`;
+        } else applied = choice.label;
+      } else if (qn.kind === "prod-balance") {
+        const partner = db.partners.find((x) => x.id === qn.subjectId);
+        if (!partner) { sendJson(res, 404, { error: "거래처가 없습니다." }); return; }
+        const target = choice.key === "sheet" ? choice.value : choice.key === "input" ? amountInput : null;
+        if (choice.key === "input" && !(String(body.value ?? "").trim())) { sendJson(res, 400, { error: "잔금을 입력하세요." }); return; }
+        if (target != null) {
+          const [bills, pays, adjs] = await Promise.all(["prodBills", "prodPayments", "prodAdjustments"].map((c) => erp.list(c)));
+          const mine = (l) => l.filter((x) => x.partnerId === partner.id && x.id !== `pa:q:${partner.id}`);
+          const current = production.partnerLedger({ bills: mine(bills), payments: mine(pays), adjustments: mine(adjs) }).balance;
+          const diff = target - current;
+          if (diff) {
+            await erp.put("prodAdjustments", { id: `pa:q:${partner.id}`, partnerId: partner.id, partnerName: partner.name, date: kstToday(), amount: diff,
+              memo: `잔금 맞춤(확인 필요 답변): ${current.toLocaleString()} → ${target.toLocaleString()}`, createdBy: who, createdAt: now() });
+          }
+          applied = `잔금 ${target.toLocaleString()}원${diff ? `(조정 ${diff > 0 ? "+" : ""}${diff.toLocaleString()})` : ""}`;
+        } else applied = "맞음";
+      } else if (qn.kind === "prod-rate-change" || qn.kind === "prod-rate-new") {
+        const partner = db.partners.find((x) => x.id === qn.subjectId);
+        const price = ["new-rate", "register"].includes(choice.key) ? choice.value : choice.key === "input" ? amountInput : 0;
+        if (choice.key === "input" && !(price > 0)) { sendJson(res, 400, { error: "단가를 입력하세요." }); return; }
+        if (partner && price > 0) {
+          const rec = { id: `prr:q:${qn.id}`, partnerId: partner.id, partnerName: partner.name, item: qn.payload?.item || "", option: "",
+            unitPrice: price, from: qn.kind === "prod-rate-change" ? qn.payload?.from || "" : "", source: "확인 필요 답변", createdBy: who, createdAt: now() };
+          await erp.put("prodRates", rec);
+          addAudit(db, actor, "create", "prodRates", rec.id, `${partner.name} ${rec.item} 공임 ${price.toLocaleString()}원 등록`, null, rec);
+          applied = `${rec.item} ${price.toLocaleString()}원${rec.from ? ` (${rec.from}부터)` : ""} 등록`;
+        } else applied = choice.label;
+      } else if (qn.kind === "loan-maturity") {
+        const loan = await erp.get("loans", qn.subjectId);
+        if (!loan) { sendJson(res, 404, { error: "대출이 없습니다." }); return; }
+        if (choice.key === "extended") {
+          const d = dateOnly(body.value);
+          if (!d) { sendJson(res, 400, { error: "새 만기일을 입력하세요." }); return; }
+          await erp.put("loans", { ...loan, maturity: d, editedAt: now(), editedBy: who });
+          applied = `만기 ${d}로 연장`;
+        } else {
+          await erp.put("loans", { ...loan, closed: true, editedAt: now(), editedBy: who });
+          applied = "종료(다 갚음)";
+        }
+        addAudit(db, actor, "update", "loan", loan.id, `${loan.name} ${applied} (확인 필요 답변)`, { maturity: loan.maturity }, null);
+      } else if (qn.kind === "proposal") {
+        // 선택지에 담긴 할 일을 그대로 실행한다(올릴 때 이미 검사했지만 한 번 더 거른다).
+        const actions = (choice.actions || []).map(proposals.sanitizeAction);
+        const tag = { source: `확인 필요: ${qn.title}`.slice(0, 200), createdBy: who, createdAt: now() };
+        for (const [i, a] of actions.entries()) {
+          if (a.type === "cashSchedule") {
+            const { type, ...data } = a;
+            await erp.put("cashSchedules", { id: `cash:${qn.id}:${i}`, ...data, active: true, ...tag, updatedAt: now() });
+          } else if (a.type === "payment") {
+            const { type, ...data } = a;
+            const rec = { id: `pay:${qn.id}:${i}`.slice(0, 120), status: "requested", files: [], requestedBy: { id: actor.id, name: who }, ...data,
+              createdAt: now(), updatedAt: now(), history: [{ at: now(), by: who, action: "create", from: "", to: "requested", note: "확인 필요 답변으로 만듦" }] };
+            if (!(await erp.get("payments", rec.id))) {
+              rec.code = nextPaymentCode(await erp.list("payments"), rec.createdAt);
+              await erp.put("payments", rec);
+            }
+          } else if (a.type === "prodPayment") {
+            const partner = db.partners.find((x) => String(x.name || "").replace(/\s+/g, "") === a.partnerName.replace(/\s+/g, ""));
+            if (!partner) { sendJson(res, 400, { error: `거래처 '${a.partnerName}'가 없습니다. 생산비 시트를 먼저 가져오세요.` }); return; }
+            await erp.put("prodPayments", { id: `pp:${qn.id}:${i}`, partnerId: partner.id, partnerName: partner.name, date: a.date, amount: a.amount, memo: a.memo, ...tag });
+          }
+        }
+        applied = actions.length ? proposals.describeActions(actions) : choice.label;
+        addAudit(db, actor, "update", "proposal", qn.id, `${qn.title}: ${applied}`.slice(0, 300), null, null);
+      } else if (qn.kind === "monthly-brand") {
+        if (choice.key === "pick-brand") {
+          const brand = db.brands.find((b) => b.id === body.brandId);
+          if (!brand) { sendJson(res, 400, { error: "브랜드를 고르세요." }); return; }
+          const months = {};
+          for (const { ym, row } of qn.payload?.rows || []) (months[ym] ||= []).push({ ...row, brand: brand.name });
+          const plan = monthly.planMonthlyImport({ months }, { brands: [brand], requests: db.requests });
+          const closingNow = await closingState();
+          for (const r of plan.records.filter((x) => !closing.isLocked(closingNow, x.month))) {
+            const prev = await erp.get("monthlyBoard", r.id);
+            await erp.put("monthlyBoard", prev?.editedAt ? { ...prev, sheet: r.sheet } : { ...r, importedAt: now() });
+          }
+          applied = `${brand.name}에 ${plan.records.length}개월 연결`;
+        } else applied = "연결 안 함";
+      } else if (qn.kind === "monthly-gap") {
+        if (choice.key === "review") {
+          const months = new Set(qn.payload?.months || []);
+          let n = 0;
+          for (const r of db.requests) {
+            if (r.brandId !== qn.subjectId || r.status === "deleted" || !months.has(monthly.requestMonth(r))) continue;
+            r.needsReview = true;
+            r.reviewNote = "월정산 시트 매출과 다름(프로모션·할인 확인)";
+            n += 1;
+          }
+          applied = `입금요청 ${n}건 확인 필요로 표시`;
+        } else applied = choice.label;
+      } else if (qn.kind === "brand-info") {
+        const brand = db.brands.find((b) => b.id === qn.subjectId);
+        if (!brand) { sendJson(res, 404, { error: "브랜드가 없습니다." }); return; }
+        if (choice.key === "keep") applied = "지금 값 유지";
+        else {
+          const set = { ...(qn.payload?.set || {}) };
+          if (choice.key === "sheet-no-bank") for (const k of Object.keys(set)) if (/bank|accountHolder/.test(k)) delete set[k];
+          const before = JSON.parse(JSON.stringify({ profile: brand.profile || {}, businessName: brand.businessName, bankName: brand.bankName, bankAccount: brand.bankAccount, accountHolder: brand.accountHolder }));
+          brandInfo.applyPaths(brand, set);
+          if (set["top.bankAccount"]) brand.bankAccount = normalizeAccountNumber(brand.bankAccount);
+          brand.updatedAt = now();
+          addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 정보 ${Object.keys(set).length}칸 설문 값으로 변경 (확인 필요 답변)`, before, set);
+          applied = `${Object.keys(set).length}칸 변경`;
+        }
+      } else if (qn.kind === "sync-conflict") {
+        // pay(운영)와 v2 에서 같은 칸을 다르게 고친 경우(하루 한 번 운영 → v2 합치기). v2 값이 이미 들어 있다.
+        if (choice.key === "prod") {
+          const p = qn.payload || {};
+          if (!Array.isArray(p.path) || !p.path.length) { sendJson(res, 400, { error: "바꿀 위치 정보가 없습니다." }); return; }
+          setAtPath(db, p.path, p.prodMissing ? undefined : p.prod);
+          addAudit(db, actor, "update", "sync", qn.subjectId, `확인 필요: ${qn.subjectId} → pay 값으로`, null, null);
+        }
+        applied = choice.label;
+      } else if (qn.kind === "brand-new") {
+        applied = choice.label;
+      } else if (qn.kind === "prod-total") {
+        applied = choice.label;
+      } else if (qn.kind === "zero-deduction") {
+        // 그 입금요청들의 채권차감액만 다시 계산한다(입금액은 그대로 — 이미 송금한 건이 있다).
+        const brand = db.brands.find((b) => b.id === qn.subjectId);
+        const rate = number(String(body.value ?? "").replace(/,/g, ""));
+        if (choice.key === "rate" && !(rate > 0 && rate <= 100)) { sendJson(res, 400, { error: "0~100 사이 %를 입력하세요." }); return; }
+        const ids = new Set(qn.payload?.requestIds || []);
+        const targets = db.requests.filter((r) => ids.has(r.id) && r.status !== "deleted");
+        const { changes, skipped } = legacy.recomputeZeroDeductions(targets, { mode: choice.key, rate });
+        for (const c of changes) {
+          const r = db.requests.find((x) => x.id === c.id);
+          r.receivableDeduction = c.after;
+          r.updatedAt = now();
+          addAudit(db, actor, "update", "request", r.id, `${r.brandName} ${r.orderNo} 채권차감 ${c.before.toLocaleString()} → ${c.after.toLocaleString()} (확인 필요 답변: ${choice.label})`, { receivableDeduction: c.before }, { receivableDeduction: c.after });
+        }
+        // 채권 브랜드(prepay_debt)는 수수료율이 차감에만 쓰이므로, 앞으로 올라올 건도 같은 율로 차감되게 브랜드에 저장한다.
+        if (brand && choice.key === "rate" && brand.settlementType === "prepay_debt" && number(brand.commissionRate) !== rate) {
+          const before = { commissionRate: brand.commissionRate };
+          brand.commissionRate = rate;
+          brand.updatedAt = now();
+          addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 수수료율 ${number(before.commissionRate)}% → ${rate}% (확인 필요 답변)`, before, { commissionRate: rate });
+        }
+        const total = changes.reduce((sum, c) => sum + c.after - c.before, 0);
+        applied = choice.key === "none" ? "0원 유지"
+          : `${changes.length}건 다시 계산(차감 +${total.toLocaleString()}원)${skipped.length ? `, ${skipped.length}건은 공급가가 없어 그대로` : ""}`;
+      }
+      qn.status = "answered";
+      qn.answer = { choice: choice.key, label: choice.label, value: body.value ?? null, brandId: body.brandId || null, applied };
+      qn.answeredBy = who;
+      qn.answeredAt = now();
+      await erp.put("setupQuestions", qn);
+      await recomputeLegacy();
+      await writeDb(db);
+      sendJson(res, 200, { question: { ...qn, payload: undefined }, applied });
+      return;
+    }
+
+    // 채권원장: 채권 브랜드별 채권총액 − (이관 주문 + 입금요청 차감 + 조정) = 잔액
+    if (pathname === "/api/receivables" && method === "GET") {
+      if (!requirePermission(actor, res, "brands", "view")) return;
+      const [legacyOrders, adjustments, rp] = await Promise.all([erp.list("legacyOrders"), erp.list("receivableAdjustments"), rehabPaidByBrand(db)]);
+      const rows = db.brands.filter((b) => b.hasReceivable).map((b) => {
+        const m = rp.map[b.id];
+        const l = legacy.receivableLedger(b, { legacyOrders, requests: db.requests, adjustments, rehabPaid: m?.paid || [], plan: m?.creditor || null });
+        return { brandId: b.id, code: b.code || "", name: b.name, base: l.base, deducted: l.deducted, balance: l.balance,
+          commission: l.commission, rehabCash: l.rehabCash, creditor: m?.creditor?.creditor || "", split: l.split,
+          claimKind: b.claimKind || (m ? "rehab" : ""), claimNote: b.claimNote || "",
+          legacyCount: legacyOrders.filter((o) => o.brandId === b.id).length };
+      }).sort((a, b) => b.balance - a.balance);
+      sendJson(res, 200, { brands: rows });
+      return;
+    }
+    const recOne = pathname.match(/^\/api\/receivables\/([^/]+)$/);
+    if (recOne && method === "GET") {
+      if (!requirePermission(actor, res, "brands", "view")) return;
+      const brand = db.brands.find((b) => b.id === recOne[1]);
+      if (!brand) { sendJson(res, 404, { error: "브랜드를 찾을 수 없습니다." }); return; }
+      const [legacyOrders, adjustments, rp] = await Promise.all([erp.list("legacyOrders"), erp.list("receivableAdjustments"), rehabPaidByBrand(db)]);
+      const m = rp.map[brand.id];
+      sendJson(res, 200, { brand: { id: brand.id, name: brand.name, code: brand.code }, creditor: m?.creditor?.creditor || "",
+        ledger: legacy.receivableLedger(brand, { legacyOrders, requests: db.requests, adjustments, rehabPaid: m?.paid || [], plan: m?.creditor || null }),
+        legacyOrders: legacyOrders.filter((o) => o.brandId === brand.id).sort((a, b) => String(b.date).localeCompare(String(a.date))) });
+      return;
+    }
+
+    sendJson(res, 404, { error: "지원하지 않는 요청입니다." });
+    return;
+  }
+
+  // --- v2 생산·원부자재 재고 ----------------------------------------------------
+  if (pathname === "/api/stock" || pathname.startsWith("/api/stock/")) {
+    if (!requirePermission(actor, res, "stock", "view")) return;
+    const who = actor.name || actor.email || "";
+    const locations = [
+      { key: "HQ", name: "우프 창고" },
+      ...(db.partners || []).filter((p) => p.category === "production" && p.isActive !== false)
+        .map((p) => ({ key: p.id, name: p.name }))
+    ];
+    const qtyOf = (v) => Math.round(number(String(v ?? "").replace(/,/g, "")) * 1000) / 1000;
+    const loadAll = async () => {
+      const [moves, runs, products, settingsList] = await Promise.all([
+        erp.list("stockMoves"), erp.list("stockRuns"), erp.list("stockProducts"), erp.list("stockSettings")
+      ]);
+      return { moves, runs, products, settings: Object.fromEntries(settingsList.map((s) => [s.id, s])) };
+    };
+
+    if (pathname === "/api/stock" && method === "GET") {
+      const all = await loadAll();
+      const status = inventory.stockStatus({ materials: db.materials || [], ...all });
+      const producible = all.products.map((p) => ({
+        productId: p.id,
+        byLocation: locations.map((l) => ({ location: l.key, ...inventory.producible(p, all.moves, l.key) }))
+          .filter((x) => x.quantity > 0)
+      }));
+      sendJson(res, 200, {
+        status, producible, locations, moveTypes: inventory.MOVE_TYPES,
+        moves: all.moves.slice().sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")) || String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 300),
+        runs: all.runs, products: all.products, settings: all.settings
+      });
+      return;
+    }
+
+    if (!requirePermission(actor, res, "stock", "edit")) return;
+
+    // 입출고 기록. 이동은 보낸 곳/받은 곳 두 줄, 실사는 센 수량과의 차이로 저장한다.
+    if (pathname === "/api/stock/moves" && method === "POST") {
+      const body = await readBody(req);
+      const material = (db.materials || []).find((m) => m.id === body.materialId);
+      if (!material) { sendJson(res, 400, { error: "원부자재를 고르세요." }); return; }
+      const location = String(body.location || "").trim();
+      if (!locations.some((l) => l.key === location)) { sendJson(res, 400, { error: "보관처를 고르세요." }); return; }
+      const type = String(body.type || "");
+      const date = dateOnly(body.date) || kstToday();
+      const memo = String(body.memo || "").trim().slice(0, 300);
+      const base = { materialId: material.id, date, memo, createdAt: now(), createdBy: who };
+      const rows = [];
+      if (type === "move") {
+        const to = String(body.toLocation || "").trim();
+        if (!locations.some((l) => l.key === to) || to === location) { sendJson(res, 400, { error: "받는 보관처를 고르세요." }); return; }
+        const qty = qtyOf(body.qty);
+        if (qty <= 0) { sendJson(res, 400, { error: "수량을 입력하세요." }); return; }
+        const pair = id("mvpair");
+        rows.push({ ...base, id: id("mv"), type: "move_out", location, qty, pairId: pair });
+        rows.push({ ...base, id: id("mv"), type: "move_in", location: to, qty, pairId: pair });
+      } else if (type === "adjust") {
+        const counted = qtyOf(body.counted);
+        const current = inventory.stockByLocation(await erp.list("stockMoves"))[`${material.id}|${location}`] || 0;
+        const diff = Math.round((counted - current) * 1000) / 1000;
+        if (!diff) { sendJson(res, 400, { error: "센 수량이 지금 재고와 같습니다." }); return; }
+        rows.push({ ...base, id: id("mv"), type: "adjust", location, qty: diff, memo: memo || `실사 ${counted} (기존 ${current})` });
+      } else if (["in", "out"].includes(type)) {
+        const qty = qtyOf(body.qty);
+        if (qty <= 0) { sendJson(res, 400, { error: "수량을 입력하세요." }); return; }
+        rows.push({ ...base, id: id("mv"), type, location, qty, unitPrice: Math.max(0, number(body.unitPrice)) || undefined });
+      } else {
+        sendJson(res, 400, { error: "구분을 고르세요." });
+        return;
+      }
+      for (const r of rows) await erp.put("stockMoves", r);
+      sendJson(res, 201, { moves: rows });
+      return;
+    }
+
+    const voidMatch = pathname.match(/^\/api\/stock\/moves\/([^/]+)\/void$/);
+    if (voidMatch && method === "POST") {
+      const all = await erp.list("stockMoves");
+      const target = all.find((m) => m.id === voidMatch[1]);
+      if (!target) { sendJson(res, 404, { error: "기록을 찾을 수 없습니다." }); return; }
+      if (target.refType === "production") { sendJson(res, 400, { error: "생산투입은 생산 기록을 취소하세요." }); return; }
+      // 이동은 짝까지 함께 무른다.
+      for (const m of all.filter((x) => x.id === target.id || (target.pairId && x.pairId === target.pairId))) {
+        await erp.put("stockMoves", { ...m, voided: true, voidedAt: now(), voidedBy: who });
+      }
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    const settingMatch = pathname.match(/^\/api\/stock\/settings\/([^/]+)$/);
+    if (settingMatch && method === "PUT") {
+      const body = await readBody(req);
+      if (!(db.materials || []).some((m) => m.id === settingMatch[1])) { sendJson(res, 404, { error: "원부자재를 찾을 수 없습니다." }); return; }
+      const prior = (await erp.get("stockSettings", settingMatch[1])) || { id: settingMatch[1] };
+      const next = { ...prior, updatedAt: now() };
+      for (const key of ["safetyStock", "orderMultiple", "leadTimeDays"]) if (key in body) next[key] = Math.max(0, qtyOf(body[key]));
+      if ("unit" in body) next.unit = String(body.unit || "").trim().slice(0, 20);
+      if ("tracked" in body) next.tracked = body.tracked !== false && body.tracked !== "false";
+      await erp.put("stockSettings", next);
+      sendJson(res, 200, { setting: next });
+      return;
+    }
+
+    const productMatch = pathname.match(/^\/api\/stock\/products(?:\/([^/]+))?$/);
+    if (productMatch && (method === "POST" || method === "PUT")) {
+      const body = await readBody(req);
+      const prior = productMatch[1] ? await erp.get("stockProducts", productMatch[1]) : null;
+      if (productMatch[1] && !prior) { sendJson(res, 404, { error: "제품을 찾을 수 없습니다." }); return; }
+      const lines = (Array.isArray(body.lines) ? body.lines : [])
+        .map((l) => ({ materialId: String(l.materialId || ""), perUnit: Math.max(0, qtyOf(l.perUnit)), lossRate: Math.min(100, Math.max(0, qtyOf(l.lossRate))) }))
+        .filter((l) => l.materialId && l.perUnit > 0 && (db.materials || []).some((m) => m.id === l.materialId));
+      const rec = {
+        ...(prior || { id: id("bom"), createdAt: now() }),
+        name: String(body.name || prior?.name || "").trim().slice(0, 200),
+        unit: String(body.unit || prior?.unit || "개").trim().slice(0, 20),
+        lines,
+        memo: String(body.memo ?? prior?.memo ?? "").trim().slice(0, 500),
+        updatedAt: now()
+      };
+      if (!rec.name) { sendJson(res, 400, { error: "제품명을 입력하세요." }); return; }
+      if (!rec.lines.length) { sendJson(res, 400, { error: "원부자재를 한 줄 이상 넣으세요." }); return; }
+      await erp.put("stockProducts", rec);
+      sendJson(res, prior ? 200 : 201, { product: rec });
+      return;
+    }
+    if (productMatch && productMatch[1] && method === "DELETE") {
+      if ((await erp.list("stockRuns")).some((r) => r.productId === productMatch[1] && r.status !== "cancelled")) {
+        sendJson(res, 400, { error: "생산 기록이 있는 제품은 지울 수 없습니다." });
+        return;
+      }
+      await erp.remove("stockProducts", productMatch[1]);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // 생산 기록. 완료하면 BOM 대로 그 공장 재고에서 생산투입을 만든다.
+    if (pathname === "/api/stock/runs" && method === "POST") {
+      const body = await readBody(req);
+      const product = await erp.get("stockProducts", String(body.productId || ""));
+      if (!product) { sendJson(res, 400, { error: "제품을 고르세요." }); return; }
+      const location = String(body.location || "").trim();
+      if (!locations.some((l) => l.key === location)) { sendJson(res, 400, { error: "생산처를 고르세요." }); return; }
+      const quantity = Math.round(qtyOf(body.quantity));
+      if (quantity <= 0) { sendJson(res, 400, { error: "생산 수량을 입력하세요." }); return; }
+      const run = {
+        id: id("run"), productId: product.id, productName: product.name, location, quantity,
+        date: dateOnly(body.date) || kstToday(), status: body.status === "done" ? "done" : "planned",
+        memo: String(body.memo || "").trim().slice(0, 300), createdAt: now(), createdBy: who
+      };
+      await erp.put("stockRuns", run);
+      if (run.status === "done") {
+        for (const m of inventory.consumptionMoves(run, product)) await erp.put("stockMoves", { ...m, id: id("mv"), createdAt: now(), createdBy: who });
+      }
+      sendJson(res, 201, { run });
+      return;
+    }
+
+    const runAction = pathname.match(/^\/api\/stock\/runs\/([^/]+)\/(complete|cancel)$/);
+    if (runAction && method === "POST") {
+      const body = await readBody(req);
+      const run = await erp.get("stockRuns", runAction[1]);
+      if (!run) { sendJson(res, 404, { error: "생산 기록을 찾을 수 없습니다." }); return; }
+      if (runAction[2] === "complete") {
+        if (run.status !== "planned") { sendJson(res, 400, { error: "예정 상태만 완료할 수 있습니다." }); return; }
+        const product = await erp.get("stockProducts", run.productId);
+        if (!product) { sendJson(res, 400, { error: "제품 구성이 지워졌습니다." }); return; }
+        // 실제 생산 수량이 예정과 다르면 바꿔서 완료한다.
+        if (body.quantity) run.quantity = Math.max(1, Math.round(qtyOf(body.quantity)));
+        run.date = dateOnly(body.date) || kstToday();
+        run.status = "done";
+        run.completedAt = now();
+        for (const m of inventory.consumptionMoves(run, product)) await erp.put("stockMoves", { ...m, id: id("mv"), createdAt: now(), createdBy: who });
+      } else {
+        if (run.status === "done") {
+          for (const m of (await erp.list("stockMoves")).filter((x) => x.refType === "production" && x.refId === run.id)) {
+            await erp.put("stockMoves", { ...m, voided: true, voidedAt: now(), voidedBy: who });
+          }
+        }
+        run.status = "cancelled";
+        run.cancelledAt = now();
+      }
+      run.updatedAt = now();
+      await erp.put("stockRuns", run);
+      sendJson(res, 200, { run });
+      return;
+    }
+
+    sendJson(res, 404, { error: "지원하지 않는 요청입니다." });
+    return;
+  }
+
+  // --- v2 판매 파이프라인 -------------------------------------------------------
+  // 주문접수 → 명세서 → 업체전달 → 청구·계산서 → 입금확인. 판매주문은 erp
+  // 저장소에, 명세서는 기존 '명세서 발행'(purchaseOrders) 기록으로 만든다.
+  // --- v2 경영 KPI·손익: kpi.html 저장소 + v2 참고값 -------------------------------
+  if (pathname === "/api/kpi/state" || pathname === "/api/kpi/v2-summary") {
+    if (!requirePermission(actor, res, "kpi", "view")) return;
+    if (pathname === "/api/kpi/state" && method === "GET") {
+      const rec = await erp.get("settings", "kpiState");
+      sendJson(res, 200, { state: rec?.state || null, rev: rec?.rev || 0, updatedAt: rec?.updatedAt || "", updatedBy: rec?.updatedBy || "" });
+      return;
+    }
+    if (pathname === "/api/kpi/state" && method === "PUT") {
+      if (!requirePermission(actor, res, "kpi", "edit")) return;
+      const body = await readBody(req);
+      if (!body.state || typeof body.state !== "object" || !body.state.months) { sendJson(res, 400, { error: "KPI 값이 비었습니다." }); return; }
+      const prev = await erp.get("settings", "kpiState");
+      if (prev && Number(body.rev || 0) !== Number(prev.rev || 0)) { sendJson(res, 409, { error: "다른 곳에서 먼저 고쳤습니다.", rev: prev.rev }); return; }
+      const rev = Number(prev?.rev || 0) + 1;
+      await erp.put("settings", { id: "kpiState", state: body.state, rev, updatedAt: now(), updatedBy: actor.name || actor.email || "" });
+      // 하루 한 벌씩 되돌릴 수 있게 남긴다.
+      await erp.put("kpiHistory", { id: kstToday(), state: body.state, rev, savedAt: now() });
+      sendJson(res, 200, { rev });
+      return;
+    }
+    if (pathname === "/api/kpi/v2-summary" && method === "GET") {
+      const ym = /^\d{4}-\d{2}$/.test(url.searchParams.get("month") || "") ? url.searchParams.get("month") : kstToday().slice(0, 7);
+      const [records, salesOrders, bills, loans, loanPays, schedules] = await Promise.all(
+        ["monthlyBoard", "salesOrders", "prodBills", "loans", "loanPayments", "cashSchedules"].map((c) => erp.list(c).catch(() => [])));
+      const board = monthly.boardRows({ brands: db.brands.filter((b) => (b.type || "brand") === "brand"), requests: db.requests, records, ym });
+      const sum = (list, f) => list.reduce((s, x) => s + Math.round(Number(f(x) || 0)), 0);
+      const inMonth = (d) => String(d || "").slice(0, 7) === ym;
+      const so = salesOrders.filter((o) => o.status !== "cancelled" && inMonth(o.orderDate));
+      const pb = bills.filter((b) => !b.voided && inMonth(b.date));
+      const activeLoans = loans.filter((l) => !l.closed && !l.rehabCreditor);
+      const interest = sum(activeLoans, (l) => loansLib.expectedPayment(l, loansLib.loanBalance(l, loanPays), `${ym}-15`).interest);
+      const fixed = schedules.filter((s) => s.active !== false && s.direction !== "in" && s.repeat === "monthly");
+      const byCat = {};
+      for (const s of fixed) byCat[s.category || "기타"] = (byCat[s.category || "기타"] || 0) + Math.round(Number(s.amount || 0));
+      sendJson(res, 200, { month: ym,
+        wooof: { brands: board.length, sales: sum(board, (r) => r.sales), shipping: sum(board, (r) => r.shipping), recovered: sum(board, (r) => r.recovered), margin: sum(board, (r) => r.margin) },
+        sales: { orders: so.length, total: sum(so, (o) => o.total), supply: sum(so, (o) => o.subtotal) },
+        production: { bills: pb.length, total: sum(pb, (b) => b.amount), byPartner: Object.entries(pb.reduce((m, b) => ((m[b.partnerName] = (m[b.partnerName] || 0) + Math.round(b.amount)), m), {})) },
+        loans: { interest, count: activeLoans.length },
+        fixedCosts: { total: Object.values(byCat).reduce((a, b) => a + b, 0), byCategory: byCat } });
+      return;
+    }
+  }
+
+  // --- v2 입점사 월정산 보드 ----------------------------------------------------
+  // 대시보드 '오늘 할 일': 여러 메뉴에 흩어진 대기 건을 권한에 맞게 모은다(이카운트의 미결 현황).
+  if (pathname === "/api/todo" && method === "GET") {
+    const owner = actor.role === "owner";
+    const items = [];
+    const push = (key, label, list, amountOf, go, tone = "") => {
+      if (!list.length) return;
+      items.push({ key, label, count: list.length, amount: amountOf ? list.reduce((s, x) => s + Number(amountOf(x) || 0), 0) : null, go, tone });
+    };
+    if (can(actor, "requests", "view")) {
+      push("requests", "입금 대기 입금요청", db.requests.filter((r) => ["pending", "await_deposit"].includes(r.status)), (r) => r.depositAmount, { tab: "requests" });
+    }
+    const pays = can(actor, "payments", "view") || owner ? await erp.list("payments") : [];
+    if (owner || can(actor, "payments", "approve")) push("approve", "대표 허가 필요 지급요청", pays.filter((p) => p.status === "awaiting_approval"), (p) => p.amount, { tab: "payments" }, "warn");
+    if (owner || can(actor, "payments", "confirm")) push("confirm", "확인 대기 지급요청", pays.filter((p) => p.status === "requested"), (p) => p.amount, { tab: "payments" });
+    if (owner || can(actor, "payments", "pay")) {
+      const today = kstToday();
+      push("pay", "지급할 지급요청", pays.filter((p) => p.status === "confirmed"), (p) => p.amount, { tab: "payments" });
+      push("payLate", "기한 지난 지급요청", pays.filter((p) => ["requested", "confirmed", "awaiting_approval"].includes(p.status) && p.dueDate && p.dueDate < today), (p) => p.amount, { tab: "payments" }, "danger");
+    }
+    if (owner || can(actor, "sales", "view")) {
+      const so = await erp.list("salesOrders").catch(() => []);
+      push("salesLate", "입금기한 지난 판매 미수", so.filter((o) => o.dueDate && o.dueDate < kstToday() && sales.remaining(o) > 0 && !["cancelled", "on_hold"].includes(sales.deriveStage(o))), (o) => sales.remaining(o), { tab: "trade", sub: "sales" }, "danger");
+    }
+    if (owner || can(actor, "cash", "edit")) {
+      push("questions", "답할 확인 필요", (await erp.list("setupQuestions")).filter((q) => q.status === "open"), null, { tab: "setup" });
+    }
+    if (owner || can(actor, "payments", "view") || can(actor, "requests", "view") || can(actor, "cash", "view")) {
+      push("notices", "안 보낸 메신저 알림", (await erp.list("notices")).filter((n) => !(n.shares || []).length), null, { tab: "messenger" });
+    }
+    if (owner || can(actor, "settlement", "view")) {
+      const prev = closing.prevMonth(kstToday().slice(0, 7));
+      const c = await closingState();
+      if (!closing.isLocked(c, prev)) items.push({ key: "closing", label: `지난달(${prev}) 마감 전`, count: null, amount: null, go: { tab: "closing" }, tone: "" });
+    }
+    sendJson(res, 200, { items, today: kstToday() });
+    return;
+  }
+
+  // 메신저 공유함: 알림 목록·복사/보내기 기록·채널톡 설정(설정은 대표만).
+  if (pathname === "/api/notices" || pathname.startsWith("/api/notices/") || pathname.startsWith("/api/messenger/")) {
+    const canSee = actor.role === "owner" || can(actor, "payments", "view") || can(actor, "requests", "view") || can(actor, "cash", "view");
+    if (!canSee) { sendJson(res, 403, { error: "공유함을 볼 권한이 없습니다." }); return; }
+    const who = actor.name || actor.email || "";
+    // 알림 종류마다 그 메뉴를 볼 수 있는 사람에게만.
+    const kindVisible = (kind) => actor.role === "owner"
+      || (kind.startsWith("request_") ? can(actor, "requests", "view")
+        : kind.startsWith("payment_") ? can(actor, "payments", "view")
+          : kind === "closing" ? can(actor, "settlement", "view")
+            : kind === "daily" ? can(actor, "cash", "view") : true);
+    if (pathname === "/api/notices" && method === "GET") {
+      const list = (await erp.list("notices")).filter((n) => kindVisible(n.kind)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 300);
+      const cfg = await messengerSettings();
+      sendJson(res, 200, { notices: list, kinds: notify.NOTICE_KINDS, settings: actor.role === "owner" ? cfg : { mode: cfg.mode },
+        channelReady: actor.role === "owner" && notify.channelConfigured() && cfg.mode !== "off", keysPresent: notify.channelConfigured(), isOwner: actor.role === "owner" });
+      return;
+    }
+    if (pathname === "/api/notices" && method === "POST") {
+      const body = await readBody(req);
+      const text = String(body.text || "").trim().slice(0, 4000);
+      if (!text) { sendJson(res, 400, { error: "보낼 내용을 적어 주세요." }); return; }
+      const kind = body.kind === "daily" ? "daily" : "manual";
+      const rec = { id: id("ntc"), kind, title: String(body.title || text.split("\n")[0]).slice(0, 120), text, refType: "", refId: "", createdAt: now(), createdBy: who, shares: [] };
+      await erp.put("notices", rec);
+      sendJson(res, 201, { notice: rec });
+      return;
+    }
+    const share = pathname.match(/^\/api\/notices\/([^/]+)\/share$/);
+    if (share && method === "POST") {
+      const body = await readBody(req);
+      const rec = await erp.get("notices", decodeURIComponent(share[1]));
+      if (!rec || !kindVisible(rec.kind)) { sendJson(res, 404, { error: "알림을 찾을 수 없습니다." }); return; }
+      if (body.via === "channel" && actor.role !== "owner") { sendJson(res, 403, { error: "채널톡 보내기는 대표만 할 수 있습니다." }); return; }
+      let entry = { at: now(), by: who, via: "복사" };
+      if (body.via === "channel") {
+        const r = await notify.sendToChannel(await messengerSettings(), rec.text);
+        if (!r.ok) { sendJson(res, 400, { error: r.error }); return; }
+        entry = { at: now(), by: who, via: `채널톡(${r.target === "test" ? "시험" : "팀챗"})` };
+      }
+      rec.shares = [...(rec.shares || []), entry].slice(-20);
+      await erp.put("notices", rec);
+      sendJson(res, 200, { notice: rec });
+      return;
+    }
+    if (pathname === "/api/messenger/settings" && method === "PUT") {
+      if (actor.role !== "owner") { sendJson(res, 403, { error: "대표만 바꿀 수 있습니다." }); return; }
+      const body = await readBody(req);
+      const cur = await messengerSettings();
+      const next = { ...cur, id: "messenger",
+        mode: ["off", "test", "live"].includes(body.mode) ? body.mode : cur.mode,
+        groupId: String(body.groupId ?? cur.groupId).replace(/\D/g, ""),
+        botName: String(body.botName ?? cur.botName).slice(0, 30),
+        testManagerId: String(body.testManagerId ?? cur.testManagerId).replace(/\D/g, ""),
+        autoKinds: Array.isArray(body.autoKinds) ? body.autoKinds.filter((k) => notify.NOTICE_KINDS[k]) : cur.autoKinds,
+        updatedBy: who, updatedAt: now() };
+      await erp.put("settings", next);
+      sendJson(res, 200, { settings: next });
+      return;
+    }
+    sendJson(res, 404, { error: "없는 기능입니다." });
+    return;
+  }
+
+  if (pathname === "/api/closing" || pathname.startsWith("/api/closing/")) {
+    if (!requirePermission(actor, res, "settlement", "view")) return;
+    const who = actor.name || actor.email || "";
+    if (pathname === "/api/closing" && method === "GET") {
+      sendJson(res, 200, { closing: await closingState(), canClose: actor.role === "owner" });
+      return;
+    }
+    if (pathname === "/api/closing/check" && method === "GET") {
+      const month = closing.isYm(url.searchParams.get("month")) ? url.searchParams.get("month") : closing.prevMonth(kstToday().slice(0, 7));
+      const result = await computeClosingCheck(db, month);
+      sendJson(res, 200, { ...result, closing: await closingState(), canClose: actor.role === "owner" });
+      return;
+    }
+    if (actor.role !== "owner") { sendJson(res, 403, { error: "마감·해제는 대표만 할 수 있습니다." }); return; }
+    const body = await readBody(req);
+    const c = await closingState();
+    if (pathname === "/api/closing/lock" && method === "POST") {
+      const month = String(body.month || "");
+      if (!closing.isYm(month)) { sendJson(res, 400, { error: "마감할 달을 고르세요." }); return; }
+      if (c.lockedThrough && month <= c.lockedThrough) { sendJson(res, 400, { error: `${c.lockedThrough} 까지 이미 마감되어 있습니다.` }); return; }
+      if (month > kstToday().slice(0, 7)) { sendJson(res, 400, { error: "아직 오지 않은 달은 마감할 수 없습니다." }); return; }
+      const check = await computeClosingCheck(db, month);
+      if (check.open && !String(body.note || "").trim()) { sendJson(res, 400, { error: `끝나지 않은 일이 ${check.open}건 있습니다. 마감하려면 이유를 적어 주세요.`, open: check.open }); return; }
+      body.open = check.open;
+      c.history = [{ action: "lock", month, by: who, at: now(), note: String(body.note || "").slice(0, 300), open: Number(body.open || 0) }, ...(c.history || [])].slice(0, 100);
+      c.lockedThrough = month;
+      await erp.put("settings", c);
+      addAudit(db, actor, "update", "closing", month, `${month} 월 마감${body.note ? ` (${String(body.note).slice(0, 80)})` : ""}`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { closing: c });
+      pushNotice("closing", { month, note: String(body.note || "").slice(0, 80), by: who }, { type: "closing", id: month });
+      return;
+    }
+    if (pathname === "/api/closing/unlock" && method === "POST") {
+      const month = String(body.month || c.lockedThrough || "");
+      const reason = String(body.reason || "").trim();
+      if (!closing.isLocked(c, month)) { sendJson(res, 400, { error: "마감된 달이 아닙니다." }); return; }
+      if (!reason) { sendJson(res, 400, { error: "마감을 푸는 이유를 적어 주세요." }); return; }
+      c.lockedThrough = closing.prevMonth(month) < "2000-01" ? "" : closing.prevMonth(month);
+      c.history = [{ action: "unlock", month, by: who, at: now(), note: reason.slice(0, 300) }, ...(c.history || [])].slice(0, 100);
+      await erp.put("settings", c);
+      addAudit(db, actor, "update", "closing", month, `${month} 마감 해제: ${reason.slice(0, 80)}`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { closing: c });
+      return;
+    }
+    sendJson(res, 404, { error: "없는 기능입니다." });
+    return;
+  }
+
+  if (pathname === "/api/monthly" || pathname.startsWith("/api/monthly/")) {
+    if (!requirePermission(actor, res, "settlement", "view")) return;
+    const canEdit = actor.role === "owner" || can(actor, "settlement", "edit");
+    const who = actor.name || actor.email || "";
+    const brandList = db.brands.filter((b) => (b.type || "brand") === "brand");
+
+    if (pathname === "/api/monthly" && method === "GET") {
+      const records = await erp.list("monthlyBoard");
+      const months = [...new Set([...records.map((r) => r.month), ...db.requests.filter((r) => r.status !== "deleted").map(monthly.requestMonth)])]
+        .filter((m) => /^\d{4}-\d{2}$/.test(m)).sort().reverse();
+      const ym = /^\d{4}-\d{2}$/.test(url.searchParams.get("month") || "") ? url.searchParams.get("month") : kstToday().slice(0, 7);
+      const rows = monthly.boardRows({ brands: brandList, requests: db.requests, records, ym });
+      const sum = (f) => rows.reduce((s, r) => s + Number(r[f] || 0), 0);
+      sendJson(res, 200, { month: ym, months, rows, canEdit,
+        totals: { sales: sum("sales"), shipping: sum("shipping"), recovered: sum("recovered"), margin: sum("margin"),
+          checked: rows.filter((r) => r.checked).length, sent: rows.filter((r) => r.sent).length, diffs: rows.filter((r) => r.diffs.length).length },
+        brands: brandList.map((b) => ({ id: b.id, name: b.name, code: b.code || "" })) });
+      return;
+    }
+
+    if (!canEdit) { sendJson(res, 403, { error: "월정산을 고칠 권한이 없습니다." }); return; }
+
+    const rowMatch = pathname.match(/^\/api\/monthly\/(\d{4}-\d{2})\/([^/]+)$/);
+    if (rowMatch && method === "PUT") {
+      const [, ym, brandId] = rowMatch;
+      if (!(await guardOpenMonth(res, ym))) return;
+      const brand = brandList.find((b) => b.id === decodeURIComponent(brandId));
+      if (!brand) { sendJson(res, 404, { error: "브랜드를 찾을 수 없습니다." }); return; }
+      const body = await readBody(req);
+      const rid = `${ym}:${brand.id}`;
+      const rec = (await erp.get("monthlyBoard", rid)) || { id: rid, month: ym, brandId: brand.id, brandName: brand.name, createdAt: now() };
+      for (const k of ["checked", "invoiceRequested", "sent"]) if (k in body) rec[k] = body[k] === true || body[k] === "true";
+      for (const k of ["memo", "fixRequest"]) if (k in body) rec[k] = String(body[k] ?? "").slice(0, 500);
+      if (body.manual && typeof body.manual === "object") {
+        rec.manual = Object.fromEntries(["sales", "shipping", "recovered", "margin"].map((f) => [f, Math.round(number(String(body.manual[f] ?? "").replace(/,/g, "")))]));
+      }
+      rec.updatedBy = who;
+      rec.updatedAt = now();
+      rec.editedAt = now();
+      await erp.put("monthlyBoard", rec);
+      sendJson(res, 200, { record: rec });
+      return;
+    }
+
+    if (pathname === "/api/monthly/import-sheet" && method === "POST") {
+      if (actor.role !== "owner") { sendJson(res, 403, { error: "가져오기는 오너만 할 수 있습니다." }); return; }
+      let extract;
+      try { extract = await extractSheetWith(MONTHLY_SHEET_ID, MONTHLY_EXTRACT_SCRIPT, "월정산 시트"); } catch (error) { sendJson(res, 502, { error: error.message }); return; }
+      const plan = monthly.planMonthlyImport(extract, { brands: brandList, requests: db.requests });
+      const stamp = now();
+      let saved = 0;
+      const closingNow = await closingState();
+      for (const r of plan.records.filter((x) => !closing.isLocked(closingNow, x.month))) {
+        const prev = await erp.get("monthlyBoard", r.id);
+        if (prev?.editedAt) { await erp.put("monthlyBoard", { ...prev, sheet: r.sheet }); continue; } // 손댄 줄은 시트 값만 갱신
+        await erp.put("monthlyBoard", { ...r, importedAt: stamp });
+        saved += 1;
+      }
+      const qs = monthly.monthlyQuestions(plan);
+      const existingQ = new Map((await erp.list("setupQuestions")).map((x) => [x.id, x]));
+      for (const qn of qs) {
+        if (existingQ.get(qn.id)?.status === "answered") continue;
+        await erp.put("setupQuestions", { ...qn, createdAt: existingQ.get(qn.id)?.createdAt || stamp, updatedAt: stamp });
+      }
+      addAudit(db, actor, "update", "monthly", "import", `월정산 시트 가져오기: ${Object.keys(extract.months || {}).length}개월, ${plan.records.length}줄, 질문 ${qs.length}건`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { months: Object.keys(extract.months || {}).length, records: plan.records.length, saved, unmatched: plan.unmatched.length, questions: qs.length });
+      return;
+    }
+
+    sendJson(res, 404, { error: "없는 경로입니다." });
+    return;
+  }
+
+  // --- v2 현금흐름표 (구글시트와 같은 모양: 행=IN/OUT 항목, 열=날짜) -------------------
+  if (pathname === "/api/cashflow" || pathname.startsWith("/api/cashflow/")) {
+    if (!requirePermission(actor, res, "cash", "view")) return;
+    const canEdit = actor.role === "owner" || can(actor, "cash", "edit");
+    const who = actor.name || actor.email || "";
+    const today = kstToday();
+    const monthOf = (v) => (/^\d{4}-\d{2}$/.test(v || "") ? v : today.slice(0, 7));
+    const companies = (key) => (key === "wooof" || key === "betters" ? [key] : ["wooof", "betters"]);
+
+    // 그달 v2 예정: 일일 자금보고와 같은 계산을 그달 전체로 돌린다(회사별).
+    const planLines = async (month, companyKey) => {
+      const days = cashFlow.monthDays(month);
+      const start = days[0].date;
+      const span = days.length - 1;
+      const [schedules, pays, loans, loanPays, plan, rehabPays, so] = await Promise.all([
+        erp.list("cashSchedules"), erp.list("payments").catch(() => []), erp.list("loans"), erp.list("loanPayments"),
+        erp.get("rehabPlan", "current"), erp.list("rehabPayments"), erp.list("salesOrders").catch(() => [])]);
+      const out = [];
+      for (const co of companies(companyKey)) {
+        const end = payments.addDays(start, span);
+        const report = cashReport.buildCashReport({
+          today: start, days: span, company: co, openingBalance: null,
+          schedules: [...schedules, ...loansLib.loanScheduleLines(loans.filter((l) => l.company === co), loanPays, start, end),
+            ...(co === "wooof" ? rehab.rehabScheduleLines(plan, rehabPays, start, end) : [])],
+          payments: pays.filter((p) => (p.company || "wooof") === co),
+          requests: co === "wooof" ? db.requests : [],
+          receivables: co === "wooof" ? sales.receivables(so, start) : []
+        });
+        for (const d of report.days) for (const it of d.items) {
+          if (!it.amount) continue;
+          out.push({ date: d.date, side: it.direction === "in" ? "in" : "out", amount: it.amount, company: co,
+            text: `${it.title || ""} ${it.category || ""}`, title: it.title, source: it.source });
+        }
+      }
+      return out;
+    };
+
+    if (pathname === "/api/cashflow" && method === "GET") {
+      const month = monthOf(url.searchParams.get("month"));
+      // 기본은 두 사업자 합쳐 보기, 필터로 우프컴퍼니 / Betters(개인사업자)만.
+      const companyKey = ["wooof", "betters"].includes(url.searchParams.get("company")) ? url.searchParams.get("company") : "";
+      const [rows, allCells, actualDoc, plan] = await Promise.all([
+        erp.list("cashRows"), erp.list("cashCells"), erp.get("cashActual", month), planLines(month, companyKey)]);
+      const cells = allCells.filter((c) => String(c.date).startsWith(month));
+      const actual = (actualDoc?.lines || []).filter((l) => !companyKey || l.company === companyKey);
+      const grid = cashFlow.buildGrid({ rows, month, cells, actual, plan, today, company: companyKey, actualSynced: Boolean(actualDoc) });
+      // 이번 달이면 오늘 시작 잔액(클로브)부터 앞날 잔액을 이어 본다.
+      let opening = null;
+      let balanceError = "";
+      if (month === today.slice(0, 7)) {
+        try {
+          let sum = 0;
+          let any = false;
+          for (const co of companies(companyKey)) {
+            const company = CASH_COMPANIES.find((c) => c.key === co);
+            const companyId = company ? await clobeCompanyIdFor(db, company) : "";
+            if (!companyId) continue;
+            const acc = await clobeCall(db, "get_bank_accounts", { companyId });
+            for (const a of acc.accounts || []) if ((a.currencyCode || "KRW") === "KRW") { sum += Number(a.krwBalance || 0); any = true; }
+          }
+          opening = any ? sum : null;
+          if (!any) balanceError = "클로브가 연결되지 않아 잔액을 이어 볼 수 없습니다.";
+        } catch (error) { balanceError = error.message || "클로브 잔액을 불러오지 못했습니다."; }
+      }
+      sendJson(res, 200, { month, company: companyKey, today, ...grid, balances: cashFlow.balances(grid.days, grid.totals, opening, today),
+        opening, balanceError, actualSyncedAt: actualDoc?.syncedAt || "", hasRows: rows.length > 0, canEdit, isOwner: actor.role === "owner", revenueTypes: cashFlow.REVENUE_TYPES });
+      return;
+    }
+
+    if (!canEdit) { sendJson(res, 403, { error: "현금흐름표를 고칠 권한이 없습니다." }); return; }
+
+    if (pathname === "/api/cashflow/cell" && method === "PUT") {
+      const body = await readBody(req);
+      const date = dateOnly(body.date);
+      const row = await erp.get("cashRows", String(body.rowId || ""));
+      if (!date || !row) { sendJson(res, 400, { error: "날짜와 행을 고르세요." }); return; }
+      if (!(await guardOpenMonth(res, closing.ym(date)))) return;
+      const id = `${date}|${row.id}|manual`;
+      const raw = String(body.amount ?? "").replace(/,/g, "").trim();
+      if (raw === "") {
+        await erp.remove("cashCells", id);
+        sendJson(res, 200, { removed: true });
+        return;
+      }
+      const rec = { id, date, rowId: row.id, amount: Math.round(number(raw)), memo: String(body.memo || "").slice(0, 300), source: "manual", by: who, at: now() };
+      await erp.put("cashCells", rec);
+      sendJson(res, 200, { cell: rec });
+      return;
+    }
+
+    if (pathname === "/api/cashflow/rows" && method === "POST") {
+      const body = await readBody(req);
+      const label = String(body.label || "").trim().slice(0, 60);
+      const side = body.side === "in" ? "in" : "out";
+      if (!label) { sendJson(res, 400, { error: "행 이름을 입력하세요." }); return; }
+      const rows = await erp.list("cashRows");
+      const rec = { id: id("cfr"), side, label, order: Math.max(0, ...rows.filter((r) => r.side === side).map((r) => Number(r.order || 0))) + 1,
+        match: [], company: "", active: true, createdBy: who, createdAt: now() };
+      await erp.put("cashRows", rec);
+      sendJson(res, 201, { row: rec });
+      return;
+    }
+    const rowEdit = pathname.match(/^\/api\/cashflow\/rows\/([^/]+)$/);
+    if (rowEdit && method === "PUT") {
+      const rec = await erp.get("cashRows", decodeURIComponent(rowEdit[1]));
+      if (!rec) { sendJson(res, 404, { error: "행이 없습니다." }); return; }
+      const body = await readBody(req);
+      if ("label" in body) rec.label = String(body.label || "").trim().slice(0, 60) || rec.label;
+      if ("order" in body) rec.order = number(body.order);
+      if ("active" in body) rec.active = body.active !== false && body.active !== "false";
+      if ("company" in body) rec.company = ["wooof", "betters"].includes(body.company) ? body.company : "";
+      if ("revenueType" in body) rec.revenueType = cashFlow.REVENUE_TYPES[body.revenueType] ? body.revenueType : "";
+      if ("match" in body) rec.match = String(Array.isArray(body.match) ? body.match.join(",") : body.match || "").split(",").map((x) => x.trim()).filter(Boolean).slice(0, 20);
+      rec.updatedBy = who;
+      rec.updatedAt = now();
+      await erp.put("cashRows", rec);
+      sendJson(res, 200, { row: rec });
+      return;
+    }
+
+    // 클로브 실제 입출금을 그달(어제까지) 가져와 둔다. 계좌 간 이체는 뺀다.
+    if (pathname === "/api/cashflow/sync-clobe" && method === "POST") {
+      const body = await readBody(req);
+      const month = monthOf(body.month);
+      const days = cashFlow.monthDays(month);
+      const startDate = days[0].date;
+      const endDate = days.at(-1).date < today ? days.at(-1).date : payments.addDays(today, -1);
+      if (endDate < startDate) { sendJson(res, 400, { error: "아직 지난 날이 없는 달입니다." }); return; }
+      const lines = [];
+      const errors = [];
+      for (const co of ["wooof", "betters"]) {
+        const company = CASH_COMPANIES.find((c) => c.key === co);
+        try {
+          const companyId = company ? await clobeCompanyIdFor(db, company) : "";
+          if (!companyId) { errors.push(`${company?.name || co}: 클로브 연결 없음`); continue; }
+          let cursor = null;
+          for (let page = 0; page < 40; page += 1) {
+            const p = await clobeCall(db, "get_labeled_transactions", { companyId, startDate, endDate, size: 100, ...(cursor ? { cursor } : {}) });
+            for (const tx of p.content || []) {
+              if (/계좌간/.test(String(tx.category || ""))) continue;
+              const side = Number(tx.inAmount || 0) > 0 ? "in" : "out";
+              const amount = Math.round(Number(side === "in" ? tx.inAmount : tx.outAmount) || 0);
+              if (!amount) continue;
+              lines.push({ date: String(tx.transactionAt || "").slice(0, 10), side, amount, company: co, txId: String(tx.transactionId),
+                title: tx.transactionName || tx.transactionDescription || tx.businessEntityName || "",
+                text: [tx.transactionName, tx.transactionDescription, tx.businessEntityName, tx.customLabel, tx.category].filter(Boolean).join(" ") });
+            }
+            if (!p.hasNext || !p.nextCursor) break;
+            cursor = p.nextCursor;
+          }
+        } catch (error) { errors.push(`${company?.name || co}: ${error.message}`); }
+      }
+      await erp.put("cashActual", { id: month, lines, syncedAt: now(), syncedBy: who, errors });
+      sendJson(res, 200, { lines: lines.length, errors });
+      return;
+    }
+
+    // 옛 구글시트(2026_현금흐름표) 가져오기: 행 이름, 1~11월 칸 값, 왼쪽 고정비 목록 → 자금 일정.
+    if (pathname === "/api/cashflow/import-sheet" && method === "POST") {
+      if (actor.role !== "owner") { sendJson(res, 403, { error: "가져오기는 오너만 할 수 있습니다." }); return; }
+      let ex;
+      try { ex = await extractSheetWith(CASHFLOW_SHEET_ID, CASHFLOW_EXTRACT_SCRIPT, "현금흐름표"); } catch (error) { sendJson(res, 502, { error: error.message }); return; }
+      const stamp = now();
+      const rowId = (side, label) => `cfr:${side}:${label}`;
+      // 클로브 거래처 이름이 시트 행 이름과 다른데 확실한 것만 미리 이어 둔다(나머지는 '기타' 칸에서 사람이 보낸다).
+      const SAFE_MATCH = { "스마트스토어": ["네이버파이낸셜"], "페이코": ["엔에이치엔페이코"], "마켓컬리": ["컬리", "더즌"], "29cm": ["무신사"],
+        "쿠팡": ["쿠팡페이"], "딱펫": ["제이엔씨"], "현대M몰": ["현대홈쇼핑"] };
+      for (const r of ex.rows || []) {
+        const prev = await erp.get("cashRows", rowId(r.side, r.label));
+        const match = prev?.match?.length ? prev.match : (r.side === "in" ? SAFE_MATCH[r.label] || [] : []);
+        const revenueType = prev?.revenueType ?? (r.side === "in" ? (/외주/.test(r.label) ? "service_fee" : /^기타/.test(r.label) ? "" : "product_sales") : "");
+        await erp.put("cashRows", { ...(prev || { company: "", active: true }), match, revenueType, id: rowId(r.side, r.label), side: r.side, label: prev?.label || r.label,
+          order: prev?.order ?? r.order, source: "현금흐름표 시트", importedAt: stamp });
+      }
+      // 사업구조 지침(2026-11-15)에 따라 시트에 없던 행을 더한다. 이미 있으면(고쳤으면) 그대로.
+      const EXTRA_ROWS = [
+        { side: "in", label: "픽키파크 운영대행비·실비", order: 90, company: "wooof", revenueType: "agency_fee", match: ["박상민", "픽키파크"] },
+        { side: "in", label: "MIH ITIT 운영 용역", order: 91, company: "betters", revenueType: "service_fee", match: ["엠아이", "MIH"] },
+        { side: "out", label: "비스타디아 측 재발행(ITIT)", order: 90, company: "betters", revenueType: "pass_through", match: ["공간사용료", "비스타디아"] }
+      ];
+      for (const r of EXTRA_ROWS) {
+        const rid = rowId(r.side, r.label);
+        if (await erp.get("cashRows", rid)) continue;
+        await erp.put("cashRows", { id: rid, ...r, active: true, source: "사업구조 지침", importedAt: stamp });
+      }
+      for (const c of ex.cells || []) {
+        const rid = rowId(c.side, c.label);
+        await erp.put("cashCells", { id: `${c.date}|${rid}|sheet`, date: c.date, rowId: rid, amount: c.amount, source: "sheet", importedAt: stamp });
+      }
+      let fixed = 0;
+      for (const [i, f] of (ex.fixed || []).entries()) {
+        const day = cashFlow.scheduleDay(f.schedule);
+        if (!f.item || !day) continue;
+        const loanLike = /이자비용/.test(f.category);
+        const sid = `cf:${f.no || `x${i}`}:${f.category}:${f.item}`;
+        const prev = await erp.get("cashSchedules", sid);
+        if (prev?.editedAt) continue;
+        await erp.put("cashSchedules", { id: sid, title: `${f.category} ${f.item}`.trim(), category: f.category, kind: f.kind, method: f.method,
+          direction: "out", repeat: "monthly", dayOfMonth: day, amount: f.amount, variable: f.variable,
+          company: /베럴즈/.test(`${f.item} ${f.category}`) ? "betters" : "wooof",
+          // 이자는 대출금 원장이 실제 이율로 잡는다 → 두 번 잡히지 않게 꺼 둔다.
+          active: !loanLike && f.amount > 0,
+          memo: loanLike ? "대출금 원장에서 이율로 자동 계산 — 이 줄은 꺼 둠" : f.variable ? "변동 금액(현금흐름표 값은 예상치)" : "",
+          sheetNo: f.no, source: "현금흐름표 시트", createdBy: who, createdAt: prev?.createdAt || stamp, updatedAt: stamp });
+        fixed += 1;
+      }
+      // 시트 고정비 목록에 이미 있는 항목의 등록 제안은 닫는다.
+      for (const qid of ["proposal:ap:vreview", "proposal:ap:wage-advance"]) {
+        const qn = await erp.get("setupQuestions", qid);
+        if (qn && qn.status !== "answered") await erp.put("setupQuestions", { ...qn, status: "answered", answeredBy: who, answeredAt: stamp,
+          answer: { choice: "sheet", label: "현금흐름표 고정비 목록", applied: "현금흐름표 고정비 목록으로 들어옴" } });
+      }
+      addAudit(db, actor, "update", "cashflow", "import", `현금흐름표 시트 가져오기: 행 ${(ex.rows || []).length}, 칸 ${(ex.cells || []).length}, 고정비 ${fixed}`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { rows: (ex.rows || []).length, cells: (ex.cells || []).length, fixed });
+      return;
+    }
+
+    sendJson(res, 404, { error: "없는 경로입니다." });
+    return;
+  }
+
+  // --- v2 회생계획 변제 ------------------------------------------------------------
+  if (pathname === "/api/rehab" || pathname.startsWith("/api/rehab/")) {
+    if (!requirePermission(actor, res, "cash", "view")) return;
+    const canEdit = actor.role === "owner" || can(actor, "cash", "edit");
+    const who = actor.name || actor.email || "";
+    const today = kstToday();
+    if (pathname === "/api/rehab" && method === "GET") {
+      const [plan, pays] = await Promise.all([erp.get("rehabPlan", "current"), erp.list("rehabPayments")]);
+      const years = plan ? rehab.yearSummary(plan, pays, today) : [];
+      const year = /^\d{4}$/.test(url.searchParams.get("year") || "") ? url.searchParams.get("year") : (years.find((y) => y.due > 0)?.year || today.slice(0, 4));
+      sendJson(res, 200, { hasPlan: Boolean(plan), importedAt: plan?.importedAt || "", totals: plan?.totals || null, years, year,
+        creditors: plan ? rehab.creditorsForYear(plan, year) : [], payments: pays.filter((p) => !p.voided).sort((a, b) => String(b.date).localeCompare(String(a.date))),
+        byCategory: plan ? Object.entries(plan.creditors.reduce((m, c) => { const k = c.cat || "기타"; m[k] ||= { count: 0, total: 0, cash: 0 }; m[k].count += 1; m[k].total += c.total; m[k].cash += c.cash; return m; }, {})) : [],
+        canEdit });
+      return;
+    }
+    if (!canEdit) { sendJson(res, 403, { error: "회생변제를 고칠 권한이 없습니다." }); return; }
+    if (pathname === "/api/rehab/import-sheet" && method === "POST") {
+      if (actor.role !== "owner") { sendJson(res, 403, { error: "가져오기는 오너만 할 수 있습니다." }); return; }
+      let extract;
+      try { extract = await extractSheetWith(REHAB_SHEET_ID, REHAB_EXTRACT_SCRIPT, "회생채권 변제계획표"); } catch (error) { sendJson(res, 502, { error: error.message }); return; }
+      const creditors = extract.creditors || [];
+      const sum = creditors.reduce((s, c) => s + Number(c.total || 0), 0);
+      if (!extract.totals || Math.abs(sum - Number(extract.totals.total || 0)) > 1) {
+        sendJson(res, 400, { error: `계획표 합계가 맞지 않습니다(채권자 합 ${sum.toLocaleString()} / 총 합계 ${Number(extract.totals?.total || 0).toLocaleString()}). 시트 모양이 바뀌었는지 확인하세요.` });
+        return;
+      }
+      await erp.put("rehabPlan", { id: "current", creditors, totals: extract.totals, importedAt: now(), importedBy: who });
+      addAudit(db, actor, "update", "rehabPlan", "current", `회생 변제계획표 가져오기: 채권자 ${creditors.length}곳, 채권총액 ${sum.toLocaleString()}원`, null, null);
+      await recomputeRehabPaid(db);
+      await writeDb(db);
+      sendJson(res, 200, { creditors: creditors.length, total: sum, years: extract.totals.years });
+      return;
+    }
+    if (pathname === "/api/rehab/payments" && method === "POST") {
+      const body = await readBody(req);
+      const rec = { id: id("rp"), year: String(body.year || "").slice(0, 4), date: dateOnly(body.date) || today,
+        amount: Math.max(0, Math.round(number(String(body.amount ?? "").replace(/,/g, "")))), memo: String(body.memo || "").slice(0, 300), createdBy: who, createdAt: now() };
+      if (!/^\d{4}$/.test(rec.year) || !rec.amount) { sendJson(res, 400, { error: "연도와 금액을 입력하세요." }); return; }
+      await erp.put("rehabPayments", rec);
+      addAudit(db, actor, "create", "rehabPayment", rec.id, `회생채권 ${rec.year}년 변제 ${rec.amount.toLocaleString()}원 기록`, null, rec);
+      await recomputeRehabPaid(db);
+      await writeDb(db);
+      sendJson(res, 201, { payment: rec });
+      return;
+    }
+    const pv = pathname.match(/^\/api\/rehab\/payments\/([^/]+)\/void$/);
+    if (pv && method === "POST") {
+      const rec = await erp.get("rehabPayments", decodeURIComponent(pv[1]));
+      if (!rec) { sendJson(res, 404, { error: "기록이 없습니다." }); return; }
+      await erp.put("rehabPayments", { ...rec, voided: true, voidedBy: who, voidedAt: now() });
+      addAudit(db, actor, "delete", "rehabPayment", rec.id, `회생채권 ${rec.year}년 변제 기록 취소`, rec, null);
+      await recomputeRehabPaid(db);
+      await writeDb(db);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    sendJson(res, 404, { error: "없는 경로입니다." });
+    return;
+  }
+
+  // --- v2 대출금 원장 ------------------------------------------------------------
+  if (pathname === "/api/loans" || pathname.startsWith("/api/loans/")) {
+    if (!requirePermission(actor, res, "cash", "view")) return;
+    const canEdit = actor.role === "owner" || can(actor, "cash", "edit");
+    const who = actor.name || actor.email || "";
+    const today = kstToday();
+    const decorate = (l, pays) => {
+      const balance = loansLib.loanBalance(l, pays);
+      const next = loansLib.loanScheduleLines([l], pays, today, payments.addDays(today, 45))[0];
+      return { ...l, currentBalance: balance, status: loansLib.loanStatus(l, balance, today), expected: loansLib.expectedPayment(l, balance, today),
+        nextDate: next?.date || "", nextAmount: next?.amount || 0, paymentCount: pays.filter((p) => p.loanId === l.id && !p.voided).length };
+    };
+
+    if (pathname === "/api/loans" && method === "GET") {
+      const [loans, pays, plan] = await Promise.all([erp.list("loans"), erp.list("loanPayments"), erp.get("rehabPlan", "current")]);
+      const rows = loans.map((l) => {
+        const d = decorate(l, pays);
+        const c = l.rehabCreditor ? rehab.creditorPlan(plan, l.rehabCreditor) : null;
+        // 회생채권: 계획표의 채권총액·현금변제액·연도별 금액을 붙인다(같은 채권자 대출이 여러 건이면 같은 값).
+        if (c) d.rehabPlan = { creditor: c.creditor, cat: c.cat, total: c.total, cash: c.cash, years: c.years, prepaid: c.prepaid, remaining2026: c.remaining2026 };
+        return d;
+      }).sort((a, b) => String(a.company).localeCompare(String(b.company)) || b.currentBalance - a.currentBalance);
+      const totals = {};
+      const rehabTotals = {};
+      for (const r of rows) {
+        if (r.status === "rehab") rehabTotals[r.company] = (rehabTotals[r.company] || 0) + r.currentBalance;
+        else if (r.status !== "closed") totals[r.company] = (totals[r.company] || 0) + r.currentBalance;
+      }
+      sendJson(res, 200, { loans: rows, totals, rehabTotals, companies: loansLib.LOAN_COMPANIES, canEdit, lastSync: (await erp.get("settings", "loanSync")) || null });
+      return;
+    }
+
+    const one = pathname.match(/^\/api\/loans\/item\/([^/]+)$/);
+    if (one && method === "GET") {
+      const loan = await erp.get("loans", decodeURIComponent(one[1]));
+      if (!loan) { sendJson(res, 404, { error: "대출을 찾을 수 없습니다." }); return; }
+      const pays = await erp.list("loanPayments");
+      sendJson(res, 200, { loan: decorate(loan, pays), payments: pays.filter((p) => p.loanId === loan.id).sort((a, b) => String(b.date).localeCompare(String(a.date))) });
+      return;
+    }
+
+    if (!canEdit) { sendJson(res, 403, { error: "대출금을 고칠 권한이 없습니다." }); return; }
+
+    if (pathname === "/api/loans/import-sheet" && method === "POST") {
+      if (actor.role !== "owner") { sendJson(res, 403, { error: "가져오기는 오너만 할 수 있습니다." }); return; }
+      let extract;
+      try { extract = await extractSheetWith(LOAN_SHEET_ID, LOAN_EXTRACT_SCRIPT, "대출금 관리대장"); } catch (error) { sendJson(res, 502, { error: error.message }); return; }
+      const plan = loansLib.planLoanImport(extract, { today });
+      const stamp = now();
+      let saved = 0;
+      for (const l of plan.loans) {
+        const prev = await erp.get("loans", l.id);
+        if (prev?.editedAt) continue; // 화면에서 고친 대출은 덮어쓰지 않는다
+        await erp.put("loans", { ...l, importedAt: stamp });
+        saved += 1;
+      }
+      // 시트에서 사라진(또는 예전 id 방식으로 들어온) 대출 정리. 상환 기록이 있으면 같은 회사·계좌·원금의
+      // 새 대출로 옮긴 뒤 지우고, 옮길 곳이 없으면 남긴다.
+      const keep = new Set(plan.loans.map((l) => l.id));
+      const digitsOf = (v) => String(v || "").replace(/\D/g, "");
+      const allPays = await erp.list("loanPayments");
+      let removed = 0;
+      let moved = 0;
+      for (const l of await erp.list("loans")) {
+        if (keep.has(l.id) || l.source !== "대출금 관리대장") continue;
+        const pays = allPays.filter((p) => p.loanId === l.id);
+        if (pays.length) {
+          const target = plan.loans.find((n) => n.company === l.company && digitsOf(n.account) === digitsOf(l.account) && Number(n.principal) === Number(l.principal));
+          if (!target) continue;
+          for (const p of pays) { await erp.put("loanPayments", { ...p, loanId: target.id }); moved += 1; }
+        }
+        await erp.remove("loans", l.id);
+        await erp.remove("setupQuestions", `loan-maturity:${l.id}`).catch(() => {});
+        removed += 1;
+      }
+      const existingQ = new Map((await erp.list("setupQuestions")).map((x) => [x.id, x]));
+      for (const qn of plan.questions) {
+        if (existingQ.get(qn.id)?.status === "answered") continue;
+        await erp.put("setupQuestions", { ...qn, createdAt: existingQ.get(qn.id)?.createdAt || stamp, updatedAt: stamp });
+      }
+      addAudit(db, actor, "update", "loans", "import", `대출금 관리대장 가져오기: 대출 ${plan.loans.length}건, 질문 ${plan.questions.length}건`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { loans: plan.loans.length, saved, removed, movedPayments: moved, questions: plan.questions.length });
+      return;
+    }
+
+    // 클로브 출금 거래에서 상환을 찾아 기록한다. 출금계좌가 클로브에 없으면 그 대출은 '미연결'.
+    if (pathname === "/api/loans/sync" && method === "POST") {
+      const [loans, pays] = await Promise.all([erp.list("loans"), erp.list("loanPayments")]);
+      const active = loans.filter((l) => !l.closed);
+      const result = { matched: 0, unconnected: [], errors: [] };
+      for (const companyKey of Object.keys(loansLib.LOAN_COMPANIES)) {
+        const mine = active.filter((l) => l.company === companyKey);
+        if (!mine.length) continue;
+        const company = CASH_COMPANIES.find((c) => c.key === companyKey);
+        try {
+          const companyId = company ? await clobeCompanyIdFor(db, company) : "";
+          if (!companyId) { result.unconnected.push(...mine.map((l) => l.id)); continue; }
+          const acc = await clobeCall(db, "get_bank_accounts", { companyId });
+          const byDigits = new Map((acc.accounts || []).map((a) => [String(a.displayAccountNumber || a.accountNumber || "").replace(/\D/g, ""), a.bankAccountId]));
+          const txs = [];
+          for (const [digitsKey, accountId] of byDigits) {
+            const loansHere = mine.filter((l) => String(l.account || "").replace(/\D/g, "") === digitsKey);
+            if (!loansHere.length) continue;
+            const startDate = loansHere.map((l) => l.asOf || today).sort()[0];
+            let cursor = null;
+            for (let page = 0; page < 10; page += 1) {
+              const p = await clobeCall(db, "get_labeled_transactions", { companyId, accountId, direction: "OUT", startDate, endDate: today, size: 100, ...(cursor ? { cursor } : {}) });
+              txs.push(...(p.content || []));
+              if (!p.hasNext || !p.nextCursor) break;
+              cursor = p.nextCursor;
+            }
+          }
+          for (const l of mine) if (!byDigits.has(String(l.account || "").replace(/\D/g, ""))) result.unconnected.push(l.id);
+          const found = loansLib.matchLoanPayments(mine, txs, pays);
+          for (const f of found) {
+            await erp.put("loanPayments", { ...f, company: companyKey, createdAt: now() });
+            pays.push(f);
+          }
+          result.matched += found.length;
+        } catch (error) {
+          result.errors.push(`${loansLib.LOAN_COMPANIES[companyKey]}: ${error.message}`);
+        }
+      }
+      await erp.put("settings", { id: "loanSync", at: now(), by: who, ...result });
+      sendJson(res, 200, result);
+      return;
+    }
+
+    const payAdd = pathname.match(/^\/api\/loans\/item\/([^/]+)\/payments$/);
+    if (payAdd && method === "POST") {
+      const loan = await erp.get("loans", decodeURIComponent(payAdd[1]));
+      if (!loan) { sendJson(res, 404, { error: "대출을 찾을 수 없습니다." }); return; }
+      const body = await readBody(req);
+      const n = (v) => Math.max(0, Math.round(number(String(v ?? "").replace(/,/g, ""))));
+      const rec = { id: id("lp"), loanId: loan.id, company: loan.company, date: dateOnly(body.date) || today, principal: n(body.principal), interest: n(body.interest),
+        memo: String(body.memo || "").slice(0, 200), source: "직접 입력", createdBy: who, createdAt: now() };
+      rec.amount = rec.principal + rec.interest;
+      if (!rec.amount) { sendJson(res, 400, { error: "원금 또는 이자를 입력하세요." }); return; }
+      await erp.put("loanPayments", rec);
+      addAudit(db, actor, "create", "loanPayment", rec.id, `${loan.name} 상환 원금 ${rec.principal.toLocaleString()} 이자 ${rec.interest.toLocaleString()}`, null, rec);
+      await writeDb(db);
+      sendJson(res, 201, { payment: rec });
+      return;
+    }
+
+    const payVoid = pathname.match(/^\/api\/loans\/payments\/([^/]+)\/void$/);
+    if (payVoid && method === "POST") {
+      const rec = await erp.get("loanPayments", decodeURIComponent(payVoid[1]));
+      if (!rec) { sendJson(res, 404, { error: "기록을 찾을 수 없습니다." }); return; }
+      await erp.put("loanPayments", { ...rec, voided: true, voidedBy: who, voidedAt: now() });
+      addAudit(db, actor, "delete", "loanPayment", rec.id, "대출 상환 기록 취소", rec, null);
+      await writeDb(db);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    const edit = pathname.match(/^\/api\/loans\/item\/([^/]+)$/);
+    if ((edit && method === "PUT") || (pathname === "/api/loans/item" && method === "POST")) {
+      const body = await readBody(req);
+      const base = edit ? await erp.get("loans", decodeURIComponent(edit[1])) : { id: id("loan"), createdAt: now(), source: "직접 입력" };
+      if (!base) { sendJson(res, 404, { error: "대출을 찾을 수 없습니다." }); return; }
+      const next = { ...base };
+      for (const k of ["company", "category", "name", "bank", "account", "payDay", "term", "memo", "rehabCreditor", "rehabNote"]) if (k in body) next[k] = String(body[k] ?? "").trim().slice(0, 200);
+      for (const k of ["principal", "principalPayment", "monthlyPayment", "balance"]) if (k in body) next[k] = Math.max(0, Math.round(number(String(body[k] ?? "").replace(/,/g, ""))));
+      if ("rate" in body) next.rate = number(body.rate);
+      for (const k of ["startDate", "repayStart", "maturity", "asOf"]) if (k in body) next[k] = dateOnly(body[k]) || "";
+      if ("closed" in body) next.closed = body.closed === true || body.closed === "true";
+      if ("autoRenew" in body) next.autoRenew = body.autoRenew === true || body.autoRenew === "true";
+      if (!loansLib.LOAN_COMPANIES[next.company]) next.company = "wooof";
+      if (!next.name) { sendJson(res, 400, { error: "대출명을 입력하세요." }); return; }
+      if ("balance" in body && !("asOf" in body)) next.asOf = today; // 잔액을 고치면 오늘 기준으로 본다
+      next.editedAt = now();
+      next.editedBy = who;
+      await erp.put("loans", next);
+      // 회생채권으로 돌렸거나, 다 갚았거나, 만기를 앞으로 옮겼으면 만기 질문은 더 묻지 않는다.
+      const settled = next.rehabCreditor ? `회생채권(${next.rehabCreditor})으로 전환` : next.closed ? "종료(다 갚음)"
+        : next.maturity && next.maturity >= kstToday() ? `만기 ${next.maturity}로 연장` : "";
+      if (settled) {
+        const qn = await erp.get("setupQuestions", `loan-maturity:${next.id}`);
+        if (qn && qn.status !== "answered") {
+          await erp.put("setupQuestions", { ...qn, status: "answered", answeredBy: who, answeredAt: now(),
+            answer: { choice: "edit", label: "대출 정보 수정", applied: settled } });
+        }
+      }
+      addAudit(db, actor, edit ? "update" : "create", "loan", next.id, `대출 ${next.name} ${edit ? "수정" : "등록"}`, edit ? base : null, next);
+      await writeDb(db);
+      sendJson(res, edit ? 200 : 201, { loan: next });
+      return;
+    }
+
+    sendJson(res, 404, { error: "없는 경로입니다." });
+    return;
+  }
+
+  // --- v2 생산비: 생산처 청구·지급 원장, 미지급, 공임 대조 -------------------------
+  if (pathname === "/api/production" || pathname.startsWith("/api/production/")) {
+    if (!requirePermission(actor, res, "stock", "view")) return;
+    const canEdit = actor.role === "owner" || can(actor, "stock", "edit");
+    const who = actor.name || actor.email || "";
+    const today = kstToday();
+    const load = async () => {
+      const [bills, pays, adjs, details, rates] = await Promise.all(["prodBills", "prodPayments", "prodAdjustments", "prodDetails", "prodRates"].map((c) => erp.list(c)));
+      return { bills, pays, adjs, details, rates };
+    };
+    const ofPartner = (all, pid) => ({
+      bills: all.bills.filter((x) => x.partnerId === pid), payments: all.pays.filter((x) => x.partnerId === pid),
+      adjustments: all.adjs.filter((x) => x.partnerId === pid)
+    });
+
+    if (pathname === "/api/production" && method === "GET") {
+      const all = await load();
+      const ids = new Set([...all.bills, ...all.pays].map((x) => x.partnerId));
+      const partners = db.partners.filter((p) => ids.has(p.id) || p.category === "production").map((p) => {
+        const s = production.partnerSummary(ofPartner(all, p.id), today);
+        return { id: p.id, code: p.code || "", name: p.name, company: p.productionCompany || "wooof", ...s };
+      }).sort((a, b) => b.balance - a.balance);
+      const wooof = partners.filter((p) => p.company !== "betters_personal");
+      sendJson(res, 200, { partners, total: wooof.reduce((s, p) => s + p.balance, 0), over60: wooof.reduce((s, p) => s + p.over60, 0), canEdit,
+        canRequestPay: can(actor, "payments", "create") });
+      return;
+    }
+
+    const one = pathname.match(/^\/api\/production\/partners\/([^/]+)$/);
+    if (one && method === "GET") {
+      const partner = db.partners.find((p) => p.id === one[1]);
+      if (!partner) { sendJson(res, 404, { error: "거래처를 찾을 수 없습니다." }); return; }
+      const all = await load();
+      const mine = ofPartner(all, partner.id);
+      const details = all.details.filter((d) => d.partnerId === partner.id).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+      const rates = all.rates.filter((r) => r.partnerId === partner.id && !r.voided);
+      const checks = production.rateChecks({ details, rates, bills: mine.bills, since: `${today.slice(0, 4)}-01-01` });
+      const ledger = production.partnerLedger(mine);
+      sendJson(res, 200, {
+        partner: { id: partner.id, code: partner.code || "", name: partner.name, bankName: partner.bankName || "", bankAccount: partner.bankAccount || "",
+          accountHolder: partner.accountHolder || "", company: partner.productionCompany || "wooof" },
+        summary: production.partnerSummary(mine, today), open: production.openBills(mine, today),
+        entries: ledger.entries.slice().reverse().slice(0, 300), details: details.slice(0, 60), rates, checks
+      });
+      return;
+    }
+
+    if (!canEdit) { sendJson(res, 403, { error: "생산비를 고칠 권한이 없습니다." }); return; }
+
+    // 시트 추출본 넣기(오너). 거래처가 없으면 생산처로 만든다.
+    if ((pathname === "/api/production/import" || pathname === "/api/production/import-sheet") && method === "POST") {
+      if (actor.role !== "owner") { sendJson(res, 403, { error: "가져오기는 오너만 할 수 있습니다." }); return; }
+      let body;
+      try {
+        body = pathname.endsWith("-sheet") ? await extractProductionSheet() : await readBody(req);
+      } catch (error) {
+        sendJson(res, 502, { error: error.message || "시트를 읽지 못했습니다." });
+        return;
+      }
+      const partnerIdByName = {};
+      let createdPartners = 0;
+      for (const p of body.partners || []) {
+        const key = String(p.name || "").replace(/\s+/g, "");
+        let partner = db.partners.find((x) => String(x.name || "").replace(/\s+/g, "") === key);
+        if (!partner) {
+          partner = { id: id("partner"), name: p.name, category: "production", isActive: true, createdAt: now(), updatedAt: now() };
+          db.partners.push(partner);
+          createdPartners += 1;
+          addAudit(db, actor, "create", "partner", partner.id, `생산처 ${p.name} 등록 (생산비 시트 가져오기)`, null, partner);
+        }
+        if (p.company && !partner.productionCompany) partner.productionCompany = p.company;
+        partnerIdByName[p.name] = partner.id;
+      }
+      const plan = production.planProductionImport(body, { partnerIdByName, today, since: `${today.slice(0, 4)}-01-01` });
+      const stamp = now();
+      const keepEdited = async (col, rec) => {
+        const prev = await erp.get(col, rec.id);
+        if (prev?.editedAt || prev?.voided) return; // 손댄 기록은 덮어쓰지 않는다
+        await erp.put(col, { ...rec, importedAt: stamp });
+      };
+      for (const r of plan.bills) await keepEdited("prodBills", r);
+      for (const r of plan.payments) await keepEdited("prodPayments", r);
+      for (const r of plan.details) await keepEdited("prodDetails", r);
+      for (const r of plan.rates) await keepEdited("prodRates", r);
+      const existingQ = new Map((await erp.list("setupQuestions")).map((x) => [x.id, x]));
+      let added = 0;
+      for (const qn of plan.questions) {
+        if (existingQ.get(qn.id)?.status === "answered") continue;
+        await erp.put("setupQuestions", { ...qn, createdAt: existingQ.get(qn.id)?.createdAt || stamp, updatedAt: stamp });
+        added += existingQ.has(qn.id) ? 0 : 1;
+      }
+      addAudit(db, actor, "update", "production", "import", `생산비 시트 가져오기: 청구 ${plan.bills.length}, 지급 ${plan.payments.length}, 질문 ${plan.questions.length}`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { createdPartners, summary: plan.summary, bills: plan.bills.length, payments: plan.payments.length,
+        details: plan.details.length, rates: plan.rates.length, questions: plan.questions.length, newQuestions: added });
+      return;
+    }
+
+    // 청구·지급·조정 직접 입력
+    const add = pathname.match(/^\/api\/production\/partners\/([^/]+)\/(bills|payments|adjustments|rates)$/);
+    if (add && method === "POST") {
+      const partner = db.partners.find((p) => p.id === add[1]);
+      if (!partner) { sendJson(res, 404, { error: "거래처를 찾을 수 없습니다." }); return; }
+      const body = await readBody(req);
+      const col = { bills: "prodBills", payments: "prodPayments", adjustments: "prodAdjustments", rates: "prodRates" }[add[2]];
+      const amount = Math.round(number(String(body.amount ?? body.unitPrice ?? "").replace(/,/g, "")));
+      const rec = { id: id(col === "prodRates" ? "prr" : "prd"), partnerId: partner.id, partnerName: partner.name, createdBy: who, createdAt: now(), source: "직접 입력" };
+      if (col === "prodRates") {
+        Object.assign(rec, { item: String(body.item || "").trim(), option: String(body.option || "").trim(), unitPrice: amount, from: dateOnly(body.from) || "" });
+        if (!rec.item || !(amount > 0)) { sendJson(res, 400, { error: "품목과 단가를 입력하세요." }); return; }
+      } else {
+        Object.assign(rec, { date: dateOnly(body.date) || today, amount, memo: String(body.memo || "").slice(0, 300) });
+        if (!amount || (col !== "prodAdjustments" && amount < 0)) { sendJson(res, 400, { error: "금액을 입력하세요." }); return; }
+        if (col === "prodBills" && Array.isArray(body.lines)) rec.lines = body.lines.slice(0, 50);
+      }
+      await erp.put(col, rec);
+      addAudit(db, actor, "create", col, rec.id, `${partner.name} 생산비 ${add[2]} ${amount.toLocaleString()}`, null, rec);
+      await writeDb(db);
+      sendJson(res, 201, { record: rec });
+      return;
+    }
+
+    const voidMatch = pathname.match(/^\/api\/production\/(prodBills|prodPayments|prodAdjustments|prodRates)\/([^/]+)\/void$/);
+    if (voidMatch && method === "POST") {
+      const rec = await erp.get(voidMatch[1], decodeURIComponent(voidMatch[2]));
+      if (!rec) { sendJson(res, 404, { error: "기록을 찾을 수 없습니다." }); return; }
+      await erp.put(voidMatch[1], { ...rec, voided: true, voidedBy: who, voidedAt: now(), editedAt: now() });
+      addAudit(db, actor, "delete", voidMatch[1], rec.id, `${rec.partnerName} 생산비 기록 취소`, rec, null);
+      await writeDb(db);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // 미지급에서 지급요청 만들기. 지급요청이 '지급완료'가 되면 생산비 지급으로 자동 기록된다.
+    const payReq = pathname.match(/^\/api\/production\/partners\/([^/]+)\/pay-request$/);
+    if (payReq && method === "POST") {
+      if (!requirePermission(actor, res, "payments", "create")) return;
+      const partner = db.partners.find((p) => p.id === payReq[1]);
+      if (!partner) { sendJson(res, 404, { error: "거래처를 찾을 수 없습니다." }); return; }
+      const body = await readBody(req);
+      const amount = Math.round(number(String(body.amount ?? "").replace(/,/g, "")));
+      if (!(amount > 0)) { sendJson(res, 400, { error: "금액을 입력하세요." }); return; }
+      const rec = {
+        id: id("pay"), status: "requested", files: [], requestedBy: { id: actor.id, name: who }, createdAt: now(),
+        title: String(body.title || `${partner.name} 생산비`).slice(0, 200), payeeName: partner.name, partnerCode: partner.code || "",
+        category: "생산비", amount, dueDate: dateOnly(body.dueDate) || "", memo: String(body.memo || "").slice(0, 2000),
+        bankName: payments.normalizeBankName(partner.bankName || ""), accountNumber: normalizeAccountNumber(partner.bankAccount || ""),
+        holder: partner.accountHolder || "", sourceType: "production", sourcePartnerId: partner.id
+      };
+      rec.code = nextPaymentCode(await erp.list("payments"), rec.createdAt);
+      rec.updatedAt = now();
+      rec.history = [{ at: now(), by: who, action: "create", from: "", to: "requested", note: "생산비 미지급에서 만듦" }];
+      await erp.put("payments", rec);
+      sendJson(res, 201, { payment: rec });
+      return;
+    }
+
+    sendJson(res, 404, { error: "없는 경로입니다." });
+    return;
+  }
+
+  // --- v2 판매처별 가격 체계 (docs/v2 §9) --------------------------------------
+  if (pathname === "/api/pricing" || pathname.startsWith("/api/pricing/")) {
+    if (!requirePermission(actor, res, "sales", "view")) return;
+    const canEdit = actor.role === "owner" || can(actor, "sales", "edit");
+    const who = actor.name || actor.email || "";
+    const items = pricingItems(db);
+    const channels = () => (db.salesChannels || []).map(pricing.normalizeChannel);
+    const findChannel = (cid) => (db.salesChannels || []).find((c) => c.id === cid);
+    const shapeChannel = (body, base = {}) => {
+      const next = { ...base };
+      for (const key of ["name", "type", "pricingMode", "vatMode", "roundMethod", "partnerId", "memo"]) {
+        if (key in body) next[key] = String(body[key] ?? "").trim().slice(0, 200);
+      }
+      for (const key of ["rate", "feeRate", "roundUnit"]) if (key in body) next[key] = number(String(body[key] ?? "").replace(/,/g, ""));
+      if ("npbChannelCodes" in body) next.npbChannelCodes = (Array.isArray(body.npbChannelCodes) ? body.npbChannelCodes : String(body.npbChannelCodes || "").split(","))
+        .map((x) => String(x).trim()).filter(Boolean);
+      if ("active" in body) next.active = body.active !== false && body.active !== "false";
+      const n = pricing.normalizeChannel(next);
+      return { ...base, ...n, id: base.id, code: base.code };
+    };
+
+    if (pathname === "/api/pricing" && method === "GET") {
+      const exceptions = await erp.list("channelPrices");
+      sendJson(res, 200, {
+        channels: channels().map((c) => ({ ...c, partnerName: db.partners.find((p) => p.id === c.partnerId)?.name || "",
+          exceptionCount: exceptions.filter((x) => x.channelId === c.id && x.active !== false).length,
+          missing: items.filter((it) => pricing.resolvePrice({ channel: c, item: it, exceptions, date: kstToday() }).status === "missing").length })),
+        items, types: pricing.CHANNEL_TYPES, modes: pricing.PRICING_MODES, roundMethods: pricing.ROUND_METHODS, roundUnits: pricing.ROUND_UNITS,
+        npbChannels: (db.npb?.channels || []).map((c) => ({ code: c.code, name: c.name, brandId: c.brandId })),
+        canEdit
+      });
+      return;
+    }
+
+    // 가격 찾기(주문 입력용): channelId + itemRef 또는 itemName
+    if (pathname === "/api/pricing/lookup" && method === "GET") {
+      const ch = findChannel(url.searchParams.get("channelId"));
+      const ref = url.searchParams.get("itemRef") || "";
+      const name = normalizeItemKey("", url.searchParams.get("itemName") || "");
+      const item = items.find((it) => it.ref === ref) || items.find((it) => name && normalizeItemKey("", it.name) === name);
+      if (!ch || !item) { sendJson(res, 200, { found: false }); return; }
+      const r = pricing.resolvePrice({ channel: ch, item, exceptions: await erp.list("channelPrices"), date: url.searchParams.get("date") || kstToday() });
+      sendJson(res, 200, { found: r.status === "ok", item, ...r });
+      return;
+    }
+
+    const sheetMatch = pathname.match(/^\/api\/pricing\/channels\/([^/]+)\/sheet$/);
+    if (sheetMatch && method === "GET") {
+      const ch = findChannel(sheetMatch[1]);
+      if (!ch) { sendJson(res, 404, { error: "판매처를 찾을 수 없습니다." }); return; }
+      const exceptions = (await erp.list("channelPrices")).filter((x) => x.channelId === ch.id);
+      const date = dateOnly(url.searchParams.get("date")) || kstToday();
+      sendJson(res, 200, { channel: pricing.normalizeChannel(ch), date, rows: pricing.priceSheet({ channel: ch, items, exceptions, date }),
+        exceptions: exceptions.sort((a, b) => String(b.from || "").localeCompare(String(a.from || ""))) });
+      return;
+    }
+
+    if (!canEdit) { sendJson(res, 403, { error: "판매처 가격을 고칠 권한이 없습니다." }); return; }
+
+    if (pathname === "/api/pricing/channels" && method === "POST") {
+      const body = await readBody(req);
+      const ch = shapeChannel(body, { id: id("ch"), createdAt: now() });
+      if (!ch.name) { sendJson(res, 400, { error: "판매처 이름을 입력하세요." }); return; }
+      ch.updatedAt = now();
+      db.salesChannels.push(ch);
+      addAudit(db, actor, "create", "salesChannel", ch.id, `판매처 ${ch.name} 등록`, null, ch);
+      await writeDb(db);
+      sendJson(res, 201, { channel: db.salesChannels.find((c) => c.id === ch.id) });
+      return;
+    }
+
+    const chMatch = pathname.match(/^\/api\/pricing\/channels\/([^/]+)$/);
+    if (chMatch && method === "PUT") {
+      const index = (db.salesChannels || []).findIndex((c) => c.id === chMatch[1]);
+      if (index === -1) { sendJson(res, 404, { error: "판매처를 찾을 수 없습니다." }); return; }
+      const before = db.salesChannels[index];
+      const ch = shapeChannel(await readBody(req), before);
+      if (!ch.name) { sendJson(res, 400, { error: "판매처 이름을 입력하세요." }); return; }
+      ch.updatedAt = now();
+      db.salesChannels[index] = ch;
+      addAudit(db, actor, "update", "salesChannel", ch.id, `판매처 ${ch.name} 가격 규칙 수정`, before, ch);
+      await writeDb(db);
+      sendJson(res, 200, { channel: ch });
+      return;
+    }
+
+    if (pathname === "/api/pricing/exceptions" && method === "POST") {
+      const body = await readBody(req);
+      const ch = findChannel(body.channelId);
+      const item = items.find((it) => it.ref === body.itemRef);
+      if (!ch || !item) { sendJson(res, 400, { error: "판매처와 품목을 고르세요." }); return; }
+      const mode = pricing.PRICING_MODES[body.mode] ? body.mode : "";
+      const x = {
+        id: id("chp"), channelId: ch.id, itemRef: item.ref, itemName: item.name, mode,
+        price: mode === "fixed" ? Math.round(number(String(body.price ?? "").replace(/,/g, ""))) : 0,
+        rate: ["discount", "supply_rate"].includes(mode) ? number(body.rate) : 0,
+        vatMode: body.vatMode === "excluded" ? "excluded" : body.vatMode === "included" ? "included" : "",
+        from: dateOnly(body.from) || "", to: dateOnly(body.to) || "", note: String(body.note || "").slice(0, 200),
+        source: "직접 입력", createdBy: who, createdAt: now(), active: true
+      };
+      if (body.feeRate !== undefined && body.feeRate !== "") x.feeRate = number(body.feeRate);
+      if (mode === "fixed" && !(x.price > 0)) { sendJson(res, 400, { error: "고정가를 입력하세요." }); return; }
+      if (!mode && x.feeRate === undefined) { sendJson(res, 400, { error: "가격 또는 수수료율을 입력하세요." }); return; }
+      if (x.from && x.to && x.from > x.to) { sendJson(res, 400, { error: "기간이 거꾸로입니다." }); return; }
+      await erp.put("channelPrices", x);
+      addAudit(db, actor, "create", "channelPrice", x.id, `${ch.name} · ${item.name} 가격 예외`, null, x);
+      await writeDb(db);
+      sendJson(res, 201, { exception: x });
+      return;
+    }
+
+    const exMatch = pathname.match(/^\/api\/pricing\/exceptions\/([^/]+)$/);
+    if (exMatch && method === "DELETE") {
+      const x = await erp.get("channelPrices", decodeURIComponent(exMatch[1]));
+      if (!x) { sendJson(res, 404, { error: "예외를 찾을 수 없습니다." }); return; }
+      // 지우지 않고 끈다(가격 이력).
+      await erp.put("channelPrices", { ...x, active: false, endedBy: who, endedAt: now() });
+      addAudit(db, actor, "delete", "channelPrice", x.id, `${x.itemName} 가격 예외 해제`, x, null);
+      await writeDb(db);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // 최초 세팅: NPB 채널 → 판매처, NPB 공급가·수수료 → 예외, 모르는 칸 → 확인 필요 질문
+    if (pathname === "/api/pricing/seed" && method === "POST") {
+      const npbChannels = db.npb?.channels || [];
+      const seed = pricing.seedChannelsFromNpb(npbChannels, db.salesChannels);
+      const stamp = now();
+      for (const c of seed.created) db.salesChannels.push({ ...c, id: id("ch"), createdAt: stamp, updatedAt: stamp });
+      assignCodes(db);
+      const existingX = new Map((await erp.list("channelPrices")).map((x) => [x.id, x]));
+      let seededX = 0;
+      for (const x of pricing.seedExceptionsFromNpb(npbChannels, db.salesChannels, db.npb?.products || [])) {
+        if (existingX.has(x.id)) continue; // 손댄 예외는 덮어쓰지 않는다
+        await erp.put("channelPrices", { ...x, active: true, createdAt: stamp, createdBy: "씨앗" });
+        seededX += 1;
+      }
+      const hintsById = Object.fromEntries(db.salesChannels.map((c) => [c.id, seed.hints[c.seedKey] || {}]));
+      const qs = pricing.pricingQuestions({ channels: db.salesChannels, items, exceptions: await erp.list("channelPrices"),
+        used: await pricingUsedPrices(db), hints: hintsById });
+      const existingQ = new Map((await erp.list("setupQuestions")).map((x) => [x.id, x]));
+      let added = 0;
+      for (const qn of qs) {
+        if (existingQ.get(qn.id)?.status === "answered") continue;
+        await erp.put("setupQuestions", { ...qn, createdAt: existingQ.get(qn.id)?.createdAt || stamp, updatedAt: stamp });
+        added += existingQ.has(qn.id) ? 0 : 1;
+      }
+      addAudit(db, actor, "update", "pricing", "seed", `판매처 가격 최초 세팅: 판매처 ${seed.created.length}곳, 예외 ${seededX}건, 질문 ${qs.length}건`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { channels: seed.created.length, exceptions: seededX, questions: qs.length, newQuestions: added });
+      return;
+    }
+
+    sendJson(res, 404, { error: "없는 경로입니다." });
+    return;
+  }
+
+  if (pathname === "/api/sales" || pathname.startsWith("/api/sales/")) {
+    if (!requirePermission(actor, res, "sales", "view")) return;
+    const who = { id: actor.id, name: actor.name || actor.email || "" };
+    const log = (o, action, note = "") => {
+      o.history = [...(o.history || []), { at: now(), by: who.name, action, note }].slice(-50);
+    };
+    const decorate = (o) => ({ ...o, stage: sales.deriveStage(o), next: sales.nextAction(o), paid: sales.paidTotal(o), remaining: sales.remaining(o) });
+    const shapeOrder = (body, base) => {
+      const o = { ...base };
+      if ("partnerId" in body) {
+        const partner = db.partners.find((p) => p.id === body.partnerId);
+        o.partnerId = partner?.id || "";
+        o.partnerName = partner?.name || "";
+        o.partnerCode = partner?.code || "";
+        // 금액 기준: 요청 → 거래처 기본값 → 이 거래처에 낸 지난 명세서 → 부가세 별도.
+        const lastDoc = db.purchaseOrders.find((p) => p.partnerId === partner?.id && p.docType === "statement");
+        const mode = body.priceMode || partner?.priceMode || lastDoc?.priceMode;
+        o.priceMode = mode === "gross" ? "gross" : "supply";
+      }
+      if ("salesChannelId" in body) {
+        const ch = (db.salesChannels || []).find((c) => c.id === body.salesChannelId);
+        o.salesChannelId = ch?.id || "";
+        if (ch) o.channel = ch.name;
+      }
+      for (const key of ["title", "channel", "memo", "businessUnit", "issuerPartnerId"]) {
+        if (key === "channel" && o.salesChannelId && "salesChannelId" in body) continue;
+        if (key in body) o[key] = String(body[key] ?? "").trim().slice(0, key === "memo" ? 2000 : 200);
+      }
+      if ("orderDate" in body) o.orderDate = dateOnly(body.orderDate) || kstToday();
+      if ("dueDate" in body) o.dueDate = dateOnly(body.dueDate) || "";
+      if ("deliveryPlace" in body) o.deliveryPlace = sanitizeDeliveryPlace(body.deliveryPlace);
+      if ("lineItems" in body) o.lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
+      if (o.businessUnit && !BUSINESS_UNITS[o.businessUnit]) o.businessUnit = "";
+      const totals = purchaseOrderTotals(o.lineItems || [], o.priceMode || "supply");
+      Object.assign(o, totals);
+      return o;
+    };
+
+    if (pathname === "/api/sales" && method === "GET") {
+      const list = (await erp.list("salesOrders")).map(decorate);
+      sendJson(res, 200, {
+        orders: list,
+        stages: sales.SALES_STAGES,
+        stageLabels: sales.SALES_STAGE_LABELS,
+        invoiceTypes: sales.INVOICE_TYPES,
+        invoiceStatuses: sales.INVOICE_STATUSES,
+        sendMethods: sales.SEND_METHODS,
+        receivables: sales.receivables(list, kstToday())
+      });
+      return;
+    }
+
+    if (pathname === "/api/sales" && method === "POST") {
+      if (!requirePermission(actor, res, "sales", "create")) return;
+      const body = await readBody(req);
+      const o = shapeOrder(body, { id: id("so"), createdAt: now(), createdBy: who, receipts: [], orderDate: kstToday() });
+      if (!o.partnerId) { sendJson(res, 400, { error: "거래처를 선택하세요." }); return; }
+      if (!(o.lineItems || []).length) { sendJson(res, 400, { error: "품목을 한 줄 이상 입력하세요." }); return; }
+      const all = await erp.list("salesOrders");
+      const kst = new Date(Date.now() + 9 * 3600 * 1000).toISOString();
+      const prefix = `SO-${kst.slice(2, 4)}${kst.slice(5, 7)}-`;
+      const max = all.reduce((m, x) => (String(x.code || "").startsWith(prefix) ? Math.max(m, Number(String(x.code).slice(prefix.length)) || 0) : m), 0);
+      o.code = `${prefix}${String(max + 1).padStart(3, "0")}`;
+      o.title ||= (o.lineItems[0]?.itemName || "") + (o.lineItems.length > 1 ? ` 외 ${o.lineItems.length - 1}건` : "");
+      o.updatedAt = now();
+      log(o, "주문접수");
+      await erp.put("salesOrders", o);
+      sendJson(res, 201, { order: decorate(o) });
+      return;
+    }
+
+    const stepMatch = pathname.match(/^\/api\/sales\/([^/]+)\/(statement|send|invoice|issue|receive|hold|cancel|reopen)$/);
+    if (stepMatch && method === "POST") {
+      const [, orderId, step] = stepMatch;
+      const need = { statement: "edit", send: "edit", invoice: "edit", issue: "invoice", receive: "receive", hold: "edit", cancel: "edit", reopen: "edit" }[step];
+      if (!requirePermission(actor, res, "sales", need)) return;
+      const body = await readBody(req);
+      const o = await erp.get("salesOrders", orderId);
+      if (!o) { sendJson(res, 404, { error: "주문을 찾을 수 없습니다." }); return; }
+
+      if (step === "statement") {
+        if (o.statementId && db.purchaseOrders.some((p) => p.id === o.statementId)) {
+          sendJson(res, 400, { error: "이미 명세서가 있습니다. 명세서 발행 화면에서 고치세요." });
+          return;
+        }
+        // 발행자: 요청 값 → 주문에 적힌 값 → 마지막으로 쓴 발행자 → 첫 발행자 거래처.
+        const lastIssuer = db.purchaseOrders.find((p) => p.issuerPartnerId)?.issuerPartnerId;
+        const issuerPartnerId = String(body.issuerPartnerId || o.issuerPartnerId || lastIssuer
+          || db.partners.find((p) => p.category === "issuer")?.id || "");
+        const built = buildTradeDoc(db, {
+          docType: "statement", partnerId: o.partnerId, issuerPartnerId, orderDate: o.orderDate,
+          priceMode: o.priceMode, lineItems: o.lineItems, deliveryPlace: o.deliveryPlace,
+          note: [o.code, o.memo].filter(Boolean).join(" · ")
+        });
+        if (built.error) { sendJson(res, 400, { error: built.error }); return; }
+        db.purchaseOrders.unshift(built.po);
+        addAudit(db, actor, "create", "purchaseOrder", built.po.id, `${built.po.docNo} 거래명세서 생성 (판매 ${o.code})`, null, built.po);
+        await writeDb(db);
+        o.statementId = built.po.id;
+        o.statementNo = built.po.docNo;
+        o.issuerPartnerId = issuerPartnerId;
+        // 명세서 금액이 원본이다(부가세 반올림 포함).
+        Object.assign(o, { subtotal: built.po.subtotal, vat: built.po.vat, total: built.po.total });
+        log(o, "명세서", built.po.docNo);
+      } else if (step === "send") {
+        o.sentAt = dateOnly(body.date) || kstToday();
+        o.sentMethod = String(body.method || "").trim().slice(0, 50);
+        log(o, "업체전달", o.sentMethod);
+      } else if (step === "invoice") {
+        const type = sales.INVOICE_TYPES.includes(body.type) ? body.type : "세금계산서";
+        const partner = db.partners.find((p) => p.id === o.partnerId);
+        o.invoice = {
+          ...(o.invoice || {}),
+          type,
+          status: type === "미발행" ? "issued" : "requested",
+          email: String(body.email ?? partner?.invoiceEmail ?? "").trim().slice(0, 200),
+          content: String(body.content || "").trim().slice(0, 500),
+          dueDate: dateOnly(body.dueDate) || o.dueDate || "",
+          requestedAt: now(),
+          requestedBy: who.name
+        };
+        log(o, "청구·계산서 요청", type);
+      } else if (step === "issue") {
+        if (!o.invoice?.requestedAt) { sendJson(res, 400, { error: "계산서 요청이 먼저 필요합니다." }); return; }
+        o.invoice = { ...o.invoice, status: "issued", issuedAt: dateOnly(body.date) || kstToday(), issuedBy: who.name };
+        log(o, "계산서 발행 완료", o.invoice.issuedAt);
+      } else if (step === "receive") {
+        const amount = Math.round(number(String(body.amount ?? sales.remaining(o)).replace(/,/g, "")));
+        if (!amount) { sendJson(res, 400, { error: "입금액을 입력하세요." }); return; }
+        o.receipts = [...(o.receipts || []), { date: dateOnly(body.date) || kstToday(), amount, memo: String(body.memo || "").slice(0, 200), by: who.name }];
+        log(o, "입금확인", `${amount.toLocaleString()}원`);
+      } else if (step === "hold") {
+        o.onHold = true;
+        log(o, "보류", String(body.note || ""));
+      } else if (step === "cancel") {
+        o.cancelledAt = now();
+        log(o, "취소", String(body.note || ""));
+      } else if (step === "reopen") {
+        delete o.onHold;
+        delete o.cancelledAt;
+        log(o, "다시 진행");
+      }
+      o.updatedAt = now();
+      await erp.put("salesOrders", o);
+      sendJson(res, 200, { order: decorate(o) });
+      return;
+    }
+
+    const one = pathname.match(/^\/api\/sales\/([^/]+)$/);
+    if (one && method === "PUT") {
+      if (!requirePermission(actor, res, "sales", "edit")) return;
+      const body = await readBody(req);
+      const o = await erp.get("salesOrders", one[1]);
+      if (!o) { sendJson(res, 404, { error: "주문을 찾을 수 없습니다." }); return; }
+      // 명세서를 만든 뒤에는 품목·거래처를 여기서 바꾸지 않는다(명세서와 어긋난다).
+      if (o.statementId && ("lineItems" in body || "partnerId" in body)) {
+        sendJson(res, 400, { error: "명세서를 만든 주문의 품목·거래처는 명세서 발행 화면에서 고치세요." });
+        return;
+      }
+      const next = shapeOrder(body, o);
+      if (o.statementId) Object.assign(next, { subtotal: o.subtotal, vat: o.vat, total: o.total });
+      next.updatedAt = now();
+      await erp.put("salesOrders", next);
+      sendJson(res, 200, { order: decorate(next) });
+      return;
+    }
+
+    if (one && method === "DELETE") {
+      if (!requirePermission(actor, res, "sales", "edit")) return;
+      const o = await erp.get("salesOrders", one[1]);
+      if (!o) { sendJson(res, 404, { error: "주문을 찾을 수 없습니다." }); return; }
+      if (o.statementId || (o.receipts || []).length) {
+        sendJson(res, 400, { error: "명세서나 입금 기록이 있는 주문은 지우지 말고 '취소'하세요." });
+        return;
+      }
+      await erp.remove("salesOrders", o.id);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    sendJson(res, 404, { error: "지원하지 않는 요청입니다." });
+    return;
+  }
+
+  // --- v2 자금: 자금 일정 + 일일 자금보고 ---------------------------------------
+  if (pathname === "/api/cash" || pathname.startsWith("/api/cash/")) {
+    if (!requirePermission(actor, res, "cash", "view")) return;
+
+    // 기간 조회(일·주·월·직접): 지난 날은 클로브 실제 입출금, 오늘부터는 v2 예정. 잔액은 지금 클로브 잔액에서 거꾸로/앞으로 이어 간다.
+    if (pathname === "/api/cash/period" && method === "GET") {
+      const companyKey = CASH_COMPANIES.some((c) => c.key === url.searchParams.get("company")) ? url.searchParams.get("company") : "wooof";
+      const company = CASH_COMPANIES.find((c) => c.key === companyKey);
+      const today = kstToday();
+      let from = dateOnly(url.searchParams.get("from")) || today;
+      let to = dateOnly(url.searchParams.get("to")) || from;
+      if (to < from) [from, to] = [to, from];
+      const span = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000);
+      if (span > 92) to = payments.addDays(from, 92);
+      const dates = [];
+      for (let d = from; d <= to; d = payments.addDays(d, 1)) dates.push(d);
+      const byDay = Object.fromEntries(dates.map((d) => [d, { date: d, past: d < today, cashIn: 0, cashOut: 0, items: [] }]));
+      // 예정(오늘부터)
+      if (to >= today) {
+        const start = from > today ? from : today;
+        const days = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000);
+        const [schedules, pays, loans, loanPays, plan, rehabPays, so] = await Promise.all([
+          erp.list("cashSchedules"), erp.list("payments").catch(() => []), erp.list("loans"), erp.list("loanPayments"),
+          erp.get("rehabPlan", "current"), erp.list("rehabPayments"), erp.list("salesOrders").catch(() => [])]);
+        const report = cashReport.buildCashReport({
+          today: start, days, company: companyKey, openingBalance: null,
+          schedules: [...schedules, ...loansLib.loanScheduleLines(loans.filter((l) => l.company === companyKey), loanPays, start, to),
+            ...(companyKey === "wooof" ? rehab.rehabScheduleLines(plan, rehabPays, start, to) : [])],
+          payments: pays.filter((x) => (x.company || "wooof") === companyKey),
+          requests: companyKey === "wooof" ? db.requests : [],
+          receivables: companyKey === "wooof" ? sales.receivables(so, start) : []
+        });
+        for (const d of report.days) {
+          const day = byDay[d.date];
+          if (!day) continue;
+          for (const it of d.items) {
+            day.items.push({ ...it, kind: "plan" });
+            if (it.direction === "in") day.cashIn += Number(it.amount || 0); else day.cashOut += Number(it.amount || 0);
+          }
+        }
+      }
+      // 실제(지난 날) + 잔액
+      let current = null;
+      let clobeError = "";
+      let txs = [];
+      try {
+        const companyId = await clobeCompanyIdFor(db, company);
+        if (!companyId) throw new Error("클로브에 이 사업자가 연결돼 있지 않습니다.");
+        const acc = await clobeCall(db, "get_bank_accounts", { companyId });
+        current = (acc.accounts || []).filter((a) => (a.currencyCode || "KRW") === "KRW").reduce((sum, a) => sum + Number(a.krwBalance || 0), 0);
+        if (from < today) {
+          let cursor = null;
+          for (let page = 0; page < 40; page += 1) {
+            const p = await clobeCall(db, "get_labeled_transactions", { companyId, startDate: from, endDate: today, size: 100, ...(cursor ? { cursor } : {}) });
+            txs.push(...(p.content || []));
+            if (!p.hasNext || !p.nextCursor) break;
+            cursor = p.nextCursor;
+          }
+        }
+      } catch (error) { clobeError = error.message || "클로브를 불러오지 못했습니다."; }
+      const netOn = {};
+      for (const t of txs) {
+        const date = String(t.transactionAt || "").slice(0, 10);
+        const inA = Number(t.inAmount || 0);
+        const outA = Number(t.outAmount || 0);
+        netOn[date] = (netOn[date] || 0) + inA - outA;
+        const day = byDay[date];
+        if (!day || !day.past || /계좌간/.test(String(t.category || ""))) continue; // 내 계좌끼리 옮긴 돈은 들어오고 나간 돈으로 치지 않는다
+        const direction = inA > 0 ? "in" : "out";
+        const amount = inA > 0 ? inA : outA;
+        if (!amount) continue;
+        day.items.push({ kind: "actual", direction, amount, title: t.transactionName || t.transactionDescription || t.businessEntityName || "", category: t.customLabel || t.category || "",
+          memo: t.transactionDescription && t.transactionDescription !== t.transactionName ? t.transactionDescription : "" });
+        if (direction === "in") day.cashIn += amount; else day.cashOut += amount;
+      }
+      // 잔액: 지난 날 = 지금 잔액 − 그날 다음부터 지금까지의 순입출금, 오늘부터 = 지금 잔액에서 예정을 더해 간다.
+      let opening = null;
+      if (current != null) {
+        const after = (d) => Object.entries(netOn).filter(([date]) => date > d).reduce((sum, [, v]) => sum + v, 0);
+        let running = current;
+        for (const d of dates) {
+          const day = byDay[d];
+          if (day.past) day.balance = Math.round(current - after(d));
+          else { running += day.cashIn - day.cashOut; day.balance = Math.round(running); }
+        }
+        opening = Math.round(dates[0] < today ? current - after(payments.addDays(dates[0], -1)) : current);
+      }
+      const list = dates.map((d) => byDay[d]);
+      const sum = (f) => list.reduce((a, x) => a + x[f], 0);
+      sendJson(res, 200, { company, from, to: dates.at(-1), today, days: list, totals: { cashIn: sum("cashIn"), cashOut: sum("cashOut") },
+        opening, closing: list.at(-1)?.balance ?? null, current, clobeError, shortfallDate: list.find((x) => !x.past && x.balance != null && x.balance < 0)?.date || "" });
+      return;
+    }
+
+    // 계좌 보기 설정 저장
+    const accPref = pathname.match(/^\/api\/cash\/accounts\/(wooof|betters)\/([^/]+)$/);
+    if (accPref && method === "PUT") {
+      if (!requirePermission(actor, res, "cash", "edit")) return;
+      const body = await readBody(req);
+      const key = `${accPref[1]}:${decodeURIComponent(accPref[2])}`;
+      const rec = { ...((await erp.get("accountPrefs", key)) || { id: key }) };
+      if ("favorite" in body) rec.favorite = body.favorite === true || body.favorite === "true";
+      if ("hidden" in body) rec.hidden = body.hidden === true || body.hidden === "true";
+      if ("alias" in body) rec.alias = String(body.alias || "").trim().slice(0, 40);
+      rec.updatedBy = actor.name || actor.email || "";
+      rec.updatedAt = now();
+      await erp.put("accountPrefs", rec);
+      sendJson(res, 200, { pref: rec });
+      return;
+    }
+    // 계좌 상세: 최근 거래(클로브)
+    const accTx = pathname.match(/^\/api\/cash\/accounts\/(wooof|betters)\/([^/]+)\/transactions$/);
+    if (accTx && method === "GET") {
+      const company = CASH_COMPANIES.find((c) => c.key === accTx[1]);
+      try {
+        const companyId = await clobeCompanyIdFor(db, company);
+        if (!companyId) { sendJson(res, 200, { transactions: [], error: "클로브가 연결되지 않았습니다." }); return; }
+        const days = Math.min(90, Math.max(1, Math.round(number(url.searchParams.get("days")) || 30)));
+        const startDate = payments.addDays(kstToday(), -days);
+        const out = [];
+        let cursor = null;
+        for (let page = 0; page < 5; page += 1) {
+          const p = await clobeCall(db, "get_labeled_transactions", { companyId, accountId: Number(decodeURIComponent(accTx[2])), startDate, endDate: kstToday(), size: 100, ...(cursor ? { cursor } : {}) });
+          for (const t of p.content || []) out.push({ at: String(t.transactionAt || "").replace("T", " ").slice(0, 16), name: t.transactionName || "", desc: t.transactionDescription || "",
+            inAmount: Number(t.inAmount || 0), outAmount: Number(t.outAmount || 0), balance: Number(t.afterBalance || 0), category: t.customLabel || t.category || "", memo: t.memo || "" });
+          if (!p.hasNext || !p.nextCursor) break;
+          cursor = p.nextCursor;
+        }
+        sendJson(res, 200, { transactions: out, days });
+      } catch (error) { sendJson(res, 200, { transactions: [], error: error.message || "거래를 불러오지 못했습니다." }); }
+      return;
+    }
+
+    if (pathname === "/api/cash/schedules" && method === "GET") {
+      sendJson(res, 200, { schedules: await erp.list("cashSchedules"), repeats: cashReport.SCHEDULE_REPEATS, categories: cashReport.SCHEDULE_CATEGORIES, companies: CASH_COMPANIES });
+      return;
+    }
+
+    const schedMatch = pathname.match(/^\/api\/cash\/schedules(?:\/([^/]+))?$/);
+    if (schedMatch && (method === "POST" || method === "PUT")) {
+      if (!requirePermission(actor, res, "cash", "edit")) return;
+      const body = await readBody(req);
+      const prior = schedMatch[1] ? await erp.get("cashSchedules", schedMatch[1]) : null;
+      if (schedMatch[1] && !prior) { sendJson(res, 404, { error: "일정을 찾을 수 없습니다." }); return; }
+      const rec = { ...(prior || { id: id("cash"), createdAt: now(), createdBy: actor.name || actor.email || "" }) };
+      for (const key of ["title", "category", "method", "memo", "company"]) {
+        if (key in body) rec[key] = String(body[key] ?? "").trim().slice(0, 200);
+      }
+      if ("direction" in body) rec.direction = body.direction === "in" ? "in" : "out";
+      if ("repeat" in body) rec.repeat = cashReport.SCHEDULE_REPEATS[body.repeat] ? body.repeat : "once";
+      if ("amount" in body) rec.amount = Math.max(0, Math.round(number(String(body.amount).replace(/,/g, ""))));
+      if ("dayOfMonth" in body) rec.dayOfMonth = Math.min(31, Math.max(1, Math.round(number(body.dayOfMonth)) || 1));
+      if ("weekday" in body) rec.weekday = Math.min(6, Math.max(0, Math.round(number(body.weekday))));
+      for (const key of ["date", "startDate", "endDate"]) if (key in body) rec[key] = dateOnly(body[key]) || "";
+      if ("active" in body) rec.active = body.active !== false && body.active !== "false";
+      if (!rec.title) { sendJson(res, 400, { error: "항목명을 입력하세요." }); return; }
+      if (!rec.amount) { sendJson(res, 400, { error: "금액을 입력하세요." }); return; }
+      if ((rec.repeat || "once") === "once" && !rec.date) { sendJson(res, 400, { error: "1회 일정은 날짜가 필요합니다." }); return; }
+      rec.direction ||= "out";
+      rec.company ||= "wooof";
+      rec.updatedAt = now();
+      if (prior) rec.editedAt = now(); // 시트를 다시 가져와도 고친 일정은 덮어쓰지 않는다
+      await erp.put("cashSchedules", rec);
+      sendJson(res, prior ? 200 : 201, { schedule: rec });
+      return;
+    }
+
+    if (schedMatch && schedMatch[1] && method === "DELETE") {
+      if (!requirePermission(actor, res, "cash", "edit")) return;
+      await erp.remove("cashSchedules", schedMatch[1]);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // 일일 자금보고. ?company=wooof|betters&days=7
+    if (pathname === "/api/cash/report" && method === "GET") {
+      const companyKey = CASH_COMPANIES.some((c) => c.key === url.searchParams.get("company")) ? url.searchParams.get("company") : "wooof";
+      const company = CASH_COMPANIES.find((c) => c.key === companyKey);
+      const days = Math.min(31, Math.max(1, Math.round(number(url.searchParams.get("days")) || 7)));
+      const today = kstToday();
+      // 클로브: 계좌 잔액(지금) + 어제 입출금 요약. 실패해도 일정 표는 보여 준다.
+      let accounts = [];
+      let fund = null;
+      let clobeError = "";
+      try {
+        const companyId = await clobeCompanyIdFor(db, company);
+        if (companyId) {
+          const [acc, rep] = await Promise.all([
+            clobeCall(db, "get_bank_accounts", { companyId }),
+            clobeCall(db, "get_daily_fund_report", { companyId }).catch(() => null)
+          ]);
+          // 계좌별 보기 설정(즐겨찾기·숨김·별칭) — 클로브처럼 자주 쓰는 계좌만 앞에, 안 쓰는 계좌는 접어 둔다.
+          const prefs = new Map((await erp.list("accountPrefs")).map((x) => [x.id, x]));
+          accounts = (acc.accounts || [])
+            .filter((a) => (a.currencyCode || "KRW") === "KRW")
+            .map((a) => {
+              const pref = prefs.get(`${companyKey}:${a.bankAccountId}`) || {};
+              return { id: a.bankAccountId, name: pref.alias || a.aliasName || a.accountName || a.displayAccountNumber, bank: a.bankName || "",
+                number: a.displayAccountNumber, balance: Number(a.krwBalance || 0), favorite: !!pref.favorite, hidden: !!pref.hidden, clobeName: a.aliasName || a.accountName || "" };
+            })
+            .sort((x, y) => Number(y.favorite) - Number(x.favorite) || Number(x.hidden) - Number(y.hidden) || y.balance - x.balance);
+          fund = rep && rep.baseDate ? {
+            baseDate: rep.baseDate, transactionDate: rep.transactionDate, cashIn: rep.cashIn, cashOut: rep.cashOut,
+            cashBalance: rep.cashBalance, summaryText: rep.summaryText, templateType: rep.templateType
+          } : null;
+        } else {
+          clobeError = "클로브에 이 회사가 연결돼 있지 않습니다.";
+        }
+      } catch (error) {
+        clobeError = error.message || "클로브 잔액을 불러오지 못했습니다.";
+      }
+      const opening = accounts.length ? accounts.reduce((s, a) => s + a.balance, 0) : null;
+      const report = cashReport.buildCashReport({
+        today, days, company: companyKey, openingBalance: opening,
+        schedules: [...await erp.list("cashSchedules"),
+          ...loansLib.loanScheduleLines((await erp.list("loans")).filter((l) => l.company === companyKey), await erp.list("loanPayments"), today, payments.addDays(today, days)),
+          // 회생채권 연말 변제는 우프컴퍼니가 낸다.
+          ...(companyKey === "wooof" ? rehab.rehabScheduleLines(await erp.get("rehabPlan", "current"), await erp.list("rehabPayments"), today, payments.addDays(today, days)) : [])],
+        // 지급요청은 회사가 적혀 있으면 그 회사, 없으면 우프 통장에서 나간다.
+        payments: (await erp.list("payments").catch(() => [])).filter((p) => (p.company || "wooof") === companyKey),
+        // 선매입 입금요청은 우프 통장에서 나간다.
+        requests: companyKey === "wooof" ? db.requests : [],
+        receivables: companyKey === "wooof" ? sales.receivables(await erp.list("salesOrders").catch(() => []), today) : []
+      });
+      sendJson(res, 200, {
+        company, report, accounts, fund, clobeError,
+        // 보고 문구에는 즐겨찾는 계좌만(없으면 숨기지 않은 계좌). 현 잔액 합계는 모든 계좌.
+        text: cashReport.reportText(report, { companyName: company.name, accounts: accounts.some((a) => a.favorite) ? accounts.filter((a) => a.favorite) : accounts.filter((a) => !a.hidden) })
+      });
+      return;
+    }
+
+    sendJson(res, 404, { error: "지원하지 않는 요청입니다." });
+    return;
+  }
+
+  // --- v2 지급요청 ------------------------------------------------------------
+  // 채널톡 한 줄 요청과 노션 결제요청 DB 를 대신한다. 레코드는 erp 저장소에
+  // 한 건씩 저장한다(app_state 와 별도).
+  if (pathname === "/api/payments" || pathname.startsWith("/api/payments/")) {
+    if (!requirePermission(actor, res, "payments", "view")) return;
+    const settings = { ...PAYMENT_SETTING_DEFAULTS, ...((await erp.get("settings", "payments")) || {}) };
+    const findAccount = (num) => (db.transferAccounts || []).find((a) => a.accountNumber === normalizeAccountNumber(num));
+    const shape = (body, base = {}) => {
+      const out = { ...base };
+      for (const key of ["title", "payeeName", "partnerCode", "holder", "category", "businessUnit",
+        "withdrawAccount", "invoice", "orderNo", "memo", "withdrawMemo", "depositMemo"]) {
+        if (key in body) out[key] = String(body[key] ?? "").trim().slice(0, key === "memo" ? 2000 : 200);
+      }
+      if ("bankName" in body) out.bankName = payments.normalizeBankName(body.bankName);
+      if ("accountNumber" in body) out.accountNumber = normalizeAccountNumber(body.accountNumber);
+      if ("amount" in body) out.amount = Math.max(0, Math.round(number(String(body.amount).replace(/,/g, ""))));
+      for (const key of ["dueDate", "plannedDate"]) {
+        if (key in body) out[key] = dateOnly(body[key]) || "";
+      }
+      if (out.businessUnit && !BUSINESS_UNITS[out.businessUnit]) out.businessUnit = "";
+      return out;
+    };
+    const who = { id: actor.id, name: actor.name || actor.email || "" };
+    const log = (rec, action, from, to, note = "") => {
+      rec.history = [...(rec.history || []), { at: now(), by: who.name, action, from, to, note }].slice(-50);
+    };
+
+    if (pathname === "/api/payments" && method === "GET") {
+      const list = await erp.list("payments");
+      sendJson(res, 200, {
+        payments: list,
+        settings,
+        statuses: payments.PAYMENT_STATUSES,
+        categories: payments.PAYMENT_CATEGORIES,
+        upcoming: payments.upcomingPayments(list, kstToday(), 7)
+      });
+      return;
+    }
+
+    // 채널톡 한 줄을 칸으로 나눠 미리 보여 준다. 저장은 하지 않는다.
+    if (pathname === "/api/payments/parse" && method === "POST") {
+      const body = await readBody(req);
+      const parsed = payments.parseQuickPaymentText(body.text);
+      const account = parsed.accountNumber ? findAccount(parsed.accountNumber) : null;
+      if (account) {
+        parsed.bankName = parsed.bankName || account.bankName;
+        parsed.holder = parsed.holder || account.holder;
+        parsed.payeeName = account.alias || account.holder;
+      }
+      sendJson(res, 200, { parsed, matchedAccount: account || null });
+      return;
+    }
+
+    if (pathname === "/api/payments/settings" && method === "PUT") {
+      if (!requirePermission(actor, res, "payments", "approve", "설정은 허가 권한이 있어야 바꿀 수 있습니다.")) return;
+      const body = await readBody(req);
+      const next = { ...settings, id: "payments" };
+      if ("approvalThreshold" in body) next.approvalThreshold = Math.max(0, Math.round(number(body.approvalThreshold)));
+      if (Array.isArray(body.withdrawAccounts)) {
+        next.withdrawAccounts = body.withdrawAccounts.map((x) => String(x || "").trim()).filter(Boolean).slice(0, 50);
+      }
+      await erp.put("settings", next);
+      sendJson(res, 200, { settings: next });
+      return;
+    }
+
+    if (pathname === "/api/payments/transfer-xlsx" && method === "POST") {
+      if (!requirePermission(actor, res, "payments", "pay")) return;
+      const body = await readBody(req);
+      const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+      const all = await erp.list("payments");
+      const picked = ids.map((pid) => all.find((p) => p.id === pid)).filter(Boolean);
+      if (!picked.length) { sendJson(res, 400, { error: "선택한 지급요청이 없습니다." }); return; }
+      const bad = picked.filter((p) => !p.bankName || !p.accountNumber || !p.amount);
+      if (bad.length) {
+        sendJson(res, 400, { error: `은행·계좌·금액이 빠진 요청이 있습니다: ${bad.slice(0, 3).map((p) => p.code || p.title).join(", ")}` });
+        return;
+      }
+      const rows = picked.map((p) => ({
+        bank: p.bankName,
+        account: p.accountNumber,
+        amount: p.amount,
+        // 출금통장표시: 건별 값 → 받는 곳 이름 → 내용 앞부분
+        withdrawMemo: p.withdrawMemo || p.payeeName || p.holder || String(p.title || "").slice(0, 10),
+        depositMemo: p.depositMemo || ""
+      }));
+      try {
+        const file = await buildHanaTransferXlsx(rows);
+        const stamp = now().slice(0, 10).replace(/-/g, "");
+        sendBuffer(res, 200, file, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          { "content-disposition": contentDisposition(`하나은행_이체등록_지급요청_${stamp}.xlsx`) });
+      } catch (error) {
+        console.error("[payments] transfer-xlsx failed:", error.message);
+        sendJson(res, 500, { error: "이체 양식을 만들지 못했습니다." });
+      }
+      return;
+    }
+
+    const fileGet = pathname.match(/^\/api\/payments\/files\/([^/]+)$/);
+    if (fileGet && method === "GET") {
+      const file = await erp.getFile(fileGet[1]);
+      if (!file) { sendJson(res, 404, { error: "파일을 찾을 수 없습니다." }); return; }
+      sendBuffer(res, 200, file.buffer, file.type || "application/octet-stream",
+        { "content-disposition": contentDisposition(file.name || "file") });
+      return;
+    }
+
+    if (pathname === "/api/payments" && method === "POST") {
+      if (!requirePermission(actor, res, "payments", "create")) return;
+      const body = await readBody(req);
+      const rec = shape(body, { id: id("pay"), status: "requested", files: [], requestedBy: who, createdAt: now() });
+      if (!rec.title) { sendJson(res, 400, { error: "내용을 입력하세요." }); return; }
+      if (!rec.amount) { sendJson(res, 400, { error: "금액을 입력하세요." }); return; }
+      // 같은 계좌·같은 금액 요청이 최근 14일 안에 있으면 한 번 더 묻는다(중복 지급 방지).
+      if (!body.allowDuplicate && rec.accountNumber) {
+        const since = new Date(Date.now() - 14 * 86400000).toISOString();
+        const dup = (await erp.list("payments")).find((p) => p.status !== "cancelled" && p.amount === rec.amount
+          && normalizeAccountNumber(p.accountNumber) === normalizeAccountNumber(rec.accountNumber) && String(p.createdAt) >= since);
+        if (dup) {
+          sendJson(res, 409, { duplicate: { id: dup.id, code: dup.code, title: dup.title, status: dup.status, createdAt: dup.createdAt },
+            error: `최근 14일 안에 같은 계좌·같은 금액 요청이 있습니다: ${dup.code || ""} ${dup.title} (${payments.PAYMENT_STATUSES[dup.status] || dup.status})` });
+          return;
+        }
+      }
+      const account = rec.accountNumber ? findAccount(rec.accountNumber) : null;
+      if (account) {
+        rec.bankName ||= account.bankName;
+        rec.holder ||= account.holder;
+        rec.payeeName ||= account.alias || account.holder;
+      }
+      rec.code = nextPaymentCode(await erp.list("payments"), rec.createdAt);
+      rec.updatedAt = now();
+      log(rec, "create", "", "requested");
+      await erp.put("payments", rec);
+      sendJson(res, 201, { payment: rec });
+      pushNotice("payment_new", { ...rec, by: who.name }, { type: "payment", id: rec.id });
+      return;
+    }
+
+    const actionMatch = pathname.match(/^\/api\/payments\/([^/]+)\/action$/);
+    if (actionMatch && method === "POST") {
+      const body = await readBody(req);
+      const rec = await erp.get("payments", actionMatch[1]);
+      if (!rec) { sendJson(res, 404, { error: "지급요청을 찾을 수 없습니다." }); return; }
+      const def = payments.PAYMENT_ACTIONS[body.action];
+      if (!def) { sendJson(res, 400, { error: "알 수 없는 처리입니다." }); return; }
+      if (!requirePermission(actor, res, "payments", def.permission)) return;
+      if (!def.from.includes(rec.status)) {
+        sendJson(res, 400, { error: `지금 상태(${payments.PAYMENT_STATUSES[rec.status]})에서는 할 수 없습니다.` });
+        return;
+      }
+      if (rec.status === "paid" && !(await guardOpenMonth(res, closing.ym(rec.paidAt || rec.updatedAt || rec.createdAt)))) return;
+      if (body.action === "pay" && !(await guardOpenMonth(res, closing.ym(dateOnly(body.paidAt) || kstToday())))) return;
+      const from = rec.status;
+      let to = def.to;
+      if (body.action === "confirm") {
+        to = payments.statusAfterConfirm(rec.amount, settings.approvalThreshold);
+        rec.confirmedBy = who;
+        rec.confirmedAt = now();
+      }
+      if (body.action === "approve") { rec.approvedBy = who; rec.approvedAt = now(); }
+      if (body.action === "pay") {
+        rec.paidAt = dateOnly(body.paidAt) || kstToday();
+        rec.paidBy = who;
+        if (body.withdrawAccount) rec.withdrawAccount = String(body.withdrawAccount).trim();
+      }
+      if (body.action === "reopen") { delete rec.paidAt; delete rec.paidBy; }
+      // 생산비에서 만든 지급요청: 지급완료 → 생산비 지급 기록, 되돌리면 그 기록 취소.
+      if (rec.sourceType === "production" && rec.sourcePartnerId) {
+        const pid = `pp:pay:${rec.id}`;
+        if (to === "paid") {
+          await erp.put("prodPayments", { id: pid, partnerId: rec.sourcePartnerId, partnerName: rec.payeeName, date: rec.paidAt,
+            amount: rec.amount, memo: `지급요청 ${rec.code}`, source: "지급요청", createdAt: now() });
+        } else if (from === "paid") {
+          const prev = await erp.get("prodPayments", pid);
+          if (prev) await erp.put("prodPayments", { ...prev, voided: true, voidedAt: now(), voidedBy: who.name });
+        }
+      }
+      rec.status = to;
+      rec.updatedAt = now();
+      log(rec, body.action, from, to, String(body.note || "").slice(0, 300));
+      await erp.put("payments", rec);
+      sendJson(res, 200, { payment: rec });
+      const kind = to === "awaiting_approval" ? "payment_approval" : to === "paid" ? "payment_paid" : to === "confirmed" ? "payment_confirm" : "";
+      if (kind) pushNotice(kind, { ...rec, by: who.name }, { type: "payment", id: rec.id });
+      return;
+    }
+
+    const fileAdd = pathname.match(/^\/api\/payments\/([^/]+)\/files$/);
+    if (fileAdd && method === "POST") {
+      if (!requirePermission(actor, res, "payments", "create")) return;
+      const body = await readBody(req);
+      const rec = await erp.get("payments", fileAdd[1]);
+      if (!rec) { sendJson(res, 404, { error: "지급요청을 찾을 수 없습니다." }); return; }
+      const buffer = Buffer.from(String(body.fileBase64 || "").split(",").pop() || "", "base64");
+      if (!buffer.length) { sendJson(res, 400, { error: "파일이 비어 있습니다." }); return; }
+      if (buffer.length > 10 * 1024 * 1024) { sendJson(res, 400, { error: "파일은 10MB 까지 올릴 수 있습니다." }); return; }
+      const fileId = id("file");
+      const name = String(body.fileName || "첨부").slice(0, 200);
+      await erp.putFile({ id: fileId, ownerCollection: "payments", ownerId: rec.id, name, type: String(body.type || ""), buffer });
+      rec.files = [...(rec.files || []), { id: fileId, name, size: buffer.length, type: String(body.type || ""), at: now(), by: who.name }];
+      rec.updatedAt = now();
+      await erp.put("payments", rec);
+      sendJson(res, 200, { payment: rec });
+      return;
+    }
+
+    const fileDel = pathname.match(/^\/api\/payments\/([^/]+)\/files\/([^/]+)$/);
+    if (fileDel && method === "DELETE") {
+      if (!requirePermission(actor, res, "payments", "edit")) return;
+      const rec = await erp.get("payments", fileDel[1]);
+      if (!rec) { sendJson(res, 404, { error: "지급요청을 찾을 수 없습니다." }); return; }
+      if (!(rec.files || []).some((f) => f.id === fileDel[2])) { sendJson(res, 404, { error: "파일을 찾을 수 없습니다." }); return; }
+      rec.files = (rec.files || []).filter((f) => f.id !== fileDel[2]);
+      await erp.removeFile(fileDel[2]);
+      rec.updatedAt = now();
+      await erp.put("payments", rec);
+      sendJson(res, 200, { payment: rec });
+      return;
+    }
+
+    const one = pathname.match(/^\/api\/payments\/([^/]+)$/);
+    if (one && method === "PUT") {
+      if (!requirePermission(actor, res, "payments", "edit")) return;
+      const body = await readBody(req);
+      const rec = await erp.get("payments", one[1]);
+      if (!rec) { sendJson(res, 404, { error: "지급요청을 찾을 수 없습니다." }); return; }
+      // 처리완료된 건의 금액·계좌는 처리 권한자만 고친다(지급 기록이 흔들리지 않게).
+      if (rec.status === "paid" && ("amount" in body || "accountNumber" in body || "bankName" in body)
+        && !can(actor, "payments", "pay")) {
+        sendJson(res, 403, { error: "처리완료된 요청의 금액·계좌는 처리 권한자만 고칠 수 있습니다." });
+        return;
+      }
+      if (rec.status === "paid" && !(await guardOpenMonth(res, closing.ym(rec.paidAt || rec.updatedAt || rec.createdAt)))) return;
+      const next = shape(body, rec);
+      next.updatedAt = now();
+      if (rec.amount !== next.amount || rec.accountNumber !== next.accountNumber || rec.bankName !== next.bankName || rec.holder !== next.holder) {
+        // 확인·허가 뒤 금액이나 계좌가 바뀌면 확인을 다시 받는다(확인한 내용과 실제 지급이 어긋나지 않게).
+        if (["confirmed", "awaiting_approval"].includes(rec.status)) {
+          next.status = "requested";
+          delete next.confirmedBy; delete next.confirmedAt; delete next.approvedBy; delete next.approvedAt;
+        }
+        log(next, "edit", rec.status, next.status,
+          `금액 ${rec.amount}→${next.amount}, 계좌 ${rec.accountNumber || "-"}→${next.accountNumber || "-"}${next.status !== rec.status ? " · 다시 확인 필요" : ""}`);
+      }
+      await erp.put("payments", next);
+      sendJson(res, 200, { payment: next });
+      return;
+    }
+
+    if (one && method === "DELETE") {
+      if (!requirePermission(actor, res, "payments", "delete")) return;
+      const rec = await erp.get("payments", one[1]);
+      if (!rec) { sendJson(res, 404, { error: "지급요청을 찾을 수 없습니다." }); return; }
+      if (rec.status === "paid" && !(await guardOpenMonth(res, closing.ym(rec.paidAt || rec.updatedAt || rec.createdAt)))) return;
+      for (const f of rec.files || []) await erp.removeFile(f.id);
+      await erp.remove("payments", rec.id);
+      addAudit(db, actor, "delete", "payment", rec.id,
+        `지급요청 ${rec.code} 삭제 (${rec.title}, ${number(rec.amount).toLocaleString()}원)`, rec, null);
+      await writeDb(db);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    sendJson(res, 404, { error: "지원하지 않는 요청입니다." });
+    return;
+  }
+
+  // --- 자주 쓰는 입금계좌 (거래관리 > 계좌관리) -------------------------------
+  if (pathname === "/api/transfer-accounts" && method === "GET") {
+    sendJson(res, 200, { transferAccounts: db.transferAccounts || [] });
+    return;
+  }
+
+  // 하나은행에서 내려받은 목록으로 통째로 바꾼다. 계좌가 바뀌면 은행에서 목록을
+  // 다시 받아 올리는 흐름이라, 부분 병합보다 교체가 맞다. 같은 계좌번호는 id 를
+  // 이어받아 브랜드 연결이 끊기지 않게 한다.
+  if (pathname === "/api/transfer-accounts/import" && method === "POST") {
+    if (!requirePermission(actor, res, "procurement", "edit")) return;
+    const body = await readBody(req);
+    if (!body.fileBase64) { sendJson(res, 400, { error: "업로드할 파일이 없습니다." }); return; }
+    let parsed;
+    try {
+      parsed = await parseHanaAccountsUpload(String(body.fileBase64).split(",").pop(), body.fileName);
+    } catch (error) {
+      console.error("[transfer-accounts] import failed:", error.message);
+      sendJson(res, 400, { error: "계좌 목록 파일을 읽지 못했습니다. 하나은행 '자주쓰는입금계좌' 엑셀인지 확인하세요." });
+      return;
+    }
+    if (!parsed.length) { sendJson(res, 400, { error: "계좌를 한 건도 찾지 못했습니다." }); return; }
+    const before = db.transferAccounts || [];
+    const byNumber = new Map(before.map((a) => [a.accountNumber, a]));
+    const seen = new Set();
+    const next = [];
+    for (const row of parsed) {
+      const accountNumber = normalizeAccountNumber(row.accountNumber);
+      if (!accountNumber || seen.has(accountNumber)) continue;
+      seen.add(accountNumber);
+      const prior = byNumber.get(accountNumber);
+      next.push({
+        id: prior?.id || id("acct"),
+        bankName: String(row.bankName || "").trim(),
+        accountNumber,
+        alias: String(row.alias || "").trim(),
+        holder: String(row.holder || "").trim(),
+        registeredAt: String(row.registeredAt || "").trim(),
+        createdAt: prior?.createdAt || now(),
+        updatedAt: now()
+      });
+    }
+    const added = next.filter((a) => !byNumber.has(a.accountNumber)).length;
+    const removed = before.filter((a) => !seen.has(a.accountNumber)).length;
+    db.transferAccounts = next;
+    // 연결된 브랜드도 새 목록 값에 맞춘다. 목록에서 빠진 계좌는 연결만 푼다
+    // (브랜드에 적힌 은행·계좌번호는 그대로 남는다).
+    for (const brand of db.brands) {
+      if (!brand.transferAccountId) continue;
+      if (next.some((a) => a.id === brand.transferAccountId)) applyTransferAccount(db, brand);
+      else brand.transferAccountId = "";
+    }
+    addAudit(db, actor, "update", "transferAccount", "import",
+      `입금계좌 목록 업로드 (${next.length}건, 추가 ${added} · 빠짐 ${removed})`, { count: before.length }, { count: next.length });
+    await writeDb(db);
+    sendJson(res, 200, { transferAccounts: next, added, removed, total: next.length });
+    return;
+  }
+
+  if (pathname === "/api/transfer-accounts" && method === "POST") {
+    if (!requirePermission(actor, res, "procurement", "create")) return;
+    const body = await readBody(req);
+    const accountNumber = normalizeAccountNumber(body.accountNumber);
+    const bankName = String(body.bankName || "").trim();
+    if (!bankName || !accountNumber) { sendJson(res, 400, { error: "은행과 계좌번호는 필수입니다." }); return; }
+    if ((db.transferAccounts || []).some((a) => a.accountNumber === accountNumber)) {
+      sendJson(res, 409, { error: "이미 등록된 계좌번호입니다." });
+      return;
+    }
+    const account = {
+      id: id("acct"),
+      bankName,
+      accountNumber,
+      alias: String(body.alias || "").trim(),
+      holder: String(body.holder || "").trim(),
+      registeredAt: String(body.registeredAt || "").trim() || now().slice(0, 10),
+      createdAt: now(),
+      updatedAt: now()
+    };
+    if (!Array.isArray(db.transferAccounts)) db.transferAccounts = [];
+    db.transferAccounts.push(account);
+    addAudit(db, actor, "create", "transferAccount", account.id, `${account.alias || account.bankName} 입금계좌 등록`, null, account);
+    await writeDb(db);
+    sendJson(res, 201, { transferAccount: account });
+    return;
+  }
+
+  const transferAccountMatch = pathname.match(/^\/api\/transfer-accounts\/([^/]+)$/);
+  if (transferAccountMatch && method === "PUT") {
+    if (!requirePermission(actor, res, "procurement", "edit")) return;
+    const body = await readBody(req);
+    const account = (db.transferAccounts || []).find((a) => a.id === transferAccountMatch[1]);
+    if (!account) { sendJson(res, 404, { error: "계좌를 찾을 수 없습니다." }); return; }
+    const before = { ...account };
+    if ("accountNumber" in body) {
+      const accountNumber = normalizeAccountNumber(body.accountNumber);
+      if (!accountNumber) { sendJson(res, 400, { error: "계좌번호는 필수입니다." }); return; }
+      if ((db.transferAccounts || []).some((a) => a.id !== account.id && a.accountNumber === accountNumber)) {
+        sendJson(res, 409, { error: "이미 등록된 계좌번호입니다." });
+        return;
+      }
+      account.accountNumber = accountNumber;
+    }
+    for (const key of ["bankName", "alias", "holder", "registeredAt"]) {
+      if (key in body) account[key] = String(body[key] || "").trim();
+    }
+    // 양방향 연결: 계좌 쪽에서 브랜드를 고르면 그 브랜드의 transferAccountId 를 바꾼다(연결은 한 칸에만 둔다).
+    if (Array.isArray(body.brandIds)) {
+      const want = new Set(body.brandIds.map(String));
+      for (const brand of db.brands) {
+        if (want.has(brand.id) && brand.transferAccountId !== account.id) {
+          const prev = { transferAccountId: brand.transferAccountId || "" };
+          brand.transferAccountId = account.id;
+          addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 입금계좌를 ${account.alias || account.accountNumber}(으)로 연결 (계좌 목록에서)`, prev, { transferAccountId: account.id });
+        } else if (!want.has(brand.id) && brand.transferAccountId === account.id) {
+          brand.transferAccountId = "";
+          addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 입금계좌 연결 해제 (계좌 목록에서)`, { transferAccountId: account.id }, { transferAccountId: "" });
+        }
+      }
+    }
+    // 거래처(사업자) 연결 — 같은 회사 코드로 묶는다.
+    if ("partnerId" in body) {
+      const partner = db.partners.find((x) => x.id === body.partnerId);
+      account.partnerId = partner?.id || "";
+    }
+    account.updatedAt = now();
+    if (account.partnerId) {
+      const partner = db.partners.find((x) => x.id === account.partnerId);
+      if (partner) { partner.bankName = account.bankName; partner.bankAccount = account.accountNumber; if (account.holder) partner.depositorName = account.holder; partner.updatedAt = now(); }
+    }
+    // 이 계좌를 쓰는 브랜드의 이체 정보도 같이 맞춘다.
+    for (const brand of db.brands) {
+      if (brand.transferAccountId !== account.id) continue;
+      brand.bankName = account.bankName;
+      brand.bankAccount = account.accountNumber;
+      if (account.holder) brand.depositorName = account.holder;
+      brand.updatedAt = now();
+    }
+    addAudit(db, actor, "update", "transferAccount", account.id, `${account.alias || account.bankName} 입금계좌 수정`, before, account);
+    await writeDb(db);
+    sendJson(res, 200, { transferAccount: account });
+    return;
+  }
+
+  if (transferAccountMatch && method === "DELETE") {
+    if (!requirePermission(actor, res, "procurement", "delete")) return;
+    const list = db.transferAccounts || [];
+    const index = list.findIndex((a) => a.id === transferAccountMatch[1]);
+    if (index === -1) { sendJson(res, 404, { error: "계좌를 찾을 수 없습니다." }); return; }
+    const [removed] = list.splice(index, 1);
+    for (const brand of db.brands) {
+      if (brand.transferAccountId === removed.id) brand.transferAccountId = "";
+    }
+    addAudit(db, actor, "delete", "transferAccount", removed.id, `${removed.alias || removed.bankName} 입금계좌 삭제`, removed, null);
+    await writeDb(db);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  // 선택한 입금요청을 하나은행 이체등록 양식으로 내려받는다.
+  if (pathname === "/api/requests/transfer-xlsx" && method === "POST") {
+    if (!requirePermission(actor, res, "requests", "pay", "입금완료 처리 권한이 있어야 이체 양식을 받을 수 있습니다.")) return;
+    const body = await readBody(req);
+    const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+    const picked = ids
+      .map((rid) => db.requests.find((item) => item.id === rid && item.status !== "deleted"))
+      .filter(Boolean);
+    if (!picked.length) { sendJson(res, 400, { error: "선택한 입금요청이 없습니다." }); return; }
+    const rows = picked.map((request) => transferRowForRequest(db, request));
+    const missing = rows.filter((row) => !row.bank || !row.account);
+    if (missing.length) {
+      const names = [...new Set(missing.map((row) => row.brandName || "(브랜드 없음)"))];
+      sendJson(res, 400, {
+        error: `입금계좌가 없는 브랜드가 있습니다: ${names.slice(0, 5).join(", ")}${names.length > 5 ? ` 외 ${names.length - 5}곳` : ""}. 브랜드 설정에서 계좌를 지정하세요.`,
+        missing: missing.map((row) => row.requestId)
+      });
+      return;
+    }
+    const zero = rows.filter((row) => !row.amount);
+    if (zero.length) {
+      sendJson(res, 400, { error: `입금액이 0원인 요청이 ${zero.length}건 있습니다: ${zero.slice(0, 3).map((r) => r.orderNo || r.brandName).join(", ")}` });
+      return;
+    }
+    try {
+      const file = await buildHanaTransferXlsx(rows);
+      addAudit(db, actor, "export", "request", "transfer-xlsx",
+        `하나은행 이체양식 ${rows.length}건 다운로드 (합계 ${rows.reduce((s, r) => s + r.amount, 0).toLocaleString()}원)`, null, { ids: rows.map((r) => r.requestId) });
+      await writeDb(db);
+      const stamp = now().slice(0, 10).replace(/-/g, "");
+      sendBuffer(res, 200, file, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        { "content-disposition": contentDisposition(`하나은행_이체등록_${stamp}.xlsx`) });
+    } catch (error) {
+      console.error("[transfer-xlsx] build failed:", error.message);
+      sendJson(res, 500, { error: "이체 양식을 만들지 못했습니다." });
+    }
+    return;
+  }
+
   if (pathname === "/api/delivery-places" && method === "GET") {
     const rows = (db.deliveryPlaces || [])
       .slice()
@@ -10394,11 +13628,11 @@ async function routeApi(req, res, url) {
     return;
   }
 
-  const DELIVERY_PLACE_EXPORT_HEADERS = ["ID", "납품지명", "주소", "담당자명", "전화번호", "메모"];
+  const DELIVERY_PLACE_EXPORT_HEADERS = ["ID", "우프코드", "납품지명", "주소", "담당자명", "전화번호", "메모"];
 
   if (pathname === "/api/delivery-places/export" && method === "GET") {
     const blank = url.searchParams.get("mode") === "blank";
-    const rows = blank ? [] : (db.deliveryPlaces || []).map((d) => [d.id, d.name, d.address, d.contactName, d.contactPhone, d.note]);
+    const rows = blank ? [] : (db.deliveryPlaces || []).map((d) => [d.id, d.code || "", d.name, d.address, d.contactName, d.contactPhone, d.note]);
     const buffer = await buildRowsXlsx("납품지", DELIVERY_PLACE_EXPORT_HEADERS, rows);
     sendBuffer(res, 200, buffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       { "content-disposition": contentDisposition(blank ? "납품지_양식.xlsx" : "납품지.xlsx") });
@@ -10509,11 +13743,34 @@ async function serveStatic(req, res, pathname) {
   }
 }
 
+// 경영 KPI 계산기(kpi/kpi.html)를 로그인·권한 확인 뒤 보여 준다. 저장된 값을 페이지에 심어
+// 보내고(window.KPI_SERVER), 페이지는 고칠 때마다 /api/kpi/state 로 저장한다.
+async function serveKpi(req, res, url) {
+  const actor = await getActor(req);
+  if (!actor) { res.writeHead(302, { location: "/" }); res.end(); return; }
+  if (!can(actor, "kpi", "view")) { res.writeHead(403, { "content-type": "text/plain; charset=utf-8" }); res.end("KPI·손익 권한이 없습니다."); return; }
+  if (url.pathname === "/kpi") { res.writeHead(302, { location: "/kpi/" }); res.end(); return; }
+  if (url.pathname === "/kpi/kpi-autofill.js") {
+    const js = await readFile(path.join(__dirname, "kpi", "kpi-autofill.js")).catch(() => Buffer.from("/* no autofill */"));
+    res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store" });
+    res.end(js);
+    return;
+  }
+  if (url.pathname !== "/kpi/") { res.writeHead(404); res.end(); return; }
+  const rec = await erp.get("settings", "kpiState");
+  const boot = JSON.stringify({ state: rec?.state || null, rev: rec?.rev || 0, canEdit: can(actor, "kpi", "edit") }).replace(/</g, "\\u003c");
+  const html = (await readFile(path.join(__dirname, "kpi", "kpi.html"), "utf8")).replace(/<head>/i, `<head>\n<script>window.KPI_SERVER=${boot};</script>`);
+  res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "SAMEORIGIN" });
+  res.end(html);
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     if (url.pathname.startsWith("/api/")) {
       await routeApi(req, res, url);
+    } else if (url.pathname === "/kpi" || url.pathname.startsWith("/kpi/")) {
+      await serveKpi(req, res, url);
     } else {
       await serveStatic(req, res, url.pathname);
     }

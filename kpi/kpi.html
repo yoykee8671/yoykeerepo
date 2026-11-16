@@ -338,7 +338,9 @@ td.warncell{color:var(--critical)!important}
 
       <div class="card">
         <h2>데이터 관리</h2>
-        <p class="desc">데이터는 이 브라우저(localStorage)에만 저장됩니다. 다른 컴퓨터에서 쓰려면 JSON으로 내보내서 옮기세요. <b>한 달에 한 번은 꼭 백업하세요</b> — 브라우저 데이터를 지우면 입력값이 사라집니다.</p>
+        <p class="desc" id="storageDesc">데이터는 이 브라우저(localStorage)에만 저장됩니다. 다른 컴퓨터에서 쓰려면 JSON으로 내보내서 옮기세요. <b>한 달에 한 번은 꼭 백업하세요</b> — 브라우저 데이터를 지우면 입력값이 사라집니다.</p>
+        <p class="desc" id="serverSaveInfo"></p>
+        <script>if(window.KPI_SERVER){document.getElementById("storageDesc").textContent="wooofpay 서버에 저장됩니다. 어느 기기에서 열어도 같은 값이 보입니다."+(window.KPI_SERVER.canEdit?"":" (보기 전용 권한)");}</script>
         <p class="desc" id="lastBackupInfo"></p>
         <div class="btnrow">
           <button class="btn primary" onclick="exportJson()">JSON 내보내기 (백업)</button>
@@ -427,9 +429,13 @@ function defaultState(){
 var state = load();
 var curMonth = (new Date()).getFullYear()===2026 ? (new Date()).getMonth()+1 : 1;
 
+/* wooofpay 안에서 열리면(window.KPI_SERVER) 서버에 저장된 값을 쓴다. 서버에 아직 없고
+   이 브라우저에 예전 값이 있으면 그 값으로 시작해 첫 저장 때 서버로 올린다. */
+var SERVER=window.KPI_SERVER||null;
 function load(){
   try{
-    var raw=localStorage.getItem(STORE_KEY);
+    var raw=(SERVER&&SERVER.state)?JSON.stringify(SERVER.state):localStorage.getItem(STORE_KEY);
+    if(SERVER&&!SERVER.state&&raw&&SERVER.canEdit) setTimeout(function(){saveNow()},500);
     if(!raw) return defaultState();
     var s=JSON.parse(raw);
     var d=defaultState();
@@ -450,10 +456,25 @@ function save(){
   clearTimeout(saveTimer);
   saveTimer=setTimeout(saveNow,250);
 }
+var serverBusy=false, serverAgain=false;
 function saveNow(){
   clearTimeout(saveTimer);
   try{ localStorage.setItem(STORE_KEY,JSON.stringify(state)); }catch(e){}
+  if(!SERVER||!SERVER.canEdit) return;
+  if(serverBusy){ serverAgain=true; return; }
+  serverBusy=true;
+  fetch("/api/kpi/state",{method:"PUT",headers:{"content-type":"application/json"},credentials:"same-origin",
+    body:JSON.stringify({state:state,rev:SERVER.rev||0}),keepalive:true})
+    .then(function(r){ return r.json().then(function(j){ return {ok:r.ok,status:r.status,j:j}; }); })
+    .then(function(x){
+      if(x.ok){ SERVER.rev=x.j.rev; setServerInfo("서버에 저장됨 "+new Date().toTimeString().slice(0,5)); }
+      else if(x.status===409){ setServerInfo("⚠ 다른 곳에서 먼저 고쳤습니다. 새로고침한 뒤 다시 입력하세요."); serverAgain=false; }
+      else setServerInfo("⚠ 서버 저장 실패: "+((x.j&&x.j.error)||x.status));
+    })
+    .catch(function(){ setServerInfo("⚠ 서버 저장 실패(인터넷 확인). 이 브라우저에는 저장돼 있습니다."); })
+    .then(function(){ serverBusy=false; if(serverAgain){ serverAgain=false; saveNow(); } });
 }
+function setServerInfo(t){ var el=document.getElementById("serverSaveInfo"); if(el) el.textContent=t; }
 window.addEventListener("beforeunload",saveNow);
 
 /* ───────────────── 숫자 유틸 ───────────────── */
