@@ -29,6 +29,8 @@ import * as monthly from "./lib/monthly-board.mjs";
 import * as closing from "./lib/closing.mjs";
 import * as notify from "./lib/notify.mjs";
 import * as depositConfirm from "./lib/deposit-confirm.mjs";
+import * as notionArchive from "./lib/notion-archive.mjs";
+import * as sellmate from "./lib/sellmate.mjs";
 import * as brandInfo from "./lib/brand-info.mjs";
 import * as rehab from "./lib/rehab-plan.mjs";
 import * as cashFlow from "./lib/cash-flow.mjs";
@@ -231,6 +233,72 @@ const importedRequests = [
 
 const settlementTypes = new Set(["prepay_debt", "prepay_fee", "prepay_supply", "consignment", "direct_purchase"]);
 const partnerCategories = new Set(["production", "sales", "purchase", "issuer"]);
+// 거래처 분류(대표 확정 2026-11-17): 자사(발행자) 말고는 모두 '거래처'. 1차 분류 태그(여러 개) + 1차 아래 2차 분류.
+// 2차 분류·발주방식·증빙구분은 기본 목록 + 화면에서 추가(settings/partnerOptions).
+const PARTNER_ROLES = { production: "생산", sales: "판매", purchase: "매입", service: "서비스", etc: "기타" };
+const PARTNER_OPTION_DEFAULTS = {
+  sub: {
+    production: ["제조(봉제·임가공)", "턴키 생산", "원자재(원단)", "부자재", "충전재·속솜", "외주가공(본딩·염색·자수·프린트)", "포장재", "라벨·인쇄물"],
+    sales: ["소매", "도매", "대리점", "동물병원", "입점 채널", "공구"],
+    purchase: ["직매입", "선매입", "위탁", "새벽배송"],
+    service: ["물류·배송", "마케팅·광고", "컨텐츠·촬영", "인쇄", "경영·세무·법무", "교육", "외주용역", "서비스 이용"],
+    etc: ["개인정산", "직원", "세금·공과", "기타"]
+  },
+  orderMethods: ["메일", "사업자몰", "개별요청", "문자", "카카오톡", "전화", "개인정산"],
+  evidenceTypes: ["발행 후 입금", "입금 후 발행", "월말까지 발행", "월말 or 익월초 이내", "출고일 익월초 일괄 발행", "익월 5일 또는 10일", "발주일 or 거래명세서 발행일",
+    "월말 역발행", "상대측발행완료", "시스템 자동발행", "카드전표", "현금영수증", "프리랜서(원천징수)", "기부금영수증", "증빙 없음"]
+};
+async function partnerOptions() {
+  const saved = (await erp.get("settings", "partnerOptions")) || {};
+  const sub = {};
+  for (const k of Object.keys(PARTNER_ROLES)) sub[k] = [...new Set([...(PARTNER_OPTION_DEFAULTS.sub[k] || []), ...((saved.sub || {})[k] || [])])];
+  return { roles: PARTNER_ROLES, sub,
+    orderMethods: [...new Set([...PARTNER_OPTION_DEFAULTS.orderMethods, ...(saved.orderMethods || [])])],
+    evidenceTypes: [...new Set([...PARTNER_OPTION_DEFAULTS.evidenceTypes, ...(saved.evidenceTypes || [])])] };
+}
+// 예전 역할 키 → 새 1차/2차
+const LEGACY_ROLE_MAP = { brand: ["purchase", "선매입"], marketing: ["service", "마케팅·광고"], personal: ["etc", "개인정산"] };
+const NOTION_SUB = { 새벽배송: "새벽배송", 직매입: "직매입", 선매입: "선매입", 우프배송: "직매입", PICKYPARK: "위탁", 컨텐츠: "컨텐츠·촬영", 오프라인: "마케팅·광고",
+  인쇄물: "인쇄", 경영: "경영·세무·법무", 서비스이용: "서비스 이용", 교육: "교육", 세금: "세금·공과", 개인정산: "개인정산", 직원: "직원",
+  "대리점(도매)": "대리점", "동물병원(도매)": "동물병원", 외주용역: "외주용역" };
+export function normalizePartnerRoles(partner) {
+  let changed = false;
+  const roles = [];
+  const subs = new Set(partner.subRoles || []);
+  for (const r of partner.roles || []) {
+    if (PARTNER_ROLES[r]) roles.push(r);
+    else if (LEGACY_ROLE_MAP[r]) { roles.push(LEGACY_ROLE_MAP[r][0]); subs.add(LEGACY_ROLE_MAP[r][1]); changed = true; }
+    else changed = true; // issuer 등은 역할이 아니라 구분
+  }
+  if (partner.notionCategory && NOTION_SUB[partner.notionCategory] && !subs.has(NOTION_SUB[partner.notionCategory]) && !(partner.subRoles || []).length) { subs.add(NOTION_SUB[partner.notionCategory]); changed = true; }
+  if (!roles.length && partner.category !== "issuer") { roles.push(partner.category === "sales" ? "sales" : partner.category === "purchase" ? "purchase" : "production"); changed = true; }
+  const uniq = [...new Set(roles)];
+  if (uniq.join() !== (partner.roles || []).join() || [...subs].join() !== (partner.subRoles || []).join()) changed = true;
+  partner.roles = partner.category === "issuer" ? [] : uniq;
+  partner.subRoles = [...subs];
+  return changed;
+}
+export function formatBizNo(v) {
+  const d = String(v || "").replace(/\D/g, "");
+  return d.length === 10 ? `${d.slice(0, 3)}-${d.slice(3, 5)}-${d.slice(5)}` : String(v || "").trim();
+}
+function applyPartnerExtras(partner, body) {
+  if (body.kind === "issuer") partner.category = "issuer";
+  else if (body.kind === "partner" && partner.category === "issuer") partner.category = "production";
+  if (Array.isArray(body.roles)) partner.roles = [...new Set(body.roles.map(String).filter((r) => PARTNER_ROLES[r]))];
+  if (Array.isArray(body.subRoles)) partner.subRoles = [...new Set(body.subRoles.map((x) => String(x).trim()).filter(Boolean))].slice(0, 20);
+  if (partner.category !== "issuer") {
+    const first = (partner.roles || [])[0];
+    partner.category = first === "sales" ? "sales" : first === "purchase" ? "purchase" : first === "production" ? "production" : (partner.roles || []).includes("production") ? "production" : "purchase";
+  }
+  partner.businessNumber = formatBizNo(partner.businessNumber);
+  if ("aliases" in body) {
+    const list = Array.isArray(body.aliases) ? body.aliases : String(body.aliases || "").split(/[,\n]/);
+    partner.aliases = [...new Set(list.map((x) => String(x || "").trim()).filter((x) => x && x !== partner.name))].slice(0, 30);
+  }
+  if ("payoutAccountType" in body) partner.payoutAccountType = body.payoutAccountType === "virtual" ? "virtual" : "fixed";
+  normalizePartnerRoles(partner);
+}
 // public/app.js의 PARTNER_CATEGORY_LABELS와 동일한 라벨 — 엑셀 내보내기/
 // 업로드에서 "분류" 열을 사람이 읽는 한글로 주고받기 위해 서버에도 둔다.
 const PARTNER_CATEGORY_LABELS = { production: "생산업체", sales: "판매납품처", purchase: "매입공급처", issuer: "발행자(자사)" };
@@ -1915,6 +1983,12 @@ function migrateDb(db) {
     changed = true;
   }
 
+  for (const item of db.materials || []) if (classifyLegacyItem(item, db.partners || [])) changed = true;
+  for (const partner of db.partners || []) {
+    if (normalizePartnerRoles(partner)) changed = true;
+    const biz = formatBizNo(partner.businessNumber);
+    if (biz !== (partner.businessNumber || "")) { partner.businessNumber = biz; changed = true; }
+  }
   // 우프코드 일괄 부여(처음 한 번). 이후에는 저장할 때마다 새 항목에 붙는다.
   if (assignCodes(db) > 0) changed = true;
   return { db, changed };
@@ -2059,10 +2133,33 @@ export const BUSINESS_UNITS = {
   service: "용역"
 };
 
+// 품목 목록(대표 확정 2026-11-17): ① 자재(종류별) · ② 제품(우리 완제품 SKU) · ④ 거래처 상품.
+// 한 저장소(db.materials)에 두고 itemKind·materialType 으로 나눠 따로 보여 준다(기존 연결을 깨지 않게).
+export const ITEM_KINDS = { material: "자재", product: "제품(우리 완제품)", vendorProduct: "거래처 상품" };
+export const MATERIAL_TYPES = { RM: "원자재(원단)", SB: "부자재", PK: "포장재", LB: "공임", OP: "외주가공", FR: "운임", OT: "1회성 비용" };
+export function itemPrefix(item) {
+  if (item.itemKind === "product") return "P";
+  if (item.itemKind === "vendorProduct") return "V";
+  return MATERIAL_TYPES[item.materialType] ? item.materialType : "SB";
+}
+// 예전 원부자재(카테고리만 있던 것)를 종류로 나눈다. 처음 한 번.
+export function classifyLegacyItem(item, partners = []) {
+  if (item.itemKind) return false;
+  const cat = String(item.category || "").trim();
+  const partner = partners.find((x) => x.id === item.partnerId);
+  const ours = /베럴즈|우프|wooof/i.test(partner?.name || "");
+  const typeByCat = { 부자재: "SB", 원자재: "RM", 원단: "RM", 포장재: "PK", 공임: "LB", 운송비: "FR", 운임: "FR", 외주가공: "OP" };
+  if (typeByCat[cat]) { item.itemKind = "material"; item.materialType = typeByCat[cat]; }
+  else item.itemKind = ours ? "product" : "vendorProduct";
+  item.kindAuto = true; // 자동 분류 — 셀메이트 규칙이 더 정확하면 고쳐도 된다(사람이 고르면 false)
+  if (item.code && /^MT-/.test(item.code)) { item.legacyCodes = [...new Set([...(item.legacyCodes || []), item.code])]; item.code = ""; }
+  return true;
+}
+
 export const CODE_SCHEMES = [
   { collection: "brands", prefix: "BR", width: 4, label: "브랜드" },
   { collection: "partners", prefix: "PT", width: 4, label: "거래처" },
-  { collection: "materials", prefix: "MT", width: 4, label: "원부자재" },
+  { collection: "materials", prefix: "MT", prefixFor: (item) => itemPrefix(item), width: 4, label: "품목" },
   { collection: "deliveryPlaces", prefix: "DP", width: 3, label: "납품지" },
   { collection: "admins", prefix: "AD", width: 2, label: "관리자" },
   // 단가표는 가격이 바뀔 때마다 줄이 새로 생긴다(가격 이력). 코드는 줄이 아니라
@@ -2080,6 +2177,25 @@ export function assignCodes(db) {
   let assigned = 0;
   for (const scheme of CODE_SCHEMES) {
     const list = Array.isArray(db[scheme.collection]) ? db[scheme.collection] : [];
+    if (scheme.prefixFor) {
+      // 종류마다 접두어가 다르다(RM-0001, SB-0001, P-0001, V-0001 …). 종류가 바뀌면 새 코드, 예전 코드는 legacyCodes.
+      const seqs = {};
+      for (const item of list) {
+        const m = String(item?.code || "").match(/^([A-Z]+)-(\d+)$/);
+        if (m) seqs[m[1]] = Math.max(seqs[m[1]] || number(db.codeSeq[m[1]]), Number(m[2]));
+      }
+      const todo = list.filter((item) => item && typeof item === "object" && !String(item.code || "").startsWith(`${scheme.prefixFor(item)}-`))
+        .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+      for (const item of todo) {
+        const pre = scheme.prefixFor(item);
+        if (item.code) item.legacyCodes = [...new Set([...(item.legacyCodes || []), item.code])];
+        seqs[pre] = Math.max(seqs[pre] || 0, number(db.codeSeq[pre])) + 1;
+        item.code = `${pre}-${String(seqs[pre]).padStart(scheme.width, "0")}`;
+        assigned += 1;
+      }
+      for (const [pre, n] of Object.entries(seqs)) db.codeSeq[pre] = Math.max(number(db.codeSeq[pre]), n);
+      continue;
+    }
     const pattern = new RegExp(`^${scheme.prefix}-(\\d+)$`);
     let seq = number(db.codeSeq[scheme.prefix]);
     for (const item of list) {
@@ -2114,6 +2230,25 @@ export function assignCodes(db) {
     db.codeSeq[scheme.prefix] = seq;
   }
   return assigned;
+}
+
+// 품목 추가 정보: 종류·자재 종류·발주단위(MOQ)·권장 발주 단위·단위 환산·발주 유의사항·대체 공급처·바코드·포장 규격.
+function applyItemExtras(item, body) {
+  if (body.itemKind && ITEM_KINDS[body.itemKind]) { if (body.itemKind !== item.itemKind || "businessUnit" in body) item.kindAuto = false; item.itemKind = body.itemKind; }
+  if (!item.itemKind) item.itemKind = "material";
+  if ("materialType" in body) item.materialType = MATERIAL_TYPES[body.materialType] ? body.materialType : "";
+  if (item.itemKind === "material" && !MATERIAL_TYPES[item.materialType]) item.materialType = "SB";
+  for (const k of ["moq", "orderMultiple", "unitPerOrder", "weightG", "widthMm", "depthMm", "heightMm", "packQty"]) {
+    if (k in body) item[k] = body[k] === "" || body[k] == null ? "" : number(String(body[k]).replace(/,/g, ""));
+  }
+  if ("businessUnit" in body) item.businessUnit = ["pb", "npb", ""].includes(body.businessUnit) ? body.businessUnit : "";
+  if ("needsReview" in body) item.needsReview = body.needsReview === true || body.needsReview === "true";
+  // 단종·마지막 재고(다시 주문 안 함). 재고가 남아 있는 동안은 보이고, 발주 목록에서는 경고한다.
+  if ("discontinued" in body) item.discontinued = body.discontinued === true || body.discontinued === "true" || body.discontinued === "on";
+  for (const k of ["baseUnit", "orderNote", "barcode", "group", "spec", "storage"]) {
+    if (k in body) item[k] = String(body[k] ?? "").trim().slice(0, k === "orderNote" ? 1000 : 200);
+  }
+  if ("altPartnerIds" in body) item.altPartnerIds = (Array.isArray(body.altPartnerIds) ? body.altPartnerIds : String(body.altPartnerIds || "").split(",")).map((x) => String(x).trim()).filter(Boolean).slice(0, 10);
 }
 
 async function writeDb(db) {
@@ -10652,6 +10787,7 @@ async function routeApi(req, res, url) {
       createdAt: now(),
       updatedAt: now()
     };
+    applyPartnerExtras(partner, body);
     db.partners.unshift(partner);
     addAudit(db, actor, "create", "partner", partner.id, `${partner.name} 거래처 생성`, null, partner);
     await writeDb(db);
@@ -10697,7 +10833,12 @@ async function routeApi(req, res, url) {
       openPayments: openPay.reduce((s, x) => s + Number(x.amount || 0), 0), openPaymentCount: openPay.length,
       brandClaims: brands.reduce((s, b) => s + (b.hasReceivable ? Number(b.receivableRemaining || 0) : 0), 0)
     };
-    sendJson(res, 200, { partner, brands, docs, salesOrders: so, payments: pr, production: prodSummary, channels, materials, balance,
+    const nameSet = new Set([partner.name, partner.businessName, ...(partner.aliases || [])].map(notionArchive.normName).filter(Boolean));
+    const notionRows = (await erp.list("notionPayments")).filter((r) => nameSet.has(notionArchive.normName(r.vendorName)));
+    const notionSummary = { count: notionRows.length, total: notionRows.reduce((s2, r) => s2 + Number(r.amount || 0), 0),
+      first: notionRows.map((r) => r.createdAt).sort()[0] || "", last: notionRows.map((r) => r.createdAt).sort().pop() || "" };
+    sendJson(res, 200, { partner, brands, docs, salesOrders: so, payments: pr, production: prodSummary, channels, materials, balance, notion: notionSummary, roleLabels: PARTNER_ROLES,
+      mergeTargets: db.partners.filter((x) => x.id !== partner.id).map((x) => ({ id: x.id, name: x.name, code: x.code || "", isActive: x.isActive !== false })),
       rehab: creditor ? { creditor: creditor.creditor, cat: creditor.cat, total: creditor.total, cash: creditor.cash } : null,
       linkableBrands: db.brands.filter((b) => (b.type || "brand") === "brand" && !brands.some((x) => x.id === b.id)).map((b) => ({ id: b.id, name: b.name, code: b.code || "" })) });
     return;
@@ -10715,6 +10856,123 @@ async function routeApi(req, res, url) {
     addAudit(db, actor, "update", "brand", brand.id, `${brand.name} ${body.unlink ? "사업자 연결 해제" : `사업자 '${partner.name}'에 연결`}`, before, { entityPartnerId: brand.entityPartnerId });
     await writeDb(db);
     sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  // 거래처 분류·발주방식·증빙구분 목록. 추가는 거래처 수정 권한자.
+  if (pathname === "/api/partner-options" && method === "GET") { sendJson(res, 200, await partnerOptions()); return; }
+  if (pathname === "/api/partner-options" && method === "POST") {
+    if (!can(actor, "procurement", "edit")) { sendJson(res, 403, { error: "목록을 바꿀 권한이 없습니다." }); return; }
+    const body = await readBody(req);
+    const value = String(body.value || "").trim().slice(0, 40);
+    if (!value) { sendJson(res, 400, { error: "추가할 이름을 적으세요." }); return; }
+    const saved = (await erp.get("settings", "partnerOptions")) || { id: "partnerOptions", sub: {} };
+    if (body.list === "sub") {
+      if (!PARTNER_ROLES[body.role]) { sendJson(res, 400, { error: "1차 분류를 고르세요." }); return; }
+      saved.sub = saved.sub || {};
+      saved.sub[body.role] = [...new Set([...(saved.sub[body.role] || []), value])];
+    } else if (["orderMethods", "evidenceTypes"].includes(body.list)) {
+      saved[body.list] = [...new Set([...(saved[body.list] || []), value])];
+    } else { sendJson(res, 400, { error: "없는 목록입니다." }); return; }
+    await erp.put("settings", { ...saved, id: "partnerOptions" });
+    sendJson(res, 200, await partnerOptions());
+    return;
+  }
+
+  // 거래처 합치기: from → into. 모든 연결(브랜드·발주서·원부자재·판매처·입금계좌·생산비·판매주문·지급요청)을 옮기고
+  // from 의 이름·사업자번호는 into 의 별칭·이력으로 남긴 뒤 from 을 지운다.
+  const mergeMatch = pathname.match(/^\/api\/partners\/([^/]+)\/merge$/);
+  if (mergeMatch && method === "POST") {
+    if (!can(actor, "procurement", "edit")) { sendJson(res, 403, { error: "거래처를 합칠 권한이 없습니다." }); return; }
+    const body = await readBody(req);
+    const from = db.partners.find((x) => x.id === decodeURIComponent(mergeMatch[1]));
+    const into = db.partners.find((x) => x.id === String(body.intoId || ""));
+    if (!from || !into || from.id === into.id) { sendJson(res, 400, { error: "합칠 두 거래처를 고르세요." }); return; }
+    const moved = {};
+    const bump = (k, n = 1) => { moved[k] = (moved[k] || 0) + n; };
+    for (const b of db.brands) if (b.entityPartnerId === from.id) { b.entityPartnerId = into.id; bump("브랜드"); }
+    for (const po of db.purchaseOrders || []) {
+      if (po.partnerId === from.id) { po.partnerId = into.id; bump("명세서·발주서"); }
+      if (po.issuerPartnerId === from.id) { po.issuerPartnerId = into.id; bump("발행자"); }
+    }
+    for (const m of db.materials || []) if (m.partnerId === from.id) { m.partnerId = into.id; bump("원부자재"); }
+    for (const c of db.salesChannels || []) if (c.partnerId === from.id) { c.partnerId = into.id; bump("판매처"); }
+    for (const a of db.transferAccounts || []) if (a.partnerId === from.id) { a.partnerId = into.id; bump("입금계좌"); }
+    for (const [col, key] of [["prodBills", "partnerId"], ["prodPayments", "partnerId"], ["prodAdjustments", "partnerId"], ["prodDetails", "partnerId"], ["prodRates", "partnerId"], ["salesOrders", "partnerId"], ["payments", "sourcePartnerId"]]) {
+      for (const r of await erp.list(col).catch(() => [])) {
+        if (r[key] !== from.id) continue;
+        await erp.put(col, { ...r, [key]: into.id, ...(r.partnerName ? { partnerName: into.name } : {}) });
+        bump(col);
+      }
+    }
+    into.aliases = [...new Set([...(into.aliases || []), from.name, from.businessName, ...(from.aliases || [])].filter((x) => x && x !== into.name))];
+    into.history = [...(into.history || []), { at: now(), by: actor.name || "", merged: { name: from.name, businessNumber: from.businessNumber || "", id: from.id } }].slice(-50);
+    into.roles = [...new Set([...(into.roles || []), ...(from.roles || [])])];
+    into.subRoles = [...new Set([...(into.subRoles || []), ...(from.subRoles || [])])];
+    for (const k of ["businessNumber", "bankName", "bankAccount", "depositorName", "invoiceEmail", "contactName", "contactPhone", "contactEmail", "address", "representativeName"]) if (!into[k] && from[k]) into[k] = from[k];
+    db.partners = db.partners.filter((x) => x.id !== from.id);
+    into.updatedAt = now();
+    addAudit(db, actor, "update", "partner", into.id, `거래처 합치기: ${from.name} → ${into.name} (${Object.entries(moved).map(([k, n]) => `${k} ${n}`).join(", ") || "옮길 기록 없음"})`, from, into);
+    await writeDb(db);
+    sendJson(res, 200, { partner: into, moved });
+    return;
+  }
+
+  // 노션 아카이브: 결제업무·세금계산서 요청 검색, 가져오기(대표).
+  if (pathname === "/api/archive/notion" && method === "GET") {
+    if (!(actor.role === "owner" || can(actor, "payments", "view") || can(actor, "procurement", "view"))) { sendJson(res, 403, { error: "볼 권한이 없습니다." }); return; }
+    const q = String(url.searchParams.get("q") || "").trim().toLowerCase();
+    const partnerId = url.searchParams.get("partnerId") || "";
+    const year = url.searchParams.get("year") || "";
+    const kind = url.searchParams.get("kind") || "payments";
+    const partner = partnerId ? db.partners.find((x) => x.id === partnerId) : null;
+    const names = partner ? new Set([partner.name, partner.businessName, ...(partner.aliases || [])].map(notionArchive.normName).filter(Boolean)) : null;
+    const list = await erp.list(kind === "invoices" ? "notionInvoices" : "notionPayments");
+    const hit = list.filter((r) => {
+      if (year && !String(r.createdAt || r.issuedAt || "").startsWith(year)) return false;
+      if (names && !names.has(notionArchive.normName(r.vendorName || r.partnerName))) return false;
+      if (q && !`${r.title} ${r.vendorName || r.partnerName} ${r.holder || ""} ${r.category || ""} ${r.midCategory || ""} ${r.subCategory || ""} ${r.orderNo || ""} ${r.amount}`.toLowerCase().includes(q)) return false;
+      return true;
+    }).sort((a, b) => String(b.createdAt || b.issuedAt).localeCompare(String(a.createdAt || a.issuedAt)));
+    const total = hit.reduce((s2, r) => s2 + Number(r.amount || 0), 0);
+    sendJson(res, 200, { kind, count: hit.length, total, rows: hit.slice(0, 300), years: [...new Set(list.map((r) => String(r.createdAt || r.issuedAt || "").slice(0, 4)).filter(Boolean))].sort().reverse(), imported: list.length });
+    return;
+  }
+  if (pathname === "/api/archive/notion/import" && method === "POST") {
+    if (actor.role !== "owner") { sendJson(res, 403, { error: "대표만 가져올 수 있습니다." }); return; }
+    const body = await readBody(req);
+    const f = body.files || {};
+    const payments = f.payments ? notionArchive.archivePayments(notionArchive.parseCsv(f.payments)) : [];
+    const invoices = f.invoices ? notionArchive.archiveInvoices(notionArchive.parseCsv(f.invoices)) : [];
+    const vendors = f.vendors ? notionArchive.parseCsv(f.vendors) : [];
+    const salesPartners = f.salesPartners ? notionArchive.parseCsv(f.salesPartners) : [];
+    const candidates = notionArchive.vendorCandidates({ vendors, salesPartners, payments });
+    const plan = notionArchive.planPartnerMerge(db.partners, candidates);
+    const summary = { payments: payments.length, invoices: invoices.length, partnersNew: plan.creates.length, partnersNewActive: plan.creates.filter((c) => c.active).length, partnersUpdated: plan.updates.length };
+    if (body.dryRun) { sendJson(res, 200, { dryRun: true, summary, preview: { creates: plan.creates.slice(0, 30).map((c) => ({ name: c.name, roles: c.roles, active: c.active, last: c.notion.last })), updates: plan.updates.slice(0, 30).map((u) => u.name) } }); return; }
+    for (const r of payments) await erp.put("notionPayments", r);
+    for (const r of invoices) await erp.put("notionInvoices", r);
+    for (const u of plan.updates) {
+      const p = db.partners.find((x) => x.id === u.id);
+      if (p) Object.assign(p, u.patch, { updatedAt: now() });
+    }
+    for (const c of plan.creates) {
+      const roles = c.roles;
+      db.partners.push({
+        id: id("partner"), category: roles.includes("sales") ? "sales" : roles.includes("purchase") || roles.includes("brand") ? "purchase" : "production",
+        roles, name: c.name, businessName: "", businessNumber: c.businessNumber || "", representativeName: "", address: "",
+        invoiceEmail: c.invoiceEmail || "", bankName: c.bankName || "", bankAccount: c.bankAccount || "", depositorName: c.depositorName || "",
+        orderMethod: c.orderMethod || "", invoiceTiming: c.invoiceTiming || "", priceMode: "supply",
+        contactName: c.contactName || "", contactPhone: "", contactEmail: c.contactEmail || "", note: c.note || "",
+        attachments: [], notionAttachments: c.attachments || [], notionCategory: c.notionCategory, notion: c.notion,
+        hasNotionLogin: c.hasLogin || false, payoutAccountType: c.payoutAccountType || "fixed", aliases: [],
+        isActive: c.active, source: "노션", createdAt: now(), updatedAt: now()
+      });
+      normalizePartnerRoles(db.partners[db.partners.length - 1]);
+    }
+    addAudit(db, actor, "create", "archive", "notion", `노션 가져오기: 결제 ${summary.payments}건, 계산서 ${summary.invoices}건, 거래처 새로 ${summary.partnersNew}곳(활성 ${summary.partnersNewActive}) · 보완 ${summary.partnersUpdated}곳`, null, null);
+    await writeDb(db);
+    sendJson(res, 200, { summary });
     return;
   }
 
@@ -10742,6 +11000,9 @@ async function routeApi(req, res, url) {
         : [];
     }
     if ("isActive" in body) partner.isActive = body.isActive !== false && body.isActive !== "false";
+    // 상호를 바꾸면 예전 이름은 별칭으로 남긴다(옛 기록·노션 결제를 계속 찾을 수 있게).
+    if (before.name && before.name !== partner.name) partner.aliases = [...new Set([...(partner.aliases || []), before.name])];
+    applyPartnerExtras(partner, body);
     partner.updatedAt = now();
     addAudit(db, actor, "update", "partner", partner.id, `${partner.name} 거래처 수정`, before, partner);
     await writeDb(db);
@@ -10870,6 +11131,75 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // 셀메이트 재고 엑셀 올리기: SKU 맞추기(없으면 새 품목) + 그날 재고 스냅샷.
+  if (pathname === "/api/sellmate/import" && method === "POST") {
+    if (!can(actor, "procurement", "edit") && !can(actor, "stock", "edit")) { sendJson(res, 403, { error: "올릴 권한이 없습니다." }); return; }
+    const body = await readBody(req);
+    const rows = sellmate.parseSellmateRows(String(body.text || ""));
+    if (!rows.length) { sendJson(res, 400, { error: "셀메이트 재고 파일을 읽지 못했습니다(바코드번호 칸이 필요합니다)." }); return; }
+    const plan = sellmate.planSellmateImport(db.materials || [], rows);
+    const totals = sellmate.snapshotTotals(rows);
+    const kinds = {};
+    for (const c of plan.creates) { const k = c.needsReview ? "확인 필요" : c.businessUnit === "npb" ? "제품(NPB)" : "제품(PB)"; kinds[k] = (kinds[k] || 0) + 1; }
+    const summary = { rows: rows.length, creates: plan.creates.length, updates: plan.updates.length, kinds, totals };
+    if (body.dryRun) { sendJson(res, 200, { dryRun: true, summary }); return; }
+    const takenAt = now();
+    await erp.put("stockSnapshots", { id: `snap:${takenAt}`, takenAt, fileName: String(body.fileName || "").slice(0, 120), by: actor.name || "", totals,
+      rows: rows.map((r) => ({ c: r.sellmateCode, n: r.name, o: r.owner, s: r.stock, a: r.available, cost: r.cost, loc: r.location, in: r.lastInbound })) });
+    for (const u of plan.updates) {
+      const m = db.materials.find((x) => x.id === u.id);
+      if (m) Object.assign(m, u.patch, { stockAt: takenAt, updatedAt: now() });
+    }
+    for (const c of plan.creates) {
+      const item = { id: id("material"), partnerId: "", itemName: c.itemName, itemCode: "", category: "", orderUnit: "", basePrice: 0, consumerPrice: 0,
+        leadTimeDays: 0, note: "", isActive: true, createdAt: now(), updatedAt: now(), stockAt: takenAt, ...c };
+      db.materials.push(item);
+    }
+    addAudit(db, actor, "create", "stock", "sellmate", `셀메이트 재고 올리기: ${rows.length}줄 · 새 품목 ${plan.creates.length} · 갱신 ${plan.updates.length} · 재고 ${totals.units}개`, null, null);
+    await writeDb(db);
+    sendJson(res, 200, { summary });
+    return;
+  }
+  if (pathname === "/api/sellmate/snapshots" && method === "GET") {
+    const list = (await erp.list("stockSnapshots")).sort((a, b) => String(b.takenAt).localeCompare(String(a.takenAt)))
+      .map(({ rows, ...x }) => x).slice(0, 60);
+    sendJson(res, 200, { snapshots: list, owners: sellmate.OWNER_LABELS });
+    return;
+  }
+
+  // 품목 단가 이력: 품목 × 거래처 × 적용 시작일. 과거 단가는 고치지 않고 새 줄을 더한다.
+  const priceHist = pathname.match(/^\/api\/materials\/([^/]+)\/prices$/);
+  if (priceHist && method === "GET") {
+    const list = (await erp.list("itemPrices")).filter((x) => x.itemId === decodeURIComponent(priceHist[1]))
+      .sort((a, b) => String(b.effectiveFrom).localeCompare(String(a.effectiveFrom)) || String(b.createdAt).localeCompare(String(a.createdAt)));
+    sendJson(res, 200, { prices: list });
+    return;
+  }
+  if (priceHist && method === "POST") {
+    if (!can(actor, "procurement", "edit")) { sendJson(res, 403, { error: "단가를 바꿀 권한이 없습니다." }); return; }
+    const material = db.materials.find((x) => x.id === decodeURIComponent(priceHist[1]));
+    if (!material) { sendJson(res, 404, { error: "품목을 찾을 수 없습니다." }); return; }
+    const body = await readBody(req);
+    const price = Math.round(number(String(body.price ?? "").replace(/,/g, "")));
+    const effectiveFrom = dateOnly(body.effectiveFrom) || kstToday();
+    if (!(price >= 0) || String(body.price ?? "") === "") { sendJson(res, 400, { error: "단가를 적으세요." }); return; }
+    const partnerId = String(body.partnerId || material.partnerId || "");
+    const rec = { id: id("ip"), itemId: material.id, partnerId, partnerName: db.partners.find((x) => x.id === partnerId)?.name || "",
+      price, vatMode: body.vatMode === "included" ? "included" : "excluded", unit: String(body.unit || material.orderUnit || "").slice(0, 20),
+      effectiveFrom, reason: String(body.reason || "").slice(0, 200), by: actor.name || "", createdAt: now() };
+    await erp.put("itemPrices", rec);
+    // 오늘 이후 적용이 아니면 기본 단가도 맞춘다(새 문서의 기본값). 이미 만든 문서는 그때 단가를 그대로 갖고 있다.
+    if (effectiveFrom <= kstToday() && (!partnerId || partnerId === material.partnerId)) {
+      const before = { basePrice: material.basePrice };
+      material.basePrice = price;
+      material.updatedAt = now();
+      addAudit(db, actor, "update", "material", material.id, `${material.itemName} 단가 ${before.basePrice ?? "-"} → ${price} (${effectiveFrom}부터${rec.reason ? `, ${rec.reason}` : ""})`, before, { basePrice: price });
+      await writeDb(db);
+    }
+    sendJson(res, 201, { price: rec, material });
+    return;
+  }
+
   if (pathname === "/api/materials" && method === "POST") {
     const body = await readBody(req);
     const itemName = String(body.itemName || "").trim();
@@ -10893,6 +11223,7 @@ async function routeApi(req, res, url) {
       createdAt: now(),
       updatedAt: now()
     };
+    applyItemExtras(material, body);
     db.materials.unshift(material);
     addAudit(db, actor, "create", "material", material.id, `${material.itemName} 원부자재 생성`, null, material);
     await writeDb(db);
@@ -10916,8 +11247,9 @@ async function routeApi(req, res, url) {
     if ("consumerPrice" in body) material.consumerPrice = Math.round(number(body.consumerPrice));
     if ("leadTimeDays" in body) material.leadTimeDays = number(body.leadTimeDays);
     if ("isActive" in body) material.isActive = body.isActive !== false && body.isActive !== "false";
+    applyItemExtras(material, body);
     material.updatedAt = now();
-    addAudit(db, actor, "update", "material", material.id, `${material.itemName} 원부자재 수정`, before, material);
+    addAudit(db, actor, "update", "material", material.id, `${material.itemName} 품목 수정`, before, material);
     await writeDb(db);
     sendJson(res, 200, { material });
     return;

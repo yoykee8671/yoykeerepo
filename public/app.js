@@ -131,6 +131,19 @@ const state = {
 const NPB_DEFAULT_BRAND = "doteon";
 const npbBrand = () => state.npb.brandId || NPB_DEFAULT_BRAND;
 const PARTNER_CATEGORY_LABELS = { production: "생산업체", sales: "판매납품처", purchase: "매입공급처", issuer: "발행자(자사)" };
+// 거래처 1차 분류(여러 개). 서버 PARTNER_ROLES 와 같다. 자사(발행자)는 분류가 아니라 '구분'.
+const PARTNER_ROLE_LABELS = { production: "생산", sales: "판매", purchase: "매입", service: "서비스", etc: "기타" };
+const isIssuer = (p) => p.category === "issuer";
+const partnerRoles = (p) => (isIssuer(p) ? [] : Array.isArray(p.roles) && p.roles.length ? p.roles.filter((r) => PARTNER_ROLE_LABELS[r]) : [p.category === "sales" ? "sales" : p.category === "purchase" ? "purchase" : "production"]);
+const partnerTagText = (p) => (isIssuer(p) ? "발행자(자사)" : [...partnerRoles(p).map((r) => PARTNER_ROLE_LABELS[r]), ...(p.subRoles || [])].join(" · "));
+const formatBizNo = (v) => { const d = String(v || "").replace(/\D/g, ""); return d.length === 10 ? `${d.slice(0, 3)}-${d.slice(3, 5)}-${d.slice(5)}` : String(v || ""); };
+async function ensurePartnerOptions() {
+  if (state.partnerOptions || state.partnerOptionsLoading) return;
+  state.partnerOptionsLoading = true;
+  try { state.partnerOptions = await api("/api/partner-options"); } catch { state.partnerOptions = { sub: {}, orderMethods: [], evidenceTypes: [] }; }
+  state.partnerOptionsLoading = false;
+  renderApp();
+}
 const PO_STATUS_LABELS = { ordered: "발주", in_production: "생산중", received: "입고완료", cancelled: "취소" };
 // 네 양식은 담기는 내용이 같아 한 목록에 모아 두고 docType으로만 가른다.
 // dateLabel/dueLabel은 같은 날짜 칸이 양식마다 다르게 불리는 이름이고,
@@ -151,7 +164,7 @@ const TRADE_SCREENS = [
   ["sales", "판매 주문·가격"],
   ["stock", "생산·재고·생산비"],
   ["orders", "명세서·발주서"],
-  ["materials", "원부자재"],
+  ["materials", "품목(자재·제품·거래처 상품)"],
   ["deliveryPlaces", "납품지"],
   ["accounts", "입금계좌"]
 ];
@@ -918,10 +931,12 @@ function renderAppInner() {
     ["audits", "이력"],
     ["archive", "아카이브"],
     ["setup", "확인 필요"],
-    ["messenger", "메신저 공유"]
+    ["messenger", "메신저 공유"],
+    ["notion", "노션 기록"]
   ].filter(([key]) => (key === "monthly" || key === "closing" ? can("settlement", "view") : key === "trade" ? TRADE_SCREENS.some(([k]) => tradeCan(k)) : can(key, "view")) || (key === "pipeline" && can("reconcile", "view"))
     || (key === "setup" && (state.admin?.role === "owner" || can("cash", "edit")))
-    || (key === "messenger" && (state.admin?.role === "owner" || can("payments", "view") || can("requests", "view") || can("cash", "view"))));
+    || (key === "messenger" && (state.admin?.role === "owner" || can("payments", "view") || can("requests", "view") || can("cash", "view")))
+    || (key === "notion" && (state.admin?.role === "owner" || can("payments", "view") || can("procurement", "view"))));
   app.innerHTML = `
     <div class="shell">
       <aside class="sidebar">
@@ -1031,7 +1046,7 @@ const NAV_GROUPS = [
   { key: "settle", label: "정산", children: ["settlement", "monthly", "npb", "closing"] },
   { key: "mall", label: "자사몰관리", children: ["brands", "prices", "productsync"] },
   { key: "mgmt", label: "경영관리", children: ["kpi", "cash"] },
-  { key: "admin", label: "관리/설정", children: ["admins", "audits", "archive", "setup", "messenger"] }
+  { key: "admin", label: "관리/설정", children: ["admins", "audits", "archive", "setup", "messenger", "notion"] }
 ];
 const navGroupOf = (tab) => NAV_GROUPS.find((g) => g.children.includes(tab));
 // 펼쳐 둔 대분류는 이 브라우저에 기억한다(편의용).
@@ -1235,6 +1250,7 @@ function renderCurrentTab() {
   if (state.tab === "monthly") return renderMonthly();
   if (state.tab === "closing") return renderClosing();
   if (state.tab === "messenger") return renderMessenger();
+  if (state.tab === "notion") return renderNotionArchive();
   if (state.tab === "trade") return renderTrade();
   if (state.tab === "kpi") return renderKpi();
   if (state.tab === "admins") return renderAdmins();
@@ -2798,6 +2814,7 @@ function bindCurrentTab() {
   if (state.tab === "monthly") bindMonthly();
   if (state.tab === "closing") bindClosing();
   if (state.tab === "messenger") bindMessenger();
+  if (state.tab === "notion") bindNotionArchive();
   if (state.tab === "trade") bindTrade();
   if (state.tab === "kpi") bindKpi();
   if (state.tab === "admins") bindAdmins();
@@ -4757,12 +4774,20 @@ function bindBrands() {
 }
 
 function filteredPartners() {
-  const cat = state.procurement.partnerFilterCategory;
-  return (state.partners || []).filter((item) => !cat || item.category === cat);
+  const pr = state.procurement;
+  const role = pr.partnerFilterCategory || "";
+  const status = pr.partnerStatus || "active";
+  const q = String(pr.partnerSearch || "").trim().toLowerCase();
+  return (state.partners || []).filter((item) => (role === "issuer" ? isIssuer(item) : (!role || partnerRoles(item).includes(role)) && (role || !isIssuer(item)))
+    && (status === "all" || (status === "active" ? item.isActive !== false : item.isActive === false))
+    && (!q || [item.name, item.businessName, item.businessNumber, item.code, item.note, item.notionCategory, ...(item.aliases || [])].some((v) => String(v || "").toLowerCase().includes(q))))
+    .sort((a, b) => String(b.notion?.last || "").localeCompare(String(a.notion?.last || "")) || String(a.name).localeCompare(String(b.name), "ko"));
 }
 
+// 문서에서 거래처 고르기: 발행자는 구분으로, 나머지는 1차 분류 태그로(여러 개 가능) 거른다. 보관 거래처는 빼고.
 function partnersByCategory(category) {
-  return (state.partners || []).filter((item) => item.category === category && item.isActive !== false);
+  return (state.partners || []).filter((item) => item.isActive !== false
+    && (category === "issuer" ? isIssuer(item) : !isIssuer(item) && (partnerRoles(item).includes(category) || item.category === category)));
 }
 
 function productionPartners() {
@@ -4911,14 +4936,15 @@ function bindBulkExcelTools(prefix, importUrl) {
 // 다른 분류도 고를 수 있게 그룹으로 나눠 전부 싣는다.
 function partnerSelectOptionsForDoc(selectedPartnerId, defaultCategory) {
   const groups = [defaultCategory]
-    .concat(Object.keys(PARTNER_CATEGORY_LABELS).filter((key) => key !== defaultCategory && key !== "issuer"));
+    .concat(Object.keys(PARTNER_ROLE_LABELS).filter((key) => key !== defaultCategory));
+  const seen = new Set();
   const options = groups.map((category) => {
-    const rows = partnersByCategory(category);
+    const rows = partnersByCategory(category).filter((p) => !seen.has(p.id) && seen.add(p.id));
     if (!rows.length) return "";
     const items = rows
       .map((p) => `<option value="${p.id}" ${selectedPartnerId === p.id ? "selected" : ""}>${h(p.name)}</option>`)
       .join("");
-    return `<optgroup label="${h(PARTNER_CATEGORY_LABELS[category])}">${items}</optgroup>`;
+    return `<optgroup label="${h(PARTNER_ROLE_LABELS[category] || PARTNER_CATEGORY_LABELS[category] || category)}">${items}</optgroup>`;
   });
   // 사용 안 함으로 바뀐 거래처를 고른 문서를 열었을 때 선택이 풀리면 안 된다.
   const known = new Set(groups.flatMap((c) => partnersByCategory(c).map((p) => p.id)));
@@ -4948,21 +4974,22 @@ function renderProcurement() {
   `;
 }
 
-// 분류는 많아야 대여섯 개라 드롭다운보다 탭이 빠르다.
+// 역할 탭 + 활성/보관 + 검색(예전 이름·노션 분류까지).
 function renderPartnerCategoryTabs() {
-  const current = state.procurement.partnerFilterCategory || "";
-  const counts = (state.partners || []).reduce((acc, partner) => {
-    acc[partner.category] = (acc[partner.category] || 0) + 1;
-    return acc;
-  }, {});
-  const tabs = [["", "전체", (state.partners || []).length]]
-    .concat(Object.entries(PARTNER_CATEGORY_LABELS).map(([key, label]) => [key, label, counts[key] || 0]));
+  const pr = state.procurement;
+  const current = pr.partnerFilterCategory || "";
+  const status = pr.partnerStatus || "active";
+  const pool = (state.partners || []).filter((x) => status === "all" || (status === "active" ? x.isActive !== false : x.isActive === false));
+  const counts = {};
+  for (const p of pool) for (const r of partnerRoles(p)) counts[r] = (counts[r] || 0) + 1;
+  const tabs = [["", "거래처 전체", pool.filter((x) => !isIssuer(x)).length], ...Object.entries(PARTNER_ROLE_LABELS).map(([k, l]) => [k, l, counts[k] || 0]), ["issuer", "발행자(자사)", pool.filter(isIssuer).length]];
+  const active = (state.partners || []).filter((x) => x.isActive !== false).length;
   return `
-    <div class="npb-subnav">
-      ${tabs
-        .map(([key, label, count]) =>
-          `<button data-partner-category-tab="${key}" class="npb-subtab ${current === key ? "active" : ""}">${label} <span class="muted">${count}</span></button>`)
-        .join("")}
+    <div class="npb-subnav" style="flex-wrap:wrap">
+      ${[["active", "활성", active], ["archived", "보관", (state.partners || []).length - active], ["all", "전체", (state.partners || []).length]].map(([k, l, n]) => `<button data-partner-status="${k}" class="npb-subtab ${status === k ? "active" : ""}">${l} <span class="muted">${n}</span></button>`).join("")}
+      <span style="width:12px"></span>
+      ${tabs.map(([key, label, count]) => `<button data-partner-category-tab="${key}" class="npb-subtab ${current === key ? "active" : ""}">${label} <span class="muted">${count}</span></button>`).join("")}
+      <input data-partner-search placeholder="이름·예전 이름·사업자번호 검색" value="${h(pr.partnerSearch || "")}" style="margin-left:auto;min-width:220px">
     </div>`;
 }
 
@@ -4974,6 +5001,8 @@ function bindProcurement() {
       renderApp();
     });
   });
+  app.querySelectorAll("[data-partner-status]").forEach((btn) => btn.addEventListener("click", () => { state.procurement.partnerStatus = btn.dataset.partnerStatus; renderApp(); }));
+  bindSearchInput("[data-partner-search]", (v) => { state.procurement.partnerSearch = v; });
   if (state.procurement.screen === "materials") bindMaterials();
   else if (state.procurement.screen === "deliveryPlaces") bindDeliveryPlaces();
   else if (state.procurement.screen === "accounts") bindTransferAccounts();
@@ -5021,9 +5050,12 @@ function renderPartnerHub() {
   const row = (cells, attrs = "") => `<tr ${attrs}>${cells.map((c) => `<td${c.num ? ' class="num"' : c.wrap ? ' class="wrap"' : ""}>${c.v}</td>`).join("")}</tr>`;
   let body = "";
   if (tab === "overview") {
-    const kv = [["분류", PARTNER_CATEGORY_LABELS[p.category] || p.category], ["상호", p.businessName], ["사업자번호", p.businessNumber], ["대표자", p.representativeName], ["주소", p.address],
-      ["담당자", [p.contactName, p.contactPhone, p.contactEmail].filter(Boolean).join(" · ")], ["세금계산서 이메일", p.invoiceEmail], ["계좌", [p.bankName, p.bankAccount, p.depositorName].filter(Boolean).join(" ")],
-      ["발주 방식", p.orderMethod], ["금액 기준", p.priceMode === "gross" ? "부가세 포함" : p.priceMode ? "부가세 별도" : ""], ["메모", p.note]].filter(([, v]) => v);
+    const kv = [["분류", partnerTagText(p) + (p.isActive === false ? " (보관)" : "")], ["검색 태그", (p.aliases || []).join(", ")],
+      ["사업자명", p.businessName], ["사업자등록번호", formatBizNo(p.businessNumber)], ["사업자상 대표명", p.representativeName], ["사업자등록 주소", p.address],
+      ["전자세금계산서 수취용 이메일", p.invoiceEmail], ["결제계좌 방식", p.payoutAccountType === "virtual" ? "가상계좌(매번 다름)" : ""],
+      ["결제정보", [p.bankName, p.bankAccount, p.depositorName].filter(Boolean).join(" ")], ["발주방식", p.orderMethod], ["증빙구분", p.invoiceTiming],
+      ["금액 계산 방식", p.priceMode === "gross" ? "부가세 포함" : p.priceMode ? "부가세 별도" : ""],
+      ["담당자", [p.contactName, p.contactPhone, p.contactEmail].filter(Boolean).join(" · ")], ["노션 분류", p.notionCategory], ["메모", p.note]].filter(([, v]) => v);
     const bal = d.balance || {};
     const tile = (label, v, sub = "") => `<div class="stat"><span>${label}</span><strong>${money.format(Math.round(v || 0))}원</strong>${sub ? `<small class="muted">${sub}</small>` : ""}</div>`;
     body = `<div class="stats hub-balance">
@@ -5033,6 +5065,10 @@ function renderPartnerHub() {
         ${bal.brandClaims ? tile("브랜드 채권잔액", bal.brandClaims) : ""}
       </div>
       <table class="kv compact"><tbody>${kv.map(([k, v]) => `<tr><th style="text-align:left;width:130px">${k}</th><td class="wrap">${h(v)}</td></tr>`).join("")}</tbody></table>
+      ${d.notion?.count ? `<p style="margin-top:10px">노션 결제 기록 <strong>${money.format(d.notion.count)}건 · ${money.format(d.notion.total)}원</strong> <span class="muted">(${h(String(d.notion.first).slice(0, 10))} ~ ${h(String(d.notion.last).slice(0, 10))})</span> <button class="small" data-hub-notion>기록 보기</button></p>` : ""}
+      ${(p.notionAttachments || []).length ? `<p class="muted" style="font-size:12px">노션 첨부: ${h(p.notionAttachments.join(", "))} — 원본은 노션에 있습니다.</p>` : ""}
+      ${p.hasNotionLogin ? `<p class="muted" style="font-size:12px">노션에 협력사 사이트 로그인 정보가 있습니다(ERP 로 옮기지 않음).</p>` : ""}
+      ${can("procurement", "edit") ? `<div class="toolbar" style="margin-top:8px"><select data-hub-merge><option value="">이 거래처를 다른 거래처에 합치기…</option>${(d.mergeTargets || []).map((x) => `<option value="${h(x.id)}">${h(x.code ? `${x.code} · ` : "")}${h(x.name)}${x.isActive ? "" : " (보관)"}</option>`).join("")}</select></div>` : ""}
       ${d.rehab ? `<p class="muted" style="margin-top:10px">회생채권자: ${h(d.rehab.creditor)} · ${h(d.rehab.cat)} · 채권 ${money.format(d.rehab.total)}원 · 현금변제 ${money.format(d.rehab.cash)}원</p>` : ""}
       ${can("procurement", "edit") ? `<div class="toolbar" style="margin-top:10px"><button class="primary" data-hub-edit>정보 고치기</button></div>` : ""}`;
   } else if (tab === "brands") {
@@ -5087,6 +5123,21 @@ function bindPartnerHub() {
     state.procurement.editingPartner = (state.partners || []).find((x) => x.id === hub.id) || null;
     state.partnerHub = null; renderApp();
   });
+  app.querySelector("[data-hub-notion]")?.addEventListener("click", () => {
+    const ns = notionState(); ns.partnerId = hub.id; ns.partnerName = hub.data?.partner?.name || ""; ns.q = ""; ns.data = null;
+    state.partnerHub = null; state.tab = "notion"; renderApp();
+  });
+  app.querySelector("[data-hub-merge]")?.addEventListener("change", async (e) => {
+    const intoId = e.target.value;
+    if (!intoId) return;
+    const into = (hub.data?.mergeTargets || []).find((x) => x.id === intoId);
+    if (!confirm(`'${hub.data?.partner?.name}'의 모든 기록(브랜드·명세서·생산비·판매·지급요청·입금계좌)을 '${into?.name}'(으)로 옮기고 이 거래처를 지울까요? 이름은 '${into?.name}'의 예전 이름으로 남습니다.`)) { e.target.value = ""; return; }
+    try {
+      const r = await api(`/api/partners/${encodeURIComponent(hub.id)}/merge`, { method: "POST", body: { intoId } });
+      showToast(`합쳤습니다: ${Object.entries(r.moved || {}).map(([k, n]) => `${k} ${n}`).join(", ") || "옮길 기록 없음"}`);
+      state.partnerHub = null; await refreshAndRender(); openPartnerHub(intoId);
+    } catch (err) { showToast(err.message, "error"); e.target.value = ""; }
+  });
   app.querySelectorAll("[data-hub-brand]").forEach((tr) => tr.addEventListener("click", (e) => {
     if (e.target.closest("button")) return;
     state.tab = "brands"; state.editingBrand = state.brands.find((b) => b.id === tr.dataset.hubBrand) || null; state.partnerHub = null; renderApp();
@@ -5115,8 +5166,8 @@ function bindPartnerHub() {
 function renderPartnerRow(item) {
   return `
     <tr class="hub-go" data-partner-hub="${item.id}" title="누르면 이 거래처와 이어진 브랜드·명세서·판매·생산비가 보입니다">
-      <td>${codeTag(item)}${h(item.name)}<br><span class="muted">${PARTNER_CATEGORY_LABELS[item.category] || item.category}</span></td>
-      <td>${h(item.businessName)}</td>
+      <td>${codeTag(item)}${h(item.name)}${item.isActive === false ? ' <span class="pill">보관</span>' : ""}${item.payoutAccountType === "virtual" ? ' <span class="pill">가상계좌</span>' : ""}<br><span class="muted" style="font-size:12px">${h(partnerTagText(item))}${item.notion?.last ? ` · 마지막 결제 ${h(item.notion.last)}` : ""}${(item.aliases || []).length ? ` · 검색 태그 ${h(item.aliases.join(", "))}` : ""}</span></td>
+      <td>${h(item.businessName)}${item.businessNumber ? `<br><span class="muted" style="font-size:11px">${h(formatBizNo(item.businessNumber))}</span>` : ""}</td>
       <td>${h(item.contactName)}${item.contactPhone ? ` · ${h(item.contactPhone)}` : ""}</td>
       <td>${h(item.orderMethod)}</td>
       <td>${h(item.bankName)} ${h(item.bankAccount)}</td>
@@ -5126,33 +5177,43 @@ function renderPartnerRow(item) {
 
 function renderPartnerForm() {
   const p = state.procurement.editingPartner || {};
+  const opt = state.partnerOptions;
+  if (!opt) { ensurePartnerOptions(); return `<p class="muted">불러오는 중…</p>`; }
+  const issuer = isIssuer(p);
+  const roles = partnerRoles(p);
+  const subs = new Set(p.subRoles || []);
+  const select = (name, list, cur, addList) => `<select name="${name}" data-opt-select="${addList}"><option value="">선택</option>${[...new Set([...(list || []), ...(cur ? [cur] : [])])].map((v) => `<option ${v === cur ? "selected" : ""}>${h(v)}</option>`).join("")}<option value="__add">+ 직접 추가…</option></select>`;
   return `
     <form class="form-grid" data-partner-form>
+      <div class="field"><label>구분</label><select name="kind" data-partner-kind><option value="partner" ${issuer ? "" : "selected"}>거래처</option><option value="issuer" ${issuer ? "selected" : ""}>발행자(자사 — 우리 사업자)</option></select></div>
+      <div class="field" data-partner-tags ${issuer ? 'style="display:none"' : ""}>
+        <label>분류 태그 <span class="muted" style="font-weight:400">(1차 · 2차 여러 개 가능)</span></label>
+        ${Object.entries(PARTNER_ROLE_LABELS).map(([k, l]) => `<div class="tag-group">
+          <label class="chip tag-l1"><input type="checkbox" name="role_${k}" ${roles.includes(k) ? "checked" : ""}> <strong>${h(l)}</strong></label>
+          ${(opt.sub[k] || []).map((sub) => `<label class="chip"><input type="checkbox" name="sub" value="${h(sub)}" data-sub-of="${k}" ${subs.has(sub) ? "checked" : ""}> ${h(sub)}</label>`).join("")}
+          <button type="button" class="small ghost" data-add-sub="${k}">+ 2차 추가</button></div>`).join("")}
+      </div>
+      <div class="field"><label>거래처명 (관리용 라벨)</label><input name="name" value="${h(p.name)}" required></div>
+      <div class="field"><label>거래처명 (검색 태그 추가) <span class="muted" style="font-weight:400">— 예전 이름·다른 이름, 쉼표로 구분</span></label><input name="aliases" value="${h((p.aliases || []).join(", "))}"></div>
+      <div class="field two">
+        <div><label>사업자명</label><input name="businessName" value="${h(p.businessName)}"></div>
+        <div><label>사업자등록번호</label><input name="businessNumber" value="${h(formatBizNo(p.businessNumber))}" placeholder="000-00-00000" data-bizno></div>
+      </div>
+      <div class="field"><label>사업자상 대표명</label><input name="representativeName" value="${h(p.representativeName)}"></div>
+      <div class="field"><label>사업자등록 주소</label><input name="address" value="${h(p.address)}"></div>
+      <div class="field"><label>전자세금계산서 수취용 이메일</label><input name="invoiceEmail" type="email" value="${h(p.invoiceEmail)}"></div>
+      <div class="field"><label>결제계좌 방식</label><select name="payoutAccountType"><option value="fixed" ${p.payoutAccountType !== "virtual" ? "selected" : ""}>고정 계좌</option><option value="virtual" ${p.payoutAccountType === "virtual" ? "selected" : ""}>가상계좌(매번 다름 — 지급요청마다 입력)</option></select></div>
+      <div class="field two">
+        <div><label>결제정보 (은행)</label><input name="bankName" value="${h(p.bankName)}"></div>
+        <div><label>결제정보 (계좌번호)</label><input name="bankAccount" value="${h(p.bankAccount)}"></div>
+      </div>
+      <div class="field"><label>결제정보 (예금주명)</label><input name="depositorName" value="${h(p.depositorName)}"></div>
+      <div class="field two">
+        <div><label>발주방식</label>${select("orderMethod", opt.orderMethods, p.orderMethod, "orderMethods")}</div>
+        <div><label>증빙구분</label>${select("invoiceTiming", opt.evidenceTypes, p.invoiceTiming, "evidenceTypes")}</div>
+      </div>
       <div class="field">
-        <label>분류</label>
-        <select name="category">
-          ${Object.entries(PARTNER_CATEGORY_LABELS).map(([key, label]) => `<option value="${key}" ${(p.category || "production") === key ? "selected" : ""}>${label}</option>`).join("")}
-        </select>
-      </div>
-      <div class="field"><label>거래처명</label><input name="name" value="${h(p.name)}" required></div>
-      <div class="field two">
-        <div><label>상호명</label><input name="businessName" value="${h(p.businessName)}"></div>
-        <div><label>사업자등록번호</label><input name="businessNumber" value="${h(p.businessNumber)}"></div>
-      </div>
-      <div class="field"><label>대표자명</label><input name="representativeName" value="${h(p.representativeName)}"></div>
-      <div class="field"><label>주소</label><input name="address" value="${h(p.address)}"></div>
-      <div class="field"><label>세금계산서 발행 메일</label><input name="invoiceEmail" type="email" value="${h(p.invoiceEmail)}"></div>
-      <div class="field two">
-        <div><label>은행</label><input name="bankName" value="${h(p.bankName)}"></div>
-        <div><label>계좌번호</label><input name="bankAccount" value="${h(p.bankAccount)}"></div>
-      </div>
-      <div class="field"><label>예금주명</label><input name="depositorName" value="${h(p.depositorName)}"></div>
-      <div class="field two">
-        <div><label>발주방식</label><input name="orderMethod" value="${h(p.orderMethod)}" placeholder="예: 메일, 개별요청"></div>
-        <div><label>증빙구분(계산서 발행 시점)</label><input name="invoiceTiming" value="${h(p.invoiceTiming)}" placeholder="예: 입금 후 발행"></div>
-      </div>
-      <div class="field">
-        <label>금액 기준 <span class="muted" style="font-weight:400">(발주서 단가 기본값 — 문서별로 변경 가능)</span></label>
+        <label>금액 계산 방식 <span class="muted" style="font-weight:400">(발주서 단가 기본값 — 문서별로 변경 가능)</span></label>
         <select name="priceMode">
           <option value="supply" ${p.priceMode === "gross" ? "" : "selected"}>부가세 별도 (공급가 기준 — 생산처 일반)</option>
           <option value="gross" ${p.priceMode === "gross" ? "selected" : ""}>부가세 포함 (제품가에 부가세 포함)</option>
@@ -5169,7 +5230,7 @@ function renderPartnerForm() {
         <div data-attachments-list>${(p.attachments || []).map(renderAttachmentRow).join("")}</div>
         <button type="button" data-add-attachment style="margin-top:6px">링크 추가</button>
       </div>
-      <div class="field"><label>사용 상태</label><select name="isActive"><option value="true" ${p.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${p.isActive === false ? "selected" : ""}>N</option></select></div>
+      <div class="field"><label>사용 상태</label><select name="isActive"><option value="true" ${p.isActive !== false ? "selected" : ""}>사용(활성)</option><option value="false" ${p.isActive === false ? "selected" : ""}>보관</option></select></div>
       <div class="toolbar">
         <button class="primary" type="submit">${p.id ? "수정 저장" : "거래처 추가"}</button>
         ${state.procurement.editingPartner ? `<button type="button" data-cancel-edit-partner>취소</button>` : ""}
@@ -5186,7 +5247,39 @@ function renderAttachmentRow(url) {
     </div>`;
 }
 
+function bindPartnerFormExtras() {
+  const form = app.querySelector("[data-partner-form]");
+  if (!form) return;
+  form.querySelector("[data-partner-kind]")?.addEventListener("change", (e) => {
+    const tags = form.querySelector("[data-partner-tags]");
+    if (tags) tags.style.display = e.target.value === "issuer" ? "none" : "";
+  });
+  form.querySelector("[data-bizno]")?.addEventListener("blur", (e) => { e.target.value = formatBizNo(e.target.value); });
+  const addOption = async (body) => {
+    try { state.partnerOptions = await api("/api/partner-options", { method: "POST", body }); return true; } catch (err) { showToast(err.message, "error"); return false; }
+  };
+  form.querySelectorAll("[data-add-sub]").forEach((b) => b.addEventListener("click", async () => {
+    const value = prompt(`'${PARTNER_ROLE_LABELS[b.dataset.addSub]}' 아래에 추가할 2차 분류 이름`);
+    if (!value?.trim()) return;
+    // 지금 고른 값은 다시 그려도 남게 잠깐 담아 둔다
+    const p = state.procurement.editingPartner || (state.procurement.editingPartner = null);
+    if (await addOption({ list: "sub", role: b.dataset.addSub, value: value.trim() })) renderApp();
+  }));
+  form.querySelectorAll("[data-opt-select]").forEach((sel) => sel.addEventListener("change", async () => {
+    if (sel.value !== "__add") return;
+    const value = prompt("추가할 항목 이름");
+    if (!value?.trim()) { sel.value = ""; return; }
+    if (await addOption({ list: sel.dataset.optSelect, value: value.trim() })) {
+      const o = document.createElement("option");
+      o.textContent = value.trim();
+      sel.insertBefore(o, sel.lastElementChild);
+      sel.value = value.trim();
+    }
+  }));
+}
+
 function bindPartners() {
+  bindPartnerFormExtras();
   bindBulkExcelTools("partner", "/api/partners/import");
   bindProcurementPopupButtons("partner");
   app.querySelector("[data-new-partner]")?.addEventListener("click", () => {
@@ -5233,6 +5326,15 @@ function bindPartners() {
     event.preventDefault();
     const body = formObject(event.currentTarget);
     body.isActive = body.isActive === "true";
+    const formEl = event.currentTarget;
+    body.subRoles = Array.from(formEl.querySelectorAll("[name=sub]:checked")).map((x) => x.value);
+    // 2차를 고르면 그 1차도 고른 것으로
+    const subRoleOf = Array.from(formEl.querySelectorAll("[name=sub]:checked")).map((x) => x.dataset.subOf);
+    body.roles = Object.keys(PARTNER_ROLE_LABELS).filter((k) => body[`role_${k}`] || subRoleOf.includes(k));
+    for (const k of Object.keys(PARTNER_ROLE_LABELS)) delete body[`role_${k}`];
+    delete body.sub;
+    if (body.orderMethod === "__add") body.orderMethod = "";
+    if (body.invoiceTiming === "__add") body.invoiceTiming = "";
     body.attachments = Array.from(attachmentsList?.querySelectorAll(".attachment-input") || [])
       .map((input) => input.value.trim())
       .filter(Boolean);
@@ -5257,83 +5359,240 @@ function afterProcurementSave(kind, message) {
   showToast(message);
 }
 
+// 품목: ① 자재(종류별) · ② 제품(우리 완제품) · ④ 거래처 상품. 한 저장소를 종류별로 따로 보여 준다.
+const ITEM_KIND_LABELS = { material: "자재", product: "제품(우리 완제품)", vendorProduct: "거래처 상품" };
+const MATERIAL_TYPE_LABELS = { RM: "원자재(원단)", SB: "부자재", PK: "포장재", LB: "공임", OP: "외주가공", FR: "운임", OT: "1회성 비용" };
+const itemKindOf = (m) => m.itemKind || "material";
+const OWNER_LABELS = { wooof: "우프컴퍼니", betters: "Betters(예전 귀속)", npb: "NPB", other: "기타" };
+const UNIT_LABELS = { pb: "PB", npb: "NPB" };
+// 셀메이트 내보내기는 .xlsx 이름이어도 CSV(cp949)다. UTF-8 로 먼저 읽고 깨지면 EUC-KR 로.
+async function readSellmateFile(file) {
+  const buf = await file.arrayBuffer();
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(buf); } catch { return new TextDecoder("euc-kr").decode(buf); }
+}
+function itemView() {
+  const pr = state.procurement;
+  if (!pr.itemKind) pr.itemKind = "material";
+  return pr;
+}
 function renderMaterials() {
-  const rows = state.materials || [];
+  const pr = itemView();
+  const all = state.materials || [];
+  const kind = pr.itemKind;
+  const type = pr.materialType || "";
+  const q = String(pr.itemSearch || "").trim().toLowerCase();
+  const sub = pr.itemSub || "";
+  const rows = all.filter((m) => itemKindOf(m) === kind && (kind !== "material" || !type || m.materialType === type)
+    && (!sub || (sub === "review" ? m.needsReview : sub === "discontinued" ? m.discontinued : sub === "instock" ? Number(m.stock || 0) > 0 : sub.startsWith("own:") ? m.owner === sub.slice(4) : sub.startsWith("unit:") ? m.businessUnit === sub.slice(5) : true))
+    && (pr.itemShowInactive || m.isActive !== false)
+    && (!q || [m.itemName, m.code, m.itemCode, m.barcode, m.group, m.note, ...(m.legacyCodes || []), (state.partners || []).find((x) => x.id === m.partnerId)?.name].some((v) => String(v || "").toLowerCase().includes(q))))
+    .sort((a, b) => String(a.group || "").localeCompare(String(b.group || ""), "ko") || String(a.code || "").localeCompare(String(b.code || "")));
+  const kindCount = (k) => all.filter((m) => itemKindOf(m) === k && m.isActive !== false).length;
+  const typeCount = (t) => all.filter((m) => itemKindOf(m) === "material" && m.materialType === t && m.isActive !== false).length;
+  const isMat = kind === "material";
   return `
+    <div class="npb-subnav" style="flex-wrap:wrap">
+      ${Object.entries(ITEM_KIND_LABELS).map(([k, l]) => `<button class="npb-subtab ${kind === k ? "active" : ""}" data-item-kind="${k}">${l} <span class="muted">${kindCount(k)}</span></button>`).join("")}
+      ${isMat ? `<span style="width:12px"></span><button class="npb-subtab ${!type ? "active" : ""}" data-item-type="">전체</button>${Object.entries(MATERIAL_TYPE_LABELS).map(([t, l]) => `<button class="npb-subtab ${type === t ? "active" : ""}" data-item-type="${t}">${l} <span class="muted">${typeCount(t)}</span></button>`).join("")}` : ""}
+      ${!isMat ? (() => {
+        const pool = all.filter((m) => itemKindOf(m) === kind && m.isActive !== false);
+        const chip = (k, l, n) => (n ? `<button class="npb-subtab ${sub === k ? "active" : ""}" data-item-sub="${k}">${l} <span class="muted">${n}</span></button>` : "");
+        return `<span style="width:12px"></span>${chip("", "전체", pool.length)}${chip("instock", "재고 있음", pool.filter((m) => Number(m.stock || 0) > 0).length)}${chip("review", "⚠ 분류 확인 필요", pool.filter((m) => m.needsReview).length)}${chip("discontinued", "단종·마지막 재고", pool.filter((m) => m.discontinued).length)}
+          ${kind === "product" ? Object.entries(UNIT_LABELS).map(([u, l]) => chip(`unit:${u}`, l, pool.filter((m) => m.businessUnit === u).length)).join("") : ""}
+          ${Object.entries(OWNER_LABELS).map(([o, l]) => chip(`own:${o}`, `귀속 ${l}`, pool.filter((m) => m.owner === o).length)).join("")}`;
+      })() : ""}
+      <input data-item-search placeholder="이름·코드·예전 코드·거래처·묶음 검색" value="${h(pr.itemSearch || "")}" style="margin-left:auto;min-width:220px">
+      <label class="muted" style="font-size:12px"><input type="checkbox" data-item-inactive ${pr.itemShowInactive ? "checked" : ""}> 안 쓰는 것도</label>
+    </div>
     <section class="layout">
       <div class="panel">
-        <div class="panel-head"><h2>원부자재 목록</h2><span class="muted">${money.format(rows.length)}개</span></div>
+        <div class="panel-head"><h2>${h(ITEM_KIND_LABELS[kind])}${isMat && type ? ` · ${h(MATERIAL_TYPE_LABELS[type])}` : ""}</h2><span class="muted">${money.format(rows.length)}개</span></div>
         <div class="panel-body" style="padding-bottom:0">
-          <button class="primary" data-new-material>새 원부자재</button>
-          <button type="button" data-open-procurement-popup="material" style="margin-left:8px">새 창으로 입력</button>
+          <button class="primary" data-new-material>새 ${h(isMat ? (MATERIAL_TYPE_LABELS[type] || "자재") : ITEM_KIND_LABELS[kind])}</button>
           ${renderBulkExcelTools("material", "/api/materials/export")}
+          ${!isMat ? `<details class="sellmate-box" ${pr.sellmateOpen ? "open" : ""}><summary>셀메이트 재고 올리기 ${pr.sellmateLast ? `<span class="muted">— 마지막 ${h(fmtDate(pr.sellmateLast.takenAt))} · ${money.format(pr.sellmateLast.totals.units)}개 · 원가합 ${money.format(pr.sellmateLast.totals.costValue)}원</span>` : ""}</summary>
+            <p class="muted" style="font-size:12px">셀메이트 '재고 내보내기' 파일(재고 0 포함)을 그대로 올리세요. SKU 를 맞추고(없으면 새 품목), 그날 재고를 저장합니다.</p>
+            <div class="toolbar"><input type="file" data-sellmate-file accept=".csv,.xlsx,.xls"><button data-sellmate-go="dry">미리 보기</button><button class="primary" data-sellmate-go="apply">올리기</button></div>
+            ${pr.sellmateResult ? `<pre class="muted" style="white-space:pre-wrap;font-size:12px">${h(pr.sellmateResult)}</pre>` : ""}
+          </details>` : ""}
         </div>
         <div class="table-wrap">
-          <table class="materials-table">
-            <thead><tr><th>품목명</th><th>카테고리</th><th>거래처</th><th>발주단위</th><th>기본단가</th><th>리드타임</th><th>작업</th></tr></thead>
-            <tbody>${rows.map(renderMaterialRow).join("") || `<tr><td colspan="7" class="empty">등록된 원부자재가 없습니다.</td></tr>`}</tbody>
+          <table class="materials-table compact" data-unit="원">
+            <thead><tr>${isMat ? `<th>품목</th><th>종류</th><th>거래처</th><th>발주단위 / MOQ</th><th>기본단가</th><th>리드타임</th><th></th>` : `<th>품목</th><th>귀속</th><th data-nounit="1">재고 / 가용</th><th>위치</th><th>원가 / 셀메이트</th><th>바코드 · 카페24</th><th></th>`}</tr></thead>
+            <tbody>${rows.map((m) => renderMaterialRow(m, isMat)).join("") || `<tr><td colspan="7" class="empty">등록된 품목이 없습니다.</td></tr>`}</tbody>
           </table>
         </div>
       </div>
       <div class="panel">
-        <div class="panel-head"><h2>${state.procurement.editingMaterial ? "원부자재 수정" : "원부자재 입력"}</h2></div>
+        <div class="panel-head"><h2>${state.procurement.editingMaterial ? "품목 수정" : "품목 입력"}</h2></div>
         <div class="panel-body">${renderMaterialForm()}</div>
       </div>
     </section>
   `;
 }
 
-function renderMaterialRow(item) {
+function renderMaterialRow(item, isMat) {
+  if (!isMat) {
+    const unit = UNIT_LABELS[item.businessUnit];
+    return `
+    <tr class="hub-go" data-row-edit="[data-edit-material]">
+      <td>${codeTag(item)}${h(item.itemName)}${unit ? ` <span class="pill">${unit}</span>` : ""}${item.discontinued ? ' <span class="pill" title="다시 주문하지 않는 마지막 재고">단종</span>' : ""}${item.isActive === false ? ' <span class="pill">안 씀</span>' : ""}${item.needsReview ? `<br><span class="danger-text" style="font-size:11px">⚠ 분류 확인:</span> <select class="small" data-item-reclass="${h(item.id)}"><option value="">고르기…</option><option value="product:pb">제품 PB</option><option value="product:npb">제품 NPB</option><option value="vendorProduct:">거래처 상품</option></select>` : ""}</td>
+      <td>${h(OWNER_LABELS[item.owner] || "")}</td>
+      <td class="num">${item.stock != null ? `${money.format(item.stock)}${item.available != null && item.available !== item.stock ? ` / ${money.format(item.available)}` : ""}` : "-"}${item.lastInbound ? `<br><span class="muted" style="font-size:11px">입고 ${h(String(item.lastInbound).slice(0, 10))}</span>` : ""}</td>
+      <td>${h(item.storage || "")}</td>
+      <td class="num">${item.basePrice ? money.format(item.basePrice) : "-"}${item.sellmateCost ? `<br><span class="muted" style="font-size:11px">셀메이트 ${money.format(item.sellmateCost)}</span>` : ""}</td>
+      <td style="font-size:12px">${h(item.barcode || item.itemCode || "")}${item.cafe24VariantCode || item.cafe24Code ? `<br><span class="muted">${h(item.cafe24VariantCode || item.cafe24Code)}</span>` : ""}</td>
+      <td><div class="row-actions"><button data-edit-material="${item.id}">수정</button><button class="danger icon-btn" data-delete-material="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
+    </tr>`;
+  }
   const partner = (state.partners || []).find((p) => p.id === item.partnerId);
+  const alt = (item.altPartnerIds || []).map((id) => (state.partners || []).find((p) => p.id === id)?.name).filter(Boolean);
   return `
     <tr class="hub-go" data-row-edit="[data-edit-material]">
-      <td>${codeTag(item)}${h(item.itemName)}${item.itemCode ? `<br><span class="muted" style="font-size:11px">${h(item.itemCode)}</span>` : ""}</td>
-      <td>${h(item.category)}</td>
-      <td>${h(partner?.name || "")}</td>
-      <td>${h(item.orderUnit)}</td>
-      <td>${item.basePrice ? `${money.format(item.basePrice)}원` : "-"}</td>
-      <td>${item.leadTimeDays ? `${item.leadTimeDays}일` : "-"}</td>
-      <td><div class="row-actions"><button data-edit-material="${item.id}">수정</button><button data-edit-procurement-popup="material" data-record-id="${item.id}">새 창</button><button class="danger icon-btn" data-delete-material="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
+      <td>${codeTag(item)}${h(item.itemName)}${item.isActive === false ? ' <span class="pill">안 씀</span>' : ""}${item.group ? `<br><span class="muted" style="font-size:11px">묶음 ${h(item.group)}</span>` : ""}${item.orderNote ? `<br><span class="muted" style="font-size:11px">⚠ ${h(item.orderNote.slice(0, 40))}${item.orderNote.length > 40 ? "…" : ""}</span>` : ""}</td>
+      ${isMat ? `<td>${h(MATERIAL_TYPE_LABELS[item.materialType] || "")}</td>` : ""}
+      <td>${h(partner?.name || "")}${alt.length ? `<br><span class="muted" style="font-size:11px">대체 ${h(alt.join(", "))}</span>` : ""}</td>
+      <td>${h(item.orderUnit || item.baseUnit || "")}${item.moq ? ` · MOQ ${money.format(item.moq)}` : ""}${item.orderMultiple ? ` · ${money.format(item.orderMultiple)}단위` : ""}</td>
+      <td class="num">${item.basePrice ? money.format(item.basePrice) : "-"}</td>
+      ${isMat ? `<td>${item.leadTimeDays ? `${item.leadTimeDays}일` : "-"}</td>` : `<td>${h(item.barcode || item.itemCode || "")}</td>`}
+      <td><div class="row-actions"><button data-edit-material="${item.id}">수정</button><button class="danger icon-btn" data-delete-material="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
     </tr>`;
 }
 
 function renderMaterialForm() {
-  const m = state.procurement.editingMaterial || {};
+  const pr = itemView();
+  const m = state.procurement.editingMaterial || { itemKind: pr.itemKind, materialType: pr.materialType || "SB" };
+  const kind = itemKindOf(m);
+  const isMat = kind === "material";
+  const prices = pr.itemPrices && pr.itemPrices.itemId === m.id ? pr.itemPrices.list : null;
+  const partnerName = (id) => (state.partners || []).find((p) => p.id === id)?.name || "";
   return `
     <form class="form-grid" data-material-form>
-      <div class="field">
-        <label>거래처(생산업체)</label>
-        <select name="partnerId">
-          <option value="">선택 안 함</option>
-          ${partnerSelectOptions(m.partnerId).join("")}
-        </select>
+      <div class="field two">
+        <div><label>종류</label><select name="itemKind">${Object.entries(ITEM_KIND_LABELS).map(([k, l]) => `<option value="${k}" ${kind === k ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+        <div><label>자재 종류</label><select name="materialType" ${isMat ? "" : "disabled"}>${Object.entries(MATERIAL_TYPE_LABELS).map(([k, l]) => `<option value="${k}" ${m.materialType === k ? "selected" : ""}>${l}</option>`).join("")}</select></div>
       </div>
+      ${kind === "product" ? `<div class="field"><label>사업부</label><select name="businessUnit"><option value="pb" ${m.businessUnit !== "npb" ? "selected" : ""}>PB (베럴즈 등 우리 브랜드)</option><option value="npb" ${m.businessUnit === "npb" ? "selected" : ""}>NPB (픽키도기클럽·도톤·공감캣)</option></select></div>` : ""}
+      ${!isMat && (m.owner || m.sellmateCode) ? `<p class="muted" style="font-size:12px">셀메이트: ${h(m.sellmateCode || "")} · 귀속 ${h(OWNER_LABELS[m.owner] || "-")} · 재고 ${money.format(m.stock || 0)}${m.stockAt ? ` (${h(fmtDate(m.stockAt))})` : ""}</p>` : ""}
       <div class="field"><label>품목명</label><input name="itemName" value="${h(m.itemName)}" required></div>
       <div class="field two">
-        <div><label>코드(바코드)</label><input name="itemCode" value="${h(m.itemCode)}" placeholder="선택 입력 — 바코드 스캔 또는 직접 입력"></div>
-        <div><label>카테고리</label><input name="category" value="${h(m.category)}" placeholder="예: 원단, 부자재, 포장재, 사은품"></div>
+        <div><label>기본 거래처(공급처)</label><select name="partnerId"><option value="">선택 안 함</option>${partnerSelectOptionsForDoc(m.partnerId, kind === "vendorProduct" ? "purchase" : "production").join("")}</select></div>
+        <div><label>묶음(그룹)</label><input name="group" value="${h(m.group)}" placeholder="예: 이케코 ML 체크블루 부자재"></div>
+      </div>
+      <div class="field"><label>대체 공급처 <span class="muted" style="font-weight:400">(가격·수급에 따라 바뀌는 곳)</span></label><select name="altPartnerIds" multiple size="3">${(state.partners || []).filter((p) => p.isActive !== false).map((p) => `<option value="${h(p.id)}" ${(m.altPartnerIds || []).includes(p.id) ? "selected" : ""}>${h(p.name)}</option>`).join("")}</select></div>
+      <div class="field two">
+        <div><label>${isMat ? "규격·사양" : "옵션·규격"}</label><input name="spec" value="${h(m.spec)}" placeholder="${isMat ? "예: 비바와샤2 N100/56'' 36번 그레이" : "예: ML / 체크블루"}"></div>
+        <div><label>${isMat ? "공급처 품번" : "바코드"}</label><input name="${isMat ? "itemCode" : "barcode"}" value="${h(isMat ? m.itemCode : m.barcode || m.itemCode)}" placeholder="${isMat ? "" : "880… (없으면 비워 둠)"}"></div>
       </div>
       <div class="field two">
-        <div><label>발주단위</label><input name="orderUnit" value="${h(m.orderUnit)}" placeholder="예: 개, Roll, box"></div>
+        <div><label>기본 단위</label><input name="baseUnit" value="${h(m.baseUnit)}" placeholder="예: 야드, 개, m"></div>
+        <div><label>발주 단위</label><input name="orderUnit" value="${h(m.orderUnit)}" placeholder="예: 롤, 박스"></div>
+      </div>
+      ${isMat ? `<div class="field two">
+        <div><label>발주 단위당 수량</label><input name="unitPerOrder" inputmode="decimal" value="${h(m.unitPerOrder ?? "")}" placeholder="예: 1롤 = 100(야드)"></div>
+        <div><label>MOQ(최소 발주)</label><input name="moq" inputmode="decimal" value="${h(m.moq ?? "")}"></div>
+      </div>
+      <div class="field two">
+        <div><label>권장 발주 단위(배수)</label><input name="orderMultiple" inputmode="decimal" value="${h(m.orderMultiple ?? "")}" placeholder="예: 100개씩"></div>
         <div><label>리드타임(일)</label><input name="leadTimeDays" type="number" min="0" value="${h(m.leadTimeDays || "")}"></div>
       </div>
+      <div class="field"><label>보관 위치</label><input name="storage" value="${h(m.storage)}" placeholder="예: 세림통상, 동광섬유, 물류센터, 본사"></div>
+      <div class="field"><label>발주 시 꼭 확인할 것</label><textarea name="orderNote" rows="2" placeholder="예: 염색비 별도(1회 70,000원), 원단과 컬러감 확인">${h(m.orderNote)}</textarea></div>` : `
       <div class="field two">
-        <div><label>기본 공급가</label><input name="basePrice" type="number" min="0" value="${h(m.basePrice || "")}" placeholder="부가세 제외 금액"></div>
-        <div><label>소비자정가</label><input name="consumerPrice" type="number" min="0" value="${h(m.consumerPrice || "")}" placeholder="선택 입력 — 발주서에 표기"></div>
+        <div><label>입수(박스당)</label><input name="packQty" inputmode="decimal" value="${h(m.packQty ?? "")}"></div>
+        <div><label>중량(g)</label><input name="weightG" inputmode="decimal" value="${h(m.weightG ?? "")}"></div>
       </div>
-      <div class="field"><label>메모</label><textarea name="note">${h(m.note)}</textarea></div>
-      <div class="field"><label>사용 상태</label><select name="isActive"><option value="true" ${m.isActive !== false ? "selected" : ""}>Y</option><option value="false" ${m.isActive === false ? "selected" : ""}>N</option></select></div>
+      <div class="field"><label>포장 크기(mm) 가로 · 세로 · 높이</label><div class="toolbar"><input name="widthMm" inputmode="decimal" value="${h(m.widthMm ?? "")}" style="width:90px"><input name="depthMm" inputmode="decimal" value="${h(m.depthMm ?? "")}" style="width:90px"><input name="heightMm" inputmode="decimal" value="${h(m.heightMm ?? "")}" style="width:90px"></div></div>`}
+      <div class="field two">
+        <div><label>기본 단가 ${m.id ? '<span class="muted" style="font-weight:400">(바꾸려면 아래 단가 이력에서)</span>' : ""}</label><input name="basePrice" type="number" min="0" value="${h(m.basePrice || "")}" placeholder="부가세 별도" ${m.id ? "readonly" : ""}></div>
+        <div><label>소비자가</label><input name="consumerPrice" type="number" min="0" value="${h(m.consumerPrice || "")}"></div>
+      </div>
+      <div class="field"><label>메모</label><textarea name="note" rows="2">${h(m.note)}</textarea></div>
+      <div class="field"><label>사용 상태</label><select name="isActive"><option value="true" ${m.isActive !== false ? "selected" : ""}>사용</option><option value="false" ${m.isActive === false ? "selected" : ""}>안 씀</option></select></div>
+      ${!isMat ? `<div class="field"><label class="chip"><input type="checkbox" name="discontinued" ${m.discontinued ? "checked" : ""}> 단종 · 마지막 재고 (다시 주문 안 함)</label></div>` : ""}
+      ${(m.legacyCodes || []).length ? `<p class="muted" style="font-size:12px">예전 코드: ${h(m.legacyCodes.join(", "))}</p>` : ""}
       <div class="toolbar">
-        <button class="primary" type="submit">${m.id ? "수정 저장" : "원부자재 추가"}</button>
+        <button class="primary" type="submit">${m.id ? "수정 저장" : "품목 추가"}</button>
         ${state.procurement.editingMaterial ? `<button type="button" data-cancel-edit-material>취소</button>` : ""}
       </div>
     </form>
+    ${m.id ? `<div class="price-history" style="margin-top:14px">
+      <h3 style="font-size:14px;margin:0 0 6px">단가 이력 <span class="muted" style="font-weight:400;font-size:12px">— 바뀌면 '새 단가'를 더합니다. 이미 만든 발주·청구는 그때 단가 그대로.</span></h3>
+      ${prices ? `<div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>적용 시작</th><th>거래처</th><th>단가</th><th>부가세</th><th>사유</th><th>누가</th></tr></thead><tbody>
+        ${prices.map((x) => `<tr><td>${h(x.effectiveFrom)}</td><td>${h(x.partnerName)}</td><td class="num">${money.format(x.price)}</td><td>${x.vatMode === "included" ? "포함" : "별도"}</td><td class="wrap">${h(x.reason)}</td><td>${h(x.by)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">이력이 없습니다. 지금 기본 단가 ${m.basePrice ? `${money.format(m.basePrice)}원` : "없음"}.</td></tr>`}
+      </tbody></table></div>` : `<p class="muted">불러오는 중…</p>`}
+      ${can("procurement", "edit") ? `<form class="toolbar" data-item-price style="flex-wrap:wrap;margin-top:6px">
+        <input name="price" inputmode="numeric" placeholder="새 단가" style="width:110px" required>
+        <select name="vatMode"><option value="excluded">부가세 별도</option><option value="included">부가세 포함</option></select>
+        <input type="date" name="effectiveFrom" value="${new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10)}">
+        <select name="partnerId"><option value="${h(m.partnerId || "")}">${h(partnerName(m.partnerId) || "기본 거래처")}</option>${(m.altPartnerIds || []).map((id) => `<option value="${h(id)}">${h(partnerName(id))}</option>`).join("")}</select>
+        <input name="reason" placeholder="사유(예: 26/4/28 인상)" style="min-width:160px">
+        <button class="small primary" type="submit">새 단가 추가</button></form>` : ""}
+    </div>` : ""}
   `;
 }
 
 function bindMaterials() {
   bindBulkExcelTools("material", "/api/materials/import");
   bindProcurementPopupButtons("material");
+  const pr = itemView();
+  app.querySelectorAll("[data-item-kind]").forEach((b) => b.addEventListener("click", () => { pr.itemKind = b.dataset.itemKind; pr.materialType = ""; pr.itemSub = ""; state.procurement.editingMaterial = null; renderApp(); }));
+  app.querySelectorAll("[data-item-type]").forEach((b) => b.addEventListener("click", () => { pr.materialType = b.dataset.itemType; renderApp(); }));
+  app.querySelectorAll("[data-item-sub]").forEach((b) => b.addEventListener("click", () => { pr.itemSub = b.dataset.itemSub; renderApp(); }));
+  app.querySelectorAll("[data-item-reclass]").forEach((sel) => sel.addEventListener("change", async () => {
+    if (!sel.value) return;
+    const [itemKind, businessUnit] = sel.value.split(":");
+    try {
+      const r = await api(`/api/materials/${encodeURIComponent(sel.dataset.itemReclass)}`, { method: "PUT", body: { itemKind, businessUnit, needsReview: false } });
+      const i = state.materials.findIndex((x) => x.id === r.material.id);
+      if (i >= 0) state.materials[i] = r.material;
+      showToast("분류했습니다.");
+      renderApp();
+    } catch (e) { showToast(e.message, "error"); }
+  }));
+  if (pr.itemKind !== "material" && pr.sellmateLast === undefined && !pr.sellmateLoading) {
+    pr.sellmateLoading = true;
+    api("/api/sellmate/snapshots").then((r) => { pr.sellmateLast = r.snapshots[0] || null; }).catch(() => { pr.sellmateLast = null; }).finally(() => { pr.sellmateLoading = false; renderApp(); });
+  }
+  app.querySelectorAll("[data-sellmate-go]").forEach((b) => b.addEventListener("click", async (e) => {
+    e.preventDefault();
+    const file = app.querySelector("[data-sellmate-file]")?.files[0];
+    if (!file) { showToast("셀메이트 재고 파일을 고르세요.", "error"); return; }
+    const dryRun = b.dataset.sellmateGo === "dry";
+    try {
+      const text = await readSellmateFile(file);
+      const r = await api("/api/sellmate/import", { method: "POST", body: { text, dryRun, fileName: file.name } });
+      const sm = r.summary;
+      const own = Object.entries(sm.totals.byOwner || {}).map(([o, v]) => `${OWNER_LABELS[o] || o} ${money.format(v.units)}개 · ${money.format(v.costValue)}원`).join(" / ");
+      pr.sellmateResult = `${dryRun ? "[미리 보기] " : ""}${sm.rows}줄 · 새 품목 ${sm.creates}(${Object.entries(sm.kinds).map(([k, n]) => `${k} ${n}`).join(", ") || "-"}) · 갱신 ${sm.updates}\n재고 ${money.format(sm.totals.units)}개(재고 있는 SKU ${sm.totals.inStock}) · 셀메이트 원가 기준 ${money.format(sm.totals.costValue)}원\n${own}`;
+      pr.sellmateOpen = true;
+      if (!dryRun) { pr.sellmateLast = undefined; showToast("올렸습니다."); await refreshAndRender(); return; }
+      renderApp();
+    } catch (err) { showToast(err.message, "error"); }
+  }));
+  bindSearchInput("[data-item-search]", (v) => { pr.itemSearch = v; });
+  app.querySelector("[data-item-inactive]")?.addEventListener("change", (e) => { pr.itemShowInactive = e.target.checked; renderApp(); });
+  app.querySelector('[data-material-form] [name=itemKind]')?.addEventListener("change", (e) => {
+    const t = app.querySelector('[data-material-form] [name=materialType]');
+    if (t) t.disabled = e.target.value !== "material";
+  });
+  const editingItem = state.procurement.editingMaterial;
+  if (editingItem?.id && (!pr.itemPrices || pr.itemPrices.itemId !== editingItem.id) && !pr.itemPricesLoading) {
+    pr.itemPricesLoading = true;
+    api(`/api/materials/${encodeURIComponent(editingItem.id)}/prices`).then((r) => { pr.itemPrices = { itemId: editingItem.id, list: r.prices || [] }; })
+      .catch(() => { pr.itemPrices = { itemId: editingItem.id, list: [] }; }).finally(() => { pr.itemPricesLoading = false; renderApp(); });
+  }
+  app.querySelector("[data-item-price]")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const body = formObject(e.currentTarget);
+    try {
+      const r = await api(`/api/materials/${encodeURIComponent(editingItem.id)}/prices`, { method: "POST", body });
+      if (r.material) { Object.assign(editingItem, r.material); const i = state.materials.findIndex((x) => x.id === r.material.id); if (i >= 0) state.materials[i] = r.material; }
+      pr.itemPrices = null;
+      showToast("새 단가를 더했습니다.");
+      renderApp();
+    } catch (err) { showToast(err.message, "error"); }
+  });
   app.querySelector("[data-new-material]")?.addEventListener("click", () => {
     state.procurement.editingMaterial = null;
     renderApp();
@@ -5364,6 +5623,9 @@ function bindMaterials() {
     event.preventDefault();
     const body = formObject(event.currentTarget);
     body.isActive = body.isActive === "true";
+    body.altPartnerIds = Array.from(event.currentTarget.querySelector("[name=altPartnerIds]")?.selectedOptions || []).map((o) => o.value);
+    if (event.currentTarget.querySelector("[name=discontinued]")) body.discontinued = Boolean(event.currentTarget.querySelector("[name=discontinued]").checked);
+    if (body.itemKind !== "material") delete body.materialType;
     const editing = state.procurement.editingMaterial;
     if (editing) {
       await api(`/api/materials/${editing.id}`, { method: "PUT", body });
@@ -5920,6 +6182,15 @@ function renderPurchaseOrderRow(item) {
     </tr>`;
 }
 
+// 문서 종류별 품목 고르기(섞여 보이지 않게): 발주서 = 자재·거래처 상품, 명세서·청구서·견적서 = 제품·거래처 상품.
+// 받는 거래처의 품목을 먼저, 안 쓰는 품목은 뺀다.
+function poItemOptions(docType, partnerId) {
+  const kinds = docType === "purchase_order" ? ["material", "vendorProduct"] : ["product", "vendorProduct"];
+  return (state.materials || []).filter((m) => m.isActive !== false && kinds.includes(itemKindOf(m)))
+    .sort((a, b) => Number(b.partnerId === partnerId) - Number(a.partnerId === partnerId) || String(a.itemName).localeCompare(String(b.itemName), "ko"))
+    .map((m) => `<option value="${h(m.itemName)}">${h([m.code, m.barcode, m.discontinued ? "단종" : ""].filter(Boolean).join(" · "))}</option>`).join("");
+}
+
 function renderPurchaseOrderForm() {
   const po = state.procurement.editingPurchaseOrder || {};
   const lineItems = Array.isArray(po.lineItems) ? po.lineItems : [];
@@ -5999,10 +6270,10 @@ function renderPurchaseOrderForm() {
       <div class="field">
         <label>품목 추가</label>
         <datalist id="po-material-options">
-          ${(state.materials || []).map((m) => `<option value="${h(m.itemName)}">`).join("")}
+          ${poItemOptions(docType, po.partnerId)}
         </datalist>
         <div class="field four">
-          <div><input data-po-item-name list="po-material-options" placeholder="원부자재명 (검색 또는 신규 입력)"></div>
+          <div><input data-po-item-name list="po-material-options" placeholder="${docType === "purchase_order" ? "자재·거래처 상품" : "제품·거래처 상품"} (검색 또는 신규 입력)"></div>
           <div><input data-po-item-code placeholder="상품코드 (카탈로그 매칭 시 자동)"></div>
           <div><input data-po-item-spec placeholder="규격"></div>
           <div><input data-po-item-qty type="number" min="1" value="1" placeholder="수량"></div>
@@ -6354,11 +6625,14 @@ function bindPurchaseOrders() {
     consumerInput.value = "";
     clearMoneyInputs();
     nameInput.focus();
-    if (!material && confirm(`"${name}" 품목을 원부자재 카탈로그에 등록할까요?`)) {
+    const formDocType = form.querySelector("[name=docType]")?.value || "purchase_order";
+    if (!material && confirm(`"${name}" 품목을 품목 목록에 등록할까요?`)) {
       const partnerId = form.querySelector("[name=partnerId]").value;
+      // 발주서에서 새로 쓴 품목은 자재, 명세서·청구서·견적서는 거래처 상품(분류 확인 표시)으로 둔다.
+      const kindBody = formDocType === "purchase_order" ? { itemKind: "material", materialType: "SB" } : { itemKind: "vendorProduct", needsReview: true };
       const created = await api("/api/materials", {
         method: "POST",
-        body: { itemName: name, itemCode, orderUnit: "", basePrice: unitPrice, consumerPrice, partnerId }
+        body: { itemName: name, itemCode, orderUnit: "", basePrice: unitPrice, consumerPrice, partnerId, ...kindBody }
       });
       state.materials.push(created.material);
       // await 뒤에는 items가 stale할 수 있다(그 사이 사용자가 품목을 더
@@ -6371,7 +6645,7 @@ function bindPurchaseOrders() {
       setLineItems(currentItems);
       const datalist = form.querySelector("#po-material-options");
       if (datalist) {
-        datalist.innerHTML = (state.materials || []).map((m) => `<option value="${h(m.itemName)}">`).join("");
+        datalist.innerHTML = poItemOptions(formDocType, form.querySelector("[name=partnerId]")?.value || "");
       }
     }
   });
@@ -13218,6 +13492,83 @@ const qtyFmt = (n) => (Number(n || 0) % 1 ? Number(n).toLocaleString("ko-KR", { 
 // ===========================================================================
 // v2 입점사 월정산 보드 — 브랜드별 매출·배송비·회수·마진 + 확인/발행요청/발송 체크
 // ===========================================================================
+// ===========================================================================
+// 노션 기록 — 옛 결제업무 요청·세금계산서 발행 요청(2022~) 검색. 가져오기는 대표.
+// ===========================================================================
+function notionState() {
+  if (!state.notionArchive) state.notionArchive = { kind: "payments", q: "", year: "", partnerId: "", partnerName: "", data: null, loading: false };
+  return state.notionArchive;
+}
+async function loadNotionArchive() {
+  const ns = notionState();
+  ns.loading = true;
+  const qs = new URLSearchParams({ kind: ns.kind, q: ns.q, year: ns.year, partnerId: ns.partnerId });
+  try { ns.data = await api(`/api/archive/notion?${qs}`); } catch (e) { ns.data = { rows: [], years: [], count: 0, total: 0, imported: 0 }; showToast(e.message, "error"); }
+  finally { ns.loading = false; }
+}
+function renderNotionArchive() {
+  const ns = notionState();
+  const head = pageHead("노션 기록", "노션의 결제업무 요청·세금계산서 발행 요청(2022~)을 찾아봅니다. 거래처는 예전 이름까지 함께 찾습니다. 첨부파일은 노션 원본에 있습니다.");
+  const d = ns.data;
+  if (!d) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const isPay = ns.kind === "payments";
+  const rows = d.rows.map((r) => isPay
+    ? `<tr><td class="nowrap">${h(String(r.createdAt).slice(0, 10))}</td><td>${h(r.vendorName)}</td><td class="wrap">${h(r.title)}${r.files?.length ? ` <span class="muted" title="${h(r.files.join(", "))}">📎${r.files.length}</span>` : ""}</td><td class="num">${money.format(r.amount || 0)}</td><td>${h(r.status)}</td><td class="wrap muted" style="font-size:12px">${h([r.category, r.midCategory, r.subCategory].filter(Boolean).join(" › "))}</td><td class="muted" style="font-size:12px">${h(r.withdrawAccount)}</td><td>${r.vendorUrl ? `<a href="${h(r.vendorUrl)}" target="_blank" rel="noopener">노션</a>` : ""}</td></tr>`
+    : `<tr><td class="nowrap">${h(r.issuedAt)}</td><td>${h(r.partnerName)}</td><td class="wrap">${h(r.title)}</td><td class="num">${money.format(r.amount || 0)}</td><td>${h(r.status)}</td><td class="muted" style="font-size:12px">${h(r.kind)}</td><td class="muted">${h(r.paidOrDue)}</td><td>${r.partnerUrl ? `<a href="${h(r.partnerUrl)}" target="_blank" rel="noopener">노션</a>` : ""}</td></tr>`).join("");
+  const importer = state.admin?.role === "owner" ? `<details style="margin-top:14px"><summary>노션 내보내기(CSV) 가져오기 ${d.imported ? `<span class="muted">— 지금 ${money.format(d.imported)}건 있음, 다시 가져와도 겹치지 않음</span>` : ""}</summary>
+      <form data-notion-import class="form-grid" style="margin-top:8px">
+        <div class="field"><label>결제업무 요청 CSV (_all.csv)</label><input type="file" name="payments" accept=".csv"></div>
+        <div class="field"><label>발주 및 정산 업체 정보 CSV</label><input type="file" name="vendors" accept=".csv"></div>
+        <div class="field"><label>세금계산서 발행 요청 CSV</label><input type="file" name="invoices" accept=".csv"></div>
+        <div class="field"><label>영업거래처 대장 CSV</label><input type="file" name="salesPartners" accept=".csv"></div>
+        <div class="toolbar"><button type="submit" data-dry="1">미리 보기</button><button class="primary" type="submit">가져오기</button></div>
+      </form>${ns.preview ? `<pre class="muted" style="white-space:pre-wrap;font-size:12px">${h(ns.preview)}</pre>` : ""}</details>` : "";
+  return `${head}
+    <section class="panel"><div class="panel-body">
+      <div class="toolbar chip-row">
+        <button class="npb-subtab ${isPay ? "active" : ""}" data-notion-kind="payments">결제업무 요청</button>
+        <button class="npb-subtab ${!isPay ? "active" : ""}" data-notion-kind="invoices">세금계산서 발행 요청</button>
+        <select data-notion-year><option value="">전체 연도</option>${d.years.map((y) => `<option ${ns.year === y ? "selected" : ""}>${h(y)}</option>`).join("")}</select>
+        <input data-notion-q placeholder="내용·거래처·분류·금액 검색" value="${h(ns.q)}" style="min-width:240px">
+        ${ns.partnerId ? `<span class="pill">거래처: ${h(ns.partnerName)} <button class="small ghost" data-notion-clear-partner>✕</button></span>` : ""}
+      </div>
+      <p class="muted">${money.format(d.count)}건 · ${money.format(d.total)}원${d.count > d.rows.length ? ` (최근 ${d.rows.length}건만 표시)` : ""}</p>
+      <div class="table-wrap"><table class="compact" data-unit="원"><thead><tr>${isPay ? "<th>작성일</th><th>거래처</th><th>내용</th><th>금액</th><th>상태</th><th>분류</th><th>출금계좌</th><th></th>" : "<th>발행일</th><th>거래처</th><th>내용</th><th>금액</th><th>상태</th><th>구분</th><th>입금일/기한</th><th></th>"}</tr></thead>
+      <tbody>${rows || `<tr><td colspan="8" class="empty">${d.imported ? "찾는 기록이 없습니다." : "아직 노션 기록을 가져오지 않았습니다."}</td></tr>`}</tbody></table></div>
+      ${importer}
+    </div></section>`;
+}
+function bindNotionArchive() {
+  const ns = notionState();
+  if (!ns.data && !ns.loading) { loadNotionArchive().then(renderApp); return; }
+  const reload = () => { ns.data = null; renderApp(); };
+  app.querySelectorAll("[data-notion-kind]").forEach((b) => b.addEventListener("click", () => { ns.kind = b.dataset.notionKind; reload(); }));
+  app.querySelector("[data-notion-year]")?.addEventListener("change", (e) => { ns.year = e.target.value; reload(); });
+  app.querySelector("[data-notion-clear-partner]")?.addEventListener("click", () => { ns.partnerId = ""; ns.partnerName = ""; reload(); });
+  const qi = app.querySelector("[data-notion-q]");
+  qi?.addEventListener("keydown", (e) => { if (e.key === "Enter") { ns.q = qi.value; reload(); } });
+  qi?.addEventListener("change", () => { if (ns.q !== qi.value) { ns.q = qi.value; reload(); } });
+  app.querySelector("[data-notion-import]")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const dryRun = Boolean(e.submitter?.dataset.dry);
+    const form = e.currentTarget;
+    const files = {};
+    for (const k of ["payments", "vendors", "invoices", "salesPartners"]) {
+      const f = form.querySelector(`[name=${k}]`).files[0];
+      if (f) files[k] = await f.text();
+    }
+    if (!Object.keys(files).length) { showToast("CSV 파일을 고르세요.", "error"); return; }
+    try {
+      const r = await api("/api/archive/notion/import", { method: "POST", body: { files, dryRun } });
+      const sm = r.summary;
+      ns.preview = `${dryRun ? "[미리 보기] " : ""}결제 ${sm.payments}건 · 계산서 ${sm.invoices}건 · 새 거래처 ${sm.partnersNew}곳(활성 ${sm.partnersNewActive}) · 기존 거래처 보완 ${sm.partnersUpdated}곳`
+        + (r.preview ? `\n새로: ${r.preview.creates.map((c) => `${c.name}${c.active ? "" : "(보관)"}`).join(", ")}\n보완: ${r.preview.updates.join(", ")}` : "");
+      if (!dryRun) { showToast("가져왔습니다."); await refreshAndRender(); }
+      reload();
+    } catch (err) { showToast(err.message, "error"); }
+  });
+}
+
 // ===========================================================================
 // v2 메신저 공유함 — 담당자가 봐야 할 알림(입금요청·지급요청·입금 완료·월 마감·일일 보고)을 모아
 // [복사]로 채널톡 팀챗에 붙여 넣는다. 채널톡 키·유료 플랜이 생기면 [채널톡 보내기]·자동 발송을 켠다.
