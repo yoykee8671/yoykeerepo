@@ -2544,3 +2544,7 @@ tr.period-items > td { background: #fbfcfe; padding: 4px 16px 10px; }
   .todo-card strong { font-size: 18px; }
 }
 .dc-h { font-size: 13px; margin: 12px 0 6px; }
+/* 거래처 분류 태그(1차 · 2차) */
+.tag-group { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 4px 0; border-bottom: 1px dashed var(--line); }
+.tag-group .tag-l1 { min-width: 76px; }
+.sellmate-box { margin-top: 8px; } .sellmate-box summary { cursor: pointer; font-size: 13px; }
