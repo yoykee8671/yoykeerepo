@@ -137,6 +137,13 @@ const isIssuer = (p) => p.category === "issuer";
 // 보관 표시: 글자 대신 작은 상자 아이콘(마우스를 올리면 '보관').
 const ARCHIVE_ICON = `<span class="archived-ic" title="보관 — 2025년 이후 거래 없음"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg></span>`;
 const partnerRoles = (p) => (isIssuer(p) ? [] : Array.isArray(p.roles) && p.roles.length ? p.roles.filter((r) => PARTNER_ROLE_LABELS[r]) : [p.category === "sales" ? "sales" : p.category === "purchase" ? "purchase" : "production"]);
+const PARTNER_ROLE_COLORS = { production: "orange", sales: "blue", purchase: "green", service: "purple", etc: "grey" };
+// 목록에서 분류를 색 칩으로 보여 준다(2차는 1차 색을 따른다).
+const partnerTagChips = (p, opt) => {
+  if (isIssuer(p)) return tagChip("발행자(자사)", "pink");
+  const parentOf = (sub) => Object.keys(PARTNER_ROLE_LABELS).find((k) => (opt?.sub?.[k] || []).includes(sub));
+  return [...partnerRoles(p).map((r) => tagChip(PARTNER_ROLE_LABELS[r], PARTNER_ROLE_COLORS[r])), ...(p.subRoles || []).map((sub) => tagChip(sub, PARTNER_ROLE_COLORS[parentOf(sub)] || "grey"))].join("");
+};
 const partnerTagText = (p) => (isIssuer(p) ? "발행자(자사)" : [...partnerRoles(p).map((r) => PARTNER_ROLE_LABELS[r]), ...(p.subRoles || [])].join(" · "));
 const formatBizNo = (v) => { const d = String(v || "").replace(/\D/g, ""); return d.length === 10 ? `${d.slice(0, 3)}-${d.slice(3, 5)}-${d.slice(5)}` : String(v || ""); };
 async function ensurePartnerOptions() {
@@ -5013,6 +5020,7 @@ function bindProcurement() {
 }
 
 function renderPartners() {
+  if (!state.partnerOptions) ensurePartnerOptions();
   const rows = filteredPartners();
   return `
     <section class="layout">
@@ -5168,10 +5176,10 @@ function bindPartnerHub() {
 function renderPartnerRow(item) {
   return `
     <tr class="hub-go ${item.isActive === false ? "is-archived" : ""}" data-partner-hub="${item.id}" title="누르면 이 거래처와 이어진 브랜드·명세서·판매·생산비가 보입니다">
-      <td>${codeTag(item)}${h(item.name)}${item.isActive === false ? ARCHIVE_ICON : ""}${item.payoutAccountType === "virtual" ? ' <span class="pill">가상계좌</span>' : ""}<br><span class="muted" style="font-size:12px">${h(partnerTagText(item))}${item.notion?.last ? ` · 마지막 결제 ${h(item.notion.last)}` : ""}${(item.aliases || []).length ? ` · 검색 태그 ${h(item.aliases.join(", "))}` : ""}</span></td>
+      <td>${codeTag(item)}${h(item.name)}${item.isActive === false ? ARCHIVE_ICON : ""}${item.payoutAccountType === "virtual" ? ' <span class="pill">가상계좌</span>' : ""}<div class="row-tags">${partnerTagChips(item, state.partnerOptions)}<span class="muted" style="font-size:12px">${[item.notion?.last ? `마지막 결제 ${h(item.notion.last)}` : "", (item.aliases || []).length ? `검색 태그 ${h(item.aliases.join(", "))}` : ""].filter(Boolean).join(" · ")}</span></div></td>
       <td>${h(item.businessName)}${item.businessNumber ? `<br><span class="muted" style="font-size:11px">${h(formatBizNo(item.businessNumber))}</span>` : ""}</td>
       <td>${h(item.contactName)}${item.contactPhone ? ` · ${h(item.contactPhone)}` : ""}</td>
-      <td>${h(item.orderMethod)}</td>
+      <td>${item.orderMethod ? tagChip(item.orderMethod) : ""}</td>
       <td>${h(item.bankName)} ${h(item.bankAccount)}</td>
       <td><div class="row-actions"><button data-edit-partner="${item.id}">수정</button><button data-edit-procurement-popup="partner" data-record-id="${item.id}">새 창</button><button class="danger icon-btn" data-delete-partner="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
     </tr>`;
@@ -5184,16 +5192,43 @@ function renderPartnerForm() {
   const issuer = isIssuer(p);
   const roles = partnerRoles(p);
   const subs = new Set(p.subRoles || []);
-  const select = (name, list, cur, addList) => `<select name="${name}" data-opt-select="${addList}"><option value="">선택</option>${[...new Set([...(list || []), ...(cur ? [cur] : [])])].map((v) => `<option ${v === cur ? "selected" : ""}>${h(v)}</option>`).join("")}<option value="__add">+ 직접 추가…</option></select>`;
+  // 발주방식·증빙구분: 노션식 단일 선택(없는 값은 쳐서 만들기)
+  const select = (name, list, cur, addList) => notionSelect({
+    id: `partner-${name}`, multi: false, label: name, placeholder: "선택",
+    options: [...new Set([...(list || []), ...(cur ? [cur] : [])])].map((v) => ({ value: v, label: v })),
+    selected: cur ? [cur] : [],
+    onCreate: async (text) => {
+      try { state.partnerOptions = await api("/api/partner-options", { method: "POST", body: { list: addList, value: text } }); }
+      catch (err) { showToast(err.message, "error"); return null; }
+      return { value: text, label: text };
+    },
+    hidden: (sel) => `<input type="hidden" name="${name}" value="${h(sel[0] || "")}">`
+  });
   return `
     <form class="form-grid" data-partner-form>
       <div class="field"><label>구분</label><select name="kind" data-partner-kind><option value="partner" ${issuer ? "" : "selected"}>거래처</option><option value="issuer" ${issuer ? "selected" : ""}>발행자(자사 — 우리 사업자)</option></select></div>
       <div class="field" data-partner-tags ${issuer ? 'style="display:none"' : ""}>
-        <label>분류 태그 <span class="muted" style="font-weight:400">(1차 · 2차 여러 개 가능)</span></label>
-        ${Object.entries(PARTNER_ROLE_LABELS).map(([k, l]) => `<div class="tag-group">
-          <label class="chip tag-l1"><input type="checkbox" name="role_${k}" ${roles.includes(k) ? "checked" : ""}> <strong>${h(l)}</strong></label>
-          ${(opt.sub[k] || []).map((sub) => `<label class="chip"><input type="checkbox" name="sub" value="${h(sub)}" data-sub-of="${k}" ${subs.has(sub) ? "checked" : ""}> ${h(sub)}</label>`).join("")}
-          <button type="button" class="small ghost" data-add-sub="${k}">+ 2차 추가</button></div>`).join("")}
+        <label>분류 태그 <span class="muted" style="font-weight:400">(1차 · 2차 여러 개 가능 — 칸을 눌러 고르거나, 없는 이름은 쳐서 만드세요)</span></label>
+        ${notionSelect({
+          id: "partner-tags", multi: true, label: "분류 태그", placeholder: "분류 선택",
+          options: Object.entries(PARTNER_ROLE_LABELS).flatMap(([k, l]) => [
+            { value: `role:${k}`, label: l, color: PARTNER_ROLE_COLORS[k], hint: "1차" },
+            ...(opt.sub[k] || []).map((sub) => ({ value: `sub:${k}:${sub}`, label: sub, color: PARTNER_ROLE_COLORS[k], hint: l }))
+          ]),
+          selected: [...roles.map((k) => `role:${k}`), ...Object.keys(PARTNER_ROLE_LABELS).flatMap((k) => (opt.sub[k] || []).filter((sub) => subs.has(sub)).map((sub) => `sub:${k}:${sub}`))],
+          createChoices: Object.entries(PARTNER_ROLE_LABELS).map(([k, l]) => [k, l, PARTNER_ROLE_COLORS[k]]),
+          onCreate: async (text, role) => {
+            if (!role) return null;
+            try { state.partnerOptions = await api("/api/partner-options", { method: "POST", body: { list: "sub", role, value: text } }); }
+            catch (err) { showToast(err.message, "error"); return null; }
+            return { value: `sub:${role}:${text}`, label: text, color: PARTNER_ROLE_COLORS[role], hint: PARTNER_ROLE_LABELS[role] };
+          },
+          hidden: (sel) => sel.map((v) => {
+            const [kind, k, ...rest] = v.split(":");
+            return kind === "role" ? `<input type="hidden" name="role_${h(k)}" value="on">`
+              : `<input type="checkbox" name="sub" value="${h(rest.join(":"))}" data-sub-of="${h(k)}" checked hidden>`;
+          }).join("")
+        })}
       </div>
       <div class="field"><label>거래처명 (관리용 라벨)</label><input name="name" value="${h(p.name)}" required></div>
       <div class="field"><label>거래처명 (검색 태그 추가) <span class="muted" style="font-weight:400">— 예전 이름·다른 이름, 쉼표로 구분</span></label><input name="aliases" value="${h((p.aliases || []).join(", "))}"></div>
@@ -5252,6 +5287,7 @@ function renderAttachmentRow(url) {
 function bindPartnerFormExtras() {
   const form = app.querySelector("[data-partner-form]");
   if (!form) return;
+  bindNotionSelects(form);
   form.querySelector("[data-partner-kind]")?.addEventListener("change", (e) => {
     const tags = form.querySelector("[data-partner-tags]");
     if (tags) tags.style.display = e.target.value === "issuer" ? "none" : "";
@@ -7757,6 +7793,87 @@ function downloadMenu(items, label = "내려받기") {
   return `<details class="menu-pop"><summary class="button">${label}<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></summary>
     <div class="menu-list">${items.map(([href, text]) => `<a href="${href}">${text}</a>`).join("")}</div></details>`;
 }
+// ---- 노션식 선택(태그) 칸 ----------------------------------------------------
+// 칸을 누르면 목록이 뜨고, 고른 값은 색 칩으로 한 칸에 여러 개 보인다. 목록에 없는
+// 이름을 치면 바로 만들 수 있다. 값은 숨은 입력으로 폼에 실린다(onSync 가 채운다).
+const TAG_COLORS = ["grey", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"];
+function tagColorOf(text) {
+  let n = 0;
+  for (const ch of String(text || "")) n = (n * 31 + ch.charCodeAt(0)) >>> 0;
+  return TAG_COLORS[n % TAG_COLORS.length];
+}
+function tagChip(label, color, removeValue) {
+  return `<span class="ntag ntag-${color || tagColorOf(label)}">${h(label)}${removeValue != null ? `<button type="button" class="ntag-x" data-ns-remove="${h(removeValue)}" aria-label="${h(label)} 빼기">×</button>` : ""}</span>`;
+}
+const notionSelects = new Map();
+function notionSelect(cfg) {
+  notionSelects.set(cfg.id, cfg);
+  return `<div class="nsel ${cfg.multi ? "is-multi" : ""}" data-nsel="${h(cfg.id)}">
+    <div class="nsel-box" tabindex="-1">${nselChips(cfg)}<input class="nsel-input" data-nsel-input autocomplete="off" placeholder="${cfg.selected.length ? "" : h(cfg.placeholder || "선택")}" aria-label="${h(cfg.label || "선택")}"></div>
+    <div class="nsel-pop" hidden></div>
+    <div class="nsel-hidden">${cfg.hidden(cfg.selected)}</div>
+  </div>`;
+}
+function nselChips(cfg) {
+  return cfg.selected.map((v) => { const o = cfg.options.find((x) => x.value === v) || { label: v }; return tagChip(o.label, o.color, v); }).join("");
+}
+function nselPop(cfg, q) {
+  const text = q.trim();
+  const list = cfg.options.filter((o) => !text || o.label.includes(text) || (o.hint || "").includes(text));
+  const exact = cfg.options.some((o) => o.label === text);
+  const items = list.map((o) => `<button type="button" class="nsel-opt ${cfg.selected.includes(o.value) ? "is-on" : ""}" data-ns-pick="${h(o.value)}">${tagChip(o.label, o.color)}${o.hint ? `<span class="nsel-hint">${h(o.hint)}</span>` : ""}${cfg.selected.includes(o.value) ? '<span class="nsel-check" aria-hidden="true">✓</span>' : ""}</button>`).join("");
+  const create = cfg.onCreate && text && !exact ? cfg.createChoices
+    ? `<div class="nsel-create"><span>‘${h(text)}’ 만들기 —</span>${cfg.createChoices.map(([k, l, c]) => `<button type="button" class="nsel-create-btn" data-ns-create="${h(k)}">${tagChip(l, c)} 아래에</button>`).join("")}</div>`
+    : `<button type="button" class="nsel-opt nsel-new" data-ns-create="">만들기 ${tagChip(text)}</button>` : "";
+  return `<div class="nsel-title">${cfg.multi ? "옵션 선택 또는 생성" : "하나 선택 또는 생성"}</div>${items || (create ? "" : `<p class="nsel-empty">맞는 항목이 없습니다</p>`)}${create}`;
+}
+function bindNotionSelects(root) {
+  root.querySelectorAll("[data-nsel]").forEach((el) => {
+    const cfg = notionSelects.get(el.dataset.nsel);
+    if (!cfg) return;
+    const box = el.querySelector(".nsel-box"), input = el.querySelector("[data-nsel-input]"), pop = el.querySelector(".nsel-pop");
+    const sync = () => {
+      box.querySelectorAll(".ntag").forEach((n) => n.remove());
+      input.insertAdjacentHTML("beforebegin", nselChips(cfg));
+      input.placeholder = cfg.selected.length ? "" : (cfg.placeholder || "선택");
+      el.querySelector(".nsel-hidden").innerHTML = cfg.hidden(cfg.selected);
+    };
+    const open = () => { pop.innerHTML = nselPop(cfg, input.value); pop.hidden = false; el.classList.add("is-open"); };
+    const close = () => { pop.hidden = true; el.classList.remove("is-open"); input.value = ""; };
+    const toggle = (v) => {
+      if (cfg.multi) cfg.selected = cfg.selected.includes(v) ? cfg.selected.filter((x) => x !== v) : [...cfg.selected, v];
+      else cfg.selected = cfg.selected[0] === v ? [] : [v];
+      sync();
+      if (cfg.multi) { input.value = ""; open(); input.focus(); } else close();
+    };
+    box.addEventListener("click", (e) => { if (e.target.closest("[data-ns-remove]")) return; input.focus(); open(); });
+    input.addEventListener("input", open);
+    input.addEventListener("keydown", async (e) => {
+      if (e.key === "Escape") { close(); input.blur(); }
+      else if (e.key === "Backspace" && !input.value && cfg.selected.length) { cfg.selected = cfg.selected.slice(0, -1); sync(); open(); }
+      else if (e.key === "Enter") {
+        e.preventDefault();
+        const text = input.value.trim(); if (!text) return;
+        const hit = cfg.options.find((o) => o.label === text) || cfg.options.find((o) => o.label.includes(text));
+        if (hit) toggle(hit.value);
+        else if (cfg.onCreate && !cfg.createChoices) { const o = await cfg.onCreate(text, ""); if (o) { cfg.options.push(o); toggle(o.value); } }
+      }
+    });
+    el.addEventListener("click", async (e) => {
+      const rm = e.target.closest("[data-ns-remove]");
+      if (rm) { e.stopPropagation(); cfg.selected = cfg.selected.filter((x) => x !== rm.dataset.nsRemove); sync(); return; }
+      const pick = e.target.closest("[data-ns-pick]");
+      if (pick) { toggle(pick.dataset.nsPick); return; }
+      const mk = e.target.closest("[data-ns-create]");
+      if (mk && cfg.onCreate) {
+        const o = await cfg.onCreate(input.value.trim(), mk.dataset.nsCreate);
+        if (o) { cfg.options.push(o); toggle(o.value); }
+      }
+    });
+    document.addEventListener("click", (e) => { if (!el.contains(e.target)) close(); });
+  });
+}
+
 // 바깥을 누르면 열린 내려받기 메뉴를 닫는다.
 document.addEventListener("click", (e) => {
   document.querySelectorAll("details.menu-pop[open]").forEach((d) => { if (!d.contains(e.target)) d.removeAttribute("open"); });
@@ -7824,6 +7941,16 @@ function bindDepositConfirm() {
   }));
 }
 
+// 카페24 배송준비중 넘김 결과를 알림 문구로.
+function prepareNote(prepared) {
+  if (!prepared) return "";
+  const parts = [];
+  if (prepared.ok) parts.push(`카페24 배송준비중 ${prepared.ok}건`);
+  if (prepared.failed?.length) parts.push(`배송준비중 실패 ${prepared.failed.length}건(${prepared.failed.slice(0, 3).map((f) => `${f.orderNo}: ${f.error}`).join(", ")})`);
+  if (prepared.skipped?.length) parts.push(`이미 진행된 주문 ${prepared.skipped.length}건은 그대로`);
+  return parts.length ? ` · ${parts.join(" · ")}` : "";
+}
+
 function canUseClobe() {
   return can("reconcile");
 }
@@ -7831,13 +7958,23 @@ function canUseClobe() {
 // --- 반자동 파이프라인 ------------------------------------------------------
 // 단계마다 버튼이 하나씩 있고, 각 버튼은 먼저 "무엇을 하게 될지"만 보여준다.
 // 실제 생성·상태변경은 확인한 뒤 별도 버튼으로만 일어난다.
+// 입금요청을 만들 때 카페24 주문을 배송준비중으로 같이 넘길지(대표만 바꿈).
+function renderPipelinePrepareSetting(cfg) {
+  if (!cfg) return "";
+  const on = cfg.markPrepare === true;
+  if (!cfg.isOwner) return `<p class="hint">카페24 배송준비중 자동 넘김: <b>${on ? "켜짐" : "꺼짐"}</b></p>`;
+  return `<label class="switch-line"><input type="checkbox" data-pipe-prepare ${on ? "checked" : ""} ${cfg.writeScope ? "" : "disabled"}>
+    <span>입금요청을 만들면 카페24 주문을 <b>배송준비중</b>으로 같이 넘기기</span>
+    ${cfg.writeScope ? "" : `<span class="meta">카페24 주문 쓰기 권한이 있어야 켤 수 있습니다</span>`}</label>`;
+}
+
 function renderPipelineSteps(p) {
   const drafts = p.collect?.drafts || [];
   const steps = [
     { id: "flow-collect", label: "주문 수집", state: p.collect ? "done" : "current" },
     { id: "flow-collect", label: "요청 확인", state: !p.collect ? "todo" : drafts.length ? "current" : "done", note: p.collect ? (drafts.length ? `${drafts.length}건 남음` : "완료") : "" },
     { id: "flow-match", label: "입금매칭", state: "todo", note: canUseClobe() ? "클로브" : "" },
-    { id: "", label: "카페24 반영", state: "later", note: "준비 중" }
+    { id: "flow-collect", label: "카페24 반영", state: p.settings?.markPrepare ? "done" : "later", note: p.settings?.markPrepare ? "생성 시 배송준비중" : "꺼짐" }
   ];
   return `<nav class="stepper" aria-label="주문매칭 단계"><ol>${steps.map((st, i) => {
     const inner = `<span class="step-no">${st.state === "done" ? '<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M2.5 6.2 5 8.6l4.6-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>' : i + 1}</span>
@@ -7870,6 +8007,7 @@ function renderPipeline() {
           <button class="primary" data-pipe-collect ${p.collecting ? "disabled" : ""}>${p.collecting ? "수집 중…" : "수집하기"}</button>
         </div>
         <p class="hint">결제된 주문만 가져오고, 이미 등록된 건은 건너뜁니다.</p>
+        ${renderPipelinePrepareSetting(p.settings)}
         ${helpNote("확인 목록에 올라온 건은 <b>생성</b>을 눌러야 저장됩니다. 단, 자동 등록으로 설정한 브랜드는 수집과 동시에 등록됩니다.")}
         ${p.error ? notice("danger", "수집하지 못했습니다", h(p.error)) : ""}
         ${renderPipelineCollect(p.collect)}
@@ -7977,7 +8115,7 @@ function renderPipelineCollect(collect) {
           : ""}
         ${!d.shippingMismatch && !d.catalogMismatch ? `<span class="muted">-</span>` : ""}
       </td>
-      <td class="cell-action"><button type="button" class="small" data-pipe-draft-request="${i}">입금요청 입력</button></td>
+      <td class="cell-action"><div class="cell-action-btns"><button type="button" class="small" data-pipe-draft-request="${i}">입금요청 입력</button><button type="button" class="small ghost" data-pipe-monthly="${i}" title="위탁(월 정산 후 입금) 업체로 바꾸고 바로 등록합니다">월단위입금</button></div></td>
     </tr>`;
   }).join("");
   return `
@@ -8292,6 +8430,7 @@ function bindPipeline() {
     renderApp();
     try {
       p.collect = await api("/api/pipeline/collect", { method: "POST", body: { startDate: p.startDate, endDate: p.endDate } });
+      if (p.collect.prepared) showToast(`자동 등록 ${p.collect.autoCreated?.length || 0}건${prepareNote(p.collect.prepared)}`, p.collect.prepared.failed?.length ? "error" : "");
       // 배송비가 어긋나거나 단가표 매칭이 안 된 건은 사람이 먼저 보게 기본 선택에서 뺀다.
       p.selected = (p.collect.drafts || [])
         .map((d, i) => (d.shippingMismatch || d.catalogMismatch ? null : i))
@@ -8337,13 +8476,43 @@ function bindPipeline() {
     });
   });
 
+  if (!p.settings && !p.settingsLoading) {
+    p.settingsLoading = true;
+    api("/api/pipeline/settings").then((cfg) => { p.settings = cfg; renderApp(); }).catch(() => {}).finally(() => { p.settingsLoading = false; });
+  }
+  app.querySelector("[data-pipe-prepare]")?.addEventListener("change", async (e) => {
+    const on = e.target.checked;
+    if (on && !confirm("이제부터 주문매칭에서 입금요청을 만들면, 그 주문(해당 브랜드 품목)이 카페24에서 배송준비중으로 바뀝니다. 켤까요?")) { e.target.checked = false; return; }
+    try { const cfg = await api("/api/pipeline/settings", { method: "PUT", body: { markPrepare: on } }); p.settings = { ...p.settings, ...cfg }; showToast(on ? "배송준비중 자동 넘김을 켰습니다." : "배송준비중 자동 넘김을 껐습니다."); }
+    catch (err) { showToast(err.message, "error"); e.target.checked = !on; }
+    renderApp();
+  });
+  app.querySelectorAll("[data-pipe-monthly]").forEach((button) => button.addEventListener("click", async () => {
+    const all = p.collect?.drafts || [];
+    const draft = all[Number(button.dataset.pipeMonthly)];
+    if (!draft) return;
+    const same = all.filter((d) => d.brandId === draft.brandId);
+    if (!confirm(`${draft.brandName}을(를) 월단위입금 업체로 바꿀까요?\n\n· 위탁(월 정산 후 입금)으로 분류됩니다.\n· 지금 목록의 ${draft.brandName} 주문 ${same.length}건이 위탁-입금전으로 바로 등록됩니다.\n· 앞으로 이 브랜드 주문은 확인 목록 없이 수집할 때 바로 등록됩니다.`)) return;
+    try {
+      const r = await api("/api/pipeline/monthly/apply", { method: "POST", body: { brandId: draft.brandId, drafts: same } });
+      const keep = all.filter((d) => d.brandId !== draft.brandId);
+      const selectedDrafts = new Set(p.selected.map((i) => all[i]));
+      p.collect.autoCreated = [...(p.collect.autoCreated || []), ...same.map((d) => ({ orderNo: d.orderNo, brandName: d.brandName, customerName: d.customerName, depositAmount: d.depositAmount }))];
+      p.collect.drafts = keep;
+      p.selected = keep.map((d, i) => (selectedDrafts.has(d) ? i : null)).filter((v) => v !== null);
+      showToast(`${r.brandName}: 월단위입금으로 바꾸고 ${r.createdCount}건 등록했습니다.${prepareNote(r.prepared)}`, r.prepared?.failed?.length ? "error" : "");
+      await loadAll();
+      renderApp();
+    } catch (error) { showToast(error.message || "바꾸지 못했습니다.", "error"); }
+  }));
+
   app.querySelector("[data-pipe-apply]")?.addEventListener("click", async () => {
     const drafts = p.selected.map((i) => p.collect?.drafts?.[i]).filter(Boolean);
     if (!drafts.length) return showToast("생성할 요청을 선택하세요.", "error");
     if (!confirm(`${drafts.length}건의 입금요청을 생성할까요?`)) return;
     try {
       const result = await api("/api/pipeline/collect/apply", { method: "POST", body: { drafts } });
-      showToast(`${result.createdCount}건 생성했습니다.${result.skipped?.length ? ` (중복 ${result.skipped.length}건 제외)` : ""}`);
+      showToast(`${result.createdCount}건 생성했습니다.${result.skipped?.length ? ` (중복 ${result.skipped.length}건 제외)` : ""}${prepareNote(result.prepared)}`, result.prepared?.failed?.length ? "error" : "");
       p.collect = null; p.selected = [];
       await loadAll();
       renderApp();
