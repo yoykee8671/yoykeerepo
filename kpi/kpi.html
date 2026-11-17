@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
 <title>우프컴퍼니 공헌이익 KPI</title>
 <style>
 :root{
@@ -25,7 +26,7 @@
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--page);color:var(--ink);
-  font-family:system-ui,-apple-system,"Segoe UI","Apple SD Gothic Neo","Noto Sans KR",sans-serif;
+  font-family:"Pretendard Variable",Pretendard,system-ui,-apple-system,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;
   font-size:15px;line-height:1.5}
 .wrap{max-width:1180px;margin:0 auto;padding:16px 16px 80px}
 header.top{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:8px 0 14px}
@@ -147,18 +148,18 @@ td.warncell{color:var(--critical)!important}
   </header>
 
   <div class="tabs">
-    <button id="tabBtn-input" class="active" onclick="showTab('input')">① 월별 입력</button>
-    <button id="tabBtn-year" onclick="showTab('year')">② 연간 현황</button>
-    <button id="tabBtn-settings" onclick="showTab('settings')">③ 설정</button>
+    <button id="tabBtn-input" class="active" onclick="showTab('input')">월별 입력</button>
+    <button id="tabBtn-year" onclick="showTab('year')">연간 현황</button>
+    <button id="tabBtn-settings" onclick="showTab('settings')">설정</button>
   </div>
 
   <!-- ══════════ TAB 1 : 월별 입력 ══════════ -->
   <section id="tab-input">
     <div class="card onboard" id="onboardCard" style="display:none">
-      <h2>👋 처음 오셨나요? 딱 3단계입니다</h2>
+      <h2>처음 오셨나요? 딱 3단계입니다</h2>
       <ol>
-        <li><b>③ 설정</b> 탭에서 3인의 <b>월 기본급</b>을 입력하세요. (보너스 상한 계산에 필요)</li>
-        <li><b>① 월별 입력</b>에서 이번 달 채널별 숫자를 노란 칸에 넣으세요. 정산서에 <b>실입금액만</b> 있으면 순매출 칸에 그 금액을 넣고 수수료는 비워두면 됩니다.</li>
+        <li><b>설정</b> 탭에서 3인의 <b>월 기본급</b>을 입력하세요. (보너스 상한 계산에 필요)</li>
+        <li><b>월별 입력</b>에서 이번 달 채널별 숫자를 노란 칸에 넣으세요. 정산서에 <b>실입금액만</b> 있으면 순매출 칸에 그 금액을 넣고 수수료는 비워두면 됩니다.</li>
         <li>아래 <b>이번 달 결과</b>에서 판정과 보너스를 확인하고, 지급 전에 <b>월 마감 체크리스트</b>를 확인하세요.</li>
       </ol>
       <div class="btnrow"><button class="btn primary" onclick="dismissOnboard()">알겠어요, 닫기</button></div>
@@ -196,11 +197,11 @@ td.warncell{color:var(--critical)!important}
       <div class="tiles" id="monthTiles"></div>
       <div class="judge">
         <div class="col">
-          <h2 style="font-size:14px">① 방어선 (이 금액을 넘어야 보너스 검토)</h2>
+          <h2 style="font-size:14px">방어선 (이 금액을 넘어야 보너스 검토)</h2>
           <table class="plain" id="gateTable"></table>
         </div>
         <div class="col">
-          <h2 style="font-size:14px">② 보너스 계산</h2>
+          <h2 style="font-size:14px">보너스 계산</h2>
           <table class="plain" id="bonusTable"></table>
           <div style="margin-top:12px" id="judgeBadge"></div>
           <div class="hint" id="judgeHint"></div>

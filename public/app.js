@@ -134,6 +134,8 @@ const PARTNER_CATEGORY_LABELS = { production: "생산업체", sales: "판매납�
 // 거래처 1차 분류(여러 개). 서버 PARTNER_ROLES 와 같다. 자사(발행자)는 분류가 아니라 '구분'.
 const PARTNER_ROLE_LABELS = { production: "생산", sales: "판매", purchase: "매입", service: "서비스", etc: "기타" };
 const isIssuer = (p) => p.category === "issuer";
+// 보관 표시: 글자 대신 작은 상자 아이콘(마우스를 올리면 '보관').
+const ARCHIVE_ICON = `<span class="archived-ic" title="보관 — 2025년 이후 거래 없음"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg></span>`;
 const partnerRoles = (p) => (isIssuer(p) ? [] : Array.isArray(p.roles) && p.roles.length ? p.roles.filter((r) => PARTNER_ROLE_LABELS[r]) : [p.category === "sales" ? "sales" : p.category === "purchase" ? "purchase" : "production"]);
 const partnerTagText = (p) => (isIssuer(p) ? "발행자(자사)" : [...partnerRoles(p).map((r) => PARTNER_ROLE_LABELS[r]), ...(p.subRoles || [])].join(" · "));
 const formatBizNo = (v) => { const d = String(v || "").replace(/\D/g, ""); return d.length === 10 ? `${d.slice(0, 3)}-${d.slice(3, 5)}-${d.slice(5)}` : String(v || ""); };
@@ -1261,9 +1263,9 @@ function renderCurrentTab() {
   // 쪽만 보여준다 — 한쪽만 받은 관리자에게 "권한 없음" 안내가 겹쳐 뜨지 않게.
   if (state.tab === "pipeline") {
     if (!can("pipeline")) return renderReconcile();
-    return renderPipeline() + (canUseClobe() ? renderDepositConfirm() + renderReconcile() : "");
+    return renderPipeline() + (canUseClobe() ? renderReconcile(true) + renderDepositConfirm() : "");
   }
-  if (state.tab === "reconcile") return renderPipeline() + renderReconcile();
+  if (state.tab === "reconcile") return renderPipeline() + renderReconcile(true);
   if (state.tab === "npb") return renderNpb();
   if (state.tab === "productsync") return renderProductSync();
   return renderDashboard();
@@ -1411,11 +1413,8 @@ function renderDashboard() {
 
 function renderRequests() {
   const actions = `
-    <a href="/api/export/payment-log.csv"><button type="button">입금로그 CSV</button></a>
-    <a href="/api/export/payment-log.xls"><button type="button">입금로그 Excel</button></a>
-    <a href="/api/export/csv"><button type="button">CSV</button></a>
-    <a href="/api/export/xls"><button type="button">Excel</button></a>
-    <button type="button" data-deleted-requests>삭제된 요청</button>
+    <button type="button" class="ghost" data-deleted-requests>삭제된 요청</button>
+    ${downloadMenu([["/api/export/csv", "입금요청 CSV"], ["/api/export/xls", "입금요청 Excel"], ["/api/export/payment-log.csv", "입금로그 CSV"], ["/api/export/payment-log.xls", "입금로그 Excel"]])}
     <button class="primary" type="button" data-open-request-popup>새 창 입금요청</button>
   `;
   const dr = state.deletedRequests;
@@ -1438,21 +1437,6 @@ function renderRequests() {
       <div class="panel">
         <div class="panel-head"><h2>요청 목록</h2><span class="muted">${money.format(rows.length)}건</span></div>
         <div class="panel-body">
-          <div class="toolbar" style="margin-bottom:12px">
-            <label style="display:flex;align-items:center;gap:6px"><span>일괄 입금일</span><input type="date" data-bulk-paid-at value="${h(state.bulkPaidAt)}"></label>
-            <button type="button" data-mark-selected-paid ${state.selectedRequestIds.length ? "" : "disabled"}>선택 입금완료</button>
-            <span style="display:flex;align-items:center;gap:4px">
-              <select data-bulk-status ${state.selectedRequestIds.length ? "" : "disabled"}>
-                <option value="">선택 상태 변경…</option>
-                ${STATUS_CHOICES.map((v) => `<option value="${v}">${h(statusLabel(v))}로 변경</option>`).join("")}
-              </select>
-            </span>
-            <button type="button" class="danger" data-delete-selected-requests ${state.selectedRequestIds.length ? "" : "disabled"}>선택 삭제</button>
-            <button type="button" data-clear-selection ${state.selectedRequestIds.length ? "" : "disabled"}>선택 해제</button>
-            ${can("requests", "pay") ? `<button type="button" data-transfer-xlsx ${state.selectedRequestIds.length ? "" : "disabled"}>하나은행 이체양식</button>` : ""}
-            <span class="muted">선택 ${state.selectedRequestIds.length}건</span>
-            ${state.selectedRequestIds.length ? `<span class="muted">· 선택 합계 <strong class="amount-emphasis">${money.format(selectedTotal)}원</strong></span>` : ""}
-          </div>
           <div class="filters request-filters">
             <input data-filter-q placeholder="주문번호, 주문자, 브랜드 검색" value="${h(state.filters.q)}">
             <label class="date-range">주문일 <input type="date" data-filter-date-from value="${h(state.filters.dateFrom || "")}"></label>
@@ -1486,8 +1470,21 @@ function renderRequests() {
               ${state.promotionRules.map((rule) => `<option value="${rule.id}" ${state.filters.promotionRuleId === rule.id ? "selected" : ""}>${h(rule.brandName)} · ${h(rule.name)}</option>`).join("")}
             </select>
           </div>
+          <div class="bulk-bar ${state.selectedRequestIds.length ? "is-active" : ""}" role="group" aria-label="선택한 요청 일괄 처리">
+            <span class="bulk-count">${state.selectedRequestIds.length ? `<b>${state.selectedRequestIds.length}건 선택</b> · 합계 <strong class="amount-emphasis">${money.format(selectedTotal)}원</strong>` : "선택한 요청 일괄 처리"}</span>
+            <label class="inline-field"><span>입금일</span><input type="date" data-bulk-paid-at value="${h(state.bulkPaidAt)}" aria-label="일괄 입금일"></label>
+            <button type="button" data-mark-selected-paid ${state.selectedRequestIds.length ? "" : "disabled"}>입금완료 처리</button>
+            <select data-bulk-status aria-label="선택 상태 변경" ${state.selectedRequestIds.length ? "" : "disabled"}>
+              <option value="">상태 변경…</option>
+              ${STATUS_CHOICES.map((v) => `<option value="${v}">${h(statusLabel(v))}로 변경</option>`).join("")}
+            </select>
+            ${can("requests", "pay") ? `<button type="button" data-transfer-xlsx ${state.selectedRequestIds.length ? "" : "disabled"}>하나은행 이체양식</button>` : ""}
+            <span class="bulk-spacer"></span>
+            <button type="button" class="ghost" data-clear-selection ${state.selectedRequestIds.length ? "" : "disabled"}>선택 해제</button>
+            <button type="button" class="danger" data-delete-selected-requests ${state.selectedRequestIds.length ? "" : "disabled"}>선택 삭제</button>
+          </div>
           <div class="table-wrap">
-            <table class="requests-table">
+            <table class="requests-table m-cards">
               <thead><tr><th><input type="checkbox" data-select-all-requests ${allSelected ? "checked" : ""}></th><th>작업</th><th>상태</th><th>정산유형</th><th>브랜드</th><th>주문번호</th><th>주문자</th><th>제품매출</th><th>배송비</th><th>입금액</th><th>적용 프로모션</th><th>예정일</th><th>입금일시</th><th>출고/정산</th><th>메모</th></tr></thead>
               <tbody>
                 ${rows.map(renderRequestRow).join("") || `<tr><td colspan="15" class="empty">표시할 입금요청이 없습니다.</td></tr>`}
@@ -1545,21 +1542,21 @@ function filteredRequests() {
 function renderRequestRow(item) {
   return `
     <tr class="hub-go" data-row-edit="[data-open-edit-request-popup]">
-      <td><input type="checkbox" data-select-request="${item.id}" ${state.selectedRequestIds.includes(item.id) ? "checked" : ""}></td>
-      <td><div class="row-actions">${item.status !== "paid" ? `<button data-pay-request="${item.id}">입금완료</button>` : ""}<button data-open-edit-request-popup="${item.id}">수정</button><button class="danger icon-btn" data-delete-request="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
-      <td>${renderRowStatusSelect(item)}</td>
-      <td>${settlementLabel(item.settlementType)}</td>
-      <td>${h(item.brandName)}</td>
-      <td><a href="#" class="order-link" data-open-edit-request-popup="${item.id}">${h(item.orderNo)}</a></td>
-      <td>${h(item.customerName)}</td>
-      <td>${money.format(Number(item.productSalesAmount || 0))}원</td>
-      <td>${money.format(Number(item.shippingFee || 0))}원</td>
-      <td><strong class="amount-emphasis">${money.format(finalDepositAmount(item))}원</strong>${Number(item.creditUsedAmount || 0) > 0 ? `<br><span class="muted" style="font-size:11px">원 ${money.format(Number(item.depositAmount || 0))}원 − 외상 ${money.format(Number(item.creditUsedAmount || 0))}원</span>` : ""}${Number(item.priorPaidAmount || 0) > 0 ? `<br><span class="muted" style="font-size:11px">총 ${money.format(Number(item.depositAmount || 0))}원 − 기지급 ${money.format(Number(item.priorPaidAmount || 0))}원 = 추가 ${money.format(finalDepositAmount(item))}원</span>` : ""}</td>
-      <td class="wrap">${h(summarizeAppliedPromotions(item) || "-")}</td>
-      <td>${h(item.expectedDepositDate)}</td>
-      <td>${formatPaidAtCell(item.paidAt)}</td>
-      <td class="wrap">${h(item.cutoffNote || item.requiredMemo)}</td>
-      <td class="wrap">${renderRequestMemoCell(item)}</td>
+      <td class="m-check"><input type="checkbox" aria-label="${h(item.orderNo)} 선택" data-select-request="${item.id}" ${state.selectedRequestIds.includes(item.id) ? "checked" : ""}></td>
+      <td class="m-actions"><div class="row-actions">${item.status !== "paid" ? `<button data-pay-request="${item.id}">입금완료</button>` : ""}<button data-open-edit-request-popup="${item.id}">수정</button><button class="danger icon-btn" data-delete-request="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
+      <td class="m-status">${renderRowStatusSelect(item)}</td>
+      <td class="m-hide">${settlementLabel(item.settlementType)}</td>
+      <td class="m-title">${h(item.brandName)}</td>
+      <td class="m-sub"><a href="#" class="order-link" data-open-edit-request-popup="${item.id}">${h(item.orderNo)}</a></td>
+      <td class="m-sub">${h(item.customerName)}</td>
+      <td class="num m-hide">${money.format(Number(item.productSalesAmount || 0))}원</td>
+      <td class="num m-hide">${money.format(Number(item.shippingFee || 0))}원</td>
+      <td class="num m-amount"><strong class="amount-emphasis">${money.format(finalDepositAmount(item))}원</strong>${Number(item.creditUsedAmount || 0) > 0 ? `<br><span class="muted" style="font-size:11px">원 ${money.format(Number(item.depositAmount || 0))}원 − 외상 ${money.format(Number(item.creditUsedAmount || 0))}원</span>` : ""}${Number(item.priorPaidAmount || 0) > 0 ? `<br><span class="muted" style="font-size:11px">총 ${money.format(Number(item.depositAmount || 0))}원 − 기지급 ${money.format(Number(item.priorPaidAmount || 0))}원 = 추가 ${money.format(finalDepositAmount(item))}원</span>` : ""}</td>
+      <td class="wrap m-hide">${h(summarizeAppliedPromotions(item) || "-")}</td>
+      <td class="m-field" data-label="예정일">${h(item.expectedDepositDate)}</td>
+      <td class="m-field" data-label="입금">${formatPaidAtCell(item.paidAt)}</td>
+      <td class="wrap m-hide">${h(item.cutoffNote || item.requiredMemo)}</td>
+      <td class="wrap m-hide">${renderRequestMemoCell(item)}</td>
     </tr>
   `;
 }
@@ -1600,7 +1597,7 @@ function renderRequestForm() {
   const defaultExtraShippingFee = item.extraShippingFee ?? 0;
   const defaultShippingFee = item.shippingFee ?? (Number(defaultBaseShippingFee || 0) + Number(defaultExtraShippingFee || 0));
   return `
-    <form class="form-grid" data-request-form>
+    <form class="form-grid request-form" data-request-form>
       <input name="settlementType" type="hidden" value="${h(settlementType)}">
       <input name="sourceSheet" type="hidden" value="${h(resolvedSourceSheet)}">
       <input name="cutoffNote" type="hidden" value="${h(resolvedCutoffNote)}">
@@ -1642,6 +1639,7 @@ function renderRequestForm() {
         ${settlementNote ? `<div><span>계산 안내</span><strong data-special-settlement-note>${h(settlementNote)}</strong></div>` : `<div style="display:none"><span>계산 안내</span><strong data-special-settlement-note></strong></div>`}
       </div>
       </section>
+      <div class="form-sec-head"><h3>주문·금액</h3></div>
       <div class="field three">
         <div><label>주문번호</label><input name="orderNo" value="${h(item.orderNo)}" required></div>
         <div><label>주문자명</label><input name="customerName" value="${h(item.customerName)}" required></div>
@@ -1666,12 +1664,9 @@ function renderRequestForm() {
         <div><label>지역 추가배송비</label><input name="extraShippingFee" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(defaultExtraShippingFee))}"></div>
         <div><label>추가배송비 메모</label><input name="extraShippingNote" value="${h(item.extraShippingNote || "")}" placeholder="예: 제주 추가 4,000원"></div>
       </div>
-      <div class="field">
-        <label>총 배송비</label>
-        <input name="shippingFee" type="text" readonly class="money-input" value="${h(formatAmount(defaultShippingFee))}">
-      </div>
-      <div class="field two" data-hide-direct="1">
-        <div><label>수수료율(%)</label><input name="commissionRate" type="number" min="0" max="100" step="0.1" readonly value="${h(item.commissionRate ?? promotion?.commissionRate ?? selectedBrand?.commissionRate ?? "")}"></div>
+      <div class="field three">
+        <div><label>총 배송비</label><input name="shippingFee" type="text" readonly class="money-input" value="${h(formatAmount(defaultShippingFee))}"></div>
+        <div data-hide-direct="1"><label>수수료율(%)</label><input name="commissionRate" type="number" min="0" max="100" step="0.1" readonly value="${h(item.commissionRate ?? promotion?.commissionRate ?? selectedBrand?.commissionRate ?? "")}"></div>
         <div data-supply-amount-field style="${settlementType === "prepay_supply" ? "" : "display:none"}"><label>공급가 합</label><input name="supplyAmount" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.supplyAmount))}"></div>
       </div>
       <div class="field" data-hide-direct="1">
@@ -1690,8 +1685,9 @@ function renderRequestForm() {
         <span class="muted" data-promotion-preview>${h(item.promotionRuleName || promotion?.name || "없음")}</span>
         ${lineItems.length ? `<span class="muted">품목별 항목을 쓰는 요청은 여기서 고른 값이 계산에 반영되지 않습니다 — 각 품목 행에서 지정하세요.</span>` : ""}
       </div>
+      <div class="form-sec-head" data-hide-direct="1"><h3>품목</h3><span class="meta">최대 30개 행 · 현재판매가는 원판매가−할인금액 자동</span></div>
       <div class="field" data-hide-direct="1">
-        <label>품목별 항목 추가</label>
+        <label>품목 검색해서 추가</label>
         <input name="lineItemsJson" type="hidden" value='${h(JSON.stringify(lineItems))}'>
         <div class="field two">
           <div class="autocomplete" style="position:relative">
@@ -1708,9 +1704,10 @@ function renderRequestForm() {
         <div data-line-items-table>${renderRequestLineItems(lineItems)}</div>
         <div class="toolbar" style="margin-top:8px">
           <button type="button" class="primary" data-add-manual-line-item>+ 행 추가</button>
-          <span class="muted">최대 30개 행 · 모든 값은 선택 입력, 현재판매가는 원판매가−할인금액 자동(수정 가능)</span>
+          <span class="muted">모든 값은 선택 입력입니다.</span>
         </div>
       </div>
+      <div class="form-sec-head"><h3>입금</h3></div>
       <div class="field two">
         <div>
           <label>업체 실 입금액 <span class="muted" style="font-weight:400">(직접 고치면 그 금액으로 고정)</span></label>
@@ -1734,10 +1731,11 @@ function renderRequestForm() {
           <input name="paidAmount" type="text" inputmode="numeric" class="money-input" value="${h(formatAmount(item.paidAmount))}" data-manual="${item.paidAmount ? "1" : ""}">
         </div>
       </div>
-      <div class="field">
-        <label>입금일시</label>
-        <input name="paidAt" type="datetime-local" step="1" value="${h(toDatetimeLocal(item.paidAt))}">
+      <div class="field two">
+        <div><label>입금일시</label><input name="paidAt" type="datetime-local" step="1" value="${h(toDatetimeLocal(item.paidAt))}"></div>
+        <div><label>상태</label><select name="status">${["pending", "await_deposit", "consignment_unpaid", "paid", "hold", "error"].map((s) => `<option value="${s}" ${(item.status || (settlementType === "consignment" ? "consignment_unpaid" : "pending")) === s ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}</select></div>
       </div>
+      <div class="form-sec-head"><h3>메모·이체 표시</h3></div>
       <div class="field">
         <label>주문 메모</label>
         <textarea name="notes" placeholder="해당 입금건에 대한 메모 (예: 통화 내용, 특이사항 등)">${h(item.notes || "")}</textarea>
@@ -1752,6 +1750,7 @@ function renderRequestForm() {
           <input name="depositMemo" value="${h(item.depositMemo || "")}">
         </div>
       </div>
+      <div class="form-sec-head"><h3>정산 조정</h3><span class="meta">필요할 때만 펼치세요</span></div>
       <details class="fixed-summary collapsible-summary" ${
         Number(item.overpaidAmount || 0) > 0 || Number(item.creditUsedAmount || 0) > 0 || item.overpaidNote || item.creditUsedNote ? "open" : ""
       }>
@@ -1813,12 +1812,12 @@ function renderRequestForm() {
         </div>
         <div class="field"><label>환불/취소 메모</label><input name="cancelledNote" value="${h(item.cancelledNote || "")}" placeholder="예: 사료 1포 품절 4,000원"></div>
       </details>
-      <div class="field"><label>상태</label><select name="status">${["pending", "await_deposit", "consignment_unpaid", "paid", "hold", "error"].map((s) => `<option value="${s}" ${(item.status || (settlementType === "consignment" ? "consignment_unpaid" : "pending")) === s ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}</select></div>
+
       <div class="field" data-hide-direct="1">
         <label>계산 수수료 <span class="muted" style="font-weight:400" data-commission-display-hint>${selectedBrand?.hasReceivable ? "(채권 기준 — 프로모션 무시)" : "(실제 차감액)"}</span></label>
         <input name="commissionAmount" type="text" readonly class="money-input" value="${h(formatAmount(item.commissionAmount))}">
       </div>
-      <div class="toolbar">
+      <div class="toolbar form-save-bar">
         <button class="primary" type="submit">${state.editingRequest?.id ? "수정 저장" : "요청 추가"}</button>
         ${state.editingRequest ? `<button type="button" data-cancel-edit>취소</button>` : ""}
       </div>
@@ -2889,10 +2888,10 @@ function renderCatalogResolvePanel() {
   const allDone = cr.items.every((it) => it.status !== "pending");
   const rows = cr.items.map((it, i) => {
     if (it.status === "registered") {
-      return `<div class="catalog-resolve-item">✅ <b>${h(it.itemName)}</b> — 단가표에 새로 등록했습니다.</div>`;
+      return `<div class="catalog-resolve-item"><span class="status-dot is-ok"></span><b>${h(it.itemName)}</b> — 단가표에 새로 등록했습니다.</div>`;
     }
     if (it.status === "aliased") {
-      return `<div class="catalog-resolve-item">✅ <b>${h(it.itemName)}</b> — "${h(it.aliasedToName || "")}" 별칭으로 연결했습니다.</div>`;
+      return `<div class="catalog-resolve-item"><span class="status-dot is-ok"></span><b>${h(it.itemName)}</b> — "${h(it.aliasedToName || "")}" 별칭으로 연결했습니다.</div>`;
     }
     if (it.status === "skipped") {
       return `<div class="catalog-resolve-item"><span class="muted">⏭ <b>${h(it.itemName)}</b> — 이번엔 건너뜁니다.</span></div>`;
@@ -4123,14 +4122,15 @@ function showToast(text, kind = "success") {
     el.id = "toast";
     Object.assign(el.style, {
       position: "fixed", bottom: "24px", left: "50%", transform: "translateX(-50%)",
-      padding: "12px 20px", borderRadius: "8px", color: "#fff", fontSize: "14px",
-      fontWeight: "500", zIndex: "9999", boxShadow: "0 10px 26px rgba(0,0,0,0.18)",
+      padding: "14px 22px", borderRadius: "14px", color: "#fff", fontSize: "14px",
+      fontWeight: "600", zIndex: "9999", boxShadow: "0 8px 24px rgba(0,0,0,0.2)", maxWidth: "min(92vw, 560px)",
       opacity: "0", transition: "opacity 180ms ease-out", pointerEvents: "none"
     });
     document.body.appendChild(el);
   }
-  el.style.background = kind === "error" ? "#b42318" : "#287d3c";
-  el.textContent = text;
+  // 토스처럼 어두운 상자, 오류만 빨간 점으로 구분한다.
+  el.style.background = "rgba(25,31,40,0.94)";
+  el.textContent = kind === "error" ? `⚠ ${text}` : text;
   el.style.opacity = "1";
   clearTimeout(el._t);
   el._t = setTimeout(() => { el.style.opacity = "0"; }, 1800);
@@ -4840,13 +4840,15 @@ function renderBulkExcelTools(prefix, exportUrl) {
   const status = state.procurement.importStatus;
   const showStatus = status && status.prefix === prefix;
   return `
-    <div class="toolbar" style="margin-top:8px;flex-wrap:wrap">
-      <button type="button" data-template-download-open="${prefix}">양식다운로드</button>
-      <button type="button" data-bulk-import-trigger="${prefix}">일괄업로드</button>
-      <input type="file" data-bulk-import-file="${prefix}" accept=".xlsx" style="display:none">
-    </div>
+    <details class="menu-pop"><summary class="button">엑셀<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></summary>
+      <div class="menu-list">
+        <button type="button" class="menu-item" data-template-download-open="${prefix}">양식 내려받기</button>
+        <button type="button" class="menu-item" data-bulk-import-trigger="${prefix}">엑셀로 한꺼번에 올리기</button>
+      </div>
+    </details>
+    <input type="file" data-bulk-import-file="${prefix}" accept=".xlsx" style="display:none">
     ${showStatus ? `
-      <div class="${status.kind === "error" ? "error-text" : "notice"}" style="margin-top:6px">
+      <div class="notice ${status.kind === "error" ? "notice-danger" : "notice-info"} list-actions-status">
         ${h(status.text)}
         ${(status.details || []).length ? `<br>${status.details.slice(0, 20).map((d) => h(`${d.row}행: ${d.reason}`)).join("<br>")}` : ""}
         ${(status.details || []).length > 20 ? `<br>...외 ${status.details.length - 20}건` : ""}
@@ -4987,7 +4989,7 @@ function renderPartnerCategoryTabs() {
   return `
     <div class="npb-subnav" style="flex-wrap:wrap">
       ${[["active", "활성", active], ["archived", "보관", (state.partners || []).length - active], ["all", "전체", (state.partners || []).length]].map(([k, l, n]) => `<button data-partner-status="${k}" class="npb-subtab ${status === k ? "active" : ""}">${l} <span class="muted">${n}</span></button>`).join("")}
-      <span style="width:12px"></span>
+      <span class="chip-divider" aria-hidden="true"></span>
       ${tabs.map(([key, label, count]) => `<button data-partner-category-tab="${key}" class="npb-subtab ${current === key ? "active" : ""}">${label} <span class="muted">${count}</span></button>`).join("")}
       <input data-partner-search placeholder="이름·예전 이름·사업자번호 검색" value="${h(pr.partnerSearch || "")}" style="margin-left:auto;min-width:220px">
     </div>`;
@@ -5016,9 +5018,9 @@ function renderPartners() {
     <section class="layout">
       <div class="panel">
         <div class="panel-head"><h2>거래처 목록</h2><span class="muted">${money.format(rows.length)}개</span></div>
-        <div class="panel-body" style="padding-bottom:0">
+        <div class="panel-body list-actions">
           <button class="primary" data-new-partner>새 거래처</button>
-          <button type="button" data-open-procurement-popup="partner" style="margin-left:8px">새 창으로 입력</button>
+          <button type="button" data-open-procurement-popup="partner">새 창으로 입력</button>
           ${renderBulkExcelTools("partner", "/api/partners/export")}
         </div>
         <div class="table-wrap">
@@ -5165,8 +5167,8 @@ function bindPartnerHub() {
 
 function renderPartnerRow(item) {
   return `
-    <tr class="hub-go" data-partner-hub="${item.id}" title="누르면 이 거래처와 이어진 브랜드·명세서·판매·생산비가 보입니다">
-      <td>${codeTag(item)}${h(item.name)}${item.isActive === false ? ' <span class="pill">보관</span>' : ""}${item.payoutAccountType === "virtual" ? ' <span class="pill">가상계좌</span>' : ""}<br><span class="muted" style="font-size:12px">${h(partnerTagText(item))}${item.notion?.last ? ` · 마지막 결제 ${h(item.notion.last)}` : ""}${(item.aliases || []).length ? ` · 검색 태그 ${h(item.aliases.join(", "))}` : ""}</span></td>
+    <tr class="hub-go ${item.isActive === false ? "is-archived" : ""}" data-partner-hub="${item.id}" title="누르면 이 거래처와 이어진 브랜드·명세서·판매·생산비가 보입니다">
+      <td>${codeTag(item)}${h(item.name)}${item.isActive === false ? ARCHIVE_ICON : ""}${item.payoutAccountType === "virtual" ? ' <span class="pill">가상계좌</span>' : ""}<br><span class="muted" style="font-size:12px">${h(partnerTagText(item))}${item.notion?.last ? ` · 마지막 결제 ${h(item.notion.last)}` : ""}${(item.aliases || []).length ? ` · 검색 태그 ${h(item.aliases.join(", "))}` : ""}</span></td>
       <td>${h(item.businessName)}${item.businessNumber ? `<br><span class="muted" style="font-size:11px">${h(formatBizNo(item.businessNumber))}</span>` : ""}</td>
       <td>${h(item.contactName)}${item.contactPhone ? ` · ${h(item.contactPhone)}` : ""}</td>
       <td>${h(item.orderMethod)}</td>
@@ -5393,11 +5395,11 @@ function renderMaterials() {
   return `
     <div class="npb-subnav" style="flex-wrap:wrap">
       ${Object.entries(ITEM_KIND_LABELS).map(([k, l]) => `<button class="npb-subtab ${kind === k ? "active" : ""}" data-item-kind="${k}">${l} <span class="muted">${kindCount(k)}</span></button>`).join("")}
-      ${isMat ? `<span style="width:12px"></span><button class="npb-subtab ${!type ? "active" : ""}" data-item-type="">전체</button>${Object.entries(MATERIAL_TYPE_LABELS).map(([t, l]) => `<button class="npb-subtab ${type === t ? "active" : ""}" data-item-type="${t}">${l} <span class="muted">${typeCount(t)}</span></button>`).join("")}` : ""}
+      ${isMat ? `<span class="chip-divider" aria-hidden="true"></span><button class="npb-subtab ${!type ? "active" : ""}" data-item-type="">전체</button>${Object.entries(MATERIAL_TYPE_LABELS).map(([t, l]) => `<button class="npb-subtab ${type === t ? "active" : ""}" data-item-type="${t}">${l} <span class="muted">${typeCount(t)}</span></button>`).join("")}` : ""}
       ${!isMat ? (() => {
         const pool = all.filter((m) => itemKindOf(m) === kind && m.isActive !== false);
         const chip = (k, l, n) => (n ? `<button class="npb-subtab ${sub === k ? "active" : ""}" data-item-sub="${k}">${l} <span class="muted">${n}</span></button>` : "");
-        return `<span style="width:12px"></span>${chip("", "전체", pool.length)}${chip("instock", "재고 있음", pool.filter((m) => Number(m.stock || 0) > 0).length)}${chip("review", "⚠ 분류 확인 필요", pool.filter((m) => m.needsReview).length)}${chip("discontinued", "단종·마지막 재고", pool.filter((m) => m.discontinued).length)}
+        return `<span class="chip-divider" aria-hidden="true"></span>${chip("", "전체", pool.length)}${chip("instock", "재고 있음", pool.filter((m) => Number(m.stock || 0) > 0).length)}${chip("review", "⚠ 분류 확인 필요", pool.filter((m) => m.needsReview).length)}${chip("discontinued", "단종·마지막 재고", pool.filter((m) => m.discontinued).length)}
           ${kind === "product" ? Object.entries(UNIT_LABELS).map(([u, l]) => chip(`unit:${u}`, l, pool.filter((m) => m.businessUnit === u).length)).join("") : ""}
           ${Object.entries(OWNER_LABELS).map(([o, l]) => chip(`own:${o}`, `귀속 ${l}`, pool.filter((m) => m.owner === o).length)).join("")}`;
       })() : ""}
@@ -5407,7 +5409,7 @@ function renderMaterials() {
     <section class="layout">
       <div class="panel">
         <div class="panel-head"><h2>${h(ITEM_KIND_LABELS[kind])}${isMat && type ? ` · ${h(MATERIAL_TYPE_LABELS[type])}` : ""}</h2><span class="muted">${money.format(rows.length)}개</span></div>
-        <div class="panel-body" style="padding-bottom:0">
+        <div class="panel-body list-actions">
           <button class="primary" data-new-material>새 ${h(isMat ? (MATERIAL_TYPE_LABELS[type] || "자재") : ITEM_KIND_LABELS[kind])}</button>
           ${renderBulkExcelTools("material", "/api/materials/export")}
           ${!isMat ? `<details class="sellmate-box" ${pr.sellmateOpen ? "open" : ""}><summary>셀메이트 재고 올리기 ${pr.sellmateLast ? `<span class="muted">— 마지막 ${h(fmtDate(pr.sellmateLast.takenAt))} · ${money.format(pr.sellmateLast.totals.units)}개 · 원가합 ${money.format(pr.sellmateLast.totals.costValue)}원</span>` : ""}</summary>
@@ -5814,9 +5816,9 @@ function renderDeliveryPlaces() {
     <section class="layout">
       <div class="panel">
         <div class="panel-head"><h2>납품지 목록</h2><span class="muted">${money.format(rows.length)}개</span></div>
-        <div class="panel-body" style="padding-bottom:0">
+        <div class="panel-body list-actions">
           <button class="primary" data-new-delivery-place>새 납품지</button>
-          <button type="button" data-open-procurement-popup="deliveryPlace" style="margin-left:8px">새 창으로 입력</button>
+          <button type="button" data-open-procurement-popup="deliveryPlace">새 창으로 입력</button>
           ${renderBulkExcelTools("deliveryPlace", "/api/delivery-places/export")}
         </div>
         <div class="table-wrap">
@@ -5937,11 +5939,11 @@ function renderPurchaseOrders() {
     <section class="layout">
       <div class="panel">
         <div class="panel-head"><h2>${filter ? `${TRADE_DOC_LABELS[filter]} 목록` : "발행 문서 목록"}</h2><span class="muted">${money.format(rows.length)}건</span></div>
-        <div class="panel-body" style="padding-bottom:0">
+        <div class="panel-body list-actions">
           <button class="primary" data-new-purchase-order>새 ${formLabel}</button>
         </div>
         <div class="table-wrap">
-          <table class="purchase-orders-table">
+          <table class="purchase-orders-table m-cards">
             <thead><tr><th>문서번호</th><th>양식</th><th>거래처</th><th>일자</th><th>상태</th><th>합계</th><th>작업</th></tr></thead>
             <tbody>${rows.map(renderPurchaseOrderRow).join("") || `<tr><td colspan="7" class="empty">등록된 문서가 없습니다.</td></tr>`}</tbody>
           </table>
@@ -6166,13 +6168,13 @@ function renderPurchaseOrderRow(item) {
   const partner = (state.partners || []).find((p) => p.id === item.partnerId);
   return `
     <tr>
-      <td>${h(item.docNo)}</td>
-      <td>${h(TRADE_DOC_LABELS[item.docType || "purchase_order"] || "발주서")}</td>
-      <td>${h(partner?.name || "")}</td>
-      <td>${h(item.orderDate)}${item.dueDate ? `<br><span class="muted" style="font-size:11px">${h(tradeDocMeta(item.docType).dueLabel)} ${h(item.dueDate)}</span>` : ""}</td>
-      <td>${PO_STATUS_LABELS[item.status] || item.status}</td>
-      <td>${money.format(item.total)}원<br><span class="muted" style="font-size:11px">공급가 ${money.format(Number(item.subtotal || 0))} · 부가세 ${money.format(Number(item.vat || 0))}</span></td>
-      <td><div class="row-actions">
+      <td class="m-sub"><span class="code-tag">${h(item.docNo)}</span></td>
+      <td class="m-hide">${h(TRADE_DOC_LABELS[item.docType || "purchase_order"] || "발주서")}</td>
+      <td class="m-title">${h(partner?.name || "")}</td>
+      <td class="m-sub">${h(item.orderDate)}${item.dueDate ? `<br><span class="muted" style="font-size:11px">${h(tradeDocMeta(item.docType).dueLabel)} ${h(item.dueDate)}</span>` : ""}</td>
+      <td class="m-status"><span class="pill po-st-${h(item.status)}">${PO_STATUS_LABELS[item.status] || item.status}</span></td>
+      <td class="num m-amount"><strong>${money.format(item.total)}원</strong><br><span class="muted" style="font-size:11px">공급가 ${money.format(Number(item.subtotal || 0))} · 부가세 ${money.format(Number(item.vat || 0))}</span></td>
+      <td class="m-actions"><div class="row-actions">
         <button data-edit-purchase-order="${item.id}">수정</button>
         <button type="button" data-preview-purchase-order="${item.id}">미리보기</button>
         <a href="/api/purchase-orders/${item.id}/excel"><button type="button">엑셀</button></a>
@@ -6911,7 +6913,7 @@ function renderSettlement() {
 function renderSettlementScan(s) {
   const scan = s.scan;
   if (!scan) return "";
-  if (scan.error) return `<section class="panel"><div class="panel-body"><p class="muted" style="color:var(--red)">대상 스캔 실패: ${h(scan.error)}</p></div></section>`;
+  if (scan.error) return `<section class="panel"><div class="panel-body">${notice("danger", "대상 스캔 실패", h(scan.error))}</div></section>`;
   const targets = scan.targets || [];
   const ready = targets.filter((t) => t.status === "ready");
   const unmapped = targets.filter((t) => t.status === "unmapped");
@@ -6960,7 +6962,7 @@ function renderSettlementScan(s) {
 function renderCafe24Compare(compare) {
   if (!compare) return "";
   if (compare.error) {
-    return `<p class="muted" style="color:var(--red)">대조 실패: ${h(compare.error)}</p>`;
+    return notice("danger", "대조 실패", h(compare.error));
   }
   const fields = Object.entries(compare.diffsByField || {});
   const clean = compare.diffCount === 0 && !compare.onlyInCsvCount;
@@ -7260,7 +7262,8 @@ function npbStatusBadge(status) {
     draft: ["pending", "작성중"],
     open: ["pending", "진행중"],
     computed: ["await_deposit", "계산완료"],
-    finalized: ["paid", "확정"]
+    finalized: ["paid", "확정"],
+    final: ["paid", "확정"]
   };
   const [cls, label] = map[status] || ["", status || "-"];
   return `<span class="badge ${cls}">${h(label)}</span>`;
@@ -7736,6 +7739,33 @@ function can(menuKey, action = "view") {
   return Array.isArray(granted) && granted.includes(action);
 }
 
+// 알림 박스 — 빨간 글자 한 줄 대신, 놓치지 않게 아이콘·제목·할 일을 묶어 보여준다.
+const NOTICE_ICONS = {
+  danger: '<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 5.8v5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="10" cy="13.9" r="1.1" fill="currentColor"/></svg>',
+  warn: '<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M10 2.8 18 16.6H2z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M10 8v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="10" cy="14.2" r="1" fill="currentColor"/></svg>',
+  info: '<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 9v5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="10" cy="6.2" r="1.1" fill="currentColor"/></svg>'
+};
+function notice(kind, title, body = "", action = "") {
+  return `<div class="notice notice-${kind}" role="${kind === "danger" ? "alert" : "status"}">
+    <span class="notice-ic">${NOTICE_ICONS[kind] || NOTICE_ICONS.info}</span>
+    <div class="notice-body"><strong>${title}</strong>${body ? `<p>${body}</p>` : ""}</div>
+    ${action ? `<div class="notice-action">${action}</div>` : ""}
+  </div>`;
+}
+// 내려받기 버튼 여러 개를 하나로 묶는다(링크 그대로, 동작은 같다).
+function downloadMenu(items, label = "내려받기") {
+  return `<details class="menu-pop"><summary class="button">${label}<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></summary>
+    <div class="menu-list">${items.map(([href, text]) => `<a href="${href}">${text}</a>`).join("")}</div></details>`;
+}
+// 바깥을 누르면 열린 내려받기 메뉴를 닫는다.
+document.addEventListener("click", (e) => {
+  document.querySelectorAll("details.menu-pop[open]").forEach((d) => { if (!d.contains(e.target)) d.removeAttribute("open"); });
+});
+// 접어 두는 도움말 — 매일 쓰는 사람에게는 접힌 채로, 처음 쓰는 사람만 펼쳐 본다.
+function helpNote(text) {
+  return `<details class="help-note"><summary>도움말</summary><div>${text}</div></details>`;
+}
+
 // 클로브(은행 입금내역) 사용 여부. 역할이 아니라 관리자 화면에서 체크한
 // 메뉴 권한(주문매칭(클로브))을 따른다 — 서버의 /api/clobe/* 검사와 같다.
 // 카페24 무통장 입금전 → 은행 입금 확인 → 카페24 입금확인. 통장 내역이 보이므로 클로브 권한자(경영관리·대표)만.
@@ -7743,27 +7773,29 @@ const DEPOSIT_MODES = { off: "끔", preview: "맞춰 보기만", auto: "자동 �
 function renderDepositConfirm() {
   const dc = state.depositConfirm;
   const head = `<div class="panel-head"><h2>카페24 입금전 주문 자동 입금확인</h2>${dc?.data ? `<span class="pill">${h(DEPOSIT_MODES[dc.data.settings.mode] || dc.data.settings.mode)}</span>` : ""}</div>`;
-  if (!dc?.data) return `<section class="panel" style="margin-bottom:14px">${head}<div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  if (!dc?.data) return `<section class="panel flow-section" id="flow-deposit">${head}<div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   const d = dc.data;
   const r = d.lastRun;
   const row = (x, extra = "") => `<tr><td>${h(x.orderId)}</td><td>${h(fmtDate(x.orderDate))}</td><td>${h(x.depositor || x.buyer || "")}</td><td class="num">${money.format(x.amount || 0)}</td>${extra}</tr>`;
   const txText = (t) => `${h(t.name || "-")} · ${money.format(t.amount)}원 · ${h(fmtDate(t.at))}`;
   const sure = (r?.sure || []).filter((x) => !(r.confirmed || []).some((c) => c.orderId === x.orderId));
-  return `<section class="panel" style="margin-bottom:14px">${head}<div class="panel-body">
-    <p class="muted" style="font-size:12px">무통장 '입금전' 주문과 통장 입금을 맞춰, <strong>금액·입금자명이 같고 짝이 하나뿐인 건</strong>은 카페24에 입금확인을 넣습니다. 애매한 건은 아래에서 직접 처리합니다. 운영 직원은 통장 내역 없이 결과 알림(주문번호·입금자·금액)만 메신저 공유함에서 봅니다.</p>
-    ${!d.writeScope ? `<p class="danger-text" style="font-size:12px">카페24 주문 쓰기 권한(mall.write_order)이 아직 없습니다. 지금은 '맞춰 보기만' 할 수 있습니다.</p>` : ""}
-    <div class="toolbar" style="flex-wrap:wrap">
-      ${d.isOwner ? `<select data-dc-mode>${Object.entries(DEPOSIT_MODES).map(([k, l]) => `<option value="${k}" ${d.settings.mode === k ? "selected" : ""} ${k === "auto" && !d.writeScope ? "disabled" : ""}>${l}</option>`).join("")}</select>` : ""}
+  return `<section class="panel flow-section" id="flow-deposit">${head}<div class="panel-body">
+    <p class="section-lead">무통장 입금전 주문 중 <strong>금액·입금자명이 같고 짝이 하나뿐인 건</strong>을 카페24에 입금확인합니다.</p>
+    ${helpNote("애매한 건은 아래 '확인 필요'에서 직접 처리합니다. 운영 직원은 통장 내역 없이 결과 알림(주문번호·입금자·금액)만 메신저 공유함에서 봅니다.")}
+    ${!d.writeScope ? notice("warn", "카페24 주문 쓰기 권한이 없습니다", "지금은 '맞춰 보기만' 할 수 있습니다. 카페24를 다시 연결할 때 주문 쓰기(mall.write_order) 권한을 함께 승인해 주세요.") : ""}
+    ${r && r.ok === false ? notice("danger", "마지막 맞춰 보기가 실패했습니다", h(r.error)) : ""}
+    <div class="action-row">
+      ${d.isOwner ? `<label class="inline-field"><span>운영 방식</span><select data-dc-mode aria-label="입금확인 운영 방식">${Object.entries(DEPOSIT_MODES).map(([k, l]) => `<option value="${k}" ${d.settings.mode === k ? "selected" : ""} ${k === "auto" && !d.writeScope ? "disabled" : ""}>${l}</option>`).join("")}</select></label>` : ""}
       <button data-dc-run>지금 맞춰 보기</button>
       ${d.canApply && d.writeScope && sure.length ? `<button class="primary" data-dc-apply>확실한 ${sure.length}건 입금확인</button>` : ""}
-      <span class="muted" style="font-size:12px">${r ? `마지막 확인 ${h(fmtDate(r.at))} (${h(r.by)})${r.ok === false ? ` · <span class="danger-text">${h(r.error)}</span>` : ` · 입금전 ${money.format(r.unpaidCount || 0)}건`}` : "아직 확인하지 않았습니다."}</span>
+      <span class="meta">${r ? `마지막 확인 ${h(fmtDate(r.at))} · ${h(r.by)}${r.ok === false ? "" : ` · 입금전 ${money.format(r.unpaidCount || 0)}건`}` : "아직 확인하지 않았습니다."}</span>
     </div>
     ${sure.length ? `<h3 class="dc-h">확실한 짝 ${sure.length}건</h3><div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>주문번호</th><th>주문일</th><th>입금자</th><th>금액</th><th>통장 입금</th></tr></thead><tbody>
       ${sure.map((x) => row(x, `<td class="wrap">${txText(x.tx)}</td>`)).join("")}</tbody></table></div>` : ""}
     ${(r?.check || []).length ? `<h3 class="dc-h">확인 필요 ${r.check.length}건</h3><div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>주문번호</th><th>주문일</th><th>입금자</th><th>금액</th><th>후보 입금</th></tr></thead><tbody>
-      ${r.check.map((x) => row(x, `<td class="wrap"><span class="muted" style="font-size:11px">${h(x.reason)}</span>${(x.txs || []).map((t) => `<div>${txText(t)} ${d.canApply && d.writeScope ? `<button class="small" data-dc-confirm="${h(x.orderId)}" data-dc-tx="${h(t.txId)}">이 입금으로 확인</button>` : ""}</div>`).join("")}</td>`)).join("")}</tbody></table></div>` : ""}
-    ${(r?.errors || []).length ? `<p class="danger-text" style="font-size:12px">실패: ${r.errors.map((e) => `${h(e.orderId)} ${h(e.error)}`).join(", ")}</p>` : ""}
-    ${d.history.length ? `<details style="margin-top:8px"><summary>입금확인 기록 ${d.history.length}건</summary><div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>처리</th><th>주문번호</th><th>입금자</th><th>금액</th><th>통장 입금</th><th>누가</th></tr></thead><tbody>
+      ${r.check.map((x) => row(x, `<td class="wrap"><span class="meta">${h(x.reason)}</span>${(x.txs || []).map((t) => `<div>${txText(t)} ${d.canApply && d.writeScope ? `<button class="small" data-dc-confirm="${h(x.orderId)}" data-dc-tx="${h(t.txId)}">이 입금으로 확인</button>` : ""}</div>`).join("")}</td>`)).join("")}</tbody></table></div>` : ""}
+    ${(r?.errors || []).length ? notice("danger", `입금확인 실패 ${r.errors.length}건`, r.errors.map((e) => `${h(e.orderId)} ${h(e.error)}`).join(", ")) : ""}
+    ${d.history.length ? `<details class="history-note"><summary>입금확인 기록 ${d.history.length}건</summary><div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>처리</th><th>주문번호</th><th>입금자</th><th>금액</th><th>통장 입금</th><th>누가</th></tr></thead><tbody>
       ${d.history.map((x) => `<tr><td>${h(fmtDate(x.at))}</td><td>${h(x.orderId)}</td><td>${h(x.depositor)}</td><td class="num">${money.format(x.amount || 0)}</td><td>${h(x.txName || "")} ${h(fmtDate(x.txAt))}</td><td>${h(x.by)}${x.manual ? " (직접)" : ""}</td></tr>`).join("")}</tbody></table></div></details>` : ""}
   </div></section>`;
 }
@@ -7799,52 +7831,61 @@ function canUseClobe() {
 // --- 반자동 파이프라인 ------------------------------------------------------
 // 단계마다 버튼이 하나씩 있고, 각 버튼은 먼저 "무엇을 하게 될지"만 보여준다.
 // 실제 생성·상태변경은 확인한 뒤 별도 버튼으로만 일어난다.
+function renderPipelineSteps(p) {
+  const drafts = p.collect?.drafts || [];
+  const steps = [
+    { id: "flow-collect", label: "주문 수집", state: p.collect ? "done" : "current" },
+    { id: "flow-collect", label: "요청 확인", state: !p.collect ? "todo" : drafts.length ? "current" : "done", note: p.collect ? (drafts.length ? `${drafts.length}건 남음` : "완료") : "" },
+    { id: "flow-match", label: "입금매칭", state: "todo", note: canUseClobe() ? "클로브" : "" },
+    { id: "", label: "카페24 반영", state: "later", note: "준비 중" }
+  ];
+  return `<nav class="stepper" aria-label="주문매칭 단계"><ol>${steps.map((st, i) => {
+    const inner = `<span class="step-no">${st.state === "done" ? '<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M2.5 6.2 5 8.6l4.6-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>' : i + 1}</span>
+      <span class="step-text"><b>${st.label}</b>${st.note ? `<small>${h(st.note)}</small>` : ""}</span>`;
+    return `<li class="step is-${st.state}"${st.state === "current" ? ' aria-current="step"' : ""}>${st.id ? `<a href="#${st.id}">${inner}</a>` : `<span>${inner}</span>`}</li>`;
+  }).join("")}</ol></nav>`;
+}
+
+// --- 반자동 파이프라인 ------------------------------------------------------
+// 단계마다 버튼이 하나씩 있고, 각 버튼은 먼저 "무엇을 하게 될지"만 보여준다.
+// 실제 생성·상태변경은 확인한 뒤 별도 버튼으로만 일어난다.
 function renderPipeline() {
   const p = state.pipeline;
-  const head = pageHead("주문매칭",
-    "카페24 주문 수집 → 확인 → 입금매칭 → 카페24 반영. 단계마다 눌러서 진행합니다. "
-    + "아래에서 클로브ai 은행 거래와 대사합니다.");
+  const head = pageHead("주문매칭", "카페24 주문을 입금요청으로 만들고, 은행 입금과 맞춥니다.");
   if (!can("pipeline")) {
     return `${head}<section class="panel"><div class="panel-body"><p class="muted">주문매칭 권한이 없습니다. 관리자 메뉴에서 권한을 받아 주세요.</p></div></section>`;
   }
   return `
     ${head}
-    ${canUseClobe() ? renderClobeFreshness(p.scraping) : ""}
-    <section class="panel">
-      <div class="panel-head"><h2>① 수집 — 카페24 주문에서 입금요청 만들기</h2></div>
+    ${renderPipelineSteps(p)}
+    <section class="panel flow-section" id="flow-collect">
+      <div class="panel-head"><h2>주문 수집</h2><span class="meta">카페24 결제 주문 → 입금요청</span></div>
       <div class="panel-body">
-        <div class="field two">
-          <div><label>조회 시작일</label><input type="date" data-pipe-start value="${h(p.startDate)}"></div>
-          <div><label>조회 종료일</label><input type="date" data-pipe-end value="${h(p.endDate)}"></div>
-        </div>
-        <div class="toolbar">
+        <div class="action-row align-end">
+          <div class="date-pair" role="group" aria-label="조회 기간">
+            <label class="inline-field stacked"><span>시작일</span><input type="date" data-pipe-start value="${h(p.startDate)}" aria-label="조회 시작일"></label>
+            <span class="range-sep" aria-hidden="true">~</span>
+            <label class="inline-field stacked"><span>종료일</span><input type="date" data-pipe-end value="${h(p.endDate)}" aria-label="조회 종료일"></label>
+          </div>
           <button class="primary" data-pipe-collect ${p.collecting ? "disabled" : ""}>${p.collecting ? "수집 중…" : "수집하기"}</button>
-          <span class="muted">결제된 주문만 가져옵니다. 이미 등록된 건은 건너뜁니다.
-            확인 목록에 올라온 건은 <b>생성</b>을 눌러야 저장됩니다 — 단, 자동 등록으로 설정한 브랜드는 수집과 동시에 등록됩니다.</span>
         </div>
-        ${p.error ? `<p class="muted" style="color:var(--red)">${h(p.error)}</p>` : ""}
+        <p class="hint">결제된 주문만 가져오고, 이미 등록된 건은 건너뜁니다.</p>
+        ${helpNote("확인 목록에 올라온 건은 <b>생성</b>을 눌러야 저장됩니다. 단, 자동 등록으로 설정한 브랜드는 수집과 동시에 등록됩니다.")}
+        ${p.error ? notice("danger", "수집하지 못했습니다", h(p.error)) : ""}
         ${renderPipelineCollect(p.collect)}
       </div>
     </section>
-    <section class="panel">
-      <div class="panel-head"><h2>⑤ 출고 확인 — 입금대기를 입금요청으로</h2></div>
+    <section class="panel flow-section" id="flow-shipped">
+      <div class="panel-head"><h2>출고 확인</h2><span class="meta">출고 후 입금 브랜드 · 입금대기 → 입금요청</span></div>
       <div class="panel-body">
-        <p class="muted">출고 후 입금 브랜드의 입금대기 건 중, 카페24에 송장이 찍힌 것을 찾습니다.</p>
-        <div class="toolbar">
+        <div class="action-row">
           <button data-pipe-shipped ${p.shipping ? "disabled" : ""}>${p.shipping ? "확인 중…" : "출고 확인하기"}</button>
+          <span class="meta">입금대기 건 중 카페24에 송장이 찍힌 것을 찾습니다.</span>
         </div>
         ${renderPipelineShipped(p.shipped)}
       </div>
     </section>
-    <section class="panel">
-      <div class="panel-head"><h2>③ 입금매칭 · ④ 카페24 반영</h2></div>
-      <div class="panel-body">
-        <p class="muted">
-          ③ 통장 출금과 입금요청 대조는 <b>클로브ai</b> 탭에서 실행합니다.<br>
-          ④ 입금완료 건을 카페24에서 배송준비중으로 바꾸는 단계는 아직 없습니다 — 쓰기 권한이 필요해 마지막에 붙입니다.
-        </p>
-      </div>
-    </section>
+    ${canUseClobe() ? renderClobeFreshness(p.scraping) : ""}
   `;
 }
 
@@ -7863,20 +7904,17 @@ function renderClobeFreshness(scraping) {
       <td>${h(at || "-")}</td><td><span class="muted">${h(a.failureMessage || "")}</span></td></tr>`;
   }).join("");
   return `
-    <section class="panel">
+    <section class="panel flow-section" id="flow-match">
       <div class="panel-head">
-        <h2>클로브 데이터 최신성</h2>
-        <span class="muted">은행·카드 내역이 언제까지 수집된 것인지</span>
+        <h2>입금매칭 준비 · 은행 내역 최신성</h2>
+        <span class="meta">은행·카드 내역이 언제까지 수집됐는지</span>
       </div>
       <div class="panel-body">
-        <div class="toolbar">
+        <div class="action-row">
           <button data-pipe-scraping>수집 상태 확인</button>
-          <a class="button" href="https://app.clobe.ai" target="_blank" rel="noreferrer">클로브ai에서 최신화하기 ↗</a>
+          <a class="button" href="https://app.clobe.ai" target="_blank" rel="noreferrer">클로브ai에서 최신화 ↗</a>
         </div>
-        <p class="muted">
-          최신화(재수집)는 클로브 쪽에서만 실행할 수 있습니다. 우프페이에서 대신 눌러줄 방법이 없어
-          (클로브 MCP에 해당 기능이 없습니다), 위 링크로 이동해 실행한 뒤 돌아와서 수집하세요.
-        </p>
+        ${helpNote("최신화(재수집)는 클로브 쪽에서만 실행할 수 있습니다(클로브 MCP에 해당 기능이 없음). 링크로 이동해 실행한 뒤 돌아와서 대조하세요.")}
         ${rows ? `<div class="table-wrap" style="max-height:220px"><table class="collect-assets-table">
             <thead><tr><th>상태</th><th>자산</th><th>마지막 수집</th><th>비고</th></tr></thead>
             <tbody>${rows}</tbody></table></div>` : ""}
@@ -7915,22 +7953,22 @@ function renderPipelineCollect(collect) {
   const drafts = collect.drafts || [];
   const auto = renderPipelineAutoCreated(collect.autoCreated);
   if (!drafts.length) {
-    return `${auto}<p class="muted">확인이 필요한 입금요청은 없습니다. (조회 주문 ${money.format(collect.orderCount || 0)}건 ·
-      이미 등록 ${collect.skipped?.duplicate || 0} · 미결제 제외 ${collect.skipped?.unpaid || 0})</p>`;
+    return `<div class="collect-result">${auto}<p class="empty-line">확인이 필요한 입금요청은 없습니다. <span class="meta">조회 주문 ${money.format(collect.orderCount || 0)}건 ·
+      이미 등록 ${collect.skipped?.duplicate || 0} · 미결제 제외 ${collect.skipped?.unpaid || 0}</span></p></div>`;
   }
   const selected = new Set(state.pipeline.selected);
   const rows = drafts.map((d, i) => {
     const lines = d.lineItems.map((l) => `${h(l.itemName)} ×${l.quantity}`).join("<br>");
     const codes = d.lineItems.map((l) => `<span class="muted">${h(l.orderItemCode)}</span>`).join("<br>");
     return `<tr>
-      <td><input type="checkbox" data-pipe-draft="${i}" ${selected.has(i) ? "checked" : ""}></td>
-      <td>${h(d.orderNo)}<br><span class="muted">${h(d.customerName)}</span></td>
-      <td>${h(d.brandName)}<br><span class="muted">${d.payAfterShipping ? "출고후입금 → 입금대기" : "입금요청"}</span></td>
-      <td>${lines}</td>
-      <td>${codes}</td>
-      <td class="num"><strong>${money.format(d.depositAmount || 0)}원</strong><br>
+      <td class="cell-check"><input type="checkbox" data-pipe-draft="${i}" ${selected.has(i) ? "checked" : ""} aria-label="${h(d.orderNo)} 선택"></td>
+      <td data-label="주문">${h(d.orderNo)}<br><span class="muted">${h(d.customerName)}</span></td>
+      <td data-label="브랜드">${h(d.brandName)}<br><span class="muted">${d.payAfterShipping ? "출고후입금 → 입금대기" : "입금요청"}</span></td>
+      <td data-label="품목">${lines}</td>
+      <td data-label="품목번호" class="cell-codes">${codes}</td>
+      <td data-label="입금액" class="num"><strong>${money.format(d.depositAmount || 0)}원</strong><br>
         <span class="muted">판매 ${money.format(d.productSalesAmount || 0)} · 배송 ${money.format(d.baseShippingFee || 0)}</span></td>
-      <td>
+      <td data-label="비고">
         ${d.shippingMismatch
           ? `<span class="badge clobe-medium">배송비 확인</span><br><span class="muted">카페24 ${money.format(d.cafe24ShippingFee || 0)}원</span>`
           : ""}
@@ -7939,31 +7977,29 @@ function renderPipelineCollect(collect) {
           : ""}
         ${!d.shippingMismatch && !d.catalogMismatch ? `<span class="muted">-</span>` : ""}
       </td>
-      <td><button type="button" data-pipe-draft-request="${i}">입금요청 입력</button></td>
+      <td class="cell-action"><button type="button" class="small" data-pipe-draft-request="${i}">입금요청 입력</button></td>
     </tr>`;
   }).join("");
   return `
-    <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
-      ${auto}
-      <h3>② 확인 — 만들어질 요청 ${drafts.length}건</h3>
-      <p class="muted">
-        조회 주문 ${money.format(collect.orderCount || 0)}건 · 이미 등록 ${collect.skipped?.duplicate || 0} ·
-        미결제 제외 ${collect.skipped?.unpaid || 0} · 취소만 있는 주문 ${collect.skipped?.cancelled || 0}
-      </p>
+    <div class="collect-result">
+      <div class="sub-head">
+        <h3>요청 확인 <span class="count">${drafts.length}건</span></h3>
+        <span class="meta">조회 주문 ${money.format(collect.orderCount || 0)}건 · 이미 등록 ${collect.skipped?.duplicate || 0} ·
+          미결제 제외 ${collect.skipped?.unpaid || 0} · 취소만 ${collect.skipped?.cancelled || 0}</span>
+      </div>
       ${(collect.unmappedSuppliers || []).length
-        ? `<p class="muted" style="color:var(--red)">브랜드 매핑이 없는 공급사 ${collect.unmappedSuppliers.length}곳 —
-            ${collect.unmappedSuppliers.slice(0, 5).map((s) => `${h(s.supplierName)}(${h(s.supplierId)}) ${s.orderCount}건`).join(", ")}.
-            브랜드 화면에서 카페24 공급사코드를 지정하면 다음 수집부터 포함됩니다.</p>`
+        ? notice("warn", `브랜드가 지정되지 않은 공급사 ${collect.unmappedSuppliers.length}곳 — 이번 수집에서 빠졌습니다`,
+            `${collect.unmappedSuppliers.slice(0, 5).map((s) => `${h(s.supplierName)}(${h(s.supplierId)}) ${s.orderCount}건`).join(", ")}<br>브랜드 화면에서 카페24 공급사코드를 지정하면 다음 수집부터 포함됩니다.`)
         : ""}
-      <p class="muted">행별 <b>입금요청 입력</b>은 그 건의 계산된 초안을 입금요청 창에 채워 보여줍니다. 수동 확인이 필요한 건(룰루키친 등)은
-        이 버튼으로 열어 필요한 값만 고쳐서 바로 등록하세요.</p>
-      <div class="table-wrap" style="max-height:420px"><table class="pipeline-drafts-table">
-        <thead><tr><th><input type="checkbox" data-pipe-all ${drafts.length && selected.size === drafts.length ? "checked" : ""}></th><th>주문</th><th>브랜드</th><th>품목</th><th>품목번호</th><th>입금액</th><th>비고</th><th>동작</th></tr></thead>
+      ${auto}
+      ${helpNote("행별 <b>입금요청 입력</b>은 그 건의 계산된 초안을 입금요청 창에 채워 보여줍니다. 수동 확인이 필요한 건(룰루키친 등)은 이 버튼으로 열어 필요한 값만 고쳐서 바로 등록하세요.")}
+      <div class="table-wrap" style="max-height:420px"><table class="pipeline-drafts-table drafts-cards">
+        <thead><tr><th class="cell-check"><input type="checkbox" data-pipe-all aria-label="모두 선택" ${drafts.length && selected.size === drafts.length ? "checked" : ""}></th><th>주문</th><th>브랜드</th><th>품목</th><th>품목번호</th><th>입금액</th><th>비고</th><th>동작</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>
-      <div class="toolbar">
+      <div class="action-row">
         <button class="primary" data-pipe-apply>선택한 ${state.pipeline.selected.length}건 입금요청 생성</button>
-        <span class="muted">배송비가 어긋나는 건은 기본 선택에서 빼뒀습니다.</span>
+        <span class="meta">배송비·단가표가 어긋나는 건은 기본 선택에서 빼뒀습니다.</span>
       </div>
     </div>
   `;
@@ -7972,31 +8008,33 @@ function renderPipelineCollect(collect) {
 function renderPipelineShipped(shipped) {
   if (!shipped) return "";
   const items = shipped.items || [];
-  if (!items.length) return `<p class="muted">송장이 찍힌 입금대기 건이 없습니다.</p>`;
+  if (!items.length) return `<p class="empty-line">송장이 찍힌 입금대기 건이 없습니다.</p>`;
   const selected = new Set(state.pipeline.shippedSelected);
   const rows = items.map((it) => `<tr>
-    <td><input type="checkbox" data-pipe-ship="${h(it.requestId)}" ${selected.has(it.requestId) ? "checked" : ""}></td>
+    <td class="cell-check"><input type="checkbox" data-pipe-ship="${h(it.requestId)}" ${selected.has(it.requestId) ? "checked" : ""} aria-label="${h(it.orderNo)} 선택"></td>
     <td>${h(it.orderNo)}</td><td>${h(it.brandName)}</td>
     <td class="num">${money.format(it.amount || 0)}원</td>
     <td><span class="muted">송장 ${h(it.trackingNo)}</span></td>
   </tr>`).join("");
   return `
     <div class="table-wrap" style="max-height:300px"><table class="pipeline-ship-table">
-      <thead><tr><th><input type="checkbox" data-pipe-ship-all></th><th>주문</th><th>브랜드</th><th>금액</th><th>송장</th></tr></thead>
+      <thead><tr><th class="cell-check"><input type="checkbox" data-pipe-ship-all aria-label="모두 선택"></th><th>주문</th><th>브랜드</th><th>금액</th><th>송장</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
-    <div class="toolbar">
+    <div class="action-row">
       <button class="primary" data-pipe-ship-apply>선택한 ${state.pipeline.shippedSelected.length}건 입금요청으로 전환</button>
     </div>
   `;
 }
 
-function renderReconcile() {
+function renderReconcile(embedded = false) {
   const c = state.clobe;
-  const head = pageHead(
-    "클로브ai",
-    "클로브ai의 은행 입금내역과 미입금 요청을 대조합니다. 제안된 매칭을 확인 후 입금완료 처리하세요."
-  );
+  const head = embedded
+    ? `<div class="section-title"><h2>입금매칭 · 클로브ai 대조</h2><p>은행 입금과 미입금 요청을 맞춥니다. 제안된 짝을 확인한 뒤 입금완료 처리하세요.</p></div>`
+    : pageHead(
+      "클로브ai",
+      "클로브ai의 은행 입금내역과 미입금 요청을 대조합니다. 제안된 매칭을 확인 후 입금완료 처리하세요."
+    );
   if (!canUseClobe()) {
     return `${head}<section class="panel"><div class="panel-body"><p class="muted">주문매칭(클로브) 권한이 없습니다. 관리자 메뉴에서 권한을 받아 주세요.</p></div></section>`;
   }
@@ -8006,7 +8044,7 @@ function renderReconcile() {
   const clobeBody = c.status.connected
     ? `
       ${renderReconcileSettings()}
-      ${c.error ? `<section class="panel"><div class="panel-body"><p style="color:var(--red)">${h(c.error)}</p></div></section>` : ""}
+      ${c.error ? notice("danger", "대조하지 못했습니다", h(c.error)) : ""}
       ${renderReconcileResult(c.result)}
     `
     : renderReconcileConnect();
@@ -8027,9 +8065,7 @@ function renderCafe24Panel() {
     return `<section class="panel">
       <div class="panel-head"><h2>카페24 연동</h2></div>
       <div class="panel-body">
-        <p class="muted" style="color:var(--red)">
-          CAFE24_MALL_ID / CAFE24_CLIENT_ID / CAFE24_CLIENT_SECRET 환경변수가 설정되지 않았습니다.
-        </p>
+        ${notice("danger", "카페24 연동 설정이 없습니다", "서버 환경변수 CAFE24_MALL_ID / CAFE24_CLIENT_ID / CAFE24_CLIENT_SECRET 가 설정되지 않았습니다. 개발 담당에게 알려 주세요.")}
       </div></section>`;
   }
   if (!status.connected) {
@@ -8040,7 +8076,7 @@ function renderCafe24Panel() {
           연결하면 카페24 주문내역을 직접 조회합니다. 정산할 때 CSV를 내려받아 올리는 단계가 없어지고,
           내려받은 시점 이후에 배송완료된 주문이 누락되는 문제도 사라집니다. <strong>읽기 전용</strong>으로만 접근합니다.
         </p>
-        <div class="toolbar"><button class="primary" data-cafe24-connect>카페24 연결하기</button></div>
+        <div class="action-row"><button class="primary" data-cafe24-connect>카페24 연결하기</button></div>
       </div></section>`;
   }
   const expiryText = status.refreshTokenExpiresAt
@@ -8053,21 +8089,18 @@ function renderCafe24Panel() {
     </div>
     <div class="panel-body">
       ${status.expired
-        ? `<p class="muted" style="color:var(--red)">
-             갱신 토큰이 ${expiryText} 에 만료됐습니다. 주문 조회와 정산 자동조회가 모두 실패합니다.
-             아래 <strong>다시 연결하기</strong>를 눌러 카페24 관리자로 재승인해 주세요.
-           </p>`
+        ? notice("danger", `카페24 연결이 ${expiryText}에 만료됐습니다`, "주문 조회와 정산 자동조회가 모두 실패합니다. 아래 <strong>다시 연결하기</strong>를 눌러 카페24 관리자로 재승인해 주세요.")
         : `<p class="muted">
              연결됨. 주문내역을 조회할 수 있습니다.
              ${expiryText ? `갱신 토큰 만료 ${expiryText} (만료 전 자동 연장)` : "갱신 토큰은 2주마다 자동 연장됩니다."}
            </p>`}
       ${state24.sample ? `<pre class="table-wrap" style="max-height:260px;padding:12px;font-size:12px">${h(state24.sample)}</pre>` : ""}
-      <div class="toolbar">
+      <div class="action-row">
         <button class="${status.expired ? "primary" : "ghost"}" data-cafe24-connect>다시 연결하기</button>
         <button data-cafe24-sample ${state24.sampling || status.expired ? "disabled" : ""}>${state24.sampling ? "조회 중…" : "주문 응답 샘플 보기"}</button>
         <button class="ghost" data-cafe24-disconnect>연결 해제</button>
       </div>
-      ${state24.error ? `<p class="muted" style="color:var(--red)">${h(state24.error)}</p>` : ""}
+      ${state24.error ? notice("danger", "카페24 요청이 실패했습니다", h(state24.error)) : ""}
     </div></section>`;
 }
 
@@ -8080,7 +8113,7 @@ function renderReconcileConnect() {
           연결하면 클로브에 등록된 회사 계좌의 입금내역을 읽어와 미입금 요청과 자동 대조합니다.
           WOOOF ERP는 <strong>읽기 전용</strong> 도구만 호출하며, 장부·전표를 수정하지 않습니다.
         </p>
-        <div class="toolbar"><button class="primary" data-clobe-connect>클로브ai 연결하기</button></div>
+        <div class="action-row"><button class="primary" data-clobe-connect>클로브ai 연결하기</button></div>
       </div>
     </section>
   `;
@@ -8145,12 +8178,9 @@ function renderReconcileSettings() {
         <span class="muted">${h(status.companyName || "회사 미선택")}${status.connectedBy ? ` · ${h(status.connectedBy)} 연결` : ""}</span>
       </div>
       <div class="panel-body">
-        ${status.encryptedAtRest ? "" : `<p class="muted" style="color:var(--red)">CLOBE_TOKEN_SECRET 미설정 — 토큰이 암호화되지 않은 채 저장됩니다.</p>`}
+        ${status.encryptedAtRest ? "" : notice("warn", "클로브 토큰이 암호화되지 않은 채 저장됩니다", "서버 환경변수 CLOBE_TOKEN_SECRET 가 설정되지 않았습니다.")}
         ${status.needsReauth
-          ? `<p class="muted" style="color:var(--red)">
-               클로브가 ${h(String(status.reauthRequiredAt).slice(0, 16).replace("T", " "))} 에 갱신을 거부했습니다.
-               입금내역 대조가 실패합니다 — 아래 <strong>다시 인증하기</strong>를 눌러 클로브에 재로그인해 주세요.
-             </p>`
+          ? notice("danger", "클로브 인증이 끊겼습니다", `${h(String(status.reauthRequiredAt).slice(0, 16).replace("T", " "))}에 갱신이 거부되어 입금내역 대조가 실패합니다. 아래 <strong>다시 인증하기</strong>를 눌러 다시 로그인해 주세요.`)
           : ""}
         <div class="field two">
           <div><label>대사 대상 회사</label>
@@ -8160,17 +8190,18 @@ function renderReconcileSettings() {
             <input type="number" min="0" max="60" data-clobe-window value="${Number(status.windowDays)}"></div>
         </div>
         ${accountRows ? `<div class="field"><label>대사에 포함할 계좌</label>${accountRows}</div>` : ""}
-        <div class="field two">
-          <div><label>조회 시작일</label><input type="date" data-clobe-start value="${h(state.clobe.startDate)}"></div>
-          <div><label>조회 종료일</label><input type="date" data-clobe-end value="${h(state.clobe.endDate)}"></div>
-        </div>
-        <div class="toolbar">
+        <div class="action-row align-end">
+          <div class="date-pair" role="group" aria-label="대조 기간">
+            <label class="inline-field stacked"><span>시작일</span><input type="date" data-clobe-start value="${h(state.clobe.startDate)}" aria-label="대조 시작일"></label>
+            <span class="range-sep" aria-hidden="true">~</span>
+            <label class="inline-field stacked"><span>종료일</span><input type="date" data-clobe-end value="${h(state.clobe.endDate)}" aria-label="대조 종료일"></label>
+          </div>
           <button class="${status.needsReauth ? "ghost" : "primary"}" data-clobe-run ${state.clobe.running || status.needsReauth ? "disabled" : ""}>${state.clobe.running ? "대조 중…" : "입금내역 대조"}</button>
           <button class="${status.needsReauth ? "primary" : "ghost"}" data-clobe-connect>다시 인증하기</button>
           <button class="ghost" data-clobe-disconnect>연결 해제</button>
-          <span class="muted">${status.lastSyncAt ? `마지막 대조 ${h(status.lastSyncAt.slice(0, 16).replace("T", " "))}` : "아직 대조하지 않았습니다."}</span>
+          <span class="meta">${status.lastSyncAt ? `마지막 대조 ${h(status.lastSyncAt.slice(0, 16).replace("T", " "))}` : "아직 대조하지 않았습니다."}</span>
         </div>
-        <p class="muted">클로브 은행데이터는 실시간이 아니라 마지막 수집 시점 기준입니다. 최신화는 app.clobe.ai 에서 직접 실행하세요.</p>
+        <p class="hint">은행 내역은 실시간이 아니라 클로브의 마지막 수집 시점 기준입니다.</p>
       </div>
     </section>
   `;
@@ -8790,18 +8821,14 @@ function renderNpbUpload() {
         </div>
         ${renderNpbTradeDocs()}
         ${waiting.length ? `<div class="npb-pending-wrap">
-          <p style="color:var(--red);margin:0">
-            <b>반영 대기 ${waiting.length}개 채널</b> — ${h(waiting.map((c) => c.name).join(", "))}.
-            채널별 <b>[반영]</b> 을 눌러야 워크시트에 들어갑니다. 누른 채널만 바뀌므로,
-            워크시트에서 손으로 고쳐 둔 다른 채널은 그대로입니다.
-          </p>
+          ${notice("warn", `반영 대기 ${waiting.length}개 채널 — ${h(waiting.map((c) => c.name).join(", "))}`, "채널별 <b>[반영]</b>을 눌러야 워크시트에 들어갑니다. 누른 채널만 바뀌므로, 워크시트에서 손으로 고쳐 둔 다른 채널은 그대로입니다.")}
           <div class="toolbar">
             ${waiting.map((c) => `<button class="primary" data-npb-apply="${h(c.code)}">${h(c.name)} 반영</button>`).join("")}
           </div>
         </div>` : ""}
         ${renderNpbUnresolved()}
         ${pending ? `<div class="npb-pending-wrap">
-          <p class="muted" style="color:var(--red)">채널을 알 수 없는 파일이 있습니다. 직접 지정하세요.</p>
+          ${notice("warn", "채널을 알 수 없는 파일이 있습니다", "직접 지정하세요.")}
           ${pending}</div>` : ""}
         ${done.length ? `<div class="npb-bulk">
           <label><input type="checkbox" data-npb-pick-all
@@ -8888,13 +8915,11 @@ function renderNpbUnresolved() {
   return `
     <div class="npb-pending-wrap">
       <h3 style="color:var(--red)">상품을 알 수 없는 이름 ${list.length}건</h3>
-      <p class="muted">
-        판매처가 상품코드를 주면 그 코드로 기억합니다 — 이름이 바뀌어도 계속 인식됩니다.
+      ${helpNote(`판매처가 상품코드를 주면 그 코드로 기억합니다 — 이름이 바뀌어도 계속 인식됩니다.
         <b>어느 상품</b>인지 고르고, 그 한 건이
         <b>재고에서 몇 개 빠지는지</b> 배수를 정하세요. 3팩이면 <b>주문수량 × 3</b> 입니다.
         치킨2+고구마1 처럼 섞인 묶음은 <b>[+ 상품 추가]</b> 로 여러 개를 걸면 됩니다.
-        한 번 지정하면 <b>다음부터 자동으로 인식</b>됩니다.
-      </p>
+        한 번 지정하면 <b>다음부터 자동으로 인식</b>됩니다.`)}
       <div class="table-wrap" style="max-height:340px"><table class="npb-skumatch-table">
         <thead><tr><th>판매처 상품명</th><th>수량</th><th>매칭 상품 · 재고 배수</th></tr></thead>
         <tbody>${rows}</tbody></table></div>
@@ -9145,15 +9170,13 @@ function renderNpbReview() {
       </div>
       ${warns ? `<div class="panel-body">${warns}</div>` : ""}
       <div class="panel-body">
-        <p class="muted">
-          <b>기준가</b>는 그 판매처에서 실제로 팔린 단가입니다 — 확정하면 기억해 두었다가
+        ${helpNote(`<b>기준가</b>는 그 판매처에서 실제로 팔린 단가입니다 — 확정하면 기억해 두었다가
           다음 달 같은 코드에 자동으로 채웁니다. 파일이 다른 단가를 말하면 빨간 글씨로 알려드립니다.
           기준가·수량·할인·수수료율을 여기서 고칠 수 있습니다. 고치면 그 행은 <b>파일 금액 대신
           계산식</b>을 씁니다. <b>[확정/반영]</b> 을 눌러야 워크시트와 정산서에 들어갑니다.<br>
           <b>할인</b>은 기본이 <b>개당</b>입니다 — <code>(기준가 − 할인) × 수량 + 배송비</code> 로 계산합니다.
           <b>%</b> 를 고르면 기준가의 몇 %인지로 읽고, <b>원(줄)</b> 은 그 줄 전체에서 한 번만 뺍니다
-          (판매처 파일이 할인액을 합계로 주는 경우).
-        </p>
+          (판매처 파일이 할인액을 합계로 주는 경우).`)}
       </div>
       <div class="table-wrap" style="max-height:420px"><table class="npb-lines-table">
         <thead><tr>
@@ -11071,7 +11094,7 @@ function renderProductSync() {
     "공급사 공식몰의 품절·재입고·가격을 우프와 비교해 맞추고, 신상품을 미진열로 등록합니다. 매일 09시 자동 확인.");
   if (!ps.loaded) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   if (ps.error && !detail) {
-    return `${head}<section class="panel"><div class="panel-body"><p style="color:var(--red)">${h(ps.error)}</p>
+    return `${head}<section class="panel"><div class="panel-body">${notice("danger", "불러오지 못했습니다", h(ps.error))}
       <button data-ps-reload>다시 불러오기</button></div></section>`;
   }
   const screen = ps.screen || "issues";
@@ -11123,11 +11146,7 @@ function renderPsConnection() {
     return `<div class="ps-conn muted">카페24 연결됨${c.mallId ? ` (${h(c.mallId)})` : ""}${c.connectedAt ? ` · ${psFmtTime(c.connectedAt)} 연결` : ""}
       ${c.refreshTokenExpiresAt ? ` · 갱신 기한 ${h(String(c.refreshTokenExpiresAt).slice(0, 10))}` : ""} ${connectButton}</div>`;
   }
-  return `<section class="panel ps-warn"><div class="panel-body">
-    <strong>우프(카페24) 쪽 확인·반영이 아직 안 됩니다.</strong> 본사 수집과 신상품 후보는 지금도 볼 수 있습니다.
-    <ul>${problems.map((p) => `<li>${p}</li>`).join("")}</ul>
-    ${connectButton ? `<div class="toolbar">${connectButton}</div>` : ""}
-  </div></section>`;
+  return `<div class="ps-warn-wrap">${notice("warn", "우프(카페24) 쪽 확인·반영이 아직 안 됩니다", `본사 수집과 신상품 후보는 지금도 볼 수 있습니다.<br>${problems.join("<br>")}`, connectButton || "")}</div>`;
 }
 
 function renderPsRunBar() {
@@ -11234,7 +11253,7 @@ function renderPsIssues() {
       <td class="ps-opt">${h(issue.optionLabel || issue.wooofOptionLabel || "-")}</td>
       <td class="ps-change">${issue.from !== undefined ? `${h(psFmtValue(issue.from))} → <strong>${h(psFmtValue(issue.to))}</strong>` : ""}
         <div class="muted">${h(issue.message)}</div>
-        ${issue.autoError ? `<div style="color:var(--red)">자동 변경 실패: ${h(issue.autoError)}</div>` : ""}</td>
+        ${issue.autoError ? `<div class="danger-text">자동 변경 실패: ${h(issue.autoError)}</div>` : ""}</td>
       <td>${sameProduct
         ? `<span class="muted">${h(issue.productName)}</span>`
         : `<a href="${psWooofUrl(issue.wooofProductNo)}" target="_blank" rel="noreferrer">${h(issue.productName)}</a>
@@ -11336,12 +11355,10 @@ function renderPsCandidates() {
         </div>
       </div>
       <div class="panel-body">
-        <p class="muted">
-          기준: 우프에 연결되지 않은 본사 진열 상품 중 본사 등록일(상세이미지 날짜로 추정)이 위 기간 안인 것.
+        ${helpNote(`기준: 우프에 연결되지 않은 본사 진열 상품 중 본사 등록일(상세이미지 날짜로 추정)이 위 기간 안인 것.
           등록하면 <b>미진열</b>로 올라가고 <b>기본몰에서만 판매</b>합니다(다른 쇼핑몰은 판매 안 함). 판매가는 본사 정가, 옵션 추가금·품절은 본사와 같게,
           공급사·원산지·공급가 비율은 기존 MUNIKUND 상품에서 복사하고, 분류는 기존 상품들의 <b>공통 분류(브랜드관 등)만</b> 넣습니다 — 상품 종류별 분류는 직접 지정하세요.
-          흰 배경 누끼 썸네일은 #${h(detail.thumbnailMultiply || "F7F7F7")} multiply 처리합니다.
-        </p>
+          흰 배경 누끼 썸네일은 #${h(detail.thumbnailMultiply || "F7F7F7")} multiply 처리합니다.`)}
         ${renderPsJob("register")}
         ${psJob("register")?.status === "done" && psJob("register").result ? renderPsRegisterResult(psJob("register").result) : ""}
         ${!detail.lastScan && !(detail.unlinked || []).length ? `<p class="muted">위의 <b>신상품 찾기</b>를 먼저 실행하세요.</p>`
@@ -11357,7 +11374,7 @@ function renderPsRegisterResult(result) {
   return `<div class="ps-result">
     <strong>우프 상품 ${h(result.productNo)} 등록 완료 (미진열)</strong>
     <ul>${(result.steps || []).map((s) => `<li>${h(s)}</li>`).join("")}</ul>
-    ${(result.warnings || []).length ? `<div style="color:var(--red)">${result.warnings.map(h).join("<br>")}</div>` : ""}
+    ${(result.warnings || []).length ? notice("warn", `확인할 점 ${result.warnings.length}건`, result.warnings.map(h).join("<br>")) : ""}
     <div class="muted">카페24 어드민 → 상품 목록에서 상품번호 ${h(result.productNo)}을(를) 확인한 뒤 진열하세요.</div>
   </div>`;
 }
@@ -11388,8 +11405,8 @@ function renderPsLinks() {
           ${canApply ? `<button class="primary" data-ps-link-new>연결 추가</button>` : ""}
         </div></div>
       <div class="panel-body">
-        <p class="muted">우프 상품 하나가 본사 상품 하나에 대응합니다. 본사 한 상품(색상×사이즈)을 우프에서 색상별로 나눠 올렸으면 <b>옵션 필터</b>에 그 색상(예: M-Band Yellow)을 적습니다.
-          옵션값 번역(Bloom Blue → 블룸 블루)은 설정의 번역표를 씁니다.</p>
+        ${helpNote(`우프 상품 하나가 본사 상품 하나에 대응합니다. 본사 한 상품(색상×사이즈)을 우프에서 색상별로 나눠 올렸으면 <b>옵션 필터</b>에 그 색상(예: M-Band Yellow)을 적습니다.
+          옵션값 번역(Bloom Blue → 블룸 블루)은 설정의 번역표를 씁니다.`)}
         <div class="table-wrap" style="max-height:620px"><table class="ps-table">
           <thead><tr><th>우프</th><th>우프 상품명</th><th>본사</th><th>본사 상품명</th><th>확인필요</th><th></th></tr></thead>
           <tbody>${rows}</tbody></table></div>
@@ -11435,7 +11452,7 @@ function renderPsSuggestions() {
       <p class="muted">우프에서 이름이 "${h(ps.detail?.namePrefix || "")}"로 시작하는 상품 ${money.format(d.wooofCount)}개를 본사 상품 ${money.format(d.sourceCount)}개와 이름으로 맞춰 봤습니다.
         ${d.alreadyLinked ? `이미 연결된 ${money.format(d.alreadyLinked)}개는 뺐습니다.` : ""}
         <b>이름 일치·옵션으로 나눔</b>은 미리 골라 두었고, <b>비슷한 이름</b>은 본사 링크를 열어 확인한 뒤 고르세요.</p>
-      ${!d.sourceCount ? `<p style="color:var(--red)">본사 상품을 아직 읽지 않았습니다. 신상품 등록 화면에서 <b>신상품 찾기</b>를 먼저 한 번 돌려 주세요.</p>` : ""}
+      ${!d.sourceCount ? notice("warn", "본사 상품을 아직 읽지 않았습니다", "신상품 등록 화면에서 <b>신상품 찾기</b>를 먼저 한 번 돌려 주세요.") : ""}
       ${rows ? `<div class="table-wrap" style="max-height:520px"><table class="ps-table">
         <thead><tr><th><input type="checkbox" data-ps-suggest-all ${picked.size === d.suggestions.length ? "checked" : ""}></th><th>우프</th><th>우프 상품명</th><th>본사</th><th>본사 상품명</th><th>근거</th></tr></thead>
         <tbody>${rows}</tbody></table></div>` : ""}
@@ -11507,7 +11524,7 @@ function renderPsLinkForm() {
 
 function renderPsLinkCheck(check) {
   if (check.loading) return `<p class="muted">비교 중…</p>`;
-  if (check.error || check.wooofError) return `<p style="color:var(--red)">${h(check.error || check.wooofError)}</p>`;
+  if (check.error || check.wooofError) return notice("danger", "확인하지 못했습니다", h(check.error || check.wooofError));
   const pairs = check.pairs || [];
   return `<div class="ps-result">
     <strong>${h(check.wooof?.product_name || "")}</strong> ↔ <strong>${h(check.snap?.name || "")}</strong>
@@ -12064,24 +12081,24 @@ function renderPayments() {
   };
   const list = rows.map((p) => `
     <tr>
-      <td><input type="checkbox" data-pay-select="${p.id}" ${ps.selected.includes(p.id) ? "checked" : ""}></td>
-      <td><span class="code-tag">${h(p.code)}</span><br><span class="badge ${PAYMENT_STATUS_BADGE[p.status] || ""}">${h(statuses[p.status] || p.status)}</span></td>
-      <td>${h(String(p.createdAt || "").slice(5, 10))}<br><span class="muted">${h(p.requestedBy?.name || "")}</span></td>
-      <td>${h(p.payeeName || p.holder || "")}<br><span class="muted" style="font-size:11px">${h(p.bankName || "")} ${h(p.accountNumber || "")}</span></td>
-      <td class="wrap">${h(p.title)}${p.memo ? `<br><span class="muted">${h(p.memo)}</span>` : ""}</td>
-      <td class="num"><strong>${money.format(p.amount || 0)}</strong></td>
-      <td>${p.plannedDate ? `예정 ${h(p.plannedDate.slice(5))}` : ""}${p.dueDate ? `<br><span class="muted">기한 ${h(p.dueDate.slice(5))}</span>` : ""}${p.paidAt ? `<br><span class="muted">지급 ${h(p.paidAt.slice(5))}</span>` : ""}</td>
-      <td>${h(p.category || "")}${p.withdrawAccount ? `<br><span class="muted" style="font-size:11px">${h(p.withdrawAccount)}</span>` : ""}</td>
-      <td>${(p.files || []).map((f) => `<a href="/api/payments/files/${h(f.id)}" target="_blank" rel="noreferrer">📎</a>`).join(" ")}
+      <td class="m-check"><input type="checkbox" aria-label="${h(p.code)} 선택" data-pay-select="${p.id}" ${ps.selected.includes(p.id) ? "checked" : ""}></td>
+      <td class="m-status"><span class="code-tag">${h(p.code)}</span><br><span class="badge ${PAYMENT_STATUS_BADGE[p.status] || ""}">${h(statuses[p.status] || p.status)}</span></td>
+      <td class="m-sub">${h(String(p.createdAt || "").slice(5, 10))}<br><span class="muted">${h(p.requestedBy?.name || "")}</span></td>
+      <td class="m-sub">${h(p.payeeName || p.holder || "")}<br><span class="muted" style="font-size:11px">${h(p.bankName || "")} ${h(p.accountNumber || "")}</span></td>
+      <td class="wrap m-title">${h(p.title)}${p.memo ? `<br><span class="muted">${h(p.memo)}</span>` : ""}</td>
+      <td class="num m-amount"><strong>${money.format(p.amount || 0)}원</strong></td>
+      <td class="m-sub">${p.plannedDate ? `예정 ${h(p.plannedDate.slice(5))}` : ""}${p.dueDate ? `<br><span class="muted">기한 ${h(p.dueDate.slice(5))}</span>` : ""}${p.paidAt ? `<br><span class="muted">지급 ${h(p.paidAt.slice(5))}</span>` : ""}</td>
+      <td class="m-hide">${h(p.category || "")}${p.withdrawAccount ? `<br><span class="muted" style="font-size:11px">${h(p.withdrawAccount)}</span>` : ""}</td>
+      <td class="m-sub">${(p.files || []).map((f) => `<a href="/api/payments/files/${h(f.id)}" target="_blank" rel="noreferrer">📎</a>`).join(" ")}
         ${can("payments", "create") ? `<label class="file-mini" title="영수증·견적서 첨부">＋<input type="file" data-pay-file="${p.id}" hidden></label>` : ""}</td>
-      <td><div class="row-actions">${actionsFor(p)}</div></td>
+      <td class="m-actions"><div class="row-actions">${actionsFor(p)}</div></td>
     </tr>`).join("") || `<tr><td colspan="10" class="empty">해당하는 지급요청이 없습니다.</td></tr>`;
 
   return `
     ${head}
     <section class="fixed-summary">
       <div class="fixed-summary-title">나갈 돈 (지급요청 기준 · ${h(up.start || "")} ~ ${h(up.end || "")})</div>
-      <div class="fixed-summary-grid">
+      <div class="fixed-summary-grid cols-4">
         ${card("기한 지남", up.overdueTotal, up.overdueTotal ? "danger-text" : "")}
         ${card("오늘", up.todayTotal)}
         ${card("7일 안", up.windowTotal)}
@@ -12090,15 +12107,15 @@ function renderPayments() {
     </section>
     <section class="layout">
       <div class="panel">
-        <div class="panel-head">
+        <div class="panel-head list-head">
           <div class="npb-subnav" style="margin:0">${PAYMENT_FILTERS.map(([k, l, st]) => `<button class="npb-subtab ${ps.filter === k ? "active" : ""}" data-pay-filter="${k}">${l} <span class="muted">${ps.list.filter((p) => !st || st.includes(p.status)).length}</span></button>`).join("")}</div>
-          <input data-pay-q placeholder="번호·내용·받는곳·계좌 검색" value="${h(q)}">
+          <input data-pay-q class="list-search" placeholder="번호·내용·받는곳·계좌 검색" value="${h(q)}" aria-label="지급요청 검색">
         </div>
-        <div class="toolbar" style="padding:0 16px">
+        <div class="bulk-bar ${ps.selected.length ? "is-active" : ""}" style="margin:4px 24px 8px">
+          <span class="bulk-count">${ps.selected.length ? `<b>${ps.selected.length}건 선택</b> · 합계 <strong>${money.format(selectedTotal)}원</strong>` : "선택한 요청 일괄 처리"}</span>
           ${can("payments", "pay") ? `<button data-pay-transfer ${ps.selected.length ? "" : "disabled"}>하나은행 이체양식</button>` : ""}
-          <span class="muted">선택 ${ps.selected.length}건${ps.selected.length ? ` · ${money.format(selectedTotal)}원` : ""}</span>
         </div>
-        <div class="table-wrap"><table class="compact payments-table" data-unit="원">
+        <div class="table-wrap"><table class="compact payments-table m-cards" data-unit="원">
           <thead><tr><th></th><th>번호·상태</th><th>작성</th><th>받는 곳</th><th>내용</th><th>금액</th><th>일정</th><th>분류</th><th>영수증</th><th>처리</th></tr></thead>
           <tbody>${list}</tbody>
         </table></div>
@@ -12121,7 +12138,8 @@ function renderPaymentForm() {
       <label>빠른 입력 <span class="muted" style="font-weight:400">(채널톡에 쓰던 대로 붙여넣기)</span></label>
       <textarea data-pay-quick rows="2" placeholder="예: 041302 04 196113 국민 김성준 로젠택배 8,000원 세림 택배 착불비"></textarea>
       <div class="toolbar" style="margin-top:4px"><button type="button" data-pay-parse>칸 채우기</button></div>
-    </div>`}
+    </div>
+    <div class="form-divider"></div>`}
     <form class="form-grid" data-pay-form>
       <div class="field"><label>내용</label><input name="title" value="${h(p.title || "")}" required placeholder="예: 세림 택배 착불비"></div>
       <div class="field two">
@@ -12748,10 +12766,10 @@ function renderCashPeriod() {
     }
   }
   return `<section class="panel">${nav}
-    ${d.clobeError ? `<p class="muted" style="margin:0 16px 8px">⚠ ${h(d.clobeError)} — 지난 날 실제 내역·잔액을 못 불러왔습니다.</p>` : ""}
+    ${d.clobeError ? `<div style="margin:0 16px 8px">${notice("warn", "지난 날 실제 내역·잔액을 못 불러왔습니다", h(d.clobeError))}</div>` : ""}
     <section class="sales-flow" style="padding:0 12px">
       ${card("기초 잔액", d.opening)}${card("입금 합계", d.totals.cashIn)}${card("출금 합계", d.totals.cashOut)}${card("순현금", net, net < 0 ? "danger-text" : "")}${card("기말 잔액", d.closing, d.closing != null && d.closing < 0 ? "danger-text" : "")}
-      ${d.shortfallDate ? `<div class="sales-step"><span>⚠ 잔액 부족 예상</span><strong class="danger-text">${h(cashDay(d.shortfallDate))}</strong></div>` : ""}
+      ${d.shortfallDate ? `<div class="sales-step"><span>잔액 부족 예상</span><strong class="danger-text">${h(cashDay(d.shortfallDate))}</strong></div>` : ""}
     </section>
     <div class="table-wrap"><table class="compact cash-table" data-unit="원">
       <thead><tr><th>날짜</th><th>구분</th><th>입금</th><th>출금</th><th>잔액</th><th>내역 (누르면 펼침)</th></tr></thead>
@@ -12768,7 +12786,7 @@ function renderCashReport() {
     <tr><td>${l.overdue ? `<span class="badge warn">기한지남</span> ` : ""}${h(l.title)}<br><span class="muted" style="font-size:11px">${(() => { const src = { schedule: "자금일정", payment: "지급요청", request: "선매입", sales: "받을 돈" }[l.source] || ""; return h(l.category && l.category !== src ? `${l.category} · ${src}` : src); })()}</span></td>
     <td class="num">${money.format(l.amount)}</td></tr>`).join("") || `<tr><td colspan="2" class="empty">없음</td></tr>`;
   return `
-    ${clobeError ? `<p class="muted" style="margin:8px 0">⚠ 잔액: ${h(clobeError)}</p>` : ""}
+    ${clobeError ? notice("warn", "계좌 잔액을 못 불러왔습니다", h(clobeError)) : ""}
     ${renderCashPeriod()}
     <section class="layout">
       <div class="panel">
@@ -13111,8 +13129,8 @@ function renderSalesForm() {
           <table class="sales-lines"><thead><tr><th>품목명</th><th>수량</th><th>단가</th><th>금액</th></tr></thead><tbody>
             ${d.lines.map((l, i) => `<tr>
               <td><input data-sl-name="${i}" list="sales-items" value="${h(l.itemName || "")}"></td>
-              <td><input data-sl-qty="${i}" inputmode="numeric" value="${h(l.quantity || "")}" style="width:70px"></td>
-              <td><input data-sl-price="${i}" inputmode="numeric" value="${h(l.price ? money.format(l.price) : "")}" style="width:100px"></td>
+              <td><input data-sl-qty="${i}" inputmode="numeric" value="${h(l.quantity || "")}" aria-label="수량"></td>
+              <td><input data-sl-price="${i}" inputmode="numeric" value="${h(l.price ? money.format(l.price) : "")}" aria-label="단가"></td>
               <td class="num">${l.quantity && l.price ? money.format(Number(l.quantity) * Number(l.price)) : ""}${l.priceNote ? `<br><span class="muted" style="font-size:11px">${h(l.priceNote)}</span>` : ""}</td></tr>`).join("")}
           </tbody></table>
           <button type="button" data-sl-add>줄 추가</button>
@@ -13698,7 +13716,7 @@ function renderClosing() {
   const c = d.closing || {};
   const locked = c.lockedThrough && cs.month <= c.lockedThrough;
   const rows = (d.items || []).map((it) => `<tr class="${it.count ? "" : "row-done"}">
-      <td>${it.count ? "⚠️" : "✅"} ${h(it.label)}</td><td class="num">${money.format(it.count)}건</td>
+      <td><span class="status-dot ${it.count ? "is-warn" : "is-ok"}" aria-label="${it.count ? "남은 일 있음" : "끝남"}"></span>${h(it.label)}</td><td class="num">${money.format(it.count)}건</td>
       <td class="wrap muted" style="font-size:12px">${h((it.sample || []).join(", "))}${it.count > (it.sample || []).length ? " …" : ""}</td>
       <td class="wrap" style="font-size:12px">${it.count ? h(it.hint) : ""}</td>
       <td>${it.count && it.go ? `<button class="small" data-closing-go="${h(it.go.tab)}${it.go.sub ? `:${h(it.go.sub)}` : ""}">가기</button>` : ""}</td></tr>`).join("");
