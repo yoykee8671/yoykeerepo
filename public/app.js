@@ -1245,7 +1245,7 @@ function renderCurrentTab() {
   // 쪽만 보여준다 — 한쪽만 받은 관리자에게 "권한 없음" 안내가 겹쳐 뜨지 않게.
   if (state.tab === "pipeline") {
     if (!can("pipeline")) return renderReconcile();
-    return renderPipeline() + (canUseClobe() ? renderReconcile() : "");
+    return renderPipeline() + (canUseClobe() ? renderDepositConfirm() + renderReconcile() : "");
   }
   if (state.tab === "reconcile") return renderPipeline() + renderReconcile();
   if (state.tab === "npb") return renderNpb();
@@ -2806,6 +2806,7 @@ function bindCurrentTab() {
   if (state.tab === "pipeline" || state.tab === "reconcile") {
     bindPipeline();
     bindReconcile();
+    if (canUseClobe()) bindDepositConfirm();
   }
   if (state.tab === "npb") bindNpb();
   if (state.tab === "productsync") bindProductSync();
@@ -7463,6 +7464,60 @@ function can(menuKey, action = "view") {
 
 // 클로브(은행 입금내역) 사용 여부. 역할이 아니라 관리자 화면에서 체크한
 // 메뉴 권한(주문매칭(클로브))을 따른다 — 서버의 /api/clobe/* 검사와 같다.
+// 카페24 무통장 입금전 → 은행 입금 확인 → 카페24 입금확인. 통장 내역이 보이므로 클로브 권한자(경영관리·대표)만.
+const DEPOSIT_MODES = { off: "끔", preview: "맞춰 보기만", auto: "자동 입금확인" };
+function renderDepositConfirm() {
+  const dc = state.depositConfirm;
+  const head = `<div class="panel-head"><h2>카페24 입금전 주문 자동 입금확인</h2>${dc?.data ? `<span class="pill">${h(DEPOSIT_MODES[dc.data.settings.mode] || dc.data.settings.mode)}</span>` : ""}</div>`;
+  if (!dc?.data) return `<section class="panel" style="margin-bottom:14px">${head}<div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const d = dc.data;
+  const r = d.lastRun;
+  const row = (x, extra = "") => `<tr><td>${h(x.orderId)}</td><td>${h(fmtDate(x.orderDate))}</td><td>${h(x.depositor || x.buyer || "")}</td><td class="num">${money.format(x.amount || 0)}</td>${extra}</tr>`;
+  const txText = (t) => `${h(t.name || "-")} · ${money.format(t.amount)}원 · ${h(fmtDate(t.at))}`;
+  const sure = (r?.sure || []).filter((x) => !(r.confirmed || []).some((c) => c.orderId === x.orderId));
+  return `<section class="panel" style="margin-bottom:14px">${head}<div class="panel-body">
+    <p class="muted" style="font-size:12px">무통장 '입금전' 주문과 통장 입금을 맞춰, <strong>금액·입금자명이 같고 짝이 하나뿐인 건</strong>은 카페24에 입금확인을 넣습니다. 애매한 건은 아래에서 직접 처리합니다. 운영 직원은 통장 내역 없이 결과 알림(주문번호·입금자·금액)만 메신저 공유함에서 봅니다.</p>
+    ${!d.writeScope ? `<p class="danger-text" style="font-size:12px">카페24 주문 쓰기 권한(mall.write_order)이 아직 없습니다. 지금은 '맞춰 보기만' 할 수 있습니다.</p>` : ""}
+    <div class="toolbar" style="flex-wrap:wrap">
+      ${d.isOwner ? `<select data-dc-mode>${Object.entries(DEPOSIT_MODES).map(([k, l]) => `<option value="${k}" ${d.settings.mode === k ? "selected" : ""} ${k === "auto" && !d.writeScope ? "disabled" : ""}>${l}</option>`).join("")}</select>` : ""}
+      <button data-dc-run>지금 맞춰 보기</button>
+      ${d.canApply && d.writeScope && sure.length ? `<button class="primary" data-dc-apply>확실한 ${sure.length}건 입금확인</button>` : ""}
+      <span class="muted" style="font-size:12px">${r ? `마지막 확인 ${h(fmtDate(r.at))} (${h(r.by)})${r.ok === false ? ` · <span class="danger-text">${h(r.error)}</span>` : ` · 입금전 ${money.format(r.unpaidCount || 0)}건`}` : "아직 확인하지 않았습니다."}</span>
+    </div>
+    ${sure.length ? `<h3 class="dc-h">확실한 짝 ${sure.length}건</h3><div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>주문번호</th><th>주문일</th><th>입금자</th><th>금액</th><th>통장 입금</th></tr></thead><tbody>
+      ${sure.map((x) => row(x, `<td class="wrap">${txText(x.tx)}</td>`)).join("")}</tbody></table></div>` : ""}
+    ${(r?.check || []).length ? `<h3 class="dc-h">확인 필요 ${r.check.length}건</h3><div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>주문번호</th><th>주문일</th><th>입금자</th><th>금액</th><th>후보 입금</th></tr></thead><tbody>
+      ${r.check.map((x) => row(x, `<td class="wrap"><span class="muted" style="font-size:11px">${h(x.reason)}</span>${(x.txs || []).map((t) => `<div>${txText(t)} ${d.canApply && d.writeScope ? `<button class="small" data-dc-confirm="${h(x.orderId)}" data-dc-tx="${h(t.txId)}">이 입금으로 확인</button>` : ""}</div>`).join("")}</td>`)).join("")}</tbody></table></div>` : ""}
+    ${(r?.errors || []).length ? `<p class="danger-text" style="font-size:12px">실패: ${r.errors.map((e) => `${h(e.orderId)} ${h(e.error)}`).join(", ")}</p>` : ""}
+    ${d.history.length ? `<details style="margin-top:8px"><summary>입금확인 기록 ${d.history.length}건</summary><div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>처리</th><th>주문번호</th><th>입금자</th><th>금액</th><th>통장 입금</th><th>누가</th></tr></thead><tbody>
+      ${d.history.map((x) => `<tr><td>${h(fmtDate(x.at))}</td><td>${h(x.orderId)}</td><td>${h(x.depositor)}</td><td class="num">${money.format(x.amount || 0)}</td><td>${h(x.txName || "")} ${h(fmtDate(x.txAt))}</td><td>${h(x.by)}${x.manual ? " (직접)" : ""}</td></tr>`).join("")}</tbody></table></div></details>` : ""}
+  </div></section>`;
+}
+function bindDepositConfirm() {
+  if (!state.depositConfirm) state.depositConfirm = { data: null, loading: false };
+  const dc = state.depositConfirm;
+  const load = async () => { dc.loading = true; try { dc.data = await api("/api/deposit-confirm"); } catch (e) { dc.data = null; showToast(e.message, "error"); } finally { dc.loading = false; } renderApp(); };
+  if (!dc.data && !dc.loading) { load(); return; }
+  const run = async (apply) => {
+    try { const r = await api("/api/deposit-confirm/run", { method: "POST", body: { apply } }); showToast(r.lastRun.ok ? (apply ? `${r.lastRun.confirmed.length}건 입금확인했습니다.` : "맞춰 봤습니다.") : r.lastRun.error, r.lastRun.ok ? "" : "error"); }
+    catch (e) { showToast(e.message, "error"); }
+    load();
+  };
+  app.querySelector("[data-dc-run]")?.addEventListener("click", () => run(false));
+  app.querySelector("[data-dc-apply]")?.addEventListener("click", () => { if (confirm("확실한 짝을 카페24에 입금확인할까요?")) run(true); });
+  app.querySelector("[data-dc-mode]")?.addEventListener("change", async (e) => {
+    const mode = e.target.value;
+    if (mode === "auto" && !confirm("10분마다 확실한 짝을 카페24에 자동으로 입금확인합니다. 켤까요?")) { e.target.value = dc.data.settings.mode; return; }
+    try { await api("/api/deposit-confirm/settings", { method: "PUT", body: { mode } }); showToast(`${DEPOSIT_MODES[mode]}(으)로 바꿨습니다.`); } catch (err) { showToast(err.message, "error"); }
+    load();
+  });
+  app.querySelectorAll("[data-dc-confirm]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm(`${b.dataset.dcConfirm} 주문을 이 입금으로 입금확인할까요?`)) return;
+    try { await api("/api/deposit-confirm/confirm", { method: "POST", body: { orderId: b.dataset.dcConfirm, txId: b.dataset.dcTx } }); showToast("입금확인했습니다."); } catch (e) { showToast(e.message, "error"); }
+    load();
+  }));
+}
+
 function canUseClobe() {
   return can("reconcile");
 }

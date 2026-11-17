@@ -28,6 +28,7 @@ import * as proposals from "./lib/setup-proposals.mjs";
 import * as monthly from "./lib/monthly-board.mjs";
 import * as closing from "./lib/closing.mjs";
 import * as notify from "./lib/notify.mjs";
+import * as depositConfirm from "./lib/deposit-confirm.mjs";
 import * as brandInfo from "./lib/brand-info.mjs";
 import * as rehab from "./lib/rehab-plan.mjs";
 import * as cashFlow from "./lib/cash-flow.mjs";
@@ -1335,6 +1336,74 @@ async function computeClosingCheck(db, month) {
   const boardRows = monthly.boardRows({ brands: brandList, requests: db.requests, records, ym: month });
   const stock = inventory.stockStatus({ materials: db.materials || [], moves, runs, products, settings: Object.fromEntries(settingsList.map((x) => [x.id, x])) });
   return closing.closingCheck({ month, requests: db.requests, requestMonth: monthly.requestMonth, payments: pays, boardRows, questions, stock, overdueSales });
+}
+
+// 카페24 무통장 입금전 ↔ 클로브 입금 자동 입금확인(lib/deposit-confirm.mjs).
+// mode: off(안 함) / preview(맞춰 보기만, 화면에 후보) / auto(확실한 건은 카페24에 입금확인).
+// 운영 직원은 통장 내역을 보지 않고, 결과 알림(주문번호·입금자·금액)만 메신저 공유함으로 받는다.
+const DEPOSIT_CONFIRM_DEFAULT = { id: "depositConfirm", mode: "off", windowDays: 7, lookbackDays: 10, accountIds: [] };
+async function depositConfirmSettings() {
+  return { ...DEPOSIT_CONFIRM_DEFAULT, ...((await erp.get("settings", "depositConfirm")) || {}) };
+}
+let depositConfirmRunning = false;
+async function runDepositConfirm({ apply = false, by = "자동" } = {}) {
+  if (depositConfirmRunning) return { ok: false, error: "이미 확인 중입니다." };
+  depositConfirmRunning = true;
+  const cfg = await depositConfirmSettings();
+  const lastRun = { at: now(), by, apply, sure: [], check: [], confirmed: [], errors: [] };
+  try {
+    const db = await readDb();
+    if (!cafe24IsConnected(db)) throw new Error("카페24가 연결되지 않았습니다.");
+    if (!clobeIsConnected(db)) throw new Error("클로브가 연결되지 않았습니다.");
+    const today = kstToday();
+    const startDate = new Date(Date.parse(`${today}T00:00:00+09:00`) - Number(cfg.lookbackDays || 10) * 86400000 + 9 * 3600000).toISOString().slice(0, 10);
+    const rawOrders = await withCafe24Token(db, (token) => cafe24.fetchUnpaidCashOrders(token, { startDate, endDate: today, shopNos: cafe24ShopNos(db) }));
+    const orders = depositConfirm.unpaidCashOrders(rawOrders);
+    const txs = await clobeFetchTransactions(db, { startDate, endDate: today, direction: "IN" });
+    const deposits = depositConfirm.incomingDeposits(txs, { accountIds: cfg.accountIds || [] });
+    const done = await erp.list("depositConfirms");
+    const result = depositConfirm.matchDeposits(orders, deposits, { usedTxIds: done.map((x) => x.txId), windowDays: Number(cfg.windowDays || 7) });
+    lastRun.unpaidCount = orders.length;
+    lastRun.sure = result.sure.map((m) => ({ ...m.order, tx: m.tx }));
+    lastRun.check = result.check.map((c) => ({ ...c.order, reason: c.reason, txs: c.txs }));
+    if (apply && result.sure.length) {
+      const byShop = new Map();
+      for (const m of result.sure) (byShop.get(m.order.shopNo) || byShop.set(m.order.shopNo, []).get(m.order.shopNo)).push(m);
+      for (const [shopNo, list] of byShop) {
+        try {
+          const res = await withCafe24Token(db, (token) => cafe24.markOrdersPaid(token, shopNo, list.map((m) => m.order.orderId)));
+          const okIds = new Set(res.filter((x) => String(x.status) === "paid").map((x) => String(x.order_id)));
+          for (const m of list) {
+            if (!okIds.has(m.order.orderId)) { lastRun.errors.push({ orderId: m.order.orderId, error: "카페24가 입금확인을 돌려주지 않음" }); continue; }
+            const rec = { id: `dc:${m.order.orderId}`, orderId: m.order.orderId, shopNo, amount: m.order.amount, depositor: m.order.depositor,
+              txId: m.tx.txId, txAt: m.tx.at, txName: m.tx.name, at: now(), by };
+            await erp.put("depositConfirms", rec);
+            lastRun.confirmed.push(rec);
+          }
+        } catch (error) {
+          for (const m of list) lastRun.errors.push({ orderId: m.order.orderId, error: error.message });
+        }
+      }
+      if (lastRun.confirmed.length) pushNotice("deposit_confirm", { items: lastRun.confirmed, by }, { type: "cafe24", id: lastRun.confirmed[0].orderId });
+    }
+    lastRun.ok = true;
+  } catch (error) {
+    lastRun.ok = false;
+    lastRun.error = error.message;
+  } finally {
+    depositConfirmRunning = false;
+  }
+  await erp.put("settings", { ...(await depositConfirmSettings()), lastRun });
+  return lastRun;
+}
+async function depositConfirmTick() {
+  try {
+    const cfg = await depositConfirmSettings();
+    if (cfg.mode === "auto") await runDepositConfirm({ apply: true, by: "자동" });
+    else if (cfg.mode === "preview") await runDepositConfirm({ apply: false, by: "자동(미리보기)" });
+  } catch (error) {
+    console.error("deposit confirm tick failed", error.message);
+  }
 }
 
 // 여러 건을 한꺼번에 바꾸는 API: 마감한 달의 입금요청은 빼고 처리한다.
@@ -11675,6 +11744,64 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // 카페24 자동 입금확인: 통장 내역이 들어 있으므로 주문매칭(클로브) 권한자만 본다.
+  if (pathname === "/api/deposit-confirm" || pathname.startsWith("/api/deposit-confirm/")) {
+    if (!can(actor, "reconcile", "view")) { sendJson(res, 403, { error: "입금 대사(클로브) 권한이 없습니다." }); return; }
+    const who = actor.name || actor.email || "";
+    if (pathname === "/api/deposit-confirm" && method === "GET") {
+      const cfg = await depositConfirmSettings();
+      const history = (await erp.list("depositConfirms")).sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 100);
+      sendJson(res, 200, { settings: { mode: cfg.mode, windowDays: cfg.windowDays, lookbackDays: cfg.lookbackDays, accountIds: cfg.accountIds || [] },
+        lastRun: cfg.lastRun || null, history, writeScope: /mall\.write_order/.test(cafe24.CAFE24_SCOPE), isOwner: actor.role === "owner", canApply: can(actor, "reconcile", "apply") });
+      return;
+    }
+    if (pathname === "/api/deposit-confirm/run" && method === "POST") {
+      const body = await readBody(req);
+      const apply = Boolean(body.apply);
+      if (apply && !can(actor, "reconcile", "apply")) { sendJson(res, 403, { error: "입금확인 처리 권한이 없습니다." }); return; }
+      sendJson(res, 200, { lastRun: await runDepositConfirm({ apply, by: who }) });
+      return;
+    }
+    if (pathname === "/api/deposit-confirm/confirm" && method === "POST") {
+      if (!can(actor, "reconcile", "apply")) { sendJson(res, 403, { error: "입금확인 처리 권한이 없습니다." }); return; }
+      const body = await readBody(req);
+      const orderId = String(body.orderId || "");
+      const cfg = await depositConfirmSettings();
+      const item = (cfg.lastRun?.check || []).find((x) => x.orderId === orderId) || (cfg.lastRun?.sure || []).find((x) => x.orderId === orderId);
+      if (!item) { sendJson(res, 404, { error: "확인할 주문을 찾을 수 없습니다. 먼저 [지금 확인]을 누르세요." }); return; }
+      const tx = (item.txs || [item.tx]).find((t) => t && String(t.txId) === String(body.txId || "")) || null;
+      if (await erp.get("depositConfirms", `dc:${orderId}`)) { sendJson(res, 400, { error: "이미 입금확인한 주문입니다." }); return; }
+      if (tx && (await erp.list("depositConfirms")).some((x) => x.txId === tx.txId)) { sendJson(res, 400, { error: "그 입금은 이미 다른 주문에 썼습니다." }); return; }
+      const res2 = await withCafe24Token(db, (token) => cafe24.markOrdersPaid(token, item.shopNo, [orderId]));
+      if (!res2.some((x) => String(x.order_id) === orderId && String(x.status) === "paid")) { sendJson(res, 502, { error: "카페24가 입금확인을 받아들이지 않았습니다." }); return; }
+      const rec = { id: `dc:${orderId}`, orderId, shopNo: item.shopNo, amount: item.amount, depositor: item.depositor, txId: tx?.txId || "", txAt: tx?.at || "", txName: tx?.name || "", at: now(), by: who, manual: true };
+      await erp.put("depositConfirms", rec);
+      cfg.lastRun.check = (cfg.lastRun.check || []).filter((x) => x.orderId !== orderId);
+      await erp.put("settings", cfg);
+      pushNotice("deposit_confirm", { items: [rec], by: who }, { type: "cafe24", id: orderId });
+      sendJson(res, 200, { confirmed: rec });
+      return;
+    }
+    if (pathname === "/api/deposit-confirm/settings" && method === "PUT") {
+      if (actor.role !== "owner") { sendJson(res, 403, { error: "대표만 바꿀 수 있습니다." }); return; }
+      const body = await readBody(req);
+      const cur = await depositConfirmSettings();
+      const next = { ...cur,
+        mode: ["off", "preview", "auto"].includes(body.mode) ? body.mode : cur.mode,
+        windowDays: Math.min(30, Math.max(1, Number(body.windowDays || cur.windowDays))),
+        accountIds: Array.isArray(body.accountIds) ? body.accountIds.map(Number).filter(Number.isFinite) : cur.accountIds,
+        updatedBy: who, updatedAt: now() };
+      if (next.mode === "auto" && !/mall\.write_order/.test(cafe24.CAFE24_SCOPE)) { sendJson(res, 400, { error: "카페24 주문 쓰기 권한(mall.write_order)이 없어 자동 입금확인을 켤 수 없습니다." }); return; }
+      await erp.put("settings", next);
+      addAudit(db, actor, "update", "settings", "depositConfirm", `카페24 자동 입금확인: ${next.mode}`, { mode: cur.mode }, { mode: next.mode });
+      await writeDb(db);
+      sendJson(res, 200, { settings: next });
+      return;
+    }
+    sendJson(res, 404, { error: "없는 기능입니다." });
+    return;
+  }
+
   // 메신저 공유함: 알림 목록·복사/보내기 기록·채널톡 설정(설정은 대표만).
   if (pathname === "/api/notices" || pathname.startsWith("/api/notices/") || pathname.startsWith("/api/messenger/")) {
     const canSee = actor.role === "owner" || can(actor, "payments", "view") || can(actor, "requests", "view") || can(actor, "cash", "view");
@@ -11685,6 +11812,7 @@ async function routeApi(req, res, url) {
       || (kind.startsWith("request_") ? can(actor, "requests", "view")
         : kind.startsWith("payment_") ? can(actor, "payments", "view")
           : kind === "closing" ? can(actor, "settlement", "view")
+            : kind === "deposit_confirm" ? (can(actor, "pipeline", "view") || can(actor, "reconcile", "view") || can(actor, "requests", "view"))
             : kind === "daily" ? can(actor, "cash", "view") : true);
     if (pathname === "/api/notices" && method === "GET") {
       const list = (await erp.list("notices")).filter((n) => kindVisible(n.kind)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 300);
@@ -13811,4 +13939,8 @@ if (isMainModule) {
   // 로컬 개발 서버에서는 기본으로 끈다(PRODUCT_SYNC_SCHEDULE=on 으로 켤 수 있다).
   const syncSchedule = String(process.env.PRODUCT_SYNC_SCHEDULE || (process.env.NODE_ENV === "production" ? "on" : "off")).toLowerCase();
   if (syncSchedule === "on") productSync.startSchedule();
+  // 카페24 자동 입금확인: 10분마다(설정이 off 면 아무것도 안 함). 운영에서만(테스트 사이트는 카페24 미연결).
+  if (syncSchedule === "on") {
+    setTimeout(() => { depositConfirmTick(); setInterval(depositConfirmTick, 10 * 60 * 1000).unref(); }, KEEPALIVE_START_DELAY_MS + 60000).unref();
+  }
 }
