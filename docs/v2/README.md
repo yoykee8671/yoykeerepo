@@ -429,3 +429,9 @@
 - **마감 우회 막기**: 일괄 입금완료·삭제·상태변경은 마감 달 건을 빼고(모두 마감 달이면 423), 새 등록·주문번호 옮기기도 검사. 마감 요청은 서버가 점검을 다시 계산해 남은 일이 있으면 이유 필수, 오지 않은 달은 거부.
 - **야간 합치기**: 입금요청의 status·paidAt·paidAmount 는 양쪽이 다르면 운영 값.
 - 이카운트 적용 내역: `docs/v2/ecount-applied.md`, 대표 확인 목록: `docs/v2/pending-decisions.md`.
+
+## v2 테스트 사이트 정리 (2026-11-18)
+- 대표 결정으로 v2 테스트 사이트(v2.gnuol.com, 포트 4174, 컨테이너 `wooofpay-v2test-*`)와 매일 운영→v2 동기화를 없앴다. 이제 수정은 pay(운영)에서 바로 한다.
+- 지운 것: `deploy/v2test/`, `scripts/v2test-up.sh`, `scripts/v2-cutover.sh`, `scripts/v2-sync.sh`, `scripts/v2-sync-apply.mjs`, 서울 대문 `v2` 경로, LaunchAgent `com.yoykee.wooofpay-v2sync`.
+- 위에 적힌 overrides(대출 회생채권 전환, 브랜드 채권 구분)는 2026-11-17 이관 때 운영 DB에 이미 들어가 있다. 원본 파일은 `~/.cache/v2data/loan/overrides.json`, `~/.cache/v2data/brand-overrides.json` 에 남겨 둔다.
+- 큰 작업이 생기면 그때 테스트 사이트를 새로 만든다.
