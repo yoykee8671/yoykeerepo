@@ -13,7 +13,7 @@ import * as clobe from "./lib/clobe-mcp.mjs";
 import { reconcile } from "./lib/clobe-reconcile.mjs";
 import * as cafe24 from "./lib/cafe24-api.mjs";
 import { cafe24OrdersToRows, compareRows } from "./lib/cafe24-rows.mjs";
-import { buildRequestDrafts, findShippedAwaiting } from "./lib/cafe24-collect.mjs";
+import { buildRequestDrafts, findShippedAwaiting, planPrepare } from "./lib/cafe24-collect.mjs";
 import { createProductSyncService } from "./lib/product-sync-service.mjs";
 import { createErpStore } from "./lib/erp-store.mjs";
 import * as payments from "./lib/payment-requests.mjs";
@@ -6996,8 +6996,9 @@ function buildRequestFromDraft(db, brand, draft) {
     businessName: brand.businessName || "",
     businessNumber: brand.businessNumber || "",
     depositorName: brand.depositorName || "",
-    // 출고후입금 브랜드는 송장이 찍히기 전까지 입금대기로 둔다.
-    status: brand.payAfterShipping === true ? "await_deposit" : "pending",
+    // 위탁(월정산)은 월 정산 후 입금하므로 위탁-입금전, 출고후입금 브랜드는
+    // 송장이 찍히기 전까지 입금대기로 둔다.
+    status: calc.settlementType === "consignment" ? "consignment_unpaid" : brand.payAfterShipping === true ? "await_deposit" : "pending",
     paidAmount: "",
     paidAt: "",
     notes: "",
@@ -7321,6 +7322,34 @@ async function cafe24AccessToken(db, { force = false } = {}) {
 // 만료 시각 판정이 어긋나도 서비스가 멈추지 않도록, invalid_token 이면 한 번
 // 강제로 갱신하고 다시 시도한다. 카페24가 오프셋 없는 현지시각을 주기 때문에
 // 시계 해석이 틀어질 여지가 늘 있다.
+// 주문매칭에서 입금요청을 만든 주문을 카페24에서 배송준비중으로 넘긴다.
+// 설정(pipelineSettings.markPrepare)이 켜져 있을 때만. 실패해도 입금요청은
+// 그대로 두고 결과만 알려 준다 -- 카페24 쪽은 사람이 다시 눌러도 된다.
+async function prepareOnCafe24(db, actor, drafts) {
+  if (!db.pipelineSettings?.markPrepare || !drafts.length) return null;
+  if (!/mall\.write_order/.test(cafe24.CAFE24_SCOPE)) return { ok: 0, failed: drafts.map((d) => ({ orderNo: d.orderNo, error: "카페24 주문 쓰기 권한 없음" })), skipped: [] };
+  const plan = planPrepare(drafts);
+  const result = { ok: 0, failed: [], skipped: plan.skipped };
+  for (const { shopNo, requests } of plan.byShop) {
+    try {
+      await withCafe24Token(db, (token) => cafe24.markOrdersPrepare(token, shopNo, requests));
+      result.ok += requests.length;
+      for (const r of requests) {
+        for (const request of db.requests) {
+          if (String(request.orderNo || "").trim() === r.orderId && request.sourceSheet === "카페24 자동수집" && !request.cafe24PreparedAt) request.cafe24PreparedAt = now();
+        }
+      }
+    } catch (error) {
+      for (const r of requests) result.failed.push({ orderNo: r.orderId, error: error.message });
+    }
+  }
+  if (result.ok || result.failed.length) {
+    addAudit(db, actor, "update", "cafe24", "prepare",
+      `카페24 배송준비중 ${result.ok}건${result.failed.length ? ` · 실패 ${result.failed.length}건` : ""}`, null, result);
+  }
+  return result;
+}
+
 async function withCafe24Token(db, run) {
   const token = await cafe24AccessToken(db);
   try {
@@ -8927,6 +8956,7 @@ async function routeApi(req, res, url) {
       // 정산내역 다운로드는 영향받지 않는다.
       const drafts = [];
       const autoCreated = [];
+      const autoDrafts = [];
       for (const draft of priced) {
         const brand = db.brands.find((item) => item.id === draft.brandId);
         if (!brand?.autoCreateRequests) {
@@ -8943,7 +8973,9 @@ async function routeApi(req, res, url) {
           customerName: draft.customerName || "",
           depositAmount: request.depositAmount
         });
+        autoDrafts.push(draft);
       }
+      const prepared = await prepareOnCafe24(db, actor, autoDrafts);
       db.cafe24.lastSyncAt = now();
       await writeDb(db);
       sendJson(res, 200, {
@@ -8951,6 +8983,7 @@ async function routeApi(req, res, url) {
         orderCount: orders.length,
         drafts,
         autoCreated,
+        prepared,
         skipped: result.skipped,
         unmappedSuppliers: result.unmappedSuppliers
       });
@@ -8969,6 +9002,7 @@ async function routeApi(req, res, url) {
       return;
     }
     const created = [];
+    const createdDrafts = [];
     const skipped = [];
     for (const draft of drafts) {
       const brand = db.brands.find((item) => item.id === draft.brandId);
@@ -8987,9 +9021,60 @@ async function routeApi(req, res, url) {
       addAudit(db, actor, "create", "request", request.id,
         `${request.orderNo} 입금요청 자동수집 (${brand.name})`, null, request);
       created.push(request);
+      createdDrafts.push(draft);
     }
-    if (created.length) await writeDb(db);
-    sendJson(res, 200, { created, createdCount: created.length, skipped });
+    const prepared = await prepareOnCafe24(db, actor, createdDrafts);
+    if (created.length || prepared) await writeDb(db);
+    sendJson(res, 200, { created, createdCount: created.length, skipped, prepared });
+    return;
+  }
+
+  // 월단위입금 — 이 브랜드를 위탁(월 정산 후 입금)으로 바꾸고, 앞으로 이 브랜드
+  // 주문은 확인 목록 없이 바로 등록되게 한다(autoCreateRequests). 지금 목록에
+  // 있는 그 브랜드 주문도 위탁-입금전으로 바로 만든다.
+  if (pathname === "/api/pipeline/monthly/apply" && method === "POST") {
+    const body = await readBody(req);
+    const brand = db.brands.find((item) => item.id === body.brandId);
+    if (!brand) { sendJson(res, 404, { error: "브랜드를 찾을 수 없습니다." }); return; }
+    if (!can(actor, "brands", "edit") && actor.role !== "owner") { sendJson(res, 403, { error: "브랜드 수정 권한이 있어야 월단위입금으로 바꿀 수 있습니다." }); return; }
+    const before = { settlementType: brand.settlementType, autoCreateRequests: brand.autoCreateRequests === true };
+    brand.settlementType = "consignment";
+    brand.autoCreateRequests = true;
+    brand.updatedAt = now();
+    addAudit(db, actor, "update", "brand", brand.id, `${brand.name} 월단위입금(위탁·자동등록)으로 변경`, before,
+      { settlementType: brand.settlementType, autoCreateRequests: true });
+    const created = [];
+    const createdDrafts = [];
+    for (const draft of (Array.isArray(body.drafts) ? body.drafts : []).filter((d) => d.brandId === brand.id)) {
+      const orderNo = normalizeOrderNo(draft.orderNo);
+      if (!orderNo) continue;
+      const exists = db.requests.some((item) => item.status !== "deleted" && String(item.orderNo || "").trim() === orderNo && item.brandId === brand.id);
+      if (exists) continue;
+      const request = buildRequestFromDraft(db, brand, draft);
+      db.requests.unshift(request);
+      addAudit(db, actor, "create", "request", request.id, `${request.orderNo} 입금요청 자동수집 (${brand.name} · 월단위입금)`, null, request);
+      created.push(request);
+      createdDrafts.push(draft);
+    }
+    const prepared = await prepareOnCafe24(db, actor, createdDrafts);
+    await writeDb(db);
+    sendJson(res, 200, { brandName: brand.name, createdCount: created.length, prepared });
+    return;
+  }
+
+  // 주문매칭 설정: 입금요청을 만들 때 카페24 주문을 배송준비중으로 넘길지. 대표만 바꾼다.
+  if (pathname === "/api/pipeline/settings" && method === "GET") {
+    sendJson(res, 200, { markPrepare: db.pipelineSettings?.markPrepare === true, writeScope: /mall\.write_order/.test(cafe24.CAFE24_SCOPE), isOwner: actor.role === "owner" });
+    return;
+  }
+  if (pathname === "/api/pipeline/settings" && method === "PUT") {
+    if (actor.role !== "owner") { sendJson(res, 403, { error: "대표만 바꿀 수 있습니다." }); return; }
+    const body = await readBody(req);
+    const before = { ...(db.pipelineSettings || {}) };
+    db.pipelineSettings = { ...(db.pipelineSettings || {}), markPrepare: body.markPrepare === true };
+    addAudit(db, actor, "update", "settings", "pipeline", `주문매칭: 카페24 배송준비중 자동 넘김 ${db.pipelineSettings.markPrepare ? "켬" : "끔"}`, before, db.pipelineSettings);
+    await writeDb(db);
+    sendJson(res, 200, db.pipelineSettings);
     return;
   }
 
