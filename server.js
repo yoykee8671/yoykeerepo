@@ -11037,7 +11037,7 @@ async function routeApi(req, res, url) {
     }
     const po = built.po;
     db.purchaseOrders.unshift(po);
-    addAudit(db, actor, "create", "purchaseOrder", po.id, `${po.docNo} ${TRADE_DOC_LABELS[docType]} 생성`, null, po);
+    addAudit(db, actor, "create", "purchaseOrder", po.id, `${po.docNo} ${TRADE_DOC_LABELS[po.docType] || "발주서"} 생성`, null, po);
     await writeDb(db);
     sendJson(res, 201, { purchaseOrder: po });
     return;
