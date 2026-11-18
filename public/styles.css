@@ -3103,3 +3103,8 @@ tbody tr:hover td.sticky, .requests-table tbody tr:hover td:nth-child(-n+2) { ba
 .nsel-create-btn:hover { background: var(--grey100) !important; }
 .nsel-new { color: #4e5968 !important; }
 .nsel-empty { margin: 4px 8px; color: #8b95a1; font-size: 13px; }
+/* 신상품 후보 카드 선택 */
+.ps-card { position: relative; }
+.ps-pick { position: absolute; top: 8px; left: 8px; z-index: 2; display: inline-flex; width: 32px; height: 32px; align-items: center; justify-content: center; background: rgba(255, 255, 255, .92); border-radius: 8px; box-shadow: 0 1px 4px rgba(0, 0, 0, .12); cursor: pointer; }
+.ps-pick input { width: 18px; height: 18px; }
+.ps-card.is-picked { border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue) inset; }

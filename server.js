@@ -7034,6 +7034,7 @@ const productSync = createProductSyncService({
     return withCafe24Token(db, run);
   },
   api: cafe24,
+  shopNos: async () => cafe24ShopNos(await readDb()),
   log: console
 });
 
@@ -7239,6 +7240,16 @@ async function routeProductSync(req, res, url, actor, db) {
     }
     if (linkMatch && linkMatch[2] && method === "GET") {
       sendJson(res, 200, { check: await productSync.checkLink(sourceId, linkMatch[1]) });
+      return;
+    }
+    if (rest === "/candidates/register-many" && method === "POST") {
+      const body = await readBody(req);
+      const items = (Array.isArray(body.items) ? body.items : []).slice(0, 30)
+        .map((it) => ({ sourceNo: Number(it.sourceNo), productName: String(it.productName || "").trim() }))
+        .filter((it) => it.sourceNo && it.productName);
+      const job = productSync.startRegisterMany(sourceId, items, actorInfo);
+      await audit(`상품동기화 신규 일괄 등록 시작: 본사 ${items.map((it) => it.sourceNo).join(", ")}`, "many");
+      sendJson(res, 202, { job });
       return;
     }
     const candMatch = rest.match(/^\/candidates\/(\d+)\/(ignore|register)$/);
