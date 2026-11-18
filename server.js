@@ -2348,8 +2348,32 @@ function applyItemExtras(item, body) {
   if ("altPartnerIds" in body) item.altPartnerIds = (Array.isArray(body.altPartnerIds) ? body.altPartnerIds : String(body.altPartnerIds || "").split(",")).map((x) => String(x).trim()).filter(Boolean).slice(0, 10);
 }
 
+// 거래처에 적힌 결제 계좌도 계좌관리 목록에 넣어, 모든 계좌가 고유 코드(AC-)를 갖게 한다
+// (대표 결정 2026-11-18). 같은 계좌번호가 이미 있으면 거래처 연결만 붙인다.
+function syncPartnerAccounts(db) {
+  if (!Array.isArray(db.transferAccounts)) db.transferAccounts = [];
+  const byNumber = new Map(db.transferAccounts.map((a) => [normalizeAccountNumber(a.accountNumber), a]));
+  for (const partner of db.partners || []) {
+    const accountNumber = normalizeAccountNumber(partner.bankAccount);
+    if (accountNumber.length < 8) continue;
+    const existing = byNumber.get(accountNumber);
+    if (existing) {
+      if (!existing.partnerId) existing.partnerId = partner.id;
+      continue;
+    }
+    const account = {
+      id: id("acct"), bankName: String(partner.bankName || "").trim(), accountNumber,
+      alias: partner.name || "", holder: String(partner.depositorName || partner.businessName || "").trim(),
+      source: "partner", partnerId: partner.id, createdAt: now(), updatedAt: now()
+    };
+    db.transferAccounts.push(account);
+    byNumber.set(accountNumber, account);
+  }
+}
+
 async function writeDb(db) {
   // 어떤 경로로 만들어졌든(화면·엑셀 일괄·카페24 자동 생성) 저장 전에 코드를 붙인다.
+  syncPartnerAccounts(db);
   assignCodes(db);
   if (pgPool) {
     await writePostgresDb(db);
@@ -14123,6 +14147,8 @@ async function routeApi(req, res, url) {
       seen.add(accountNumber);
       const prior = byNumber.get(accountNumber);
       next.push({
+        ...(prior?.code ? { code: prior.code } : {}),
+        ...(prior?.partnerId ? { partnerId: prior.partnerId } : {}),
         id: prior?.id || id("acct"),
         bankName: String(row.bankName || "").trim(),
         accountNumber,
@@ -14133,6 +14159,8 @@ async function routeApi(req, res, url) {
         updatedAt: now()
       });
     }
+    // 거래처에서 온 계좌는 하나은행 목록에 없어도 지우지 않는다.
+    for (const a of before) if (a.source === "partner" && !seen.has(a.accountNumber)) { next.push(a); seen.add(a.accountNumber); }
     const added = next.filter((a) => !byNumber.has(a.accountNumber)).length;
     const removed = before.filter((a) => !seen.has(a.accountNumber)).length;
     db.transferAccounts = next;
