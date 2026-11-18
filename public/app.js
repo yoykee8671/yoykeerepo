@@ -1439,7 +1439,7 @@ function renderRequests() {
     .filter((item) => selectedIdSet.has(item.id))
     .reduce((sum, item) => sum + finalDepositAmount(item), 0);
   return `
-    ${pageHead("입금요청", "주문번호, 업체 실 입금액, 입금 예정일과 정산 메모를 관리합니다.", actions)}${deletedModal}
+    ${pageHead("입금요청", "주문번호, 업체 실 입금액, 입금 예정일과 정산 메모를 관리합니다.", actions)}${deletedModal}${renderShipSendModal()}
     <section class="layout single">
       <div class="panel">
         <div class="panel-head"><h2>요청 목록</h2><span class="muted">${money.format(rows.length)}건</span></div>
@@ -1486,6 +1486,7 @@ function renderRequests() {
               ${STATUS_CHOICES.map((v) => `<option value="${v}">${h(statusLabel(v))}로 변경</option>`).join("")}
             </select>
             ${can("requests", "pay") ? `<button type="button" data-transfer-xlsx ${state.selectedRequestIds.length ? "" : "disabled"}>하나은행 이체양식</button>` : ""}
+            <button type="button" data-ship-notify-selected ${state.selectedRequestIds.length ? "" : "disabled"}>출고 요청 보내기</button>
             <span class="bulk-spacer"></span>
             <button type="button" class="ghost" data-clear-selection ${state.selectedRequestIds.length ? "" : "disabled"}>선택 해제</button>
             <button type="button" class="danger" data-delete-selected-requests ${state.selectedRequestIds.length ? "" : "disabled"}>선택 삭제</button>
@@ -1550,8 +1551,8 @@ function renderRequestRow(item) {
   return `
     <tr class="hub-go" data-row-edit="[data-open-edit-request-popup]">
       <td class="m-check"><input type="checkbox" aria-label="${h(item.orderNo)} 선택" data-select-request="${item.id}" ${state.selectedRequestIds.includes(item.id) ? "checked" : ""}></td>
-      <td class="m-actions"><div class="row-actions">${item.status !== "paid" ? `<button data-pay-request="${item.id}">입금완료</button>` : ""}<button data-open-edit-request-popup="${item.id}">수정</button><button class="danger icon-btn" data-delete-request="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
-      <td class="m-status">${renderRowStatusSelect(item)}</td>
+      <td class="m-actions"><div class="row-actions">${item.status !== "paid" ? `<button data-pay-request="${item.id}">입금완료</button>` : ""}${item.status === "paid" && shipNotifyOn(item) ? `<button data-ship-notify="${item.id}" title="브랜드 출고 담당자에게 문자·메일">출고 요청</button>` : ""}<button data-open-edit-request-popup="${item.id}">수정</button><button class="danger icon-btn" data-delete-request="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
+      <td class="m-status">${renderRowStatusSelect(item)}${shipSentTags(item)}</td>
       <td class="m-hide">${settlementLabel(item.settlementType)}</td>
       <td class="m-title">${h(item.brandName)}</td>
       <td class="m-sub"><a href="#" class="order-link" data-open-edit-request-popup="${item.id}">${h(item.orderNo)}</a></td>
@@ -1837,6 +1838,7 @@ function renderBrands() {
   const brandRows = filteredBrands();
   return `
     ${pageHead("브랜드", "시트별 업체 정보를 관리하고 공유 링크와 Google Sheets 아카이브 링크를 지정합니다.", `${state.admin?.role === "owner" ? `<button data-brand-info-upload>브랜드 설문 응답 올리기</button><input type="file" accept=".xlsx,.xls" data-brand-info-file hidden>` : ""}<button class="primary" data-new-brand>새 브랜드</button>`)}
+    ${state.admin?.role === "owner" ? renderShipNotifySettings() : ""}
     <section class="layout brands-layout">
       <div class="panel">
         <div class="panel-head"><h2>브랜드 목록</h2><span class="muted">${money.format(brandRows.length)}개</span></div>
@@ -2457,12 +2459,197 @@ function renderBrandForm() {
         </p>
       </div>
       <div class="field"><label>Google Sheets 아카이브 URL</label><input name="googleSheetUrl" value="${h(b.googleSheetUrl)}" placeholder="브랜드별 공유용 스프레드시트 링크"></div>
+      ${state.editingBrand ? renderBrandShipNotifyFields(b) : ""}
       <div class="toolbar">
         <button class="primary" type="submit">${state.editingBrand ? "수정 저장" : "브랜드 추가"}</button>
         ${state.editingBrand ? `<button type="button" data-cancel-edit>취소</button>` : ""}
       </div>
     </form>
   `;
+}
+
+// ---- 출고 알림(브랜드 출고 담당자에게 문자·메일) -----------------------------
+function shipNotifyOn(item) {
+  const b = state.brands.find((x) => x.id === item.brandId);
+  return Boolean(b && ((b.shipSmsMode && b.shipSmsMode !== "off") || (b.shipMailMode && b.shipMailMode !== "off")));
+}
+function shipSentTags(item) {
+  const n = item.shipNotify || {};
+  const tag = (k, l) => (n[k]?.ok ? `<span class="ship-tag is-ok" title="${h(fmtDate(n[k].at))} ${h(n[k].to || "")}">${l}✓</span>` : n[k]?.error ? `<span class="ship-tag is-fail" title="${h(n[k].error)}">${l} 실패</span>` : "");
+  const t = tag("sms", "문자") + tag("mail", "메일");
+  return t ? `<div class="ship-tags">${t}</div>` : "";
+}
+// 대표 전용: 문자 발신번호와 문구(문자 3·메일 3)를 고친다.
+function renderShipNotifySettings() {
+  ensureShipNotify();
+  const cfg = state.shipNotify;
+  const st = state.shipSettings || (state.shipSettings = { open: false });
+  if (!cfg) return "";
+  const draft = st.draft || (st.draft = JSON.parse(JSON.stringify(cfg.templates)));
+  const bytes = (t) => { let n = 0; for (const ch of String(t || "")) n += ch.charCodeAt(0) > 127 ? 2 : 1; return n; };
+  return `<details class="panel ship-settings" ${st.open ? "open" : ""} data-ship-settings>
+    <summary class="panel-head"><h2>출고 알림 설정</h2><span class="meta">문자 발신번호 · 문자·메일 문구 · 쓰는 법: 브랜드 수정 › 출고 알림</span></summary>
+    <div class="panel-body">
+      ${!cfg.smsScope ? notice("warn", "카페24 연결에 문자 권한이 아직 없습니다", "서버 설정을 바꾼 뒤 주문매칭 › 카페24 연동에서 '다시 연결하기'를 한 번 눌러 주세요.") : ""}
+      ${!cfg.mailConfigured ? notice("warn", "메일 발송 설정이 아직 없습니다", "우프 CS 메일(wooof.betters@gmail.com)의 Gmail 앱 비밀번호를 서버에 넣어야 메일이 나갑니다.") : ""}
+      <div class="action-row">
+        <label class="inline-field"><span>문자 발신번호</span>
+          <select data-ship-sender>${st.senders ? st.senders.map((x) => `<option value="${x.senderNo}" ${Number(cfg.senderNo) === x.senderNo ? "selected" : ""}>${h(x.sender)}${x.authStatus && x.authStatus !== "30" ? " (인증 대기)" : ""}</option>`).join("") : `<option value="${cfg.senderNo || 0}">${cfg.senderNo ? `발신자 ${cfg.senderNo}` : "불러오기를 누르세요"}</option>`}</select></label>
+        <button data-ship-senders-load>카페24에서 불러오기</button>
+        ${st.balance ? `<span class="meta">문자 잔액: ${h(JSON.stringify(st.balance).replace(/[{}"]/g, "").replace(/,/g, " · "))}</span>` : ""}
+      </div>
+      <div class="ship-tpl-grid">
+        <div><h3>문자 문구 <span class="meta">단문 90byte(한글 약 45자)</span></h3>
+          ${draft.sms.map((t, i) => `<div class="ship-tpl"><input data-tpl="sms:${i}:name" value="${h(t.name)}" aria-label="문자 문구 이름">
+            <textarea data-tpl="sms:${i}:text" rows="2">${h(t.text)}</textarea><span class="meta ${bytes(t.text) > 80 ? "danger-text" : ""}">문구만 ${bytes(t.text)}byte (브랜드명·주문번호가 들어가면 늘어남)</span></div>`).join("")}</div>
+        <div><h3>메일 문구</h3>
+          ${draft.mail.map((t, i) => `<div class="ship-tpl"><input data-tpl="mail:${i}:name" value="${h(t.name)}" aria-label="메일 문구 이름">
+            <input data-tpl="mail:${i}:subject" value="${h(t.subject)}" aria-label="메일 제목"><textarea data-tpl="mail:${i}:body" rows="5">${h(t.body)}</textarea></div>`).join("")}</div>
+      </div>
+      <p class="hint">넣을 수 있는 값: {브랜드} {주문번호} {주문자} {입금일} {품목} {건수} {주문목록}</p>
+      <div class="action-row"><button class="primary" data-ship-settings-save>설정 저장</button></div>
+    </div>
+  </details>`;
+}
+function bindShipSettings() {
+  const el = app.querySelector("[data-ship-settings]");
+  if (!el) return;
+  const st = state.shipSettings;
+  el.addEventListener("toggle", () => { st.open = el.open; });
+  el.querySelectorAll("[data-tpl]").forEach((inp) => inp.addEventListener("input", () => {
+    const [kind, i, key] = inp.dataset.tpl.split(":");
+    st.draft[kind][Number(i)][key] = inp.value;
+  }));
+  el.querySelector("[data-ship-senders-load]")?.addEventListener("click", async () => {
+    try { const r = await api("/api/ship-notify/senders"); st.senders = r.senders; st.balance = r.balance; renderApp(); }
+    catch (e) { showToast(e.message, "error"); }
+  });
+  el.querySelector("[data-ship-settings-save]")?.addEventListener("click", async () => {
+    const senderNo = Number(el.querySelector("[data-ship-sender]")?.value || 0);
+    try {
+      await api("/api/ship-notify/settings", { method: "PUT", body: { senderNo, templates: st.draft } });
+      state.shipNotify = null; st.draft = null; showToast("출고 알림 설정을 저장했습니다.");
+      await ensureShipNotify();
+    } catch (e) { showToast(e.message, "error"); }
+  });
+}
+
+function renderShipSendModal() {
+  const ss = state.shipSend;
+  if (!ss) return "";
+  const cfg = state.shipNotify;
+  if (!cfg) { ensureShipNotify(); return v2Modal(`<div class="panel-body"><p class="muted">불러오는 중…</p></div>`, "data-ship-close"); }
+  const sel = (ch, list) => `<select data-ship-tpl="${ch}" ${ss[ch] ? "" : "disabled"}>${list.map((t) => `<option value="${h(t.id)}" ${ss[ch] === t.id ? "selected" : ""}>${h(t.name)}</option>`).join("")}</select>`;
+  const pv = ss.preview?.previews || [];
+  return v2Modal(`<div class="panel-head"><h2>출고 요청 보내기 <span class="count">${ss.ids.length}건</span></h2><button data-ship-close>닫기</button></div>
+    <div class="panel-body">
+      <div class="ship-channels">
+        <label class="switch-line"><input type="checkbox" data-ship-ch="sms" ${ss.sms ? "checked" : ""}><span><b>문자</b></span></label>${sel("sms", cfg.templates.sms)}
+        <label class="switch-line"><input type="checkbox" data-ship-ch="mail" ${ss.mail ? "checked" : ""}><span><b>메일</b> <span class="meta">${h(cfg.mailFrom || "")}</span></span></label>${sel("mail", cfg.templates.mail)}
+      </div>
+      ${ss.mail && !cfg.mailConfigured ? notice("warn", "메일 발송 설정이 아직 없습니다", "우프 CS 메일(Gmail) 앱 비밀번호를 서버에 넣어야 메일이 나갑니다.") : ""}
+      <p class="hint">같은 브랜드 여러 건은 한 통으로 묶어 보냅니다.</p>
+      <div class="ship-previews">${ss.loading ? `<p class="muted">미리보기 만드는 중…</p>` : pv.map((p) => `<div class="ship-pv">
+        <div class="ship-pv-head"><b>${h(p.brandName)}</b> <span class="meta">${p.count}건</span></div>
+        ${p.sms ? `<div class="ship-pv-row"><span class="ship-pv-k">문자</span><div>${p.sms.value ? `<span class="meta">${h(p.sms.value)} · ${h(p.sms.source)}</span>` : `<span class="danger-text">받을 휴대폰 번호 없음 — 브랜드 › 주문배송 담당 연락처</span>`}
+          <pre class="ship-pv-text">${h(p.sms.text)}</pre><span class="meta ${p.sms.bytes > 90 ? "danger-text" : ""}">${p.sms.bytes}/90byte ${p.sms.bytes > 90 ? "· 장문으로 나가 요금이 더 듭니다" : "· 단문"}</span></div></div>` : ""}
+        ${p.mail ? `<div class="ship-pv-row"><span class="ship-pv-k">메일</span><div>${p.mail.value ? `<span class="meta">${h(p.mail.value)} · ${h(p.mail.source)}</span>` : `<span class="danger-text">받을 메일 없음 — 브랜드 › 주문배송 담당 이메일</span>`}
+          <div class="ship-pv-subject">${h(p.mail.subject)}</div><pre class="ship-pv-text">${h(p.mail.body)}</pre></div></div>` : ""}
+      </div>`).join("")}</div>
+      <div class="action-row">
+        <button class="primary" data-ship-send ${ss.sending || ss.loading || (!ss.sms && !ss.mail) ? "disabled" : ""}>${ss.sending ? "보내는 중…" : "보내기"}</button>
+        <button data-ship-close>취소</button>
+      </div>
+    </div>`, "data-ship-close");
+}
+async function openShipSend(ids) {
+  await ensureShipNotify();
+  const cfg = state.shipNotify;
+  const items = state.requests.filter((r) => ids.includes(r.id));
+  const brands = items.map((r) => state.brands.find((b) => b.id === r.brandId)).filter(Boolean);
+  const anySms = brands.some((b) => b.shipSmsMode && b.shipSmsMode !== "off");
+  const anyMail = brands.some((b) => b.shipMailMode && b.shipMailMode !== "off");
+  const first = brands[0] || {};
+  state.shipSend = {
+    ids,
+    sms: anySms || !anyMail ? (first.shipSmsTemplateId || cfg?.templates.sms[0]?.id || "sms1") : "",
+    mail: anyMail ? (first.shipMailTemplateId || cfg?.templates.mail[0]?.id || "mail1") : ""
+  };
+  loadShipPreview();
+}
+async function loadShipPreview() {
+  const ss = state.shipSend;
+  if (!ss) return;
+  ss.loading = true; renderApp();
+  try { ss.preview = await api("/api/ship-notify/preview", { method: "POST", body: { requestIds: ss.ids, sms: ss.sms, mail: ss.mail } }); }
+  catch (e) { ss.preview = null; showToast(e.message, "error"); }
+  ss.loading = false; renderApp();
+}
+function bindShipSend() {
+  app.querySelectorAll("[data-ship-notify]").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); openShipSend([b.dataset.shipNotify]); }));
+  app.querySelector("[data-ship-notify-selected]")?.addEventListener("click", () => openShipSend([...state.selectedRequestIds]));
+  const ss = state.shipSend;
+  if (!ss) return;
+  app.querySelectorAll("[data-ship-close]").forEach((b) => b.addEventListener("click", () => { state.shipSend = null; renderApp(); }));
+  app.querySelectorAll("[data-ship-ch]").forEach((c) => c.addEventListener("change", () => {
+    const ch = c.dataset.shipCh;
+    ss[ch] = c.checked ? (state.shipNotify.templates[ch][0]?.id || "") : "";
+    loadShipPreview();
+  }));
+  app.querySelectorAll("[data-ship-tpl]").forEach((sel) => sel.addEventListener("change", () => { ss[sel.dataset.shipTpl] = sel.value; loadShipPreview(); }));
+  app.querySelector("[data-ship-send]")?.addEventListener("click", async () => {
+    ss.sending = true; renderApp();
+    try {
+      const { results } = await api("/api/ship-notify/send", { method: "POST", body: { requestIds: ss.ids, sms: ss.sms, mail: ss.mail } });
+      const ok = results.filter((r) => r.ok).length, bad = results.filter((r) => !r.ok);
+      showToast(`출고 요청 ${ok}통 보냈습니다.${bad.length ? ` 실패 ${bad.length}통: ${bad.map((r) => `${r.brandName} ${r.channel === "sms" ? "문자" : "메일"} — ${r.error}`).join(", ")}` : ""}`, bad.length ? "error" : "");
+      state.shipSend = null;
+      await loadAll();
+    } catch (e) { showToast(e.message, "error"); ss.sending = false; }
+    renderApp();
+  });
+}
+const SHIP_MODE_LABELS = { off: "안 보냄", manual: "버튼으로 보냄", auto: "입금완료 때 자동 (계속)" };
+async function ensureShipNotify() {
+  if (state.shipNotify || state.shipNotifyLoading) return;
+  state.shipNotifyLoading = true;
+  try { state.shipNotify = await api("/api/ship-notify/settings"); } catch { state.shipNotify = null; }
+  state.shipNotifyLoading = false;
+  renderApp();
+}
+const digitsOnly = (v) => String(v || "").replace(/\D/g, "");
+const isMobileNo = (v) => /^01[016789]\d{7,8}$/.test(digitsOnly(v));
+const isMailAddr = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || "").trim());
+// 서버(lib/ship-notify.mjs)와 같은 순서로 '비워 두면 보낼 곳'을 보여 준다.
+function shipFallback(b, kind) {
+  const p = b.profile || {}, c = p.contacts || {};
+  const partner = (state.partners || []).find((x) => x.code && x.code === b.partnerCode);
+  const list = kind === "phone"
+    ? [[c.delivery?.mobile, "배송 담당자(설문)"], [c.main?.mobile, "메인 담당자(설문)"], [p.ceoPhone, "대표자(설문)"], [partner?.contactPhone, "거래처 담당자"]]
+    : [[c.delivery?.email, "배송 담당자(설문)"], [c.main?.email, "메인 담당자(설문)"], [partner?.contactEmail, "거래처 담당자"], [p.invoiceEmail, "계산서 메일(설문)"], [partner?.invoiceEmail, "거래처 계산서 메일"]];
+  const hit = list.find(([v]) => (kind === "phone" ? isMobileNo(v) : isMailAddr(v)));
+  return hit ? `${hit[0]} (${hit[1]})` : "";
+}
+function renderBrandShipNotifyFields(b) {
+  ensureShipNotify();
+  const cfg = state.shipNotify;
+  const tplSelect = (name, list, cur) => `<select name="${name}">${(list || []).map((t) => `<option value="${h(t.id)}" ${cur === t.id ? "selected" : ""}>${h(t.name)}</option>`).join("")}</select>`;
+  const modeSelect = (name, cur) => `<select name="${name}">${Object.entries(SHIP_MODE_LABELS).map(([k, l]) => `<option value="${k}" ${(cur || "off") === k ? "selected" : ""}>${l}</option>`).join("")}</select>`;
+  const phoneFb = shipFallback(b, "phone"), mailFb = shipFallback(b, "mail");
+  return `<div class="form-sec-head"><h3>출고 알림</h3><span class="meta">입금완료되면 이 브랜드 출고 담당자에게 문자·메일</span></div>
+    <div class="field two">
+      <div><label>주문배송 담당 연락처 <span class="muted" style="font-weight:400">(휴대폰)</span></label><input name="shipContactPhone" value="${h(b.shipContactPhone || "")}" placeholder="${h(phoneFb ? `비우면 ${phoneFb}` : "비어 있으면 보낼 번호가 없습니다")}"></div>
+      <div><label>주문배송 담당 이메일</label><input name="shipContactEmail" type="email" value="${h(b.shipContactEmail || "")}" placeholder="${h(mailFb ? `비우면 ${mailFb}` : "비어 있으면 보낼 메일이 없습니다")}"></div>
+    </div>
+    <div class="field two">
+      <div><label>문자 발송</label>${modeSelect("shipSmsMode", b.shipSmsMode)}</div>
+      <div><label>메일 발송</label>${modeSelect("shipMailMode", b.shipMailMode)}</div>
+    </div>
+    ${cfg ? `<div class="field two">
+      <div><label>기본 문자 문구</label>${tplSelect("shipSmsTemplateId", cfg.templates.sms, b.shipSmsTemplateId)}</div>
+      <div><label>기본 메일 문구</label>${tplSelect("shipMailTemplateId", cfg.templates.mail, b.shipMailTemplateId)}</div>
+    </div>` : ""}
+    <p class="hint">'자동'은 켠 뒤에 입금완료된 건부터 보냅니다. 같은 건에는 한 번만 나갑니다.</p>`;
 }
 
 function filteredPromotionRules() {
@@ -3040,6 +3227,7 @@ async function submitRequestPayload(form, body, wasEditing) {
 }
 
 function bindRequests() {
+  bindShipSend();
   const syncSelectedRequestIds = () => {
     const validIds = new Set(filteredRequests().filter((item) => item.status !== "deleted").map((item) => item.id));
     state.selectedRequestIds = state.selectedRequestIds.filter((id) => validIds.has(id));
@@ -4531,6 +4719,7 @@ function bindPrices() {
 }
 
 function bindBrands() {
+  bindShipSettings();
   bindSearchInput("[data-brand-filter-q]", (value) => {
     state.brandFilterQ = value;
   });

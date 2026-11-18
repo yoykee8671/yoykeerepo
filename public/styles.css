@@ -3108,3 +3108,26 @@ tbody tr:hover td.sticky, .requests-table tbody tr:hover td:nth-child(-n+2) { ba
 .ps-pick { position: absolute; top: 8px; left: 8px; z-index: 2; display: inline-flex; width: 32px; height: 32px; align-items: center; justify-content: center; background: rgba(255, 255, 255, .92); border-radius: 8px; box-shadow: 0 1px 4px rgba(0, 0, 0, .12); cursor: pointer; }
 .ps-pick input { width: 18px; height: 18px; }
 .ps-card.is-picked { border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue) inset; }
+
+/* ---- 출고 알림 ---- */
+.ship-tags { display: flex; gap: 4px; margin-top: 4px; }
+.ship-tag { font-size: 12px; font-weight: 600; padding: 1px 6px; border-radius: 4px; }
+.ship-tag.is-ok { background: #dbeddb; color: #1c3829; }
+.ship-tag.is-fail { background: #ffe2dd; color: #5d1715; }
+.ship-channels { display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; align-items: center; }
+.ship-channels .switch-line { margin: 0; }
+.ship-channels select { max-width: 260px; }
+.ship-previews { display: grid; gap: 10px; margin-top: 12px; max-height: 50vh; overflow: auto; }
+.ship-pv { border: 1px solid var(--hairline); border-radius: 10px; padding: 10px 12px; }
+.ship-pv-head { margin-bottom: 6px; }
+.ship-pv-row { display: grid; grid-template-columns: 44px 1fr; gap: 8px; padding: 6px 0; border-top: 1px solid var(--grey100); }
+.ship-pv-k { font-size: 13px; font-weight: 700; color: #4e5968; }
+.ship-pv-subject { font-weight: 600; margin-top: 4px; }
+.ship-pv-text { white-space: pre-wrap; font-family: inherit; font-size: 13.5px; background: var(--grey50); border-radius: 8px; padding: 8px 10px; margin: 4px 0; }
+.ship-settings > summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; gap: 12px; }
+.ship-settings > summary::-webkit-details-marker { display: none; }
+.ship-settings { margin-bottom: 16px; }
+.ship-tpl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 16px; }
+.ship-tpl { display: grid; gap: 6px; padding: 10px 0; border-top: 1px solid var(--grey100); }
+.ship-tpl-grid h3 { font-size: 15px; margin: 0 0 6px; }
+@media (max-width: 900px) { .ship-tpl-grid { grid-template-columns: 1fr; } }

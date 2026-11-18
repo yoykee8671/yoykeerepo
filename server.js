@@ -14,6 +14,8 @@ import { reconcile } from "./lib/clobe-reconcile.mjs";
 import * as cafe24 from "./lib/cafe24-api.mjs";
 import { cafe24OrdersToRows, compareRows } from "./lib/cafe24-rows.mjs";
 import { buildRequestDrafts, findShippedAwaiting, planPrepare } from "./lib/cafe24-collect.mjs";
+import * as shipNotify from "./lib/ship-notify.mjs";
+import * as mailer from "./lib/mailer.mjs";
 import { createProductSyncService } from "./lib/product-sync-service.mjs";
 import { createErpStore } from "./lib/erp-store.mjs";
 import * as payments from "./lib/payment-requests.mjs";
@@ -1464,6 +1466,101 @@ async function runDepositConfirm({ apply = false, by = "자동" } = {}) {
   await erp.put("settings", { ...(await depositConfirmSettings()), lastRun });
   return lastRun;
 }
+// ---- 출고 알림(브랜드 담당자에게 문자·메일) ----------------------------------
+async function shipNotifySettings() {
+  return { id: "shipNotify", senderNo: 0, templates: null, ...((await erp.get("settings", "shipNotify")) || {}) };
+}
+// 한 브랜드의 요청 여러 건을 한 통으로 보내고, 결과를 각 요청에 적는다.
+async function sendShipNotice(db, { brand, requests, channel, templateId, by }) {
+  const cfg = await shipNotifySettings();
+  const list = shipNotify.templatesOf(cfg)[channel];
+  const brandTpl = channel === "sms" ? brand.shipSmsTemplateId : brand.shipMailTemplateId;
+  const tpl = list.find((t) => t.id === templateId) || list.find((t) => t.id === brandTpl) || list[0];
+  const vars = shipNotify.templateVars(brand, requests);
+  const result = { ok: false, at: now(), by, templateId: tpl.id };
+  try {
+    if (channel === "sms") {
+      const to = shipNotify.resolveShipPhone(brand, db.partners);
+      if (!to.value) throw new Error("문자 받을 휴대폰 번호가 없습니다(브랜드 › 주문배송 담당 연락처).");
+      if (!cfg.senderNo) throw new Error("발신번호가 정해지지 않았습니다(출고 알림 설정에서 고르세요).");
+      const content = shipNotify.fillTemplate(tpl.text, vars);
+      const type = shipNotify.smsBytes(content) > 90 ? "LMS" : "SMS";
+      await withCafe24Token(db, (token) => cafe24.sendSms(token, { shopNo: 1, senderNo: cfg.senderNo, content, recipients: [to.value], type, title: type === "LMS" ? `[우프] ${brand.name}` : "" }));
+      Object.assign(result, { ok: true, to: to.value, type, text: content });
+    } else {
+      const to = shipNotify.resolveShipEmail(brand, db.partners);
+      if (!to.value) throw new Error("메일 받을 주소가 없습니다(브랜드 › 주문배송 담당 이메일).");
+      const subject = shipNotify.fillTemplate(tpl.subject, vars);
+      await mailer.sendMail({ to: to.value, subject, text: shipNotify.fillTemplate(tpl.body, vars) });
+      Object.assign(result, { ok: true, to: to.value, subject });
+    }
+  } catch (error) {
+    result.error = error.message;
+  }
+  return result;
+}
+function applyShipResult(request, channel, result) {
+  const prev = request.shipNotify?.[channel] || {};
+  const history = [...(prev.history || []), { at: result.at, ok: result.ok, by: result.by, to: result.to || "", error: result.error || "" }].slice(-5);
+  request.shipNotify = { ...(request.shipNotify || {}), [channel]: { ...result, tries: (prev.tries || 0) + 1, history } };
+}
+// 브랜드별로 묶어서 보낸다. 문자는 1초에 1건이라 사이를 띄운다.
+async function sendShipGroups(db, items, { by, templates = {} }) {
+  const groups = new Map();
+  for (const { request, brand, channel } of items) {
+    const key = `${brand.id}:${channel}`;
+    if (!groups.has(key)) groups.set(key, { brand, channel, requests: [] });
+    groups.get(key).requests.push(request);
+  }
+  const out = [];
+  let lastSms = 0;
+  for (const g of groups.values()) {
+    if (g.channel === "sms") { const wait = 1100 - (Date.now() - lastSms); if (wait > 0) await new Promise((r) => setTimeout(r, wait)); lastSms = Date.now(); }
+    const result = await sendShipNotice(db, { ...g, templateId: templates[g.channel], by });
+    out.push({ brandName: g.brand.name, channel: g.channel, requestIds: g.requests.map((r) => r.id), ...result });
+  }
+  return out;
+}
+// 결과를 최신 DB에 다시 적는다(보내는 동안 다른 사람이 저장했을 수 있다).
+async function saveShipResults(results, actorName) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const fresh = await readDb();
+      for (const res of results) {
+        for (const id of res.requestIds) {
+          const r = fresh.requests.find((x) => x.id === id);
+          if (r) applyShipResult(r, res.channel, res);
+        }
+        addAudit(fresh, { name: actorName, role: "system" }, "notify", "request", res.requestIds[0],
+          `출고 ${res.channel === "sms" ? "문자" : "메일"} ${res.ok ? "발송" : "실패"}: ${res.brandName} ${res.requestIds.length}건${res.ok ? ` → ${res.to}` : ` (${res.error})`}`, null, null);
+      }
+      await writeDb(fresh);
+      return;
+    } catch (error) {
+      if (attempt === 2) console.error("ship notify save failed", error.message);
+    }
+  }
+}
+let shipNotifyRunning = false;
+async function shipNotifyTick() {
+  if (shipNotifyRunning) return;
+  shipNotifyRunning = true;
+  try {
+    const db = await readDb();
+    const due = shipNotify.dueAutoNotices(db);
+    if (!due.length) return;
+    // 먼저 '보내는 중'으로 저장해 두어, 저장 충돌로 결과가 빠져도 두 번 나가지 않게 한다.
+    for (const d of due) d.request.shipNotify = { ...(d.request.shipNotify || {}), [d.channel]: { ...(d.request.shipNotify?.[d.channel] || {}), pendingAt: now() } };
+    await writeDb(db);
+    const results = await sendShipGroups(db, due, { by: "자동" });
+    await saveShipResults(results, "자동");
+  } catch (error) {
+    console.error("ship notify tick failed", error.message);
+  } finally {
+    shipNotifyRunning = false;
+  }
+}
+
 async function depositConfirmTick() {
   try {
     const cfg = await depositConfirmSettings();
@@ -8132,6 +8229,82 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // ---- 출고 알림 API ----
+  if (pathname === "/api/ship-notify/settings" && method === "GET") {
+    const cfg = await shipNotifySettings();
+    sendJson(res, 200, { senderNo: cfg.senderNo || 0, templates: shipNotify.templatesOf(cfg), modes: shipNotify.SHIP_MODES,
+      mailConfigured: mailer.mailConfigured(), mailFrom: mailer.mailFrom(), smsScope: /mall\.write_notification/.test(cafe24.CAFE24_SCOPE), isOwner: actor.role === "owner" });
+    return;
+  }
+  if (pathname === "/api/ship-notify/settings" && method === "PUT") {
+    if (actor.role !== "owner") { sendJson(res, 403, { error: "대표만 바꿀 수 있습니다." }); return; }
+    const body = await readBody(req);
+    const cfg = await shipNotifySettings();
+    const clean = (list, kind) => (Array.isArray(list) ? list : []).slice(0, 10).map((t, i) => kind === "sms"
+      ? { id: String(t.id || `sms${i + 1}`), name: String(t.name || `문자 ${i + 1}`).slice(0, 40), text: String(t.text || "").slice(0, 1000) }
+      : { id: String(t.id || `mail${i + 1}`), name: String(t.name || `메일 ${i + 1}`).slice(0, 40), subject: String(t.subject || "").slice(0, 200), body: String(t.body || "").slice(0, 5000) })
+      .filter((t) => (kind === "sms" ? t.text : t.subject && t.body));
+    const next = { ...cfg };
+    if ("senderNo" in body) next.senderNo = Number(body.senderNo) || 0;
+    if (body.templates) next.templates = { sms: clean(body.templates.sms, "sms"), mail: clean(body.templates.mail, "mail") };
+    await erp.put("settings", next);
+    addAudit(db, actor, "update", "settings", "shipNotify", "출고 알림 설정 변경", null, { senderNo: next.senderNo });
+    await writeDb(db);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+  if (pathname === "/api/ship-notify/senders" && method === "GET") {
+    try {
+      const senders = await withCafe24Token(db, (token) => cafe24.fetchSmsSenders(token));
+      let balance = null;
+      try { balance = await withCafe24Token(db, (token) => cafe24.fetchSmsBalance(token)); } catch {}
+      sendJson(res, 200, { senders, balance });
+    } catch (error) {
+      sendJson(res, 502, { error: /scope|권한/.test(error.message) ? "카페24 연결에 문자 권한이 없습니다. 주문매칭 › 카페24 연동에서 '다시 연결하기'를 눌러 주세요." : error.message });
+    }
+    return;
+  }
+  if ((pathname === "/api/ship-notify/preview" || pathname === "/api/ship-notify/send") && method === "POST") {
+    if (!can(actor, "requests", "edit")) { sendJson(res, 403, { error: "입금요청 수정 권한이 있어야 보낼 수 있습니다." }); return; }
+    const body = await readBody(req);
+    const ids = new Set(Array.isArray(body.requestIds) ? body.requestIds : []);
+    const picked = db.requests.filter((r) => ids.has(r.id) && r.status !== "deleted");
+    const channels = ["sms", "mail"].filter((c) => body[c]);
+    if (!picked.length || !channels.length) { sendJson(res, 400, { error: "보낼 요청과 방법(문자·메일)을 고르세요." }); return; }
+    const items = [];
+    for (const r of picked) {
+      const brand = db.brands.find((b) => b.id === r.brandId);
+      if (brand) for (const channel of channels) items.push({ request: r, brand, channel });
+    }
+    if (pathname.endsWith("/preview")) {
+      const cfg = await shipNotifySettings();
+      const tpls = shipNotify.templatesOf(cfg);
+      const byBrand = new Map();
+      for (const it of items) { const k = it.brand.id; if (!byBrand.has(k)) byBrand.set(k, { brand: it.brand, requests: new Set() }); byBrand.get(k).requests.add(it.request); }
+      const out = [...byBrand.values()].map(({ brand, requests }) => {
+        const list = [...requests];
+        const vars = shipNotify.templateVars(brand, list);
+        const row = { brandName: brand.name, count: list.length };
+        if (body.sms) {
+          const t = tpls.sms.find((x) => x.id === body.sms) || tpls.sms[0];
+          const text = shipNotify.fillTemplate(t.text, vars);
+          row.sms = { ...shipNotify.resolveShipPhone(brand, db.partners), text, bytes: shipNotify.smsBytes(text) };
+        }
+        if (body.mail) {
+          const t = tpls.mail.find((x) => x.id === body.mail) || tpls.mail[0];
+          row.mail = { ...shipNotify.resolveShipEmail(brand, db.partners), subject: shipNotify.fillTemplate(t.subject, vars), body: shipNotify.fillTemplate(t.body, vars) };
+        }
+        return row;
+      });
+      sendJson(res, 200, { previews: out, mailConfigured: mailer.mailConfigured() });
+      return;
+    }
+    const results = await sendShipGroups(db, items, { by: actor.name || "", templates: { sms: body.sms, mail: body.mail } });
+    await saveShipResults(results, actor.name || "");
+    sendJson(res, 200, { results });
+    return;
+  }
+
   const brandMatch = pathname.match(/^\/api\/brands\/([^/]+)$/);
   if (brandMatch && method === "PUT") {
     const body = await readBody(req);
@@ -8178,10 +8351,25 @@ async function routeApi(req, res, url) {
       "businessUnit",
       "priceBasis",
       "claimKind",
-      "claimNote"
+      "claimNote",
+      "shipContactPhone",
+      "shipContactEmail",
+      "shipSmsMode",
+      "shipMailMode",
+      "shipSmsTemplateId",
+      "shipMailTemplateId"
     ]) {
       if (key in body) brand[key] = body[key];
     }
+    // 출고 알림: 모드 검사, '자동'을 켠 시각을 남겨 그 뒤 입금완료 건만 자동으로 보낸다.
+    for (const [modeKey, sinceKey] of [["shipSmsMode", "shipSmsAutoSince"], ["shipMailMode", "shipMailAutoSince"]]) {
+      if (!(modeKey in body)) continue;
+      if (!shipNotify.SHIP_MODES[brand[modeKey]]) brand[modeKey] = "off";
+      if (brand[modeKey] === "auto" && before[modeKey] !== "auto") brand[sinceKey] = now();
+      if (brand[modeKey] !== "auto") brand[sinceKey] = "";
+    }
+    if ("shipContactPhone" in body) brand.shipContactPhone = String(body.shipContactPhone || "").replace(/[^\d-]/g, "").slice(0, 20);
+    if ("shipContactEmail" in body) brand.shipContactEmail = String(body.shipContactEmail || "").trim().slice(0, 120);
     // 채권 종류: rehab(회생채권 — 계획표 채권자), separate(회생채권 아님·별도 변제), cash-only(계획표 현금변제만, 차감 없음), none(채권자 아님)
     if ("claimKind" in body && !["", "rehab", "separate", "cash-only", "none"].includes(brand.claimKind)) brand.claimKind = "";
     if ("claimNote" in body) brand.claimNote = String(body.claimNote || "").slice(0, 300);
@@ -14370,5 +14558,6 @@ if (isMainModule) {
   // 카페24 자동 입금확인: 10분마다(설정이 off 면 아무것도 안 함). 운영에서만(테스트 사이트는 카페24 미연결).
   if (syncSchedule === "on") {
     setTimeout(() => { depositConfirmTick(); setInterval(depositConfirmTick, 10 * 60 * 1000).unref(); }, KEEPALIVE_START_DELAY_MS + 60000).unref();
+    setTimeout(() => { shipNotifyTick(); setInterval(shipNotifyTick, 2 * 60 * 1000).unref(); }, KEEPALIVE_START_DELAY_MS + 90000).unref();
   }
 }
