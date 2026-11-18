@@ -11489,7 +11489,9 @@ function renderPsCandidates() {
       ? `${(c.optionNames || []).join("×") || "옵션"} ${(c.options || []).length}개${soldOptions ? ` · 품절 ${soldOptions}` : ""}`
       : "단일상품";
     const hasNoteInOptions = (c.options || []).some((o) => /\(|\)/.test(o.label));
-    return `<article class="ps-card">
+    const picked = (ps.candPicked || []).includes(String(c.sourceNo));
+    return `<article class="ps-card ${picked ? "is-picked" : ""}">
+      ${canApply ? `<label class="ps-pick" title="일괄 등록에 넣기"><input type="checkbox" data-ps-pick="${h(c.sourceNo)}" ${picked ? "checked" : ""} aria-label="${h(c.name)} 선택"></label>` : ""}
       <a href="${h(c.url)}" target="_blank" rel="noreferrer"><img src="${h(c.thumbnail)}" alt="" loading="lazy"></a>
       <div class="ps-card-body">
         <div class="muted">본사 ${h(c.sourceNo)} · 등록 ${h(c.registeredAt || "-")}${c.soldOut ? ` · <span style="color:var(--red)">전체 품절</span>` : ""}</div>
@@ -11530,6 +11532,15 @@ function renderPsCandidates() {
           흰 배경 누끼 썸네일은 #${h(detail.thumbnailMultiply || "F7F7F7")} multiply 처리합니다.`)}
         ${renderPsJob("register")}
         ${psJob("register")?.status === "done" && psJob("register").result ? renderPsRegisterResult(psJob("register").result) : ""}
+        ${canApply && candidates.length ? (() => {
+          const picked = (ps.candPicked || []).filter((no) => candidates.some((c) => String(c.sourceNo) === no));
+          return `<div class="bulk-bar ${picked.length ? "is-active" : ""}">
+            <label class="inline-field"><input type="checkbox" data-ps-pick-all ${picked.length && picked.length === candidates.length ? "checked" : ""} aria-label="모두 선택"><span>모두 선택</span></label>
+            <span class="bulk-count">${picked.length ? `<b>${picked.length}개 선택</b>` : "여러 상품을 골라 한 번에 등록할 수 있습니다"}</span>
+            <span class="bulk-spacer"></span>
+            <button class="primary" data-ps-register-many ${picked.length && !registering ? "" : "disabled"}>선택한 ${picked.length}개 미진열로 등록</button>
+          </div>`;
+        })() : ""}
         ${!detail.lastScan && !(detail.unlinked || []).length ? `<p class="muted">위의 <b>신상품 찾기</b>를 먼저 실행하세요.</p>`
           : candidates.length ? `<div class="ps-cards">${cards}</div>` : `<p class="muted">이 기간에 새로 등록할 상품이 없습니다.</p>`}
         ${ignored.length ? `<details style="margin-top:12px"><summary class="muted">등록 안 함으로 넘긴 상품 ${ignored.length}개</summary>
@@ -11540,6 +11551,16 @@ function renderPsCandidates() {
 }
 
 function renderPsRegisterResult(result) {
+  if (result.many) {
+    const warnCount = (result.done || []).reduce((n, d) => n + (d.warnings || []).length, 0);
+    return `<div class="ps-result">
+      <strong>${(result.done || []).length}개 등록 완료 (미진열)${(result.failed || []).length ? ` · 실패 ${result.failed.length}개` : ""}</strong>
+      <ul>${(result.done || []).map((d) => `<li>우프 상품 ${h(d.productNo)} — ${h(d.productName || "")}${(d.warnings || []).length ? ` <span class="muted">(확인할 점 ${d.warnings.length}건)</span>` : ""}</li>`).join("")}</ul>
+      ${(result.failed || []).length ? notice("danger", `등록 실패 ${result.failed.length}개`, result.failed.map((f) => `본사 ${h(f.sourceNo)} ${h(f.productName || "")}: ${h(f.error)}`).join("<br>")) : ""}
+      ${warnCount ? notice("warn", `확인할 점 ${warnCount}건`, (result.done || []).flatMap((d) => (d.warnings || []).map((w) => `${h(d.productNo)}: ${h(w)}`)).join("<br>")) : ""}
+      <div class="muted">카페24 어드민 → 상품 목록에서 확인한 뒤 진열하세요.</div>
+    </div>`;
+  }
   return `<div class="ps-result">
     <strong>우프 상품 ${h(result.productNo)} 등록 완료 (미진열)</strong>
     <ul>${(result.steps || []).map((s) => `<li>${h(s)}</li>`).join("")}</ul>
@@ -11953,6 +11974,35 @@ function bindProductSync() {
   });
   on("[data-ps-cand-name]", "input", (event) => {
     ps.candidateNames[event.currentTarget.dataset.psCandName] = event.currentTarget.value;
+  });
+  on("[data-ps-pick]", "change", (event) => {
+    const no = event.currentTarget.dataset.psPick;
+    const set = new Set(ps.candPicked || []);
+    if (event.currentTarget.checked) set.add(no); else set.delete(no);
+    ps.candPicked = [...set];
+    renderApp();
+  });
+  on("[data-ps-pick-all]", "change", (event) => {
+    ps.candPicked = event.currentTarget.checked ? psCandidates().map((c) => String(c.sourceNo)) : [];
+    renderApp();
+  });
+  on("[data-ps-register-many]", "click", async () => {
+    const picked = (ps.candPicked || []).filter((no) => psCandidates().some((c) => String(c.sourceNo) === no));
+    const items = picked.map((no) => ({ sourceNo: no, productName: (app.querySelector(`[data-ps-cand-name="${no}"]`)?.value || "").trim() }));
+    const empty = items.filter((it) => !it.productName);
+    if (empty.length) { showToast(`우프 상품명이 빈 상품이 ${empty.length}개 있습니다.`, "error"); return; }
+    if (!confirm(`${items.length}개 상품을 우프에 미진열로 등록합니다.\n하나에 1~2분씩, 차례로 등록합니다(약 ${items.length * 2}분). 등록하는 동안 이 화면을 닫아도 계속됩니다.`)) return;
+    try {
+      const { job } = await api(`${sourcePath}/candidates/register-many`, { method: "POST", body: { items } });
+      ps.candPicked = [];
+      watchProductSyncJob(job, {
+        onDone: (done) => {
+          if (done.status === "done") showToast(`${done.result?.done?.length || 0}개 등록 완료 (미진열)${done.result?.failed?.length ? ` · 실패 ${done.result.failed.length}개` : ""}`, done.result?.failed?.length ? "error" : "");
+        }
+      });
+    } catch (error) {
+      showToast(error.message, "error");
+    }
   });
   on("[data-ps-register]", "click", async (event) => {
     const sourceNo = event.currentTarget.dataset.psRegister;
