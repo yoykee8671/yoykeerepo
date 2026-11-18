@@ -944,8 +944,9 @@ function renderAppInner() {
     ["archive", "아카이브"],
     ["setup", "확인 필요"],
     ["messenger", "메신저 공유"],
+    ["notify", "알림 설정"],
     ["notion", "노션 기록"]
-  ].filter(([key]) => (key === "monthly" || key === "closing" ? can("settlement", "view") : key === "accounts" ? can("procurement", "view") : key === "trade" ? TRADE_SCREENS.some(([k]) => tradeCan(k)) : can(key, "view")) || (key === "pipeline" && can("reconcile", "view"))
+  ].filter(([key]) => (key === "monthly" || key === "closing" ? can("settlement", "view") : key === "accounts" ? can("procurement", "view") : key === "notify" ? state.admin?.role === "owner" : key === "trade" ? TRADE_SCREENS.some(([k]) => tradeCan(k)) : can(key, "view")) || (key === "pipeline" && can("reconcile", "view"))
     || (key === "setup" && (state.admin?.role === "owner" || can("cash", "edit")))
     || (key === "messenger" && (state.admin?.role === "owner" || can("payments", "view") || can("requests", "view") || can("cash", "view")))
     || (key === "notion" && (state.admin?.role === "owner" || can("payments", "view") || can("procurement", "view"))));
@@ -1058,7 +1059,7 @@ const NAV_GROUPS = [
   { key: "mall", label: "자사몰관리", children: ["brands", "prices", "productsync"] },
   { key: "settle", label: "정산", children: ["settlement", "monthly", "npb", "closing"] },
   { key: "mgmt", label: "경영관리", children: ["kpi", "cash", "accounts"] },
-  { key: "admin", label: "관리/설정", children: ["admins", "audits", "archive", "setup", "messenger", "notion"] }
+  { key: "admin", label: "관리/설정", children: ["admins", "audits", "archive", "setup", "messenger", "notify", "notion"] }
 ];
 const navGroupOf = (tab) => NAV_GROUPS.find((g) => g.children.includes(tab));
 // 펼쳐 둔 대분류는 이 브라우저에 기억한다(편의용).
@@ -1258,6 +1259,7 @@ function redirectMovedTabs() {
 function renderCurrentTab() {
   redirectMovedTabs();
   if (state.tab === "accounts") { state.procurement.screen = "accounts"; return renderProcurement(); }
+  if (state.tab === "notify") return renderNotifySettings();
   if (state.tab === "requests") return renderRequests();
   if (state.tab === "prices") return renderPrices();
   if (state.tab === "brands") return renderBrands();
@@ -1849,7 +1851,6 @@ function renderBrands() {
   const brandRows = filteredBrands();
   return `
     ${pageHead("브랜드", "시트별 업체 정보를 관리하고 공유 링크와 Google Sheets 아카이브 링크를 지정합니다.", `${state.admin?.role === "owner" ? `<button data-brand-info-upload>브랜드 설문 응답 올리기</button><input type="file" accept=".xlsx,.xls" data-brand-info-file hidden>` : ""}<button class="primary" data-new-brand>새 브랜드</button>`)}
-    ${state.admin?.role === "owner" ? renderShipNotifySettings() : ""}
     <section class="layout brands-layout">
       <div class="panel">
         <div class="panel-head"><h2>브랜드 목록</h2><span class="muted">${money.format(brandRows.length)}개</span></div>
@@ -2490,6 +2491,29 @@ function shipSentTags(item) {
   const t = tag("sms", "문자") + tag("mail", "메일");
   return t ? `<div class="ship-tags">${t}</div>` : "";
 }
+// 관리/설정 › 알림 설정(대표 전용): 메일 계정, 문자 발신번호, 문구, 시험 발송.
+function renderNotifySettings() {
+  ensureShipNotify();
+  const cfg = state.shipNotify;
+  const head = pageHead("알림 설정", "브랜드 출고 담당자에게 보내는 메일·문자의 발신 설정과 문구를 정합니다. 브랜드별로 보낼지는 브랜드 수정 › 출고 알림에서 고릅니다.");
+  if (!cfg) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  return `${head}
+    <section class="panel"><div class="panel-head"><h2>메일 발송</h2><span class="meta">${cfg.mailConfigured ? "설정됨" : "아직 설정 안 됨"}</span></div>
+      <div class="panel-body">
+        <div class="field two">
+          <div><label>보내는 메일(Gmail)</label><input data-mail-user value="${h(cfg.mailUser || "")}" placeholder="wooof.betters@gmail.com"></div>
+          <div><label>Gmail 앱 비밀번호 <span class="muted" style="font-weight:400">${cfg.mailPassSet ? "(저장됨 — 바꿀 때만 입력)" : "(16자리)"}</span></label><input data-mail-pass type="password" autocomplete="new-password" placeholder="${cfg.mailPassSet ? "••••••••••••••••" : "abcd efgh ijkl mnop"}"></div>
+        </div>
+        ${helpNote(`Gmail 앱 비밀번호 만드는 법: ① 우프 CS 계정으로 <a href="https://myaccount.google.com/security" target="_blank" rel="noreferrer">구글 계정 › 보안</a>에서 <b>2단계 인증</b>을 켭니다. ② <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noreferrer">앱 비밀번호</a>에 들어가 이름(예: WOOOF ERP)을 적고 만들기. ③ 나온 16자리를 위 칸에 붙여넣고 저장합니다. 비밀번호는 암호화해 저장하고 화면에 다시 보여 주지 않습니다.`)}
+        <div class="action-row">
+          <button class="primary" data-mail-save>메일 설정 저장</button>
+          <label class="inline-field"><span>시험 받을 메일</span><input data-test-email value="${h(cfg.testEmail || cfg.mailUser || "")}" style="width:220px"></label>
+          <button data-test-send="mail" ${cfg.mailConfigured ? "" : "disabled"}>시험 메일 보내기</button>
+        </div>
+      </div></section>
+    ${renderShipNotifySettings()}`;
+}
+
 // 대표 전용: 문자 발신번호와 문구(문자 3·메일 3)를 고친다.
 function renderShipNotifySettings() {
   ensureShipNotify();
@@ -2498,16 +2522,20 @@ function renderShipNotifySettings() {
   if (!cfg) return "";
   const draft = st.draft || (st.draft = JSON.parse(JSON.stringify(cfg.templates)));
   const bytes = (t) => { let n = 0; for (const ch of String(t || "")) n += ch.charCodeAt(0) > 127 ? 2 : 1; return n; };
-  return `<details class="panel ship-settings" ${st.open ? "open" : ""} data-ship-settings>
-    <summary class="panel-head"><h2>출고 알림 설정</h2><span class="meta">문자 발신번호 · 문자·메일 문구 · 쓰는 법: 브랜드 수정 › 출고 알림</span></summary>
+  return `<section class="panel ship-settings" data-ship-settings>
+    <div class="panel-head"><h2>문자 발송 · 문구</h2><span class="meta">카페24 문자(단문 90byte) · 쓰는 법: 브랜드 수정 › 출고 알림</span></div>
     <div class="panel-body">
       ${!cfg.smsScope ? notice("warn", "카페24 연결에 문자 권한이 아직 없습니다", "서버 설정을 바꾼 뒤 주문매칭 › 카페24 연동에서 '다시 연결하기'를 한 번 눌러 주세요.") : ""}
-      ${!cfg.mailConfigured ? notice("warn", "메일 발송 설정이 아직 없습니다", "우프 CS 메일(wooof.betters@gmail.com)의 Gmail 앱 비밀번호를 서버에 넣어야 메일이 나갑니다.") : ""}
       <div class="action-row">
         <label class="inline-field"><span>문자 발신번호</span>
           <select data-ship-sender>${st.senders ? st.senders.map((x) => `<option value="${x.senderNo}" ${Number(cfg.senderNo) === x.senderNo ? "selected" : ""}>${h(x.sender)}${x.authStatus && x.authStatus !== "30" ? " (인증 대기)" : ""}</option>`).join("") : `<option value="${cfg.senderNo || 0}">${cfg.senderNo ? `발신자 ${cfg.senderNo}` : "불러오기를 누르세요"}</option>`}</select></label>
         <button data-ship-senders-load>카페24에서 불러오기</button>
         ${st.balance ? `<span class="meta">문자 잔액: ${h(JSON.stringify(st.balance).replace(/[{}"]/g, "").replace(/,/g, " · "))}</span>` : ""}
+      </div>
+      <div class="action-row">
+        <label class="inline-field"><span>시험 받을 휴대폰</span><input data-test-phone value="${h(cfg.testPhone || "")}" placeholder="010-0000-0000" style="width:160px"></label>
+        <button data-test-send="sms">시험 문자 보내기</button>
+        <span class="meta">발신번호를 고르고 '설정 저장'을 먼저 눌러 주세요.</span>
       </div>
       <div class="ship-tpl-grid">
         <div><h3>문자 문구 <span class="meta">단문 90byte(한글 약 45자)</span></h3>
@@ -2520,13 +2548,30 @@ function renderShipNotifySettings() {
       <p class="hint">넣을 수 있는 값: {브랜드} {주문번호} {주문자} {입금일} {품목} {건수} {주문목록}</p>
       <div class="action-row"><button class="primary" data-ship-settings-save>설정 저장</button></div>
     </div>
-  </details>`;
+  </section>`;
 }
 function bindShipSettings() {
   const el = app.querySelector("[data-ship-settings]");
   if (!el) return;
   const st = state.shipSettings;
-  el.addEventListener("toggle", () => { st.open = el.open; });
+  app.querySelector("[data-mail-save]")?.addEventListener("click", async () => {
+    const body = { mailUser: app.querySelector("[data-mail-user]")?.value || "", testEmail: app.querySelector("[data-test-email]")?.value || "" };
+    const pw = app.querySelector("[data-mail-pass]")?.value || "";
+    if (pw) body.mailPassword = pw;
+    try { await api("/api/ship-notify/settings", { method: "PUT", body }); state.shipNotify = null; showToast("메일 설정을 저장했습니다."); await ensureShipNotify(); }
+    catch (e) { showToast(e.message, "error"); }
+  });
+  app.querySelectorAll("[data-test-send]").forEach((b) => b.addEventListener("click", async () => {
+    const channel = b.dataset.testSend;
+    const to = channel === "sms" ? app.querySelector("[data-test-phone]")?.value : app.querySelector("[data-test-email]")?.value;
+    b.disabled = true;
+    try {
+      if (channel === "sms") await api("/api/ship-notify/settings", { method: "PUT", body: { testPhone: to } });
+      const r = await api("/api/ship-notify/test", { method: "POST", body: { channel, to } });
+      showToast(`시험 ${channel === "sms" ? "문자" : "메일"}을 ${r.to}(으)로 보냈습니다.`);
+    } catch (e) { showToast(e.message, "error"); }
+    b.disabled = false;
+  }));
   el.querySelectorAll("[data-tpl]").forEach((inp) => inp.addEventListener("input", () => {
     const [kind, i, key] = inp.dataset.tpl.split(":");
     st.draft[kind][Number(i)][key] = inp.value;
@@ -3010,6 +3055,7 @@ function bindCurrentTab() {
   if (state.tab === "prices") bindPrices();
   if (state.tab === "brands") bindBrands();
   if (state.tab === "procurement" || state.tab === "accounts") bindProcurement();
+  if (state.tab === "notify") bindShipSettings();
   if (state.tab === "payments") bindPayments();
   if (state.tab === "cash") bindCash();
   if (state.tab === "sales") bindSales();
@@ -4730,7 +4776,6 @@ function bindPrices() {
 }
 
 function bindBrands() {
-  bindShipSettings();
   bindSearchInput("[data-brand-filter-q]", (value) => {
     state.brandFilterQ = value;
   });

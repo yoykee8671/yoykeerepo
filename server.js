@@ -1468,7 +1468,12 @@ async function runDepositConfirm({ apply = false, by = "자동" } = {}) {
 }
 // ---- 출고 알림(브랜드 담당자에게 문자·메일) ----------------------------------
 async function shipNotifySettings() {
-  return { id: "shipNotify", senderNo: 0, templates: null, ...((await erp.get("settings", "shipNotify")) || {}) };
+  const cfg = { id: "shipNotify", senderNo: 0, templates: null, mailUser: "wooof.betters@gmail.com", mailPass: "", ...((await erp.get("settings", "shipNotify")) || {}) };
+  // 메일 계정은 화면에서 넣은 값(암호화 저장)을 쓴다.
+  let pass = "";
+  try { pass = clobe.openSecret(cfg.mailPass); } catch { pass = ""; }
+  mailer.setMailConfig({ user: cfg.mailUser, pass });
+  return cfg;
 }
 // 한 브랜드의 요청 여러 건을 한 통으로 보내고, 결과를 각 요청에 적는다.
 async function sendShipNotice(db, { brand, requests, channel, templateId, by }) {
@@ -8257,6 +8262,7 @@ async function routeApi(req, res, url) {
   if (pathname === "/api/ship-notify/settings" && method === "GET") {
     const cfg = await shipNotifySettings();
     sendJson(res, 200, { senderNo: cfg.senderNo || 0, templates: shipNotify.templatesOf(cfg), modes: shipNotify.SHIP_MODES,
+      mailUser: cfg.mailUser || "", mailPassSet: Boolean(cfg.mailPass), testPhone: cfg.testPhone || "", testEmail: cfg.testEmail || "",
       mailConfigured: mailer.mailConfigured(), mailFrom: mailer.mailFrom(), smsScope: /mall\.write_notification/.test(cafe24.CAFE24_SCOPE), isOwner: actor.role === "owner" });
     return;
   }
@@ -8270,11 +8276,40 @@ async function routeApi(req, res, url) {
       .filter((t) => (kind === "sms" ? t.text : t.subject && t.body));
     const next = { ...cfg };
     if ("senderNo" in body) next.senderNo = Number(body.senderNo) || 0;
+    if ("mailUser" in body) next.mailUser = String(body.mailUser || "").trim().slice(0, 120);
+    // 앱 비밀번호는 바꿀 때만 온다. 암호화해 저장하고 화면에는 다시 보내지 않는다.
+    if (body.mailPassword) next.mailPass = clobe.sealSecret(String(body.mailPassword).replace(/\s+/g, ""));
+    if (body.clearMailPassword) next.mailPass = "";
+    if ("testPhone" in body) next.testPhone = String(body.testPhone || "").replace(/[^\d]/g, "").slice(0, 12);
+    if ("testEmail" in body) next.testEmail = String(body.testEmail || "").trim().slice(0, 120);
     if (body.templates) next.templates = { sms: clean(body.templates.sms, "sms"), mail: clean(body.templates.mail, "mail") };
     await erp.put("settings", next);
     addAudit(db, actor, "update", "settings", "shipNotify", "출고 알림 설정 변경", null, { senderNo: next.senderNo });
     await writeDb(db);
     sendJson(res, 200, { ok: true });
+    return;
+  }
+  // 시험 발송(대표만): 설정이 맞는지 내 번호·내 메일로 확인한다.
+  if (pathname === "/api/ship-notify/test" && method === "POST") {
+    if (actor.role !== "owner") { sendJson(res, 403, { error: "대표만 시험 발송할 수 있습니다." }); return; }
+    const body = await readBody(req);
+    const cfg = await shipNotifySettings();
+    try {
+      if (body.channel === "sms") {
+        const to = String(body.to || cfg.testPhone || "").replace(/\D/g, "");
+        if (!shipNotify.isMobile(to)) throw new Error("시험 문자를 받을 휴대폰 번호를 넣으세요.");
+        if (!cfg.senderNo) throw new Error("발신번호를 먼저 고르고 저장하세요.");
+        await withCafe24Token(db, (token) => cafe24.sendSms(token, { shopNo: 1, senderNo: cfg.senderNo, content: "[우프] pay 문자 발송 시험입니다.", recipients: [to], type: "SMS" }));
+        await writeDb(db);
+        sendJson(res, 200, { ok: true, to });
+      } else {
+        const to = String(body.to || cfg.testEmail || cfg.mailUser || "").trim();
+        await mailer.sendMail({ to, subject: "[우프] pay 메일 발송 시험", text: "WOOOF ERP(pay)에서 보낸 시험 메일입니다. 이 메일이 보이면 메일 설정이 정상입니다." });
+        sendJson(res, 200, { ok: true, to });
+      }
+    } catch (error) {
+      sendJson(res, 400, { error: /scope|권한/.test(error.message) ? "카페24 연결에 문자 권한이 없습니다. 주문매칭 › 카페24 연동에서 '다시 연결하기'를 눌러 주세요." : error.message });
+    }
     return;
   }
   if (pathname === "/api/ship-notify/senders" && method === "GET") {
