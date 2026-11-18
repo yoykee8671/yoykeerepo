@@ -168,16 +168,19 @@ const TRADE_DOC_LABELS = Object.fromEntries(TRADE_DOC_TYPES.map(([key, label]) =
 const TRADE_DOC_META = Object.fromEntries(TRADE_DOC_TYPES.map(([key, , meta]) => [key, meta]));
 const tradeDocMeta = (docType) => TRADE_DOC_META[docType] || TRADE_DOC_META.purchase_order;
 // '거래' 메뉴: 판매·생산/재고·거래관리를 한 메뉴로(대표 결정 2026-11-15). 화면 자체는 기존 것을 그대로 쓴다.
+// 거래 하위 메뉴 순서(대표 결정 2026-11-18): 청구 → 판매 → 명세서 → 생산 → 품목 → 납품지 → 거래처.
+// 지급요청은 '거래 › 청구'로 옮겼고, 계좌관리는 '경영관리 › 계좌관리'로 옮겼다.
 const TRADE_SCREENS = [
-  ["partners", "거래처(사업자)"],
+  ["billing", "청구(지급요청)"],
   ["sales", "판매 주문·가격"],
-  ["stock", "생산·재고·생산비"],
   ["orders", "명세서·발주서"],
+  ["stock", "생산·재고·생산비"],
   ["materials", "품목(자재·제품·거래처 상품)"],
-  ["deliveryPlaces", "납품지"],
-  ["accounts", "입금계좌"]
+  ["deliveryPlaces", "납품지 관리"],
+  ["partners", "거래처 관리"]
 ];
 function tradeCan(key) {
+  if (key === "billing") return can("payments", "view");
   if (key === "sales") return can("sales", "view");
   if (key === "stock") return can("stock", "view");
   return can("procurement", "view");
@@ -925,24 +928,24 @@ function renderAppInner() {
     // 본다. 권한 키는 pipeline 하나로 묶고, 화면 안에서 두 단계를 이어 보여준다.
     ["pipeline", "주문매칭"],
     ["requests", "입금요청"],
-    ["payments", "지급요청"],
     ["trade", "거래"],
+    ["brands", "브랜드"],
+    ["prices", "단가표"],
+    ["productsync", "상품동기화"],
     ["settlement", "월 정산 생성"],
     ["monthly", "월 정산 현황"],
     ["npb", "npb정산"],
     ["closing", "월 마감"],
-    ["brands", "브랜드"],
-    ["prices", "단가표"],
-    ["productsync", "상품동기화"],
     ["kpi", "KPI·손익"],
     ["cash", "자금"],
+    ["accounts", "계좌관리"],
     ["admins", "관리자"],
     ["audits", "이력"],
     ["archive", "아카이브"],
     ["setup", "확인 필요"],
     ["messenger", "메신저 공유"],
     ["notion", "노션 기록"]
-  ].filter(([key]) => (key === "monthly" || key === "closing" ? can("settlement", "view") : key === "trade" ? TRADE_SCREENS.some(([k]) => tradeCan(k)) : can(key, "view")) || (key === "pipeline" && can("reconcile", "view"))
+  ].filter(([key]) => (key === "monthly" || key === "closing" ? can("settlement", "view") : key === "accounts" ? can("procurement", "view") : key === "trade" ? TRADE_SCREENS.some(([k]) => tradeCan(k)) : can(key, "view")) || (key === "pipeline" && can("reconcile", "view"))
     || (key === "setup" && (state.admin?.role === "owner" || can("cash", "edit")))
     || (key === "messenger" && (state.admin?.role === "owner" || can("payments", "view") || can("requests", "view") || can("cash", "view")))
     || (key === "notion" && (state.admin?.role === "owner" || can("payments", "view") || can("procurement", "view"))));
@@ -1051,10 +1054,10 @@ const TAB_SUBMENUS = {
 // 대분류 아래 중분류로 묶는 메뉴(대표 결정 2026-11-16). 중분류는 원래 탭 그대로(state.tab)라
 // 화면·권한·하위 화면은 바뀌지 않는다. 대분류는 눌러서 펼치고 접는다(▸/▾).
 const NAV_GROUPS = [
-  { key: "buy", label: "결제/구매", children: ["pipeline", "requests", "payments"] },
-  { key: "settle", label: "정산", children: ["settlement", "monthly", "npb", "closing"] },
+  { key: "buy", label: "결제/구매", children: ["pipeline", "requests"] },
   { key: "mall", label: "자사몰관리", children: ["brands", "prices", "productsync"] },
-  { key: "mgmt", label: "경영관리", children: ["kpi", "cash"] },
+  { key: "settle", label: "정산", children: ["settlement", "monthly", "npb", "closing"] },
+  { key: "mgmt", label: "경영관리", children: ["kpi", "cash", "accounts"] },
   { key: "admin", label: "관리/설정", children: ["admins", "audits", "archive", "setup", "messenger", "notion"] }
 ];
 const navGroupOf = (tab) => NAV_GROUPS.find((g) => g.children.includes(tab));
@@ -1234,6 +1237,7 @@ function clearEditing() {
 function renderTrade() {
   const t = tradeState();
   if (!tradeCan(t.screen)) t.screen = (TRADE_SCREENS.find(([k]) => tradeCan(k)) || ["partners"])[0];
+  if (t.screen === "billing") return renderPayments();
   if (t.screen === "sales") return renderSales();
   if (t.screen === "stock") return renderStock();
   state.procurement.screen = t.screen;
@@ -1241,12 +1245,19 @@ function renderTrade() {
 }
 function bindTrade() {
   const t = tradeState();
-  if (t.screen === "sales") bindSales();
+  if (t.screen === "billing") bindPayments();
+  else if (t.screen === "sales") bindSales();
   else if (t.screen === "stock") bindStock();
   else bindProcurement();
 }
 
+// 옮긴 메뉴로 들어오는 예전 주소·즐겨찾기·할 일 바로가기를 새 자리로 보낸다.
+function redirectMovedTabs() {
+  if (state.tab === "payments") { state.tab = "trade"; tradeState().screen = "billing"; }
+}
 function renderCurrentTab() {
+  redirectMovedTabs();
+  if (state.tab === "accounts") { state.procurement.screen = "accounts"; return renderProcurement(); }
   if (state.tab === "requests") return renderRequests();
   if (state.tab === "prices") return renderPrices();
   if (state.tab === "brands") return renderBrands();
@@ -2998,7 +3009,7 @@ function bindCurrentTab() {
   if (state.tab === "requests") bindRequests();
   if (state.tab === "prices") bindPrices();
   if (state.tab === "brands") bindBrands();
-  if (state.tab === "procurement") bindProcurement();
+  if (state.tab === "procurement" || state.tab === "accounts") bindProcurement();
   if (state.tab === "payments") bindPayments();
   if (state.tab === "cash") bindCash();
   if (state.tab === "sales") bindSales();
@@ -5165,7 +5176,9 @@ function renderProcurement() {
   else if (p.screen === "orders") body = renderPurchaseOrders();
   else body = renderPartners();
   return `
-    ${pageHead(state.tab === "trade" ? "거래" : "거래관리", "생산업체·판매납품처·매입공급처 거래처와 발주서를 관리합니다.")}
+    ${state.tab === "accounts"
+      ? pageHead("계좌관리", "지급·이체에 쓰는 계좌를 한곳에서 봅니다. 거래처에 적힌 계좌도 함께 보입니다.")
+      : pageHead(state.tab === "trade" ? "거래" : "거래관리", "생산업체·판매납품처·매입공급처 거래처와 발주서를 관리합니다.")}
     ${p.screen === "partners" ? renderPartnerCategoryTabs() : ""}
     ${body}
     ${state.partnerHub ? v2Modal(renderPartnerHub(), "data-hub-close") : ""}
@@ -12465,7 +12478,7 @@ async function loadPayments() {
 
 function renderPayments() {
   const ps = paymentState();
-  const head = pageHead("지급요청", "택배비·외주·생산비 등 선매입 외 결제 요청을 한곳에서 받고, 확인·처리하고, 영수증을 남깁니다.");
+  const head = pageHead(state.tab === "trade" ? "거래" : "지급요청", "거래처 청구(계산서·명세서)와 택배비·외주 같은 소액 결제를 한곳에서 받고, 확인·처리하고, 영수증을 남깁니다.");
   if (ps.list === null) return `${head}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   const statuses = ps.statuses || {};
   const filter = PAYMENT_FILTERS.find(([k]) => k === ps.filter) || PAYMENT_FILTERS[0];
