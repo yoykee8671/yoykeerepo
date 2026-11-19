@@ -16,6 +16,6 @@ assert.equal(n.text.split("\n")[0], "MUNIKUND의 3건의 새로운 제품이 미
 const iss = issueFor(n, planAuto(cfg, "product_registered"));
 assert.deepEqual(iss.labels, ["브랜드"]);
 assert.ok(iss.title.startsWith("[신상품 미진열 등록] MUNIKUND"));
-assert.ok(iss.title.endsWith(" · 확인: 유재량"), iss.title);
+assert.ok(iss.title.endsWith(" @유재량"), iss.title);
 assert.deepEqual(issueFor({ title: "x" }, { event: "request", room: "payment", mentions: ["이교영"] }).labels, ["결제요청"]);
 console.log("team alerts verify: all checks passed");
