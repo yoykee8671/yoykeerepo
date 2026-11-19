@@ -3134,3 +3134,7 @@ tbody tr:hover td.sticky, .requests-table tbody tr:hover td:nth-child(-n+2) { ba
 .ta-people { display: grid; gap: 8px; margin: 6px 0 8px; }
 .ta-person { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 10px; border: 1px solid var(--hairline); border-radius: 10px; }
 .ta-person input:not([type=checkbox]) { min-height: 34px; }
+.team-send { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 8px 12px; border-radius: 10px; background: var(--grey50); border: 1px solid var(--hairline); }
+.form-save-bar .team-send { flex-basis: 100%; margin-bottom: 8px; }
+.ta-h { font-size: 15px; margin: 18px 0 8px; }
+.ta-events select { min-height: 32px; }
