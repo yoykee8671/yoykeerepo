@@ -1,3 +1,6 @@
+// 한국 날짜(YYYY-MM-DD). toISOString 은 UTC 라 오전 9시 전에는 하루 전 날짜가 나온다.
+const kstDate = (daysAgo = 0) => new Date(Date.now() + 9 * 3600000 - daysAgo * 86400000).toISOString().slice(0, 10);
+
 const state = {
   admin: null,
   tab: "dashboard",
@@ -74,13 +77,13 @@ const state = {
     error: "",
     confirming: "",
     showAllAccounts: false,
-    startDate: new Date(Date.now() - 13 * 86400000).toISOString().slice(0, 10),
-    endDate: new Date().toISOString().slice(0, 10)
+    startDate: kstDate(13),
+    endDate: kstDate()
   },
   cafe24: { status: null, sample: "", sampling: false, error: "" },
   pipeline: {
-    startDate: new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10),
-    endDate: new Date().toISOString().slice(0, 10),
+    startDate: kstDate(7),
+    endDate: kstDate(),
     collecting: false, collect: null, selected: [],
     shipping: false, shipped: null, shippedSelected: [], error: "",
     scraping: null
@@ -8388,6 +8391,8 @@ function renderPipelineSteps(p) {
 // 실제 생성·상태변경은 확인한 뒤 별도 버튼으로만 일어난다.
 function renderPipeline() {
   const p = state.pipeline;
+  // 종료일은 늘 오늘(한국 날짜). 화면을 켜 둔 채 날이 바뀌어도 따라간다 — 직접 바꾼 경우만 그대로 둔다.
+  if (!p.endTouched) p.endDate = kstDate();
   const head = pageHead("주문매칭", "카페24 주문을 입금요청으로 만들고, 은행 입금과 맞춥니다.");
   if (!can("pipeline")) {
     return `${head}<section class="panel"><div class="panel-body"><p class="muted">주문매칭 권한이 없습니다. 관리자 메뉴에서 권한을 받아 주세요.</p></div></section>`;
@@ -8816,7 +8821,7 @@ function renderReconcileResult(result) {
 function bindPipeline() {
   const p = state.pipeline;
   app.querySelector("[data-pipe-start]")?.addEventListener("change", (e) => { p.startDate = e.target.value; });
-  app.querySelector("[data-pipe-end]")?.addEventListener("change", (e) => { p.endDate = e.target.value; });
+  app.querySelector("[data-pipe-end]")?.addEventListener("change", (e) => { p.endDate = e.target.value; p.endTouched = e.target.value !== kstDate(); });
 
   app.querySelector("[data-pipe-scraping]")?.addEventListener("click", async () => {
     try {
@@ -8831,6 +8836,7 @@ function bindPipeline() {
     p.collecting = true; p.error = ""; p.collect = null; p.selected = []; p.shipForms = [];
     renderApp();
     try {
+      if (!p.endTouched) p.endDate = kstDate();
       p.collect = await api("/api/pipeline/collect", { method: "POST", body: { startDate: p.startDate, endDate: p.endDate } });
       if (p.collect.prepared) showToast(`자동 등록 ${p.collect.autoCreated?.length || 0}건${prepareNote(p.collect.prepared)}`, p.collect.prepared.failed?.length ? "error" : "");
       // 배송비가 어긋나거나 단가표 매칭이 안 된 건은 사람이 먼저 보게 기본 선택에서 뺀다.
