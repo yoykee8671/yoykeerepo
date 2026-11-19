@@ -1434,7 +1434,8 @@ function renderDashboard() {
 function renderRequests() {
   const actions = `
     <button type="button" class="ghost" data-deleted-requests>삭제된 요청</button>
-    ${downloadMenu([["/api/export/csv", "입금요청 CSV"], ["/api/export/xls", "입금요청 Excel"], ["/api/export/payment-log.csv", "입금로그 CSV"], ["/api/export/payment-log.xls", "입금로그 Excel"]])}
+    ${downloadMenu([["/api/export/csv", "입금요청 CSV"], ["/api/export/xls", "입금요청 Excel"], ["/api/export/payment-log.csv", "입금로그 CSV"], ["/api/export/payment-log.xls", "입금로그 Excel"]], "내려받기",
+      `<button type="button" class="menu-item" data-ship-form-selected>택배 발주양식 (선택한 요청)</button>`)}
     <button class="primary" type="button" data-open-request-popup>새 창 입금요청</button>
   `;
   const dr = state.deletedRequests;
@@ -2480,6 +2481,27 @@ function renderBrandForm() {
   `;
 }
 
+// ---- 택배 발주양식(브랜드가 직접 주문처리 안 할 때 우리가 만들어 주는 엑셀) ----
+const DEFAULT_SHIP_FORMS = { 펫페이스: { enabled: true, senderName: "리딩펫", senderPhone: "01077455522", senderAddress: "경기도 양주시 은현면 도하리 93-18", fileLabel: "펫페이스 발주서" } };
+function shipFormOf(brand) {
+  if (brand?.shipForm && typeof brand.shipForm === "object") return brand.shipForm;
+  const key = Object.keys(DEFAULT_SHIP_FORMS).find((k) => String(brand?.name || "").includes(k));
+  return key ? DEFAULT_SHIP_FORMS[key] : null;
+}
+async function downloadShipForm(ids) {
+  if (!ids.length) return showToast("택배 발주양식으로 내려받을 입금요청을 먼저 고르세요.", "error");
+  try {
+    const res = await fetch("/api/requests/ship-form", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids }) });
+    if (!res.ok) { const err = await res.json().catch(() => ({})); return showToast(err.error || "발주양식을 만들지 못했습니다.", "error"); }
+    const blob = await res.blob();
+    const name = decodeURIComponent((res.headers.get("content-disposition") || "").match(/filename\*=UTF-8''([^;]+)/)?.[1] || "") || "발주서.xlsx";
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a"); link.href = url; link.download = name; document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast(`${name} 을(를) 받았습니다.`);
+  } catch (error) { showToast(error.message || "발주양식을 만들지 못했습니다.", "error"); }
+}
+
 // ---- 출고 알림(브랜드 출고 담당자에게 문자·메일) -----------------------------
 function shipNotifyOn(item) {
   const b = state.brands.find((x) => x.id === item.brandId);
@@ -2642,6 +2664,7 @@ async function loadShipPreview() {
   ss.loading = false; renderApp();
 }
 function bindShipSend() {
+  app.querySelector("[data-ship-form-selected]")?.addEventListener("click", (e) => { e.currentTarget.closest("details")?.removeAttribute("open"); downloadShipForm([...state.selectedRequestIds]); });
   app.querySelectorAll("[data-ship-notify]").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); openShipSend([b.dataset.shipNotify]); }));
   app.querySelector("[data-ship-notify-selected]")?.addEventListener("click", () => openShipSend([...state.selectedRequestIds]));
   const ss = state.shipSend;
@@ -2705,7 +2728,18 @@ function renderBrandShipNotifyFields(b) {
       <div><label>기본 문자 문구</label>${tplSelect("shipSmsTemplateId", cfg.templates.sms, b.shipSmsTemplateId)}</div>
       <div><label>기본 메일 문구</label>${tplSelect("shipMailTemplateId", cfg.templates.mail, b.shipMailTemplateId)}</div>
     </div>` : ""}
-    <p class="hint">'자동'은 켠 뒤에 입금완료된 건부터 보냅니다. 같은 건에는 한 번만 나갑니다.</p>`;
+    <p class="hint">'자동'은 켠 뒤에 입금완료된 건부터 보냅니다. 같은 건에는 한 번만 나갑니다.</p>
+    ${(() => { const f = shipFormOf(b) || {}; return `<div class="form-sec-head"><h3>택배 발주양식</h3><span class="meta">브랜드가 우리 어드민에서 주문처리를 안 할 때, 그 브랜드 양식으로 주문을 내려받아 전달</span></div>
+    <div class="field two">
+      <div><label>발주양식 사용</label><select name="shipFormEnabled"><option value="false" ${f.enabled ? "" : "selected"}>안 씀</option><option value="true" ${f.enabled ? "selected" : ""}>사용</option></select></div>
+      <div><label>파일 이름 앞부분</label><input name="shipFormFileLabel" value="${h(f.fileLabel || `${b.name || ""} 발주서`)}" placeholder="예: 펫페이스 발주서"></div>
+    </div>
+    <div class="field three">
+      <div><label>보내는 분 성명</label><input name="shipFormSenderName" value="${h(f.senderName || "")}"></div>
+      <div><label>보내는 분 전화번호</label><input name="shipFormSenderPhone" value="${h(f.senderPhone || "")}"></div>
+      <div><label>보내는 분 주소</label><input name="shipFormSenderAddress" value="${h(f.senderAddress || "")}"></div>
+    </div>
+    <p class="hint">파일 이름: ${h(f.fileLabel || `${b.name || ""} 발주서`)}_우프컴퍼니_YYMMDD.xlsx · 품목 1개당 1줄, 내품명은 카페24 '상품명(관리용)' + 자체품목코드</p>`; })()}`;
 }
 
 function filteredPromotionRules() {
@@ -8036,9 +8070,9 @@ function notice(kind, title, body = "", action = "") {
   </div>`;
 }
 // 내려받기 버튼 여러 개를 하나로 묶는다(링크 그대로, 동작은 같다).
-function downloadMenu(items, label = "내려받기") {
+function downloadMenu(items, label = "내려받기", extra = "") {
   return `<details class="menu-pop"><summary class="button">${label}<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></summary>
-    <div class="menu-list">${items.map(([href, text]) => `<a href="${href}">${text}</a>`).join("")}</div></details>`;
+    <div class="menu-list">${items.map(([href, text]) => `<a href="${href}">${text}</a>`).join("")}${extra}</div></details>`;
 }
 // ---- 노션식 선택(태그) 칸 ----------------------------------------------------
 // 칸을 누르면 목록이 뜨고, 고른 값은 색 칩으로 한 칸에 여러 개 보인다. 목록에 없는
@@ -8257,6 +8291,7 @@ function renderPipeline() {
         ${renderPipelinePrepareSetting(p.settings)}
         ${helpNote("확인 목록에 올라온 건은 <b>생성</b>을 눌러야 저장됩니다. 단, 자동 등록으로 설정한 브랜드는 수집과 동시에 등록됩니다.")}
         ${p.error ? notice("danger", "수집하지 못했습니다", h(p.error)) : ""}
+        ${(p.shipForms || []).map((f, i) => notice("info", `${h(f.brandName)} 입금요청 ${f.ids.length}건을 만들었습니다`, "이 브랜드는 택배 발주양식으로 주문을 전달합니다.", `<button class="primary small" data-pipe-shipform="${i}">발주양식 내려받기</button>`)).join("")}
         ${renderPipelineCollect(p.collect)}
       </div>
     </section>
@@ -8673,7 +8708,7 @@ function bindPipeline() {
   });
 
   app.querySelector("[data-pipe-collect]")?.addEventListener("click", async () => {
-    p.collecting = true; p.error = ""; p.collect = null; p.selected = [];
+    p.collecting = true; p.error = ""; p.collect = null; p.selected = []; p.shipForms = [];
     renderApp();
     try {
       p.collect = await api("/api/pipeline/collect", { method: "POST", body: { startDate: p.startDate, endDate: p.endDate } });
@@ -8753,6 +8788,8 @@ function bindPipeline() {
     } catch (error) { showToast(error.message || "바꾸지 못했습니다.", "error"); }
   }));
 
+  app.querySelectorAll("[data-pipe-shipform]").forEach((b) => b.addEventListener("click", () => downloadShipForm(p.shipForms[Number(b.dataset.pipeShipform)]?.ids || [])));
+
   app.querySelector("[data-pipe-apply]")?.addEventListener("click", async () => {
     const drafts = p.selected.map((i) => p.collect?.drafts?.[i]).filter(Boolean);
     if (!drafts.length) return showToast("생성할 요청을 선택하세요.", "error");
@@ -8760,6 +8797,15 @@ function bindPipeline() {
     try {
       const result = await api("/api/pipeline/collect/apply", { method: "POST", body: { drafts } });
       showToast(`${result.createdCount}건 생성했습니다.${result.skipped?.length ? ` (중복 ${result.skipped.length}건 제외)` : ""}${prepareNote(result.prepared)}`, result.prepared?.failed?.length ? "error" : "");
+      // 발주양식을 쓰는 브랜드 건은 바로 내려받을 수 있게 남겨 둔다.
+      const forms = new Map();
+      for (const r of result.created || []) {
+        const b = state.brands.find((x) => x.id === r.brandId);
+        if (!shipFormOf(b)?.enabled) continue;
+        if (!forms.has(b.id)) forms.set(b.id, { brandName: b.name, ids: [] });
+        forms.get(b.id).ids.push(r.id);
+      }
+      p.shipForms = [...forms.values()];
       p.collect = null; p.selected = [];
       await loadAll();
       renderApp();

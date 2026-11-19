@@ -15,6 +15,7 @@ import * as cafe24 from "./lib/cafe24-api.mjs";
 import { cafe24OrdersToRows, compareRows } from "./lib/cafe24-rows.mjs";
 import { buildRequestDrafts, findShippedAwaiting, planPrepare } from "./lib/cafe24-collect.mjs";
 import * as shipNotify from "./lib/ship-notify.mjs";
+import * as shipForm from "./lib/ship-form.mjs";
 import * as mailer from "./lib/mailer.mjs";
 import { createProductSyncService } from "./lib/product-sync-service.mjs";
 import { createErpStore } from "./lib/erp-store.mjs";
@@ -8427,6 +8428,17 @@ async function routeApi(req, res, url) {
       if (brand[modeKey] === "auto" && before[modeKey] !== "auto") brand[sinceKey] = now();
       if (brand[modeKey] !== "auto") brand[sinceKey] = "";
     }
+    // 택배 발주양식 설정(보내는 분 고정값)
+    if ("shipFormEnabled" in body) {
+      brand.shipForm = {
+        enabled: body.shipFormEnabled === true || body.shipFormEnabled === "true" || body.shipFormEnabled === "on",
+        senderName: String(body.shipFormSenderName || "").trim().slice(0, 60),
+        senderPhone: String(body.shipFormSenderPhone || "").trim().slice(0, 30),
+        senderAddress: String(body.shipFormSenderAddress || "").trim().slice(0, 200),
+        fileLabel: String(body.shipFormFileLabel || `${brand.name} 발주서`).trim().slice(0, 60)
+      };
+    }
+    for (const k of ["shipFormEnabled", "shipFormSenderName", "shipFormSenderPhone", "shipFormSenderAddress", "shipFormFileLabel"]) delete brand[k];
     if ("shipContactPhone" in body) brand.shipContactPhone = String(body.shipContactPhone || "").replace(/[^\d-]/g, "").slice(0, 20);
     if ("shipContactEmail" in body) brand.shipContactEmail = String(body.shipContactEmail || "").trim().slice(0, 120);
     // 채권 종류: rehab(회생채권 — 계획표 채권자), separate(회생채권 아님·별도 변제), cash-only(계획표 현금변제만, 차감 없음), none(채권자 아님)
@@ -14314,6 +14326,38 @@ async function routeApi(req, res, url) {
   }
 
   // 선택한 입금요청을 하나은행 이체등록 양식으로 내려받는다.
+  // 택배 발주양식(예: 펫페이스 발주서): 고른 입금요청의 주문을 카페24에서 다시 읽어
+  // 받는 분·관리용 상품명·수량을 브랜드 양식대로 엑셀로 만든다.
+  if (pathname === "/api/requests/ship-form" && method === "POST") {
+    if (!requirePermission(actor, res, "requests", "view")) return;
+    const body = await readBody(req);
+    const ids = new Set(Array.isArray(body.ids) ? body.ids.map(String) : []);
+    const picked = db.requests.filter((r) => ids.has(r.id) && r.status !== "deleted");
+    const brandIds = [...new Set(picked.map((r) => r.brandId))];
+    const brands = brandIds.map((bid) => db.brands.find((b) => b.id === bid)).filter(Boolean);
+    const withForm = brands.filter((b) => shipForm.shipFormOf(b)?.enabled);
+    if (!picked.length || !withForm.length) { sendJson(res, 400, { error: "택배 발주양식을 쓰는 브랜드(예: 펫페이스)의 입금요청을 고르세요." }); return; }
+    if (withForm.length > 1 || brands.length > 1) { sendJson(res, 400, { error: `한 번에 한 브랜드만 내려받을 수 있습니다. 지금 고른 브랜드: ${brands.map((b) => b.name).join(", ")}` }); return; }
+    const brand = withForm[0];
+    const form = shipForm.shipFormOf(brand);
+    try {
+      const orderIds = [...new Set(picked.map((r) => String(r.orderNo || "").trim()).filter(Boolean))];
+      const orders = await withCafe24Token(db, (token) => cafe24.fetchOrdersByIds(token, orderIds, { shopNos: cafe24ShopNos(db) }));
+      const { rows, missing } = shipForm.buildShipFormRows(orders, { supplierId: brand.cafe24Supplier, form });
+      if (!rows.length) { sendJson(res, 400, { error: "카페24에서 이 브랜드 품목을 찾지 못했습니다(취소됐거나 주문번호가 다를 수 있습니다)." }); return; }
+      const file = await buildRowsXlsx("변환결과시트", shipForm.SHIP_FORM_HEADERS, rows);
+      const stamp = now();
+      for (const r of picked) r.shipFormAt = stamp;
+      addAudit(db, actor, "export", "request", "ship-form", `${brand.name} 택배 발주양식 ${orderIds.length}건(${rows.length}행) 다운로드${missing.length ? ` · 관리용 상품명 없음 ${missing.length}` : ""}`, null, { ids: picked.map((r) => r.id) });
+      await writeDb(db);
+      sendBuffer(res, 200, file, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        { "content-disposition": contentDisposition(shipForm.shipFormFileName(form)) });
+    } catch (error) {
+      sendJson(res, 502, { error: error.message });
+    }
+    return;
+  }
+
   if (pathname === "/api/requests/transfer-xlsx" && method === "POST") {
     if (!requirePermission(actor, res, "requests", "pay", "입금완료 처리 권한이 있어야 이체 양식을 받을 수 있습니다.")) return;
     const body = await readBody(req);
