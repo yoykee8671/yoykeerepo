@@ -2597,7 +2597,7 @@ function renderTeamAlertSettings() {
   const ta = state.teamAlerts;
   if (!ta) { ensureTeamAlerts(); return ""; }
   const d = state.teamAlertsDraft || (state.teamAlertsDraft = { events: JSON.parse(JSON.stringify(ta.events || {})) });
-  return `<section class="panel"><div class="panel-head"><h2>팀챗 알림 (슬랙 → 채널톡)</h2><span class="meta">${ta.enabled ? "켜짐" : "꺼짐"}${ta.webhookSet ? "" : " · 웹훅 없음"}</span></div>
+  return `<section class="panel"><div class="panel-head"><h2>팀챗 알림 (슬랙 → 채널톡)</h2><span class="meta">${ta.enabled ? "켜짐" : "꺼짐"} · ${ta.botTokenSet ? "봇으로 보냄" : ta.webhookSet ? "웹훅으로 보냄" : "보낼 곳 없음"}</span></div>
     <div class="panel-body">
       <label class="switch-line" style="margin:0"><input type="checkbox" data-ta-enabled ${ta.enabled ? "checked" : ""}><span><b>팀챗 알림 켜기</b></span></label>
       <h3 class="ta-h">알림 종류</h3>
@@ -2607,14 +2607,20 @@ function renderTeamAlertSettings() {
           <td><select data-ta-mode="${k}">${Object.entries(TA_MODE).map(([m, l]) => `<option value="${m}" ${ev.mode === m ? "selected" : ""}>${l}</option>`).join("")}</select></td>
         </tr>`).join("")}
       </tbody></table></div>
-      ${helpNote("슬랙 #notice 채널로 보내면 채널톡이 팀챗 alert 방으로 옮겨 줍니다. 사람 태그는 되지 않으니 방 알림을 모두 켜 두세요. '체크해서 보냄'은 요청을 만들 때 '팀챗 전송'을 체크하거나, 목록에서 골라 [팀챗 전송]을 누를 때 나갑니다.")}
-      <div class="field" style="margin-top:12px">
+      ${helpNote("봇 토큰을 넣으면 보낸 사람이 봇 이름으로 보이고(채널에 봇 초대 필요), 없으면 웹훅으로 보냅니다(보낸 사람이 번호로 보임). 슬랙 #notice 채널로 보내면 채널톡이 팀챗 alert 방으로 옮겨 줍니다. 사람 태그는 되지 않으니 방 알림을 모두 켜 두세요. '체크해서 보냄'은 요청을 만들 때 '팀챗 전송'을 체크하거나, 목록에서 골라 [팀챗 전송]을 누를 때 나갑니다.")}
+      <div class="field two" style="margin-top:12px">
+        <div><label>슬랙 봇 토큰 <span class="muted" style="font-weight:400">${ta.botTokenSet ? "(저장됨 — 바꿀 때만 입력)" : "(xoxb-... · 있으면 웹훅보다 먼저 씀)"}</span></label>
+          <input data-ta-bot type="password" autocomplete="new-password" placeholder="${ta.botTokenSet ? "••••••••" : "xoxb-..."}"></div>
+        <div><label>채널</label><input data-ta-channel value="${h(ta.channel || "#notice")}" placeholder="#notice"></div>
+      </div>
+      <div class="field">
         <label>슬랙 웹훅 주소 <span class="muted" style="font-weight:400">${ta.webhookSet ? "(저장됨 — 바꿀 때만 입력)" : "(https://hooks.slack.com/services/...)"}</span></label>
         <input data-ta-webhook type="password" autocomplete="new-password" placeholder="${ta.webhookSet ? "••••••••" : "https://hooks.slack.com/services/..."}">
       </div>
       <div class="action-row">
         <button class="primary" data-ta-save>팀챗 알림 저장</button>
-        <button data-ta-test ${ta.webhookSet ? "" : "disabled"}>시험 보내기</button>
+        <button data-ta-test ${ta.webhookSet || ta.botTokenSet ? "" : "disabled"}>시험 보내기</button>
+        ${ta.botTokenSet ? `<button class="ghost" data-ta-clear-bot>봇 토큰 지우기</button>` : ""}
       </div>
     </div></section>`;
 }
@@ -2628,8 +2634,16 @@ function bindTeamAlertSettings() {
     const body = { enabled: Boolean(q("[data-ta-enabled]")?.checked), events: d.events };
     const webhook = q("[data-ta-webhook]")?.value.trim() || "";
     if (webhook) body.webhook = webhook;
+    const bot = q("[data-ta-bot]")?.value.trim() || "";
+    if (bot) body.botToken = bot;
+    body.channel = q("[data-ta-channel]")?.value.trim() || "#notice";
     try { await api("/api/team-alerts/settings", { method: "PUT", body }); state.teamAlerts = null; state.teamAlertsDraft = null; showToast("팀챗 알림 설정을 저장했습니다."); renderApp(); }
     catch (e) { showToast(e.message, "error"); }
+  });
+  q("[data-ta-clear-bot]")?.addEventListener("click", async () => {
+    if (!confirm("봇 토큰을 지우고 웹훅으로 보낼까요?")) return;
+    try { await api("/api/team-alerts/settings", { method: "PUT", body: { clearBotToken: true } }); state.teamAlerts = null; state.teamAlertsDraft = null; showToast("봇 토큰을 지웠습니다."); renderApp(); }
+    catch (err) { showToast(err.message, "error"); }
   });
   q("[data-ta-test]")?.addEventListener("click", async (e) => {
     const b = e.currentTarget; b.disabled = true;

@@ -1388,9 +1388,11 @@ async function teamAlertSettings() {
 }
 // 팀챗 알림: 슬랙 웹훅으로 보낸다(채널톡이 슬랙 채널을 팀챗 방으로 옮겨 줌). 실패해도 업무 흐름은 막지 않는다.
 async function postTeam(cfg, notice, plan) {
-  let webhook = "";
-  try { webhook = clobe.openSecret(cfg.webhook); } catch { webhook = ""; }
-  return teamAlerts.postSlack({ webhook, text: teamAlerts.slackTextFor(notice, plan) });
+  const open = (v) => { try { return v ? clobe.openSecret(v) : ""; } catch { return ""; } };
+  const text = teamAlerts.slackTextFor(notice, plan);
+  // 봇 토큰이 있으면 봇으로(채널톡에 이름이 보임), 없으면 웹훅으로.
+  if (cfg.botToken) return teamAlerts.postSlackBot({ token: open(cfg.botToken), channel: cfg.channel || "#notice", text });
+  return teamAlerts.postSlack({ webhook: open(cfg.webhook), text });
 }
 async function sendTeamAlert(kind, notice) {
   try {
@@ -8341,14 +8343,21 @@ async function routeApi(req, res, url) {
   if (pathname === "/api/team-alerts/settings" && method === "GET") {
     const cfg = await teamAlertSettings();
     const events = Object.fromEntries(Object.keys(teamAlerts.EVENTS).map((k) => [k, teamAlerts.eventConfig(cfg, k)]));
-    sendJson(res, 200, { enabled: cfg.enabled, events, webhookSet: Boolean(cfg.webhook), isOwner: actor.role === "owner" });
+    sendJson(res, 200, { enabled: cfg.enabled, events, webhookSet: Boolean(cfg.webhook), botTokenSet: Boolean(cfg.botToken), channel: cfg.channel || "#notice", isOwner: actor.role === "owner" });
     return;
   }
   if (pathname === "/api/team-alerts/settings" && method === "PUT") {
     if (actor.role !== "owner") { sendJson(res, 403, { error: "대표만 바꿀 수 있습니다." }); return; }
     const body = await readBody(req);
     const cfg = await teamAlertSettings();
-    const next = { id: "teamAlerts", enabled: cfg.enabled, events: cfg.events, webhook: cfg.webhook };
+    const next = { id: "teamAlerts", enabled: cfg.enabled, events: cfg.events, webhook: cfg.webhook, botToken: cfg.botToken, channel: cfg.channel || "#notice" };
+    if ("channel" in body) next.channel = String(body.channel || "").trim().slice(0, 80) || "#notice";
+    if (body.botToken) {
+      const t = String(body.botToken).trim();
+      if (!teamAlerts.isSlackBotToken(t)) { sendJson(res, 400, { error: "슬랙 봇 토큰이 올바르지 않습니다(xoxb-...)." }); return; }
+      next.botToken = clobe.sealSecret(t);
+    }
+    if (body.clearBotToken === true) delete next.botToken;
     if ("enabled" in body) next.enabled = body.enabled === true;
     if (body.events && typeof body.events === "object") {
       next.events = {};
