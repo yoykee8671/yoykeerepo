@@ -23,4 +23,11 @@ await ta.postSlack({ webhook: "https://hooks.slack.com/services/T0/B0/xyz", text
 assert.equal(sent.body.text, text);
 await assert.rejects(ta.postSlack({ webhook: "", text }), /웹훅 주소가 없습니다/);
 await assert.rejects(ta.postSlack({ webhook: "https://hooks.slack.com/services/T0/B0/x", text }, async () => ({ ok: false, status: 404, text: async () => "no_service" })), /거절/);
+let bot;
+await ta.postSlackBot({ token: "xoxb-1-abc", channel: "#notice", text: "t" }, async (url, o) => { bot = { url, auth: o.headers.authorization, body: JSON.parse(o.body) }; return { ok: true, json: async () => ({ ok: true }) }; });
+assert.equal(bot.url, "https://slack.com/api/chat.postMessage");
+assert.equal(bot.auth, "Bearer xoxb-1-abc");
+assert.equal(bot.body.channel, "#notice");
+await assert.rejects(ta.postSlackBot({ token: "xoxb-1-abc", channel: "#notice", text: "t" }, async () => ({ ok: true, json: async () => ({ ok: false, error: "not_in_channel" }) })), /봇이 채널에 없습니다/);
+await assert.rejects(ta.postSlackBot({ token: "xoxp-1", channel: "#notice", text: "t" }), /봇 토큰/);
 console.log("team alerts verify: all checks passed");
