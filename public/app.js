@@ -2615,10 +2615,10 @@ function renderTeamAlertSettings() {
         </tr>`).join("")}
       </tbody></table></div>
       ${helpNote(`채널톡 GitHub 앱 › 저장소 pay-alerts › 알림방마다 <b>필수 라벨</b>을 넣어야 방이 갈립니다: ${Object.values(ta.rooms).map((r) => `<b>${h(r.name)}</b> = <code>${h(r.label)}</code>`).join(", ")}. '체크해서 보냄'은 요청을 만들 때 '팀챗 전송'을 체크하거나, 목록에서 골라 [팀챗 전송]을 누를 때 나갑니다.`)}
-      <h3 class="ta-h">사람 (태그)</h3>
+      <h3 class="ta-h">사람 <span class="meta">고른 사람 이름이 알림 제목 끝에 &#39;확인: 이름&#39;으로 붙습니다</span></h3>
       <div class="ta-people">${d.people.map((p, i) => `<div class="ta-person">
         <input data-ta-name="${i}" value="${h(p.name || "")}" placeholder="이름" style="width:110px">
-        <input data-ta-github="${i}" value="${h(p.github || "")}" placeholder="채널톡 github-username" style="width:200px">
+        
         <button type="button" class="ghost small" data-ta-del="${i}" aria-label="빼기">×</button></div>`).join("")}</div>
       <div><button type="button" class="small" data-ta-add>+ 사람 추가</button></div>
       <div class="field two" style="margin-top:12px">
