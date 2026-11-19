@@ -3016,29 +3016,45 @@ function renderPermissionGrid(admin) {
   const current = state.editingPermissions?.permissions
     || admin.permissions
     || {};
-  const rows = state.menus.map((menu) => {
-    const granted = current[menu.key] || [];
+  // 왼쪽 메뉴와 같은 묶음·이름으로 보여 준다(대표 결정 2026-11-19). 권한 키 하나를
+  // 여러 메뉴가 같이 쓰는 곳은 함께 바뀌는 메뉴를 적어 둔다.
+  const byKey = new Map(state.menus.map((m) => [m.key, m]));
+  const used = new Set();
+  const row = (label, key, note = "") => {
+    const menu = byKey.get(key);
+    if (!menu) return "";
+    used.add(key);
+    const granted = current[key] || [];
     const boxes = menu.actions.map((action) => `
       <label class="perm-box">
-        <input type="checkbox" data-perm-menu="${h(menu.key)}" data-perm-action="${h(action)}"
-          ${granted.includes(action) ? "checked" : ""}>
+        <input type="checkbox" data-perm-menu="${h(key)}" data-perm-action="${h(action)}" ${granted.includes(action) ? "checked" : ""}>
         ${h(state.actionLabels[action] || action)}
       </label>`).join("");
-    return `<tr>
-      <td><strong>${h(menu.label)}</strong></td>
-      <td><div class="perm-actions">${boxes}</div></td>
-    </tr>`;
-  }).join("");
+    return `<tr><td><strong>${h(label)}</strong>${note ? `<div class="meta">${h(note)}</div>` : ""}</td><td><div class="perm-actions">${boxes}</div></td></tr>`;
+  };
+  const info = (label, text) => `<tr class="perm-info"><td><strong>${h(label)}</strong></td><td><span class="meta">${h(text)}</span></td></tr>`;
+  const group = (title, body) => `<tr class="perm-group"><th colspan="2">${h(title)}</th></tr>${body}`;
+  let body = [
+    group("대시보드", row("대시보드", "dashboard")),
+    group("결제/구매", row("주문매칭 — 카페24 주문 수집·입금요청 생성", "pipeline") + row("주문매칭 — 은행 입금 대조(클로브)·입금확인", "reconcile", "통장 내역이 보이므로 경영관리 담당만") + row("입금요청", "requests")),
+    group("거래", row("청구(지급요청)", "payments") + row("판매 주문·가격", "sales") + row("명세서·발주서 · 품목 · 납품지 관리 · 거래처 관리", "procurement", "이 네 메뉴와 경영관리 › 계좌관리가 이 권한 하나를 같이 씁니다") + row("생산·재고", "stock")),
+    group("자사몰관리", row("브랜드", "brands") + row("단가표", "prices") + row("상품동기화", "productsync")),
+    group("정산", row("월 정산 생성 · 월 정산 현황 · 월 마감", "settlement") + row("npb정산", "npb")),
+    group("경영관리", row("KPI·손익", "kpi") + row("자금 (생산비 포함)", "cash") + info("계좌관리", "거래 › 거래처 관리 권한을 따릅니다")),
+    group("관리/설정", row("관리자", "admins") + row("이력", "audits") + row("아카이브", "archive") + info("확인 필요 · 메신저 공유 · 알림 설정 · 노션 기록", "대표만 볼 수 있습니다"))
+  ].join("");
+  const rest = state.menus.filter((m) => !used.has(m.key));
+  if (rest.length) body += group("기타", rest.map((m) => row(m.label, m.key)).join(""));
   return `
     <div class="field">
       <label>메뉴 권한</label>
       <span class="muted">
-        체크한 메뉴만 화면에 나타나고, 체크한 동작만 허용됩니다.
+        왼쪽 메뉴와 같은 순서입니다. 체크한 메뉴만 화면에 나타나고, 체크한 동작만 허용됩니다.
         하위 동작을 주면 접근·읽기는 자동으로 함께 부여됩니다.
       </span>
-      <div class="table-wrap" style="max-height:320px;margin-top:6px">
-        <table class="admin-perms-table"><thead><tr><th style="width:120px">메뉴</th><th>허용할 동작</th></tr></thead>
-        <tbody>${rows}</tbody></table>
+      <div class="table-wrap" style="max-height:520px;margin-top:6px">
+        <table class="admin-perms-table"><thead><tr><th style="width:42%">메뉴</th><th>허용할 동작</th></tr></thead>
+        <tbody>${body}</tbody></table>
       </div>
     </div>
   `;
@@ -5575,7 +5591,7 @@ function bindPartnerHub() {
     goTrade("orders"); if (po) state.procurement.editingPurchaseOrder = JSON.parse(JSON.stringify(po)); renderApp();
   }));
   app.querySelectorAll("[data-hub-sale]").forEach((tr) => tr.addEventListener("click", () => { goTrade("sales"); const ss = salesState(); ss.view = "orders"; ss.selectedId = tr.dataset.hubSale; renderApp(); }));
-  app.querySelector("[data-hub-prod]")?.addEventListener("click", () => { const id = hub.id; goTrade("stock"); const st = stockState(); st.screen = "cost"; st.prodSel = id; st.prod = null; renderApp(); });
+  app.querySelector("[data-hub-prod]")?.addEventListener("click", () => { const id = hub.id; state.partnerHub = null; state.tab = "cash"; cashState().screen = "production"; const st = stockState(); st.prodSel = id; st.prod = null; renderApp(); });
   app.querySelectorAll("[data-hub-channel]").forEach((b) => b.addEventListener("click", () => { goTrade("sales"); const ss = salesState(); ss.view = "pricing"; ss.pricingSel = b.dataset.hubChannel; ss.pricing = null; renderApp(); }));
   app.querySelectorAll("[data-hub-material]").forEach((b) => b.addEventListener("click", () => {
     goTrade("materials"); state.procurement.editingMaterial = (state.materials || []).find((m) => m.id === b.dataset.hubMaterial) || null; renderApp();
@@ -13310,9 +13326,10 @@ function bindCashFlow() {
 function renderCash() {
   const cs = cashState();
   const head = pageHead("자금", "오늘과 7일 안에 들어올 돈·나갈 돈, 계좌 잔액을 한 장으로 봅니다. 매일 아침 이 화면을 보고 채널톡에 공유하세요.");
-  const tabs = `<div class="npb-subnav">${[["report", "일일 자금보고"], ["cashflow", "현금흐름표"], ["schedules", "고정비·자금 일정"], ["loans", "대출금"], ["rehab", "회생변제"], ["receivables", "채권원장"]].map(([k, l]) => `<button class="npb-subtab ${cs.screen === k ? "active" : ""}" data-cash-screen="${k}">${l}</button>`).join("")}
+  const tabs = `<div class="npb-subnav">${[["report", "일일 자금보고"], ["cashflow", "현금흐름표"], ["schedules", "고정비·자금 일정"], ["production", "생산비"], ["loans", "대출금"], ["rehab", "회생변제"], ["receivables", "채권원장"]].map(([k, l]) => `<button class="npb-subtab ${cs.screen === k ? "active" : ""}" data-cash-screen="${k}">${l}</button>`).join("")}
     <span style="flex:1"></span>
     ${(cs.meta?.companies || [{ key: "wooof", name: "우프컴퍼니" }, { key: "betters", name: "Betters(개인사업자)" }]).map((c) => `<button class="npb-subtab ${cs.company === c.key ? "active" : ""}" data-cash-company="${c.key}">${h(c.name)}</button>`).join("")}</div>`;
+  if (cs.screen === "production") return `${head}${tabs}${renderProdCost()}`;
   if (cs.screen === "loans") return `${head}${tabs}${renderLoans()}`;
   if (cs.screen === "rehab") return `${head}${tabs}${renderRehab()}`;
   if (cs.screen === "cashflow") return `${head}${tabs}${renderCashFlow()}`;
@@ -13536,9 +13553,9 @@ function renderCashSchedules() {
 
 function bindCash() {
   const cs = cashState();
-  if (cs.screen === "loans" || cs.screen === "rehab" || cs.screen === "cashflow") {
+  if (cs.screen === "loans" || cs.screen === "rehab" || cs.screen === "cashflow" || cs.screen === "production") {
     app.querySelectorAll("[data-cash-screen]").forEach((b) => b.addEventListener("click", () => { cs.screen = b.dataset.cashScreen; renderApp(); }));
-    if (cs.screen === "loans") bindLoans(); else if (cs.screen === "rehab") bindRehab(); else bindCashFlow();
+    if (cs.screen === "loans") bindLoans(); else if (cs.screen === "rehab") bindRehab(); else if (cs.screen === "production") bindProdCost(); else bindCashFlow();
     return;
   }
   if (!cs.data && !cs.loading) {
@@ -14707,8 +14724,9 @@ function bindProdCost() {
 function renderStock() {
   const st = stockState();
   const head = pageHead("생산·재고", "원부자재를 어디에 얼마나 넣었고, 생산에 얼마나 썼고, 얼마나 남았는지, 언제 얼마나 발주해야 하는지 봅니다.");
-  const tabs = `<div class="npb-subnav">${[["status", "재고현황"], ["moves", "입출고 기록"], ["runs", "생산 기록"], ["products", "제품 구성(BOM)"], ["cost", "생산비"]].map(([k, l]) => `<button class="npb-subtab ${st.screen === k ? "active" : ""}" data-stock-screen="${k}">${l}</button>`).join("")}</div>`;
-  if (st.screen === "cost") return `${head}${tabs}${renderProdCost()}`;
+  const tabs = `<div class="npb-subnav">${[["status", "재고현황"], ["moves", "입출고 기록"], ["runs", "생산 기록"], ["products", "제품 구성(BOM)"]].map(([k, l]) => `<button class="npb-subtab ${st.screen === k ? "active" : ""}" data-stock-screen="${k}">${l}</button>`).join("")}</div>`;
+  // 생산비는 경영관리 › 자금 › 생산비로 옮겼다(대표 결정 2026-11-19).
+  if (st.screen === "cost") { st.screen = "status"; }
   if (!st.data) return `${head}${tabs}<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
   const body = { status: renderStockStatus, moves: renderStockMoves, runs: renderStockRuns, products: renderStockProducts }[st.screen] || renderStockStatus;
   return `${head}${tabs}${body()}`;

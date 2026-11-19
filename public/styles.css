@@ -3131,6 +3131,20 @@ tbody tr:hover td.sticky, .requests-table tbody tr:hover td:nth-child(-n+2) { ba
 .ship-tpl { display: grid; gap: 6px; padding: 10px 0; border-top: 1px solid var(--grey100); }
 .ship-tpl-grid h3 { font-size: 15px; margin: 0 0 6px; }
 @media (max-width: 900px) { .ship-tpl-grid { grid-template-columns: 1fr; } }
+/* 권한 표: 메뉴 묶음 줄 */
+.admin-perms-table tr.perm-group th { background: var(--grey50); color: #191f28; font-size: 13.5px; font-weight: 700; text-align: left; padding: 8px 12px; position: static; }
+.admin-perms-table tr.perm-info td { color: #4e5968; }
+.admin-perms-table td .meta { font-size: 12px; margin-top: 2px; font-weight: 400; }
+/* 권한 표는 좁은 오른쪽 칸에 들어가므로 '메뉴 이름 → 아래 줄에 체크칸'으로 쌓는다 */
+.admin-perms-table { min-width: 0 !important; width: 100%; table-layout: fixed; }
+.admin-perms-table thead { display: none; }
+.admin-perms-table tbody tr:not(.perm-group) { display: block; padding: 10px 4px; border-bottom: 1px solid var(--grey100); }
+.admin-perms-table tbody tr:not(.perm-group) td { display: block; border: 0; padding: 0; width: auto !important; }
+.admin-perms-table tbody tr:not(.perm-group) td + td { margin-top: 6px; }
+.admin-perms-table .perm-actions { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.admin-perms-table .perm-box { display: inline-flex; align-items: center; gap: 5px; font-size: 13.5px; white-space: nowrap; }
+.admin-perms-table tr.perm-group th { display: block; border-radius: 6px; margin-top: 8px; }
+.admin-perms-table tbody tr:hover td { background: transparent; }
 .ta-people { display: grid; gap: 8px; margin: 6px 0 8px; }
 .ta-person { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 10px; border: 1px solid var(--hairline); border-radius: 10px; }
 .ta-person input:not([type=checkbox]) { min-height: 34px; }

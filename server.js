@@ -13291,8 +13291,9 @@ async function routeApi(req, res, url) {
 
   // --- v2 생산비: 생산처 청구·지급 원장, 미지급, 공임 대조 -------------------------
   if (pathname === "/api/production" || pathname.startsWith("/api/production/")) {
-    if (!requirePermission(actor, res, "stock", "view")) return;
-    const canEdit = actor.role === "owner" || can(actor, "stock", "edit");
+    // 생산비는 경영관리 › 자금 아래로 옮겼다: 자금 권한으로 보고 고친다(예전 생산·재고 권한도 그대로 인정).
+    if (!(can(actor, "cash", "view") || can(actor, "stock", "view"))) { sendJson(res, 403, { error: "자금 메뉴 권한이 있어야 생산비를 볼 수 있습니다." }); return; }
+    const canEdit = actor.role === "owner" || can(actor, "cash", "edit") || can(actor, "stock", "edit");
     const who = actor.name || actor.email || "";
     const today = kstToday();
     const load = async () => {
@@ -13307,7 +13308,9 @@ async function routeApi(req, res, url) {
     if (pathname === "/api/production" && method === "GET") {
       const all = await load();
       const ids = new Set([...all.bills, ...all.pays].map((x) => x.partnerId));
-      const partners = db.partners.filter((p) => ids.has(p.id) || p.category === "production").map((p) => {
+      // 거래처(사업자) 중 생산 태그가 붙은 곳 + 생산비 기록이 있는 곳.
+      const isProduction = (p) => p.category === "production" || (Array.isArray(p.roles) && p.roles.includes("production"));
+      const partners = db.partners.filter((p) => ids.has(p.id) || (isProduction(p) && p.isActive !== false)).map((p) => {
         const s = production.partnerSummary(ofPartner(all, p.id), today);
         return { id: p.id, code: p.code || "", name: p.name, company: p.productionCompany || "wooof", ...s };
       }).sort((a, b) => b.balance - a.balance);
