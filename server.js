@@ -1386,13 +1386,11 @@ async function teamAlertSettings() {
   if (!cfg.events || typeof cfg.events !== "object" || Array.isArray(cfg.events)) cfg.events = {};
   return cfg;
 }
-// 팀챗 알림: 슬랙 웹훅으로 보낸다(채널톡이 슬랙 채널을 팀챗 방으로 옮겨 줌). 실패해도 업무 흐름은 막지 않는다.
+// 팀챗 알림: 슬랙 봇으로 보낸다(채널톡이 슬랙 채널을 팀챗 방으로 옮겨 줌). 실패해도 업무 흐름은 막지 않는다.
 async function postTeam(cfg, notice, plan) {
-  const open = (v) => { try { return v ? clobe.openSecret(v) : ""; } catch { return ""; } };
-  const text = teamAlerts.slackTextFor(notice, plan);
-  // 봇 토큰이 있으면 봇으로(채널톡에 이름이 보임), 없으면 웹훅으로.
-  if (cfg.botToken) return teamAlerts.postSlackBot({ token: open(cfg.botToken), channel: cfg.channel || "#notice", text });
-  return teamAlerts.postSlack({ webhook: open(cfg.webhook), text });
+  let token = "";
+  try { token = cfg.botToken ? clobe.openSecret(cfg.botToken) : ""; } catch { token = ""; }
+  return teamAlerts.postSlackBot({ token, channel: cfg.channel || "#notice", text: teamAlerts.slackTextFor(notice, plan) });
 }
 async function sendTeamAlert(kind, notice) {
   try {
@@ -8339,18 +8337,18 @@ async function routeApi(req, res, url) {
     sendJson(res, 200, { ok: true });
     return;
   }
-  // 팀챗 알림 설정(대표만 바꿈). 슬랙 웹훅 주소는 암호화해 저장하고 돌려주지 않는다.
+  // 팀챗 알림 설정(대표만 바꿈). 슬랙 봇 토큰은 암호화해 저장하고 돌려주지 않는다.
   if (pathname === "/api/team-alerts/settings" && method === "GET") {
     const cfg = await teamAlertSettings();
     const events = Object.fromEntries(Object.keys(teamAlerts.EVENTS).map((k) => [k, teamAlerts.eventConfig(cfg, k)]));
-    sendJson(res, 200, { enabled: cfg.enabled, events, webhookSet: Boolean(cfg.webhook), botTokenSet: Boolean(cfg.botToken), channel: cfg.channel || "#notice", isOwner: actor.role === "owner" });
+    sendJson(res, 200, { enabled: cfg.enabled, events, botTokenSet: Boolean(cfg.botToken), channel: cfg.channel || "#notice", isOwner: actor.role === "owner" });
     return;
   }
   if (pathname === "/api/team-alerts/settings" && method === "PUT") {
     if (actor.role !== "owner") { sendJson(res, 403, { error: "대표만 바꿀 수 있습니다." }); return; }
     const body = await readBody(req);
     const cfg = await teamAlertSettings();
-    const next = { id: "teamAlerts", enabled: cfg.enabled, events: cfg.events, webhook: cfg.webhook, botToken: cfg.botToken, channel: cfg.channel || "#notice" };
+    const next = { id: "teamAlerts", enabled: cfg.enabled, events: cfg.events, botToken: cfg.botToken, channel: cfg.channel || "#notice" };
     if ("channel" in body) next.channel = String(body.channel || "").trim().slice(0, 80) || "#notice";
     if (body.botToken) {
       const t = String(body.botToken).trim();
@@ -8366,18 +8364,13 @@ async function routeApi(req, res, url) {
         next.events[k] = { mode: ["auto", "manual", "off"].includes(v?.mode) ? v.mode : teamAlerts.EVENTS[k].mode };
       }
     }
-    if (body.webhook) {
-      const url = String(body.webhook).trim();
-      if (!teamAlerts.isSlackWebhook(url)) { sendJson(res, 400, { error: "슬랙 웹훅 주소가 올바르지 않습니다(https://hooks.slack.com/services/...)." }); return; }
-      next.webhook = clobe.sealSecret(url);
-    }
     await erp.put("settings", next);
     addAudit(db, actor, "update", "settings", "teamAlerts", `팀챗 알림 설정 변경 (${next.enabled ? "켬" : "끔"})`, null, { events: next.events });
     await writeDb(db);
     sendJson(res, 200, { ok: true });
     return;
   }
-  // 시험: 저장된 웹훅으로 시험 글 하나.
+  // 시험: 저장된 봇 토큰으로 시험 글 하나.
   if (pathname === "/api/team-alerts/test" && method === "POST") {
     if (actor.role !== "owner") { sendJson(res, 403, { error: "대표만 시험할 수 있습니다." }); return; }
     const cfg = await teamAlertSettings();
