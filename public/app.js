@@ -2533,7 +2533,75 @@ function renderNotifySettings() {
           <button data-test-send="mail" ${cfg.mailConfigured ? "" : "disabled"}>시험 메일 보내기</button>
         </div>
       </div></section>
+    ${renderTeamAlertSettings()}
     ${renderShipNotifySettings()}`;
+}
+
+// 팀챗 알림(채널톡 ← 깃허브 이슈): 알림 종류, 태그할 사람(휴가 때 끄기), 토큰.
+function renderTeamAlertSettings() {
+  const ta = state.teamAlerts;
+  if (!ta) {
+    if (!state.teamAlertsLoading) { state.teamAlertsLoading = true; api("/api/team-alerts/settings").then((r) => { state.teamAlerts = r; state.teamAlertsDraft = JSON.parse(JSON.stringify(r.people || [])); }).catch(() => {}).finally(() => { state.teamAlertsLoading = false; renderApp(); }); }
+    return "";
+  }
+  const people = state.teamAlertsDraft || ta.people || [];
+  const kindBoxes = (sel, attr) => Object.entries(ta.kindLabels).map(([k, l]) => `<label class="perm-box"><input type="checkbox" ${attr}="${k}" ${sel.includes(k) ? "checked" : ""}> ${h(l)}</label>`).join("");
+  return `<section class="panel"><div class="panel-head"><h2>팀챗 알림 (채널톡 wooof_erp 방)</h2><span class="meta">${ta.enabled ? "켜짐" : "꺼짐"}${ta.tokenSet ? "" : " · 토큰 없음"}</span></div>
+    <div class="panel-body">
+      <div class="action-row" style="margin-top:0">
+        <label class="switch-line" style="margin:0"><input type="checkbox" data-ta-enabled ${ta.enabled ? "checked" : ""}><span><b>팀챗 알림 켜기</b></span></label>
+        <label class="inline-field"><span>저장소</span><input data-ta-repo value="${h(ta.repo || "")}" style="width:220px"></label>
+      </div>
+      <div class="field" style="margin-top:12px"><label>보낼 알림</label><div class="perm-actions">${kindBoxes(ta.kinds || [], "data-ta-kind")}</div></div>
+      <div class="field" style="margin-top:12px"><label>태그할 사람 <span class="muted" style="font-weight:400">— 휴가일 땐 '태그'를 끄세요. 깃허브 아이디는 채널톡 매니저 프로필의 github-username과 같아야 태그됩니다.</span></label>
+        <div class="ta-people">${people.map((p, i) => `<div class="ta-person">
+          <label class="switch-line" style="margin:0"><input type="checkbox" data-ta-on="${i}" ${p.on ? "checked" : ""}><span>태그</span></label>
+          <input data-ta-name="${i}" value="${h(p.name || "")}" placeholder="이름" style="width:110px">
+          <input data-ta-github="${i}" value="${h(p.github || "")}" placeholder="깃허브 아이디" style="width:160px">
+          <div class="perm-actions">${Object.entries(ta.kindLabels).filter(([k]) => (ta.kinds || []).includes(k)).map(([k, l]) => `<label class="perm-box"><input type="checkbox" data-ta-pkind="${i}:${k}" ${(p.kinds || []).includes(k) ? "checked" : ""}> ${h(l)}</label>`).join("")}</div>
+          <button type="button" class="ghost small" data-ta-del="${i}" aria-label="빼기">×</button>
+        </div>`).join("")}</div>
+        <div><button type="button" class="small" data-ta-add>+ 사람 추가</button></div>
+      </div>
+      <div class="field two" style="margin-top:12px">
+        <div><label>깃허브 토큰 <span class="muted" style="font-weight:400">${ta.tokenSet ? "(저장됨 — 바꿀 때만 입력)" : "(pay-alerts 저장소 Issues 쓰기)"}</span></label><input data-ta-token type="password" autocomplete="new-password" placeholder="${ta.tokenSet ? "••••••••" : "github_pat_..."}"></div>
+      </div>
+      <div class="action-row">
+        <button class="primary" data-ta-save>팀챗 알림 저장</button>
+        <button data-ta-test ${ta.tokenSet ? "" : "disabled"}>시험 알림 보내기</button>
+      </div>
+    </div></section>`;
+}
+function bindTeamAlertSettings() {
+  const ta = state.teamAlerts;
+  if (!ta) return;
+  const people = state.teamAlertsDraft;
+  const q = (sel) => app.querySelector(sel);
+  app.querySelectorAll("[data-ta-on]").forEach((c) => c.addEventListener("change", () => { people[Number(c.dataset.taOn)].on = c.checked; }));
+  app.querySelectorAll("[data-ta-name]").forEach((c) => c.addEventListener("input", () => { people[Number(c.dataset.taName)].name = c.value; }));
+  app.querySelectorAll("[data-ta-github]").forEach((c) => c.addEventListener("input", () => { people[Number(c.dataset.taGithub)].github = c.value; }));
+  app.querySelectorAll("[data-ta-pkind]").forEach((c) => c.addEventListener("change", () => {
+    const [i, k] = c.dataset.taPkind.split(":"); const p = people[Number(i)];
+    p.kinds = c.checked ? [...new Set([...(p.kinds || []), k])] : (p.kinds || []).filter((x) => x !== k);
+  }));
+  app.querySelectorAll("[data-ta-del]").forEach((b) => b.addEventListener("click", () => { people.splice(Number(b.dataset.taDel), 1); renderApp(); }));
+  q("[data-ta-add]")?.addEventListener("click", () => { people.push({ name: "", github: "", on: true, kinds: [...(ta.kinds || [])] }); renderApp(); });
+  q("[data-ta-save]")?.addEventListener("click", async () => {
+    const body = {
+      enabled: Boolean(q("[data-ta-enabled]")?.checked), repo: q("[data-ta-repo]")?.value || "",
+      kinds: [...app.querySelectorAll("[data-ta-kind]:checked")].map((c) => c.dataset.taKind), people
+    };
+    const token = q("[data-ta-token]")?.value || "";
+    if (token) body.token = token;
+    try { await api("/api/team-alerts/settings", { method: "PUT", body }); state.teamAlerts = null; showToast("팀챗 알림 설정을 저장했습니다."); renderApp(); }
+    catch (e) { showToast(e.message, "error"); }
+  });
+  q("[data-ta-test]")?.addEventListener("click", async (e) => {
+    e.currentTarget.disabled = true;
+    try { const r = await api("/api/team-alerts/test", { method: "POST", body: {} }); showToast(`시험 알림을 보냈습니다(이슈 #${r.number}). wooof_erp 방을 확인하세요.`); }
+    catch (err) { showToast(err.message, "error"); }
+    renderApp();
+  });
 }
 
 // 대표 전용: 문자 발신번호와 문구(문자 3·메일 3)를 고친다.
@@ -3089,7 +3157,7 @@ function bindCurrentTab() {
   if (state.tab === "prices") bindPrices();
   if (state.tab === "brands") bindBrands();
   if (state.tab === "procurement" || state.tab === "accounts") bindProcurement();
-  if (state.tab === "notify") bindShipSettings();
+  if (state.tab === "notify") { bindShipSettings(); bindTeamAlertSettings(); }
   if (state.tab === "payments") bindPayments();
   if (state.tab === "cash") bindCash();
   if (state.tab === "sales") bindSales();

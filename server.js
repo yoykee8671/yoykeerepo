@@ -16,6 +16,7 @@ import { cafe24OrdersToRows, compareRows } from "./lib/cafe24-rows.mjs";
 import { buildRequestDrafts, findShippedAwaiting, planPrepare } from "./lib/cafe24-collect.mjs";
 import * as shipNotify from "./lib/ship-notify.mjs";
 import * as shipForm from "./lib/ship-form.mjs";
+import * as teamAlerts from "./lib/team-alerts.mjs";
 import * as mailer from "./lib/mailer.mjs";
 import { createProductSyncService } from "./lib/product-sync-service.mjs";
 import { createErpStore } from "./lib/erp-store.mjs";
@@ -1380,9 +1381,29 @@ async function closingState() {
 async function messengerSettings() {
   return { ...notify.DEFAULT_MESSENGER, ...((await erp.get("settings", "messenger")) || {}) };
 }
+async function teamAlertSettings() {
+  return { id: "teamAlerts", ...teamAlerts.DEFAULT_TEAM_ALERTS, ...((await erp.get("settings", "teamAlerts")) || {}) };
+}
+// 팀챗(채널톡) 알림: 깃허브 이슈로 남긴다. 실패해도 업무 흐름은 막지 않는다.
+async function sendTeamAlert(kind, notice) {
+  try {
+    const cfg = await teamAlertSettings();
+    const plan = teamAlerts.planAlert(cfg, kind);
+    if (!plan) return null;
+    let token = "";
+    try { token = clobe.openSecret(cfg.token); } catch { token = ""; }
+    const issue = teamAlerts.issueFor(notice, plan);
+    return await teamAlerts.createIssue({ repo: cfg.repo, token, ...issue });
+  } catch (error) {
+    console.error("team alert failed", kind, error.message);
+    return { error: error.message };
+  }
+}
+
 async function pushNotice(kind, data = {}, ref = {}) {
   try {
     const n = notify.noticeFor(kind, data);
+    sendTeamAlert(kind, n);
     const rec = { id: id("ntc"), kind, title: n.title, text: n.text, refType: ref.type || "", refId: ref.id || "", createdAt: now(), shares: [] };
     const cfg = await messengerSettings();
     if (cfg.mode !== "off" && (cfg.autoKinds || []).includes(kind)) {
@@ -8290,6 +8311,44 @@ async function routeApi(req, res, url) {
     sendJson(res, 200, { ok: true });
     return;
   }
+  // 팀챗 알림 설정(대표만 바꿈). 토큰은 암호화해 저장하고 돌려주지 않는다.
+  if (pathname === "/api/team-alerts/settings" && method === "GET") {
+    const cfg = await teamAlertSettings();
+    sendJson(res, 200, { enabled: cfg.enabled, repo: cfg.repo, kinds: cfg.kinds, people: cfg.people, tokenSet: Boolean(cfg.token), kindLabels: teamAlerts.ALERT_KINDS, isOwner: actor.role === "owner" });
+    return;
+  }
+  if (pathname === "/api/team-alerts/settings" && method === "PUT") {
+    if (actor.role !== "owner") { sendJson(res, 403, { error: "대표만 바꿀 수 있습니다." }); return; }
+    const body = await readBody(req);
+    const cfg = await teamAlertSettings();
+    const next = { ...cfg };
+    if ("enabled" in body) next.enabled = body.enabled === true;
+    if ("repo" in body) next.repo = String(body.repo || "").trim().slice(0, 100);
+    if (Array.isArray(body.kinds)) next.kinds = body.kinds.filter((k) => teamAlerts.ALERT_KINDS[k]);
+    if (Array.isArray(body.people)) next.people = body.people.slice(0, 20).map((p) => ({
+      name: String(p.name || "").trim().slice(0, 30), github: String(p.github || "").replace(/^@/, "").trim().slice(0, 39),
+      on: p.on === true, kinds: (Array.isArray(p.kinds) ? p.kinds : []).filter((k) => teamAlerts.ALERT_KINDS[k])
+    })).filter((p) => p.name || p.github);
+    if (body.token) next.token = clobe.sealSecret(String(body.token).trim());
+    await erp.put("settings", next);
+    addAudit(db, actor, "update", "settings", "teamAlerts", `팀챗 알림 설정 변경 (${next.enabled ? "켬" : "끔"})`, null, { kinds: next.kinds, people: next.people.map((p) => `${p.name}${p.on ? "" : "(끔)"}`) });
+    await writeDb(db);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+  if (pathname === "/api/team-alerts/test" && method === "POST") {
+    if (actor.role !== "owner") { sendJson(res, 403, { error: "대표만 시험할 수 있습니다." }); return; }
+    const cfg = await teamAlertSettings();
+    let token = "";
+    try { token = clobe.openSecret(cfg.token); } catch { token = ""; }
+    const mentions = (cfg.people || []).filter((p) => p.on && p.github).map((p) => `@${p.github}`);
+    try {
+      const r = await teamAlerts.createIssue({ repo: cfg.repo, token, title: "[시험] WOOOF ERP 팀챗 알림", body: `pay에서 보낸 시험 알림입니다.${mentions.length ? `\n${mentions.join(" ")}` : ""}` });
+      sendJson(res, 200, { ok: true, ...r });
+    } catch (error) { sendJson(res, 400, { error: error.message }); }
+    return;
+  }
+
   // 시험 발송(대표만): 설정이 맞는지 내 번호·내 메일로 확인한다.
   if (pathname === "/api/ship-notify/test" && method === "POST") {
     if (actor.role !== "owner") { sendJson(res, 403, { error: "대표만 시험 발송할 수 있습니다." }); return; }
@@ -9246,6 +9305,7 @@ async function routeApi(req, res, url) {
         autoDrafts.push(draft);
       }
       const prepared = await prepareOnCafe24(db, actor, autoDrafts);
+      if (autoCreated.length) pushNotice("request_batch", { items: autoCreated, source: "주문 수집 자동등록", by: actor.name || "" }, { type: "request", id: "" });
       db.cafe24.lastSyncAt = now();
       await writeDb(db);
       sendJson(res, 200, {
@@ -9296,6 +9356,7 @@ async function routeApi(req, res, url) {
     const prepared = await prepareOnCafe24(db, actor, createdDrafts);
     if (created.length || prepared) await writeDb(db);
     sendJson(res, 200, { created, createdCount: created.length, skipped, prepared });
+    if (created.length) pushNotice("request_batch", { items: created.map((r) => ({ brandName: r.brandName, orderNo: r.orderNo, customerName: r.customerName, depositAmount: r.depositAmount })), source: "주문매칭", by: actor.name || "" }, { type: "request", id: created[0].id });
     return;
   }
 
@@ -9329,6 +9390,7 @@ async function routeApi(req, res, url) {
     const prepared = await prepareOnCafe24(db, actor, createdDrafts);
     await writeDb(db);
     sendJson(res, 200, { brandName: brand.name, createdCount: created.length, prepared });
+    if (created.length) pushNotice("request_batch", { items: created.map((r) => ({ brandName: r.brandName, orderNo: r.orderNo, customerName: r.customerName, depositAmount: r.depositAmount })), source: "월단위입금", by: actor.name || "" }, { type: "request", id: created[0].id });
     return;
   }
 

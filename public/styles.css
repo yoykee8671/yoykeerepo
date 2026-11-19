@@ -3131,3 +3131,6 @@ tbody tr:hover td.sticky, .requests-table tbody tr:hover td:nth-child(-n+2) { ba
 .ship-tpl { display: grid; gap: 6px; padding: 10px 0; border-top: 1px solid var(--grey100); }
 .ship-tpl-grid h3 { font-size: 15px; margin: 0 0 6px; }
 @media (max-width: 900px) { .ship-tpl-grid { grid-template-columns: 1fr; } }
+.ta-people { display: grid; gap: 8px; margin: 6px 0 8px; }
+.ta-person { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 10px; border: 1px solid var(--hairline); border-radius: 10px; }
+.ta-person input:not([type=checkbox]) { min-height: 34px; }
