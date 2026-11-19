@@ -1383,35 +1383,32 @@ async function messengerSettings() {
 }
 async function teamAlertSettings() {
   const cfg = { id: "teamAlerts", ...teamAlerts.DEFAULT_TEAM_ALERTS, ...((await erp.get("settings", "teamAlerts")) || {}) };
-  // 예전 형식(사람마다 key 가 없던 설정)이면 기본 사람 목록(교영·예빈·재량)으로 바꾼다.
-  if (!Array.isArray(cfg.people) || cfg.people.some((p) => !p.key)) cfg.people = teamAlerts.DEFAULT_PEOPLE;
   if (!cfg.events || typeof cfg.events !== "object" || Array.isArray(cfg.events)) cfg.events = {};
   return cfg;
 }
-// 팀챗(채널톡) 알림: 깃허브 이슈로 남긴다(라벨로 방을 가른다). 실패해도 업무 흐름은 막지 않는다.
-async function postTeamIssue(cfg, notice, plan) {
-  let token = "";
-  try { token = clobe.openSecret(cfg.token); } catch { token = ""; }
-  return teamAlerts.createIssue({ repo: cfg.repo, token, ...teamAlerts.issueFor(notice, plan) });
+// 팀챗 알림: 슬랙 웹훅으로 보낸다(채널톡이 슬랙 채널을 팀챗 방으로 옮겨 줌). 실패해도 업무 흐름은 막지 않는다.
+async function postTeam(cfg, notice, plan) {
+  let webhook = "";
+  try { webhook = clobe.openSecret(cfg.webhook); } catch { webhook = ""; }
+  return teamAlerts.postSlack({ webhook, text: teamAlerts.slackTextFor(notice, plan) });
 }
 async function sendTeamAlert(kind, notice) {
   try {
     const cfg = await teamAlertSettings();
     const plan = teamAlerts.planAuto(cfg, kind);
     if (!plan) return null;
-    return await postTeamIssue(cfg, notice, plan);
+    return await postTeam(cfg, notice, plan);
   } catch (error) {
     console.error("team alert failed", kind, error.message);
     return { error: error.message };
   }
 }
 // 요청할 때 '팀챗 전송'을 체크했거나, 나중에 골라서 보낼 때.
-async function sendTeamManual(event, notice, tagKeys) {
+async function sendTeamManual(event, notice) {
   const cfg = await teamAlertSettings();
   if (!cfg.enabled) throw new Error("팀챗 알림이 꺼져 있습니다(관리/설정 › 알림 설정).");
-  const ev = teamAlerts.eventConfig(cfg, event);
-  if (!ev) throw new Error("알 수 없는 알림 종류입니다.");
-  return postTeamIssue(cfg, notice, { event, room: ev.room, mentions: teamAlerts.mentionsFor(cfg, Array.isArray(tagKeys) ? tagKeys : ev.tags) });
+  if (!teamAlerts.eventConfig(cfg, event)) throw new Error("알 수 없는 알림 종류입니다.");
+  return postTeam(cfg, notice, { event });
 }
 function requestBatchNotice(list, source, by) {
   return notify.noticeFor(list.length === 1 ? "request_new" : "request_batch", list.length === 1
@@ -8340,51 +8337,43 @@ async function routeApi(req, res, url) {
     sendJson(res, 200, { ok: true });
     return;
   }
-  // 팀챗 알림 설정(대표만 바꿈). 토큰은 암호화해 저장하고 돌려주지 않는다.
+  // 팀챗 알림 설정(대표만 바꿈). 슬랙 웹훅 주소는 암호화해 저장하고 돌려주지 않는다.
   if (pathname === "/api/team-alerts/settings" && method === "GET") {
     const cfg = await teamAlertSettings();
     const events = Object.fromEntries(Object.keys(teamAlerts.EVENTS).map((k) => [k, teamAlerts.eventConfig(cfg, k)]));
-    sendJson(res, 200, { enabled: cfg.enabled, repo: cfg.repo, people: cfg.people, events, rooms: teamAlerts.ROOMS, tokenSet: Boolean(cfg.token), isOwner: actor.role === "owner" });
+    sendJson(res, 200, { enabled: cfg.enabled, events, webhookSet: Boolean(cfg.webhook), isOwner: actor.role === "owner" });
     return;
   }
   if (pathname === "/api/team-alerts/settings" && method === "PUT") {
     if (actor.role !== "owner") { sendJson(res, 403, { error: "대표만 바꿀 수 있습니다." }); return; }
     const body = await readBody(req);
     const cfg = await teamAlertSettings();
-    const next = { ...cfg };
+    const next = { id: "teamAlerts", enabled: cfg.enabled, events: cfg.events, webhook: cfg.webhook };
     if ("enabled" in body) next.enabled = body.enabled === true;
-    if ("repo" in body) next.repo = String(body.repo || "").trim().slice(0, 100);
-    if (Array.isArray(body.people)) next.people = body.people.slice(0, 20).map((p, i) => ({
-      key: String(p.key || `p${i + 1}`).replace(/[^\w-]/g, "").slice(0, 20) || `p${i + 1}`,
-      name: String(p.name || "").trim().slice(0, 30), github: String(p.github || "").replace(/^@/, "").trim().slice(0, 39)
-    })).filter((p) => p.name || p.github);
     if (body.events && typeof body.events === "object") {
       next.events = {};
       for (const [k, v] of Object.entries(body.events)) {
         if (!teamAlerts.EVENTS[k]) continue;
-        next.events[k] = {
-          room: teamAlerts.ROOMS[v.room] ? v.room : teamAlerts.EVENTS[k].room,
-          mode: ["auto", "manual", "off"].includes(v.mode) ? v.mode : teamAlerts.EVENTS[k].mode,
-          tags: (Array.isArray(v.tags) ? v.tags : []).map(String).slice(0, 20)
-        };
+        next.events[k] = { mode: ["auto", "manual", "off"].includes(v?.mode) ? v.mode : teamAlerts.EVENTS[k].mode };
       }
     }
-    if (body.token) next.token = clobe.sealSecret(String(body.token).trim());
+    if (body.webhook) {
+      const url = String(body.webhook).trim();
+      if (!teamAlerts.isSlackWebhook(url)) { sendJson(res, 400, { error: "슬랙 웹훅 주소가 올바르지 않습니다(https://hooks.slack.com/services/...)." }); return; }
+      next.webhook = clobe.sealSecret(url);
+    }
     await erp.put("settings", next);
-    addAudit(db, actor, "update", "settings", "teamAlerts", `팀챗 알림 설정 변경 (${next.enabled ? "켬" : "끔"})`, null, { events: next.events, people: next.people });
+    addAudit(db, actor, "update", "settings", "teamAlerts", `팀챗 알림 설정 변경 (${next.enabled ? "켬" : "끔"})`, null, { events: next.events });
     await writeDb(db);
     sendJson(res, 200, { ok: true });
     return;
   }
-  // 시험: 고른 방으로, 교영(kyo)만 태그해서 보낸다.
+  // 시험: 저장된 웹훅으로 시험 글 하나.
   if (pathname === "/api/team-alerts/test" && method === "POST") {
     if (actor.role !== "owner") { sendJson(res, 403, { error: "대표만 시험할 수 있습니다." }); return; }
-    const body = await readBody(req);
     const cfg = await teamAlertSettings();
-    const room = teamAlerts.ROOMS[body.room] ? body.room : "erp";
     try {
-      const r = await postTeamIssue(cfg, { title: `시험 알림 (${teamAlerts.ROOMS[room].name} 방)`, text: "pay에서 보낸 시험 알림입니다." },
-        { event: "test", room, mentions: teamAlerts.mentionsFor(cfg, Array.isArray(body.tags) ? body.tags : ["kyo"]) });
+      const r = await postTeam(cfg, { title: "시험 알림", text: "pay에서 보낸 시험 알림입니다." }, { event: "test" });
       sendJson(res, 200, { ok: true, ...r });
     } catch (error) { sendJson(res, 400, { error: error.message }); }
     return;
@@ -8400,7 +8389,7 @@ async function routeApi(req, res, url) {
         const list = db.requests.filter((r) => ids.has(r.id) && r.status !== "deleted");
         if (!list.length) { sendJson(res, 400, { error: "보낼 입금요청을 고르세요." }); return; }
         notice = requestBatchNotice(list, "선택 전송", actor.name || "");
-        const r = await sendTeamManual("request", notice, body.tags);
+        const r = await sendTeamManual("request", notice);
         for (const x of list) x.teamSentAt = now();
         await writeDb(db);
         sendJson(res, 200, { ok: true, count: list.length, ...r });
@@ -8408,7 +8397,7 @@ async function routeApi(req, res, url) {
         if (!can(actor, "payments", "view")) { sendJson(res, 403, { error: "지급요청 권한이 필요합니다." }); return; }
         const list = (await erp.list("payments")).filter((p) => ids.has(p.id));
         if (!list.length) { sendJson(res, 400, { error: "보낼 지급요청을 고르세요." }); return; }
-        const r = await sendTeamManual("payment", paymentBatchNotice(list, actor.name || ""), body.tags);
+        const r = await sendTeamManual("payment", paymentBatchNotice(list, actor.name || ""));
         for (const p of list) await erp.put("payments", { ...p, teamSentAt: now() });
         sendJson(res, 200, { ok: true, count: list.length, ...r });
       } else {
@@ -8773,7 +8762,7 @@ async function routeApi(req, res, url) {
     await writeDb(db);
     sendJson(res, 201, { request });
     pushNotice("request_new", { ...request, by: actor.name || "" }, { type: "request", id: request.id });
-    if (body.teamSend) sendTeamManual("request", requestBatchNotice([request], "", actor.name || ""), body.teamTags).catch((e) => console.error("team send failed", e.message));
+    if (body.teamSend) sendTeamManual("request", requestBatchNotice([request], "", actor.name || "")).catch((e) => console.error("team send failed", e.message));
     syncArchiveInBackground(db, actor, request.brandId, "request_created");
     return;
   }
@@ -9427,7 +9416,7 @@ async function routeApi(req, res, url) {
     if (created.length || prepared) await writeDb(db);
     sendJson(res, 200, { created, createdCount: created.length, skipped, prepared });
     if (created.length) pushNotice("request_batch", { items: created.map((r) => ({ brandName: r.brandName, orderNo: r.orderNo, customerName: r.customerName, depositAmount: r.depositAmount })), source: "주문매칭", by: actor.name || "" }, { type: "request", id: created[0].id });
-    if (created.length && body.teamSend) sendTeamManual("request", requestBatchNotice(created, "주문매칭", actor.name || ""), body.teamTags).catch((e) => console.error("team send failed", e.message));
+    if (created.length && body.teamSend) sendTeamManual("request", requestBatchNotice(created, "주문매칭", actor.name || "")).catch((e) => console.error("team send failed", e.message));
     return;
   }
 
@@ -14166,7 +14155,7 @@ async function routeApi(req, res, url) {
       await erp.put("payments", rec);
       sendJson(res, 201, { payment: rec });
       pushNotice("payment_new", { ...rec, by: who.name }, { type: "payment", id: rec.id });
-      if (body.teamSend) sendTeamManual("payment", paymentBatchNotice([rec], who.name || ""), body.teamTags).catch((e) => console.error("team send failed", e.message));
+      if (body.teamSend) sendTeamManual("payment", paymentBatchNotice([rec], who.name || "")).catch((e) => console.error("team send failed", e.message));
       return;
     }
 

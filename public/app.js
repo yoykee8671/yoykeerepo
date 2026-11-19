@@ -2539,7 +2539,7 @@ function renderNotifySettings() {
     ${renderShipNotifySettings()}`;
 }
 
-// ---- 팀챗 알림(채널톡 ← 깃허브 이슈) ------------------------------------------
+// ---- 팀챗 알림(채널톡 ← 슬랙 웹훅) ------------------------------------------
 async function ensureTeamAlerts() {
   if (state.teamAlerts || state.teamAlertsLoading) return state.teamAlerts;
   state.teamAlertsLoading = true;
@@ -2548,44 +2548,40 @@ async function ensureTeamAlerts() {
   renderApp();
   return state.teamAlerts;
 }
-// 요청을 만들 때 붙는 '팀챗 전송' 체크 + 태그할 사람(기본: 알림 설정의 기본 태그).
+// 요청을 만들 때 붙는 '팀챗 전송' 체크.
 function teamSendControls(event) {
   const ta = state.teamAlerts;
   if (!ta) { ensureTeamAlerts(); return ""; }
   if (!ta.enabled) return "";
   const ev = ta.events?.[event];
   if (!ev || ev.mode === "off") return "";
-  const room = ta.rooms?.[ev.room]?.name || "";
   return `<div class="team-send" data-team-send="${h(event)}">
-    <label class="switch-line" style="margin:0"><input type="checkbox" data-ts-on ${ev.mode === "auto" ? "checked disabled" : ""}><span><b>팀챗 전송</b> <span class="meta">${h(room)} 방</span></span></label>
-    <span class="meta">태그</span>${(ta.people || []).map((p) => `<label class="perm-box"><input type="checkbox" data-ts-tag="${h(p.key)}" ${(ev.tags || []).includes(p.key) ? "checked" : ""}> ${h(p.name)}</label>`).join("")}
+    <label class="switch-line" style="margin:0"><input type="checkbox" data-ts-on ${ev.mode === "auto" ? "checked disabled" : ""}><span><b>팀챗 전송</b> <span class="meta">alert 방</span></span></label>
   </div>`;
 }
 function readTeamSend(root) {
   const box = root?.querySelector("[data-team-send]");
   if (!box) return {};
-  return { teamSend: Boolean(box.querySelector("[data-ts-on]")?.checked), teamTags: [...box.querySelectorAll("[data-ts-tag]:checked")].map((c) => c.dataset.tsTag) };
+  return { teamSend: Boolean(box.querySelector("[data-ts-on]")?.checked) };
 }
-// 나중에 골라서 보내기: 작은 창에서 태그를 고르고 보낸다.
+// 나중에 골라서 보내기: 고른 건을 한 글로 묶어 보낸다.
 function renderTeamSendModal() {
   const m = state.teamSendModal;
   if (!m) return "";
+  const ta = state.teamAlerts;
+  const off = !ta?.enabled || ta.events?.[m.event]?.mode === "off";
   return v2Modal(`<div class="panel-head"><h2>팀챗 전송 <span class="count">${m.ids.length}건</span></h2><button data-tsm-close>닫기</button></div>
-    <div class="panel-body">${teamSendControls(m.event) || `<p class="muted">팀챗 알림이 꺼져 있습니다(관리/설정 › 알림 설정).</p>`}
-      <p class="hint">고른 ${m.ids.length}건을 한 번에 묶어 보냅니다.</p>
-      <div class="action-row"><button class="primary" data-tsm-send>보내기</button><button data-tsm-close>취소</button></div></div>`, "data-tsm-close");
+    <div class="panel-body">${off ? `<p class="muted">팀챗 알림이 꺼져 있습니다(관리/설정 › 알림 설정).</p>` : `<p class="hint">고른 ${m.ids.length}건을 한 글로 묶어 팀챗 alert 방에 보냅니다.</p>`}
+      <div class="action-row"><button class="primary" data-tsm-send ${off ? "disabled" : ""}>보내기</button><button data-tsm-close>취소</button></div></div>`, "data-tsm-close");
 }
 function bindTeamSendModal() {
   const m = state.teamSendModal;
   if (!m) return;
   app.querySelectorAll("[data-tsm-close]").forEach((b) => b.addEventListener("click", () => { state.teamSendModal = null; renderApp(); }));
-  const box = app.querySelector("[data-team-send]");
-  const on = box?.querySelector("[data-ts-on]"); if (on && !on.disabled) on.checked = true;
   app.querySelector("[data-tsm-send]")?.addEventListener("click", async (e) => {
     e.currentTarget.disabled = true;
     try {
-      const { teamTags } = readTeamSend(app.querySelector(".v2-modal"));
-      const r = await api("/api/team-alerts/send", { method: "POST", body: { event: m.event, ids: m.ids, tags: teamTags } });
+      const r = await api("/api/team-alerts/send", { method: "POST", body: { event: m.event, ids: m.ids } });
       showToast(`팀챗에 ${r.count}건을 보냈습니다.`);
       state.teamSendModal = null;
       await loadAll();
@@ -2597,37 +2593,25 @@ const TA_MODE = { auto: "일어나면 자동", manual: "체크해서 보냄", of
 function renderTeamAlertSettings() {
   const ta = state.teamAlerts;
   if (!ta) { ensureTeamAlerts(); return ""; }
-  const d = state.teamAlertsDraft || (state.teamAlertsDraft = { people: JSON.parse(JSON.stringify(ta.people || [])), events: JSON.parse(JSON.stringify(ta.events || {})) });
-  const roomOpts = (cur) => Object.entries(ta.rooms).map(([k, r]) => `<option value="${k}" ${cur === k ? "selected" : ""}>${h(r.name)}</option>`).join("");
-  return `<section class="panel"><div class="panel-head"><h2>팀챗 알림 (채널톡)</h2><span class="meta">${ta.enabled ? "켜짐" : "꺼짐"}${ta.tokenSet ? "" : " · 토큰 없음"}</span></div>
+  const d = state.teamAlertsDraft || (state.teamAlertsDraft = { events: JSON.parse(JSON.stringify(ta.events || {})) });
+  return `<section class="panel"><div class="panel-head"><h2>팀챗 알림 (슬랙 → 채널톡)</h2><span class="meta">${ta.enabled ? "켜짐" : "꺼짐"}${ta.webhookSet ? "" : " · 웹훅 없음"}</span></div>
     <div class="panel-body">
-      <div class="action-row" style="margin-top:0">
-        <label class="switch-line" style="margin:0"><input type="checkbox" data-ta-enabled ${ta.enabled ? "checked" : ""}><span><b>팀챗 알림 켜기</b></span></label>
-        <label class="inline-field"><span>저장소</span><input data-ta-repo value="${h(ta.repo || "")}" style="width:220px"></label>
-      </div>
+      <label class="switch-line" style="margin:0"><input type="checkbox" data-ta-enabled ${ta.enabled ? "checked" : ""}><span><b>팀챗 알림 켜기</b></span></label>
       <h3 class="ta-h">알림 종류</h3>
-      <div class="table-wrap"><table class="compact ta-events"><thead><tr><th>알림</th><th>방</th><th>보내는 방식</th><th>기본 태그</th></tr></thead><tbody>
+      <div class="table-wrap"><table class="compact ta-events"><thead><tr><th>알림</th><th>보내는 방식</th></tr></thead><tbody>
         ${Object.entries(d.events).map(([k, ev]) => `<tr>
           <td><strong>${h(ev.label)}</strong></td>
-          <td><select data-ta-room="${k}">${roomOpts(ev.room)}</select></td>
           <td><select data-ta-mode="${k}">${Object.entries(TA_MODE).map(([m, l]) => `<option value="${m}" ${ev.mode === m ? "selected" : ""}>${l}</option>`).join("")}</select></td>
-          <td><div class="perm-actions">${d.people.map((p) => `<label class="perm-box"><input type="checkbox" data-ta-etag="${k}:${h(p.key)}" ${(ev.tags || []).includes(p.key) ? "checked" : ""}> ${h(p.name)}</label>`).join("")}</div></td>
         </tr>`).join("")}
       </tbody></table></div>
-      ${helpNote(`채널톡 GitHub 앱 › 저장소 pay-alerts › 알림방마다 <b>필수 라벨</b>을 넣어야 방이 갈립니다: ${Object.values(ta.rooms).map((r) => `<b>${h(r.name)}</b> = <code>${h(r.label)}</code>`).join(", ")}. '체크해서 보냄'은 요청을 만들 때 '팀챗 전송'을 체크하거나, 목록에서 골라 [팀챗 전송]을 누를 때 나갑니다.`)}
-      <h3 class="ta-h">사람 <span class="meta">고른 사람 이름이 알림 제목 끝에 &#39;@이름&#39;으로 붙습니다</span></h3>
-      <div class="ta-people">${d.people.map((p, i) => `<div class="ta-person">
-        <input data-ta-name="${i}" value="${h(p.name || "")}" placeholder="이름" style="width:110px">
-        
-        <button type="button" class="ghost small" data-ta-del="${i}" aria-label="빼기">×</button></div>`).join("")}</div>
-      <div><button type="button" class="small" data-ta-add>+ 사람 추가</button></div>
-      <div class="field two" style="margin-top:12px">
-        <div><label>깃허브 토큰 <span class="muted" style="font-weight:400">${ta.tokenSet ? "(저장됨 — 바꿀 때만 입력)" : "(pay-alerts 저장소 Issues 쓰기)"}</span></label><input data-ta-token type="password" autocomplete="new-password" placeholder="${ta.tokenSet ? "••••••••" : "github_pat_..."}"></div>
+      ${helpNote("슬랙 #notice 채널로 보내면 채널톡이 팀챗 alert 방으로 옮겨 줍니다. 사람 태그는 되지 않으니 방 알림을 모두 켜 두세요. '체크해서 보냄'은 요청을 만들 때 '팀챗 전송'을 체크하거나, 목록에서 골라 [팀챗 전송]을 누를 때 나갑니다.")}
+      <div class="field" style="margin-top:12px">
+        <label>슬랙 웹훅 주소 <span class="muted" style="font-weight:400">${ta.webhookSet ? "(저장됨 — 바꿀 때만 입력)" : "(https://hooks.slack.com/services/...)"}</span></label>
+        <input data-ta-webhook type="password" autocomplete="new-password" placeholder="${ta.webhookSet ? "••••••••" : "https://hooks.slack.com/services/..."}">
       </div>
       <div class="action-row">
         <button class="primary" data-ta-save>팀챗 알림 저장</button>
-        ${Object.entries(ta.rooms).map(([k, r]) => `<button data-ta-test="${k}" ${ta.tokenSet ? "" : "disabled"}>시험: ${h(r.name)}</button>`).join("")}
-        <span class="meta">시험은 교영만 태그합니다</span>
+        <button data-ta-test ${ta.webhookSet ? "" : "disabled"}>시험 보내기</button>
       </div>
     </div></section>`;
 }
@@ -2636,29 +2620,20 @@ function bindTeamAlertSettings() {
   if (!ta || !state.teamAlertsDraft) return;
   const d = state.teamAlertsDraft;
   const q = (sel) => app.querySelector(sel);
-  app.querySelectorAll("[data-ta-room]").forEach((c) => c.addEventListener("change", () => { d.events[c.dataset.taRoom].room = c.value; }));
   app.querySelectorAll("[data-ta-mode]").forEach((c) => c.addEventListener("change", () => { d.events[c.dataset.taMode].mode = c.value; }));
-  app.querySelectorAll("[data-ta-etag]").forEach((c) => c.addEventListener("change", () => {
-    const [k, key] = c.dataset.taEtag.split(":"); const ev = d.events[k];
-    ev.tags = c.checked ? [...new Set([...(ev.tags || []), key])] : (ev.tags || []).filter((x) => x !== key);
-  }));
-  app.querySelectorAll("[data-ta-name]").forEach((c) => c.addEventListener("input", () => { d.people[Number(c.dataset.taName)].name = c.value; }));
-  app.querySelectorAll("[data-ta-github]").forEach((c) => c.addEventListener("input", () => { d.people[Number(c.dataset.taGithub)].github = c.value; }));
-  app.querySelectorAll("[data-ta-del]").forEach((b) => b.addEventListener("click", () => { d.people.splice(Number(b.dataset.taDel), 1); renderApp(); }));
-  q("[data-ta-add]")?.addEventListener("click", () => { d.people.push({ key: `p${Date.now().toString(36)}`, name: "", github: "" }); renderApp(); });
   q("[data-ta-save]")?.addEventListener("click", async () => {
-    const body = { enabled: Boolean(q("[data-ta-enabled]")?.checked), repo: q("[data-ta-repo]")?.value || "", people: d.people, events: d.events };
-    const token = q("[data-ta-token]")?.value || "";
-    if (token) body.token = token;
+    const body = { enabled: Boolean(q("[data-ta-enabled]")?.checked), events: d.events };
+    const webhook = q("[data-ta-webhook]")?.value.trim() || "";
+    if (webhook) body.webhook = webhook;
     try { await api("/api/team-alerts/settings", { method: "PUT", body }); state.teamAlerts = null; state.teamAlertsDraft = null; showToast("팀챗 알림 설정을 저장했습니다."); renderApp(); }
     catch (e) { showToast(e.message, "error"); }
   });
-  app.querySelectorAll("[data-ta-test]").forEach((b) => b.addEventListener("click", async () => {
-    b.disabled = true;
-    try { const r = await api("/api/team-alerts/test", { method: "POST", body: { room: b.dataset.taTest, tags: ["kyo"] } }); showToast(`시험 알림을 보냈습니다(이슈 #${r.number}). 해당 방을 확인하세요.`); }
+  q("[data-ta-test]")?.addEventListener("click", async (e) => {
+    const b = e.currentTarget; b.disabled = true;
+    try { await api("/api/team-alerts/test", { method: "POST" }); showToast("시험 알림을 보냈습니다. 팀챗 alert 방을 확인하세요."); }
     catch (err) { showToast(err.message, "error"); }
     b.disabled = false;
-  }));
+  });
 }
 
 // 대표 전용: 문자 발신번호와 문구(문자 3·메일 3)를 고친다.
