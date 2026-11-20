@@ -3152,3 +3152,17 @@ tbody tr:hover td.sticky, .requests-table tbody tr:hover td:nth-child(-n+2) { ba
 
 /* active sub-tab keeps its dark fill on hover (hover rule above made white-on-white) */
 .npb-subtab.active:hover { background: var(--grey900); }
+
+/* ---- 누르면 열리는 것 구분 (2026-11-20) -------------------------------------
+   - 글 속 링크: 파란 글자 + 옅은 밑줄(늘 보임), 새 창으로 열리면 ↗
+   - 누르면 열리는 줄(hub-go 등): 마우스를 올리면 파란 바탕 + 이름에 밑줄 (일반 줄은 회색 바탕) */
+:is(.main, .v2-modal, .popup-shell) a[href]:not(.button):not(.menu-list a):not(.stepper a) {
+  color: var(--primary); text-decoration: underline; text-underline-offset: 3px;
+  text-decoration-color: color-mix(in srgb, var(--primary) 35%, transparent);
+}
+:is(.main, .v2-modal, .popup-shell) a[href]:not(.button):not(.menu-list a):not(.stepper a):hover { text-decoration-color: currentColor; }
+:is(.main, .v2-modal, .popup-shell) a[target="_blank"]:not(.button):not(.menu-list a)::after { content: "↗"; font-size: .8em; margin-left: 2px; text-decoration: none; display: inline-block; }
+:is(tr.hub-go, tr.acc-row, tr[data-sales-open], tr[data-rec-open], tr[data-prod-open], tr[data-pricing-open], tr[data-loan-open], tr[data-acc-open], tr[data-rehab-year]) { cursor: pointer; }
+:is(tr.hub-go, tr.acc-row, tr[data-sales-open], tr[data-rec-open], tr[data-prod-open], tr[data-pricing-open], tr[data-loan-open], tr[data-acc-open], tr[data-rehab-year]):hover td { background: var(--primary-weak, #eaf2fe) !important; }
+:is(tr.hub-go, tr.acc-row, tr[data-sales-open], tr[data-rec-open], tr[data-prod-open], tr[data-pricing-open], tr[data-loan-open], tr[data-acc-open], tr[data-rehab-year]):hover td strong:first-of-type { color: var(--primary); text-decoration: underline; text-underline-offset: 3px; }
+.badge.ok { background: #e8f7ef; color: #067647; }

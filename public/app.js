@@ -13436,7 +13436,7 @@ function renderCashReport() {
   const { report: r, accounts = [], fund, clobeError } = cs.data || {};
   if (!r) return `<section class="panel"><div class="panel-body"><p class="muted">${h(cs.error || "보고서를 만들지 못했습니다.")}</p></div></section>`;
   const itemRows = (items, dir) => items.filter((l) => l.direction === dir).map((l) => `
-    <tr><td>${l.overdue ? `<span class="badge warn">기한지남</span> ` : ""}${h(l.title)}<br><span class="muted" style="font-size:11px">${(() => { const src = { schedule: "자금일정", payment: "지급요청", request: "선매입", sales: "받을 돈" }[l.source] || ""; return h(l.category && l.category !== src ? `${l.category} · ${src}` : src); })()}</span></td>
+    <tr><td>${l.overdue ? `<span class="badge warn">기한지남</span> ` : ""}${h(l.title)}<br><span class="muted" style="font-size:11px">${(() => { const src = { schedule: "자금일정", payment: "지급요청", request: "선매입", sales: "받을 돈", clobe: "클로브" }[l.source] || ""; return h(l.category && l.category !== src ? `${l.category} · ${src}` : src); })()}</span></td>
     <td class="num">${money.format(l.amount)}</td></tr>`).join("") || `<tr><td colspan="2" class="empty">없음</td></tr>`;
   return `
     ${clobeError ? notice("warn", "계좌 잔액을 못 불러왔습니다", h(clobeError)) : ""}
@@ -13484,9 +13484,32 @@ function renderCashReport() {
       </div>
       <details style="padding:0 16px 16px"><summary class="muted">보고 문구 미리보기</summary><pre class="cash-text">${h(cs.data.text || "")}</pre></details>
     </section>
+    ${renderClobeReview()}
     ${cs.accDetail ? v2Modal(renderAccountDetail(), "data-acc-close") : ""}`;
 }
 
+// 클로브 자금 계획 일정: 자금일보에 넣을지 담당자가 고른다(회생 공익채권처럼 다른 곳에서 이미 잡는 돈은 뺀다).
+function renderClobeReview() {
+  const cs = cashState();
+  const rv = cs.data?.clobeReview;
+  if (!rv || (!rv.pending.length && !rv.decided.length)) return "";
+  const row = (r, decided) => `<tr>
+    <td><strong>${h(r.title)}</strong>${r.auto ? ` <span class="pill">클로브 자동</span>` : ""}${decided && r.reason ? `<br><span class="muted" style="font-size:12px">${h(r.reason)}${r.by ? ` · ${h(r.by)}` : ""}</span>` : ""}</td>
+    <td class="nowrap">${r.direction === "in" ? "들어올 돈" : "나갈 돈"}</td><td class="nowrap">${h(r.when)}</td><td class="num">${money.format(r.amount)}</td>
+    <td class="nowrap">${decided
+      ? `<span class="badge ${r.decision === "include" ? "ok" : ""}">${r.decision === "include" ? "넣음" : "뺌"}</span> <button class="ghost small" data-clobe-choice="${h(r.id)}" data-decision="">다시 고르기</button>`
+      : `<button class="small primary" data-clobe-choice="${h(r.id)}" data-decision="include" data-title="${h(r.title)}">넣기</button> <button class="small" data-clobe-choice="${h(r.id)}" data-decision="exclude" data-title="${h(r.title)}">빼기</button>`}</td></tr>`;
+  return `<section class="panel"><div class="panel-head"><h2>클로브 일정 확인 ${rv.pending.length ? `<span class="badge warn">${rv.pending.length}건 확인 필요</span>` : ""}</h2>
+      ${rv.decided.length ? `<button class="ghost small" data-clobe-show-decided>${cs.showClobeDecided ? "고른 것 접기" : `고른 것 ${rv.decided.length}건 보기`}</button>` : ""}</div>
+    <div class="panel-body">
+      ${helpNote("클로브 자금 계획에 있는 일정입니다. 자금일보에 넣을지 담당자가 고릅니다. 고르기 전에는 합계에 들어가지 않습니다. 회생 공익채권처럼 회생변제로 이미 잡는 돈, 현금흐름표 고정비와 겹치는 돈은 '빼기'를 누르세요. (판매처 정산 예정과 카드 결제 예정은 자동으로 들어갑니다)")}
+      <div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>일정</th><th>구분</th><th>언제</th><th class="num">금액</th><th></th></tr></thead><tbody>
+        ${rv.pending.map((r) => row(r, false)).join("")}
+        ${cs.showClobeDecided ? rv.decided.map((r) => row(r, true)).join("") : ""}
+        ${!rv.pending.length && !cs.showClobeDecided ? `<tr><td colspan="5" class="empty">확인할 일정이 없습니다.</td></tr>` : ""}
+      </tbody></table></div>
+    </div></section>`;
+}
 function renderCashSchedules() {
   const cs = cashState();
   const meta = cs.meta || {};
@@ -13665,6 +13688,20 @@ function bindCash() {
       showToast("메신저 공유함에 올렸습니다.");
     } catch (e) { showToast(e.message, "error"); }
   });
+  app.querySelector("[data-clobe-show-decided]")?.addEventListener("click", () => { cs.showClobeDecided = !cs.showClobeDecided; renderApp(); });
+  app.querySelectorAll("[data-clobe-choice]").forEach((b) => b.addEventListener("click", async () => {
+    const decision = b.dataset.decision;
+    let reason = "";
+    if (decision === "exclude") {
+      reason = prompt("뺄 이유를 적어 주세요 (예: 회생 공익채권 — 회생변제로 관리, 고정비와 중복)", "") ;
+      if (reason === null) return;
+    }
+    try {
+      await api("/api/cash/clobe-choice", { method: "POST", body: { id: b.dataset.clobeChoice, decision, reason, title: b.dataset.title || "" } });
+      showToast(decision === "include" ? "자금일보에 넣었습니다." : decision === "exclude" ? "자금일보에서 뺐습니다." : "다시 고를 수 있게 되돌렸습니다.");
+      await reload();
+    } catch (err) { showToast(err.message, "error"); }
+  }));
   app.querySelector("[data-cash-copy]")?.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(cs.data?.text || "");

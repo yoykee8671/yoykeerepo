@@ -1410,6 +1410,22 @@ async function sendTeamManual(event, notice) {
   if (!teamAlerts.eventConfig(cfg, event)) throw new Error("알 수 없는 알림 종류입니다.");
   return postTeam(cfg, notice, { event });
 }
+// 증빙 발행(거래명세서·발주서·청구서·계산서 등)은 공유함에 '안 보낸 것'으로 쌓는다 — 보낼 건은 골라서 복사.
+async function pushEvidence(items, by = "", ref = {}) {
+  try {
+    const n = notify.noticeFor("evidence", { items });
+    if (!n.items.length) return;
+    await erp.put("notices", { id: id("ntc"), kind: "evidence", title: n.title, text: n.text, items: n.items, refType: ref.type || "", refId: ref.id || "", createdAt: now(), createdBy: by, shares: [] });
+  } catch (error) { console.error("evidence notice failed", error.message); }
+}
+function tradeDocEvidence(db, po) {
+  const cat = { purchase_order: "발주서", statement: "거래명세서", invoice: "청구서" }[po.docType];
+  if (!cat) return null; // 견적서는 증빙이 아니다
+  const partner = (db.partners || []).find((x) => x.id === po.partnerId);
+  const first = (po.lineItems || [])[0];
+  const what = first ? `${first.itemName || ""}${po.lineItems.length > 1 ? ` 외 ${po.lineItems.length - 1}건` : ""}` : "";
+  return { cat, partner: partner?.name || "", amount: Number(po.total || 0), memo: [what, po.docNo].filter(Boolean).join(" · ") };
+}
 // 나중에 골라 팀챗으로 보낸 건: 그 건의 등록 알림을 공유함에서 '보냄'으로.
 async function markNoticesShared(kinds, ids, by) {
   for (const n of await erp.list("notices")) {
@@ -6954,6 +6970,22 @@ async function clobeAccessToken(db) {
   return clobeRefreshInFlight;
 }
 
+// 자금일보·기간 조회에 넣을 클로브 예정: 판매처(PG·마켓) 정산 예정 + 카드 결제 예정 + 담당자가 '넣기'로 고른 클로브 자금 계획.
+// 실패하면 빈 목록. review 는 담당자가 아직 고르지 않은 클로브 일정.
+async function clobePlan(db, company, start, end) {
+  try {
+    const companyId = await clobeCompanyIdFor(db, company);
+    if (!companyId) return { lines: [], review: { pending: [], decided: [] } };
+    const [revenue, plan, cards, choiceList] = await Promise.all([
+      clobeCall(db, "get_monthly_revenue", { companyId, startDate: start, endDate: end, dateBasis: "SETTLEMENT_DATE", timeUnit: "DAILY", size: 200 }).catch(() => null),
+      clobeCall(db, "get_expense_plan_items", { companyId, size: 100 }).catch(() => null),
+      clobeCall(db, "get_expense_plan_card_billing_forecast", { companyId }).catch(() => null),
+      erp.list("clobePlanChoices")
+    ]);
+    const choices = Object.fromEntries(choiceList.map((c) => [c.id, c]));
+    return { lines: cashReport.clobeLines({ revenue, plan, cards, choices, start, end }), review: cashReport.clobeReview(plan, choices) };
+  } catch { return { lines: [], review: { pending: [], decided: [] } }; }
+}
 async function clobeCall(db, tool, input) {
   const accessToken = await clobeAccessToken(db);
   return clobe.callTool(accessToken, tool, input);
@@ -11020,6 +11052,7 @@ async function routeApi(req, res, url) {
         db.npb.invoices[priorIndex] = invoice;
       } else {
         db.npb.invoices.push(invoice);
+        pushEvidence([{ cat: "청구서", partner: invoice.businessName || invoice.brandName || "", amount: Number(invoice.total || 0), memo: invoice.title || "" }], actor.name || "", { type: "npbInvoice", id: invoice.id });
       }
       await writeDb(db);
       sendJson(res, 200, { invoice });
@@ -11858,6 +11891,7 @@ async function routeApi(req, res, url) {
     addAudit(db, actor, "create", "purchaseOrder", po.id, `${po.docNo} ${TRADE_DOC_LABELS[po.docType] || "발주서"} 생성`, null, po);
     await writeDb(db);
     sendJson(res, 201, { purchaseOrder: po });
+    { const ev = tradeDocEvidence(db, po); if (ev) pushEvidence([ev], actor.name || "", { type: "purchaseOrder", id: po.id }); }
     return;
   }
 
@@ -13718,6 +13752,7 @@ async function routeApi(req, res, url) {
         db.purchaseOrders.unshift(built.po);
         addAudit(db, actor, "create", "purchaseOrder", built.po.id, `${built.po.docNo} 거래명세서 생성 (판매 ${o.code})`, null, built.po);
         await writeDb(db);
+        { const ev = tradeDocEvidence(db, built.po); if (ev) pushEvidence([ev], who.name || "", { type: "purchaseOrder", id: built.po.id }); }
         o.statementId = built.po.id;
         o.statementNo = built.po.docNo;
         o.issuerPartnerId = issuerPartnerId;
@@ -13746,6 +13781,12 @@ async function routeApi(req, res, url) {
         if (!o.invoice?.requestedAt) { sendJson(res, 400, { error: "계산서 요청이 먼저 필요합니다." }); return; }
         o.invoice = { ...o.invoice, status: "issued", issuedAt: dateOnly(body.date) || kstToday(), issuedBy: who.name };
         log(o, "계산서 발행 완료", o.invoice.issuedAt);
+        if (o.invoice.type !== "미발행") {
+          const cat = { 세금계산서: "매출세금", 영수증: "영수증" }[o.invoice.type] || "기타";
+          const partner = db.partners.find((p) => p.id === o.partnerId);
+          pushEvidence([{ cat, partner: partner?.name || o.partnerName || "", amount: Number(o.total || 0),
+            memo: [o.invoice.type === "계산서" ? "계산서(면세)" : "", o.invoice.content || o.title || "", o.code].filter(Boolean).join(" · ") }], who.name || "", { type: "salesOrder", id: o.id });
+        }
       } else if (step === "receive") {
         const amount = Math.round(number(String(body.amount ?? sales.remaining(o)).replace(/,/g, "")));
         if (!amount) { sendJson(res, 400, { error: "입금액을 입력하세요." }); return; }
@@ -13828,8 +13869,9 @@ async function routeApi(req, res, url) {
         const [schedules, pays, loans, loanPays, plan, rehabPays, so] = await Promise.all([
           erp.list("cashSchedules"), erp.list("payments").catch(() => []), erp.list("loans"), erp.list("loanPayments"),
           erp.get("rehabPlan", "current"), erp.list("rehabPayments"), erp.list("salesOrders").catch(() => [])]);
+        const extra = (await clobePlan(db, company, start, to)).lines;
         const report = cashReport.buildCashReport({
-          today: start, days, company: companyKey, openingBalance: null,
+          today: start, days, company: companyKey, openingBalance: null, extra,
           schedules: [...schedules, ...loansLib.loanScheduleLines(loans.filter((l) => l.company === companyKey), loanPays, start, to),
             ...(companyKey === "wooof" ? rehab.rehabScheduleLines(plan, rehabPays, start, to) : [])],
           payments: pays.filter((x) => (x.company || "wooof") === companyKey),
@@ -13978,6 +14020,20 @@ async function routeApi(req, res, url) {
       return;
     }
 
+    // 클로브 자금 계획 일정을 자금일보에 넣을지/뺄지(담당자가 고른다).
+    if (pathname === "/api/cash/clobe-choice" && method === "POST") {
+      if (!requirePermission(actor, res, "cash", "edit")) return;
+      const body = await readBody(req);
+      const cid = String(body.id || "").trim().slice(0, 80);
+      if (!cid) { sendJson(res, 400, { error: "일정을 고르세요." }); return; }
+      if (!body.decision) { await erp.remove("clobePlanChoices", cid); sendJson(res, 200, { ok: true }); return; }
+      if (!["include", "exclude"].includes(body.decision)) { sendJson(res, 400, { error: "넣기 또는 빼기만 고를 수 있습니다." }); return; }
+      const rec = { id: cid, decision: body.decision, reason: String(body.reason || "").trim().slice(0, 200), title: String(body.title || "").slice(0, 120), by: actor.name || actor.email || "", at: now() };
+      await erp.put("clobePlanChoices", rec);
+      sendJson(res, 200, { choice: rec });
+      return;
+    }
+
     // 출금 리포트(퇴근 보고). ?company=wooof|betters&date=YYYY-MM-DD
     if (pathname === "/api/cash/payout" && method === "GET") {
       const companyKey = CASH_COMPANIES.some((c) => c.key === url.searchParams.get("company")) ? url.searchParams.get("company") : "wooof";
@@ -14004,13 +14060,19 @@ async function routeApi(req, res, url) {
       let accounts = [];
       let fund = null;
       let clobeError = "";
+      let clobeExtra = [];
+      let clobeReviewList = { pending: [], decided: [] };
       try {
         const companyId = await clobeCompanyIdFor(db, company);
         if (companyId) {
-          const [acc, rep] = await Promise.all([
+          const [acc, rep, extra] = await Promise.all([
             clobeCall(db, "get_bank_accounts", { companyId }),
-            clobeCall(db, "get_daily_fund_report", { companyId }).catch(() => null)
+            clobeCall(db, "get_daily_fund_report", { companyId }).catch(() => null),
+            // 판매처(쿠팡·스마트스토어·29CM·PG)별 정산 예정 + 카드 결제 + 고른 클로브 일정
+            clobePlan(db, company, today, payments.addDays(today, days))
           ]);
+          clobeExtra = extra.lines;
+          clobeReviewList = extra.review;
           // 계좌별 보기 설정(즐겨찾기·숨김·별칭) — 클로브처럼 자주 쓰는 계좌만 앞에, 안 쓰는 계좌는 접어 둔다.
           const prefs = new Map((await erp.list("accountPrefs")).map((x) => [x.id, x]));
           accounts = (acc.accounts || [])
@@ -14034,7 +14096,7 @@ async function routeApi(req, res, url) {
       }
       const opening = accounts.length ? accounts.reduce((s, a) => s + a.balance, 0) : null;
       const report = cashReport.buildCashReport({
-        today, days, company: companyKey, openingBalance: opening,
+        today, days, company: companyKey, openingBalance: opening, extra: clobeExtra,
         schedules: [...await erp.list("cashSchedules"),
           ...loansLib.loanScheduleLines((await erp.list("loans")).filter((l) => l.company === companyKey), await erp.list("loanPayments"), today, payments.addDays(today, days)),
           // 회생채권 연말 변제는 우프컴퍼니가 낸다.
@@ -14048,7 +14110,8 @@ async function routeApi(req, res, url) {
       sendJson(res, 200, {
         company, report, accounts, fund, clobeError,
         // 보고 문구에는 즐겨찾는 계좌만(없으면 숨기지 않은 계좌). 현 잔액 합계는 모든 계좌.
-        text: cashReport.reportText(report, { companyName: company.name, fund, accounts: accounts.some((a) => a.favorite) ? accounts.filter((a) => a.favorite) : accounts.filter((a) => !a.hidden) })
+        clobeReview: clobeReviewList,
+        text: cashReport.reportText(report, { companyName: company.name, fund, pendingReview: clobeReviewList.pending.length, accounts: accounts.some((a) => a.favorite) ? accounts.filter((a) => a.favorite) : accounts.filter((a) => !a.hidden) })
       });
       return;
     }
