@@ -6970,16 +6970,15 @@ async function clobeAccessToken(db) {
   return clobeRefreshInFlight;
 }
 
-// 자금일보·기간 조회에 넣을 클로브 예정(판매처 정산 예정 + 클로브 자금 계획 등록 일정). 실패하면 빈 목록.
+// 자금일보·기간 조회에 넣을 클로브 예정(판매처 정산 예정). 실패하면 빈 목록.
 async function clobePlanLines(db, company, start, end) {
   try {
     const companyId = await clobeCompanyIdFor(db, company);
     if (!companyId) return [];
-    const [revenue, plan] = await Promise.all([
-      clobeCall(db, "get_monthly_revenue", { companyId, startDate: start, endDate: end, dateBasis: "SETTLEMENT_DATE", timeUnit: "DAILY", size: 200 }).catch(() => null),
-      clobeCall(db, "get_expense_plan_items", { companyId, size: 100 }).catch(() => null)
-    ]);
-    return cashReport.clobeLines({ revenue, plan, start, end });
+    // 클로브 자금 계획의 자동 등록 일정(국세 미납 등)은 넣지 않는다 — 지난 체납 부가세가 '오늘'로 잡혀
+    // 자금일보를 부풀렸다(2026-11-20 사용자 확인: 오늘 낼 부가세 없음). 판매처 정산 예정만 쓴다.
+    const revenue = await clobeCall(db, "get_monthly_revenue", { companyId, startDate: start, endDate: end, dateBasis: "SETTLEMENT_DATE", timeUnit: "DAILY", size: 200 }).catch(() => null);
+    return cashReport.clobeLines({ revenue, start, end });
   } catch { return []; }
 }
 async function clobeCall(db, tool, input) {
@@ -14049,7 +14048,7 @@ async function routeApi(req, res, url) {
           const [acc, rep, extra] = await Promise.all([
             clobeCall(db, "get_bank_accounts", { companyId }),
             clobeCall(db, "get_daily_fund_report", { companyId }).catch(() => null),
-            // 판매처(쿠팡·스마트스토어·29CM·PG)별 정산 예정 + 클로브 자금 계획
+            // 판매처(쿠팡·스마트스토어·29CM·PG)별 정산 예정
             clobePlanLines(db, company, today, payments.addDays(today, days))
           ]);
           clobeExtra = extra;
