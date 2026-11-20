@@ -13315,10 +13315,11 @@ function bindCashFlow() {
 function renderCash() {
   const cs = cashState();
   const head = pageHead("자금", "오늘과 7일 안에 들어올 돈·나갈 돈, 계좌 잔액을 한 장으로 봅니다. 매일 아침 이 화면을 보고 채널톡에 공유하세요.");
-  const tabs = `<div class="npb-subnav">${[["report", "일일 자금보고"], ["cashflow", "현금흐름표"], ["schedules", "고정비·자금 일정"], ["production", "생산비"], ["loans", "대출금"], ["rehab", "회생변제"], ["receivables", "채권원장"]].map(([k, l]) => `<button class="npb-subtab ${cs.screen === k ? "active" : ""}" data-cash-screen="${k}">${l}</button>`).join("")}
+  const tabs = `<div class="npb-subnav">${[["report", "일일 자금보고"], ["payout", "출금 리포트"], ["cashflow", "현금흐름표"], ["schedules", "고정비·자금 일정"], ["production", "생산비"], ["loans", "대출금"], ["rehab", "회생변제"], ["receivables", "채권원장"]].map(([k, l]) => `<button class="npb-subtab ${cs.screen === k ? "active" : ""}" data-cash-screen="${k}">${l}</button>`).join("")}
     <span style="flex:1"></span>
     ${(cs.meta?.companies || [{ key: "wooof", name: "우프컴퍼니" }, { key: "betters", name: "Betters(개인사업자)" }]).map((c) => `<button class="npb-subtab ${cs.company === c.key ? "active" : ""}" data-cash-company="${c.key}">${h(c.name)}</button>`).join("")}</div>`;
   if (cs.screen === "production") return `${head}${tabs}${renderProdCost()}`;
+  if (cs.screen === "payout") return `${head}${tabs}${renderPayout()}`;
   if (cs.screen === "loans") return `${head}${tabs}${renderLoans()}`;
   if (cs.screen === "rehab") return `${head}${tabs}${renderRehab()}`;
   if (cs.screen === "cashflow") return `${head}${tabs}${renderCashFlow()}`;
@@ -13540,8 +13541,60 @@ function renderCashSchedules() {
     </section>`;
 }
 
+// --- 출금 리포트: 퇴근할 때 그날 나간 돈(지급완료 지급요청 + 선매입 입금요청)을 채널톡에 붙여 넣는다 ---
+function renderPayout() {
+  const cs = cashState();
+  const date = cs.payoutDate || kstDate();
+  const d = cs.payout;
+  if (!d || d.date !== date || d.company !== cs.company) return `<section class="panel"><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
+  const rep = d.data.report;
+  return `<section class="panel"><div class="panel-head"><h2>출금 리포트</h2>
+      <div class="toolbar">
+        <button class="small ghost" data-payout-move="-1" aria-label="전날">‹</button>
+        <input type="date" data-payout-date value="${h(date)}" aria-label="날짜">
+        <button class="small ghost" data-payout-move="1" aria-label="다음날">›</button>
+        ${date !== kstDate() ? `<button class="small" data-payout-today>오늘</button>` : ""}
+        <button class="primary" data-payout-copy>채널톡 보고 문구 복사</button>
+      </div></div>
+    <div class="panel-body">
+      <div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>구분</th><th>내용</th><th class="num">금액</th></tr></thead><tbody>
+        ${rep.lines.map((l) => `<tr><td class="nowrap">${l.kind === "payment" ? "지급요청" : "선매입"}</td><td>${h(l.label)}${l.code ? ` <span class="muted">${h(l.code)}</span>` : ""}</td><td class="num">${money.format(Math.round(l.amount))}</td></tr>`).join("") || `<tr><td colspan="3" class="empty">이날 나간 돈이 없습니다.</td></tr>`}
+      </tbody>${rep.lines.length ? `<tfoot><tr><th colspan="2">합계 ${rep.lines.length}건</th><th class="num">${money.format(Math.round(rep.total))}</th></tr></tfoot>` : ""}</table></div>
+      ${helpNote("지급요청은 '지급완료'한 날짜, 입금요청은 '입금완료'한 날짜로 모읍니다. 입금요청은 브랜드별로 묶어 '선매입 N건'으로 적습니다.")}
+      <h3 class="ta-h">보고 문구 미리보기</h3>
+      <pre class="msg-text">${h(d.data.text)}</pre>
+    </div></section>`;
+}
+function bindPayout() {
+  const cs = cashState();
+  const date = cs.payoutDate || kstDate();
+  if (!cs.payout || cs.payout.date !== date || cs.payout.company !== cs.company) {
+    if (cs.payoutLoading) return;
+    cs.payoutLoading = true;
+    api(`/api/cash/payout?company=${encodeURIComponent(cs.company)}&date=${date}`)
+      .then((data) => { cs.payout = { date, company: cs.company, data }; })
+      .catch((e) => { showToast(e.message, "error"); cs.payout = { date, company: cs.company, data: { report: { lines: [], total: 0 }, text: "" } }; })
+      .finally(() => { cs.payoutLoading = false; renderApp(); });
+    return;
+  }
+  const go = (v) => { cs.payoutDate = v; renderApp(); };
+  const shift = (n) => { const t = new Date(`${date}T00:00:00Z`); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
+  app.querySelectorAll("[data-payout-move]").forEach((b) => b.addEventListener("click", () => go(shift(Number(b.dataset.payoutMove)))));
+  app.querySelector("[data-payout-date]")?.addEventListener("change", (e) => { if (e.target.value) go(e.target.value); });
+  app.querySelector("[data-payout-today]")?.addEventListener("click", () => go(kstDate()));
+  app.querySelector("[data-payout-copy]")?.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(cs.payout.data.text || ""); showToast("출금 리포트를 복사했습니다. 채널톡에 붙여 넣으세요."); }
+    catch { showToast("복사하지 못했습니다. 미리보기를 직접 선택해 복사하세요.", "error"); }
+  });
+}
 function bindCash() {
   const cs = cashState();
+  if (cs.screen === "payout") {
+    app.querySelectorAll("[data-cash-screen]").forEach((b) => b.addEventListener("click", () => { cs.screen = b.dataset.cashScreen; renderApp(); }));
+    app.querySelectorAll("[data-cash-company]").forEach((b) => b.addEventListener("click", () => { cs.company = b.dataset.cashCompany; cs.payout = null; cs.data = null; renderApp(); }));
+    bindPayout();
+    return;
+  }
   if (cs.screen === "loans" || cs.screen === "rehab" || cs.screen === "cashflow" || cs.screen === "production") {
     app.querySelectorAll("[data-cash-screen]").forEach((b) => b.addEventListener("click", () => { cs.screen = b.dataset.cashScreen; renderApp(); }));
     if (cs.screen === "loans") bindLoans(); else if (cs.screen === "rehab") bindRehab(); else if (cs.screen === "production") bindProdCost(); else bindCashFlow();
@@ -14253,6 +14306,33 @@ async function loadMessenger() {
   try { ms.data = await api("/api/notices"); ms.error = ""; } catch (e) { ms.error = e.message; ms.data = { notices: [], kinds: {}, settings: {} }; }
   finally { ms.loading = false; }
 }
+// 입금 완료·지급완료·증빙 발행 완료는 여러 건을 한 글로 합쳐 복사한다(서버 lib/notify.mjs paidText 와 같은 규칙).
+const MSG_MERGE_KINDS = ["request_paid", "payment_paid", "evidence"];
+const EVIDENCE_KINDS = ["매입세금", "매출세금", "영세", "거래명세서", "청구서", "발주서", "영수증", "기타"];
+function msgPaidText(kind, items) {
+  const won0 = (n) => `${Math.round(Number(n || 0)).toLocaleString("ko-KR")}원`;
+  const wonSp = (n) => `${Math.round(Number(n || 0)).toLocaleString("ko-KR")} 원`;
+  const head = { request_paid: "입금 완료", payment_paid: "지급완료", evidence: "증빙 발행 완료" }[kind];
+  const line = {
+    request_paid: (x) => [x.brandName, x.orderNo, x.customerName, won0(x.amount)].filter(Boolean).join(" "),
+    payment_paid: (x) => `${[x.payee, x.title].filter(Boolean).join(" ")} ${wonSp(x.amount)}`,
+    evidence: (x) => `${[x.cat, x.partner].filter(Boolean).join(" ")} ${wonSp(x.amount)}${x.memo ? ` |  ${x.memo}` : ""}`
+  }[kind];
+  const total = items.reduce((t, x) => t + Number(x.amount || 0), 0);
+  return [`[${head}] ${items.length}건 · 합계 ${won0(total)}`, ...items.map((x, i) => `[${i + 1}] ${line(x)}`)].join("\n");
+}
+// 고른 알림들(오래된 순)을 복사할 글 하나로. 같은 종류의 완료 알림은 묶는다.
+function msgCombinedText(list) {
+  const out = [];
+  const merged = new Map();
+  for (const n of list) {
+    if (MSG_MERGE_KINDS.includes(n.kind) && Array.isArray(n.items)) {
+      if (!merged.has(n.kind)) { merged.set(n.kind, []); out.push({ kind: n.kind }); }
+      merged.get(n.kind).push(...n.items);
+    } else out.push({ text: n.text });
+  }
+  return out.map((o) => o.kind ? msgPaidText(o.kind, merged.get(o.kind)) : o.text).join("\n\n");
+}
 function renderMessenger() {
   const ms = messengerState();
   const head = pageHead("메신저 공유", "담당자가 확인할 일을 한곳에 모읍니다. [복사]를 눌러 채널톡 팀챗에 붙여 넣으세요. (채널톡 무료 플랜은 자동 발송이 안 됩니다)");
@@ -14265,6 +14345,7 @@ function renderMessenger() {
   const rows = list.map((n) => {
     const last = (n.shares || []).slice(-1)[0];
     return `<tr>
+      <td class="nowrap"><input type="checkbox" data-msg-pick="${h(n.id)}" ${(ms.picked || []).includes(n.id) ? "checked" : ""} aria-label="고르기"></td>
       <td class="nowrap">${h(fmtDate(n.createdAt))}</td>
       <td class="nowrap"><span class="pill">${h(d.kinds[n.kind] || n.kind)}</span></td>
       <td class="wrap"><strong>${h(n.title)}</strong><div class="msg-text">${h(n.text)}</div></td>
@@ -14289,14 +14370,29 @@ function renderMessenger() {
   const writer = ms.writing ? v2Modal(`<div class="panel-head"><h2>직접 써서 올리기</h2><button data-msg-close>닫기</button></div>
     <div class="panel-body"><form data-msg-write class="form-grid"><div class="field" style="grid-column:1/-1"><label>내용</label><textarea name="text" rows="8" required></textarea></div>
     <div class="toolbar" style="grid-column:1/-1"><button class="primary" type="submit">공유함에 올리기</button></div></form></div>`, "data-msg-close") : "";
-  return `${head}
+  const ev = ms.evidence;
+  const evidence = ev ? v2Modal(`<div class="panel-head"><h2>증빙 발행 완료</h2><button data-msg-ev-close>닫기</button></div>
+    <div class="panel-body">
+      <div class="table-wrap"><table class="compact"><thead><tr><th>분류</th><th>거래처</th><th>합계금액</th><th>내용</th><th></th></tr></thead><tbody>
+      ${ev.rows.map((r, i) => `<tr>
+        <td><select data-ev="${i}:cat">${EVIDENCE_KINDS.map((k) => `<option ${r.cat === k ? "selected" : ""}>${k}</option>`).join("")}</select></td>
+        <td><input data-ev="${i}:partner" value="${h(r.partner)}" placeholder="소일베이커"></td>
+        <td><input data-ev="${i}:amount" value="${h(r.amount)}" inputmode="numeric" placeholder="131,630" style="width:110px"></td>
+        <td><input data-ev="${i}:memo" value="${h(r.memo)}" placeholder="10월분 원료"></td>
+        <td>${ev.rows.length > 1 ? `<button class="ghost small" data-ev-del="${i}" aria-label="빼기">×</button>` : ""}</td></tr>`).join("")}
+      </tbody></table></div>
+      <div class="action-row"><button class="small" data-ev-add>+ 한 줄 더</button></div>
+      <pre class="msg-text" style="margin-top:10px">${h(msgPaidText("evidence", ev.rows.filter((r) => r.partner || Number(String(r.amount).replace(/,/g, ""))).map((r) => ({ ...r, amount: Number(String(r.amount).replace(/,/g, "")) || 0 }))))}</pre>
+      <div class="action-row"><button class="primary" data-ev-save>공유함에 올리고 복사</button><button data-msg-ev-close>취소</button></div>
+    </div>`, "data-msg-ev-close") : "";
+  return `${head}${evidence}
     <section class="panel"><div class="panel-head"><h2>알림</h2>
-      <div class="toolbar">${unshared.length ? `<button class="primary" data-msg-copy-all>안 보낸 것 ${unshared.length}건 한꺼번에 복사</button>` : ""}<button data-msg-write-open>+ 직접 쓰기</button></div></div>
+      <div class="toolbar">${(ms.picked || []).length ? `<button class="primary" data-msg-copy-picked>고른 ${ms.picked.length}건 합쳐서 복사</button>` : ""}${unshared.length ? `<button class="${(ms.picked || []).length ? "" : "primary"}" data-msg-copy-all>안 보낸 것 ${unshared.length}건 한꺼번에 복사</button>` : ""}<button data-msg-evidence-open>+ 증빙 발행 완료</button><button data-msg-write-open>+ 직접 쓰기</button></div></div>
       <div class="panel-body">
         ${ms.error ? `<p class="error-text">${h(ms.error)}</p>` : ""}
         <div class="toolbar chip-row">${chip("unshared", "안 보낸 것", unshared.length)}${chip("all", "전체", d.notices.length)}${kindsUsed.map((k) => chip(k, d.kinds[k] || k, d.notices.filter((n) => n.kind === k).length)).join("")}</div>
-        <div class="table-wrap"><table class="compact msg-table"><thead><tr><th>시각</th><th>종류</th><th>내용</th><th>공유</th><th></th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="5" class="empty">${ms.filter === "unshared" ? "안 보낸 알림이 없습니다." : "알림이 없습니다."}</td></tr>`}</tbody></table></div>
+        <div class="table-wrap"><table class="compact msg-table"><thead><tr><th></th><th>시각</th><th>종류</th><th>내용</th><th>공유</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="6" class="empty">${ms.filter === "unshared" ? "안 보낸 알림이 없습니다." : "알림이 없습니다."}</td></tr>`}</tbody></table></div>
       </div></section>${settings}${writer}`;
 }
 function bindMessenger() {
@@ -14312,9 +14408,43 @@ function bindMessenger() {
     showToast("복사했습니다. 채널톡 팀챗에 붙여 넣으세요.");
     reload();
   }));
+  app.querySelectorAll("[data-msg-pick]").forEach((c) => c.addEventListener("change", () => {
+    const set = new Set(ms.picked || []);
+    if (c.checked) set.add(c.dataset.msgPick); else set.delete(c.dataset.msgPick);
+    ms.picked = [...set];
+    renderApp();
+  }));
+  app.querySelector("[data-msg-copy-picked]")?.addEventListener("click", async () => {
+    const list = ms.data.notices.filter((n) => (ms.picked || []).includes(n.id)).slice().reverse();
+    try { await navigator.clipboard.writeText(msgCombinedText(list)); } catch { showToast("복사하지 못했습니다.", "error"); return; }
+    for (const n of list) await mark(n.id, "copy").catch(() => {});
+    ms.picked = [];
+    showToast(`${list.length}건을 합쳐 복사했습니다. 채널톡 팀챗에 붙여 넣으세요.`);
+    reload();
+  });
+  // 증빙 발행 완료: 칸을 채우면 정해진 문구로 만든다.
+  app.querySelector("[data-msg-evidence-open]")?.addEventListener("click", () => { ms.evidence = { rows: [{ cat: "매입세금", partner: "", amount: "", memo: "" }] }; renderApp(); });
+  app.querySelectorAll("[data-msg-ev-close]").forEach((b) => b.addEventListener("click", () => { ms.evidence = null; renderApp(); }));
+  app.querySelectorAll("[data-ev]").forEach((c) => c.addEventListener(c.tagName === "SELECT" ? "change" : "input", () => {
+    const [i, key] = c.dataset.ev.split(":");
+    ms.evidence.rows[Number(i)][key] = c.value;
+    const pre = app.querySelector(".v2-modal pre.msg-text");
+    if (pre) pre.textContent = msgPaidText("evidence", ms.evidence.rows.filter((r) => r.partner || Number(String(r.amount).replace(/,/g, ""))).map((r) => ({ ...r, amount: Number(String(r.amount).replace(/,/g, "")) || 0 })));
+  }));
+  app.querySelector("[data-ev-add]")?.addEventListener("click", () => { const last = ms.evidence.rows.slice(-1)[0]; ms.evidence.rows.push({ cat: last?.cat || "매입세금", partner: "", amount: "", memo: "" }); renderApp(); });
+  app.querySelectorAll("[data-ev-del]").forEach((b) => b.addEventListener("click", () => { ms.evidence.rows.splice(Number(b.dataset.evDel), 1); renderApp(); }));
+  app.querySelector("[data-ev-save]")?.addEventListener("click", async () => {
+    try {
+      const r = await api("/api/notices", { method: "POST", body: { kind: "evidence", items: ms.evidence.rows } });
+      try { await navigator.clipboard.writeText(r.notice.text); await mark(r.notice.id, "copy"); showToast("올리고 복사했습니다. 채널톡 팀챗에 붙여 넣으세요."); }
+      catch { showToast("공유함에 올렸습니다. [복사]를 눌러 주세요."); }
+      ms.evidence = null;
+      reload();
+    } catch (err) { showToast(err.message, "error"); }
+  });
   app.querySelector("[data-msg-copy-all]")?.addEventListener("click", async () => {
     const list = ms.data.notices.filter((n) => !(n.shares || []).length).slice().reverse();
-    try { await navigator.clipboard.writeText(list.map((n) => n.text).join("\n\n")); } catch { showToast("복사하지 못했습니다.", "error"); return; }
+    try { await navigator.clipboard.writeText(msgCombinedText(list)); } catch { showToast("복사하지 못했습니다.", "error"); return; }
     for (const n of list) await mark(n.id, "copy").catch(() => {});
     showToast(`${list.length}건을 복사했습니다. 채널톡 팀챗에 붙여 넣으세요.`);
     reload();

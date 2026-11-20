@@ -3149,3 +3149,6 @@ tbody tr:hover td.sticky, .requests-table tbody tr:hover td:nth-child(-n+2) { ba
 .form-save-bar .team-send { flex-basis: 100%; margin-bottom: 8px; }
 .ta-h { font-size: 15px; margin: 18px 0 8px; }
 .ta-events select { min-height: 32px; }
+
+/* active sub-tab keeps its dark fill on hover (hover rule above made white-on-white) */
+.npb-subtab.active:hover { background: var(--grey900); }

@@ -1410,23 +1410,30 @@ async function sendTeamManual(event, notice) {
   if (!teamAlerts.eventConfig(cfg, event)) throw new Error("알 수 없는 알림 종류입니다.");
   return postTeam(cfg, notice, { event });
 }
+// 나중에 골라 팀챗으로 보낸 건: 그 건의 등록 알림을 공유함에서 '보냄'으로.
+async function markNoticesShared(kinds, ids, by) {
+  for (const n of await erp.list("notices")) {
+    if (!kinds.includes(n.kind) || !ids.has(n.refId) || (n.shares || []).length) continue;
+    await erp.put("notices", { ...n, shares: [{ at: now(), by, via: "팀챗" }] });
+  }
+}
 function requestBatchNotice(list, source, by) {
-  return notify.noticeFor(list.length === 1 ? "request_new" : "request_batch", list.length === 1
-    ? { ...list[0], by }
-    : { items: list.map((r) => ({ brandName: r.brandName, orderNo: r.orderNo, customerName: r.customerName, depositAmount: r.depositAmount })), source, by });
+  return teamAlerts.requestsNotice(list, by);
 }
 function paymentBatchNotice(list, by) {
-  if (list.length === 1) return notify.noticeFor("payment_new", { ...list[0], by });
-  const total = list.reduce((s, p) => s + Number(p.amount || 0), 0);
-  return { title: `지급요청 ${list.length}건 ${Math.round(total).toLocaleString("ko-KR")}원`,
-    text: `[지급요청] ${list.length}건 · 합계 ${Math.round(total).toLocaleString("ko-KR")}원${by ? ` · ${by}` : ""}\n${list.slice(0, 20).map((p) => `- ${p.code || ""} ${p.title} ${Math.round(Number(p.amount || 0)).toLocaleString("ko-KR")}원 → ${p.payeeName || p.holder || ""}`).join("\n")}` };
+  return teamAlerts.paymentsNotice(list, by);
 }
 
-async function pushNotice(kind, data = {}, ref = {}) {
+// opts.teamSend: 요청할 때 '팀챗 전송'을 체크한 경우. 팀챗으로 나간 알림은 메신저 공유함의 '안 보낸 것'에 남기지 않는다.
+async function pushNotice(kind, data = {}, ref = {}, opts = {}) {
   try {
     const n = notify.noticeFor(kind, data);
-    sendTeamAlert(kind, n);
-    const rec = { id: id("ntc"), kind, title: n.title, text: n.text, refType: ref.type || "", refId: ref.id || "", createdAt: now(), shares: [] };
+    const teamNotice = teamAlerts.teamNoticeFor(kind, data) || n;
+    const team = opts.teamSend
+      ? await sendTeamManual(teamAlerts.eventOf(kind), teamNotice).then(() => ({ ok: true }), (e) => { console.error("team send failed", e.message); return { error: e.message }; })
+      : await sendTeamAlert(kind, teamNotice);
+    const rec = { id: id("ntc"), kind, title: n.title, text: n.text, ...(n.items ? { items: n.items } : {}), refType: ref.type || "", refId: ref.id || "", createdAt: now(), shares: [] };
+    if (team?.ok) rec.shares.push({ at: now(), by: "자동", via: "팀챗" });
     const cfg = await messengerSettings();
     if (cfg.mode !== "off" && (cfg.autoKinds || []).includes(kind)) {
       const r = await notify.sendToChannel(cfg, rec.text);
@@ -8393,6 +8400,7 @@ async function routeApi(req, res, url) {
         notice = requestBatchNotice(list, "선택 전송", actor.name || "");
         const r = await sendTeamManual("request", notice);
         for (const x of list) x.teamSentAt = now();
+        await markNoticesShared(["request_new", "request_batch"], ids, actor.name || "");
         await writeDb(db);
         sendJson(res, 200, { ok: true, count: list.length, ...r });
       } else if (body.event === "payment") {
@@ -8401,6 +8409,7 @@ async function routeApi(req, res, url) {
         if (!list.length) { sendJson(res, 400, { error: "보낼 지급요청을 고르세요." }); return; }
         const r = await sendTeamManual("payment", paymentBatchNotice(list, actor.name || ""));
         for (const p of list) await erp.put("payments", { ...p, teamSentAt: now() });
+        await markNoticesShared(["payment_new"], ids, actor.name || "");
         sendJson(res, 200, { ok: true, count: list.length, ...r });
       } else {
         sendJson(res, 400, { error: "알 수 없는 알림 종류입니다." });
@@ -8763,8 +8772,7 @@ async function routeApi(req, res, url) {
     addAudit(db, actor, "create", "request", request.id, `${request.orderNo} 입금요청 생성`, null, request);
     await writeDb(db);
     sendJson(res, 201, { request });
-    pushNotice("request_new", { ...request, by: actor.name || "" }, { type: "request", id: request.id });
-    if (body.teamSend) sendTeamManual("request", requestBatchNotice([request], "", actor.name || "")).catch((e) => console.error("team send failed", e.message));
+    pushNotice("request_new", { ...request, by: actor.name || "" }, { type: "request", id: request.id }, { teamSend: body.teamSend === true });
     syncArchiveInBackground(db, actor, request.brandId, "request_created");
     return;
   }
@@ -9417,8 +9425,7 @@ async function routeApi(req, res, url) {
     const prepared = await prepareOnCafe24(db, actor, createdDrafts);
     if (created.length || prepared) await writeDb(db);
     sendJson(res, 200, { created, createdCount: created.length, skipped, prepared });
-    if (created.length) pushNotice("request_batch", { items: created.map((r) => ({ brandName: r.brandName, orderNo: r.orderNo, customerName: r.customerName, depositAmount: r.depositAmount })), source: "주문매칭", by: actor.name || "" }, { type: "request", id: created[0].id });
-    if (created.length && body.teamSend) sendTeamManual("request", requestBatchNotice(created, "주문매칭", actor.name || "")).catch((e) => console.error("team send failed", e.message));
+    if (created.length) pushNotice("request_batch", { items: created.map((r) => ({ brandName: r.brandName, orderNo: r.orderNo, customerName: r.customerName, depositAmount: r.depositAmount, expectedDepositDate: r.expectedDepositDate })), source: "주문매칭", by: actor.name || "" }, { type: "request", id: created[0].id }, { teamSend: body.teamSend === true });
     return;
   }
 
@@ -9452,7 +9459,7 @@ async function routeApi(req, res, url) {
     const prepared = await prepareOnCafe24(db, actor, createdDrafts);
     await writeDb(db);
     sendJson(res, 200, { brandName: brand.name, createdCount: created.length, prepared });
-    if (created.length) pushNotice("request_batch", { items: created.map((r) => ({ brandName: r.brandName, orderNo: r.orderNo, customerName: r.customerName, depositAmount: r.depositAmount })), source: "월단위입금", by: actor.name || "" }, { type: "request", id: created[0].id });
+    if (created.length) pushNotice("request_batch", { items: created.map((r) => ({ brandName: r.brandName, orderNo: r.orderNo, customerName: r.customerName, depositAmount: r.depositAmount, expectedDepositDate: r.expectedDepositDate })), source: "월단위입금", by: actor.name || "" }, { type: "request", id: created[0].id });
     return;
   }
 
@@ -12634,6 +12641,18 @@ async function routeApi(req, res, url) {
     }
     if (pathname === "/api/notices" && method === "POST") {
       const body = await readBody(req);
+      // 증빙 발행 완료: 칸(분류·거래처·금액·내용)으로 받아 정해진 문구로 만든다.
+      if (body.kind === "evidence") {
+        const items = (Array.isArray(body.items) ? body.items : []).slice(0, 50)
+          .map((x) => ({ cat: notify.EVIDENCE_KINDS.includes(x.cat) ? x.cat : "기타", partner: String(x.partner || "").trim().slice(0, 60), amount: x.amount, memo: String(x.memo || "").trim().slice(0, 120) }))
+          .filter((x) => x.partner || Number(String(x.amount || 0).replace(/,/g, "")));
+        if (!items.length) { sendJson(res, 400, { error: "증빙 한 줄 이상을 적어 주세요." }); return; }
+        const n = notify.noticeFor("evidence", { items });
+        const rec = { id: id("ntc"), kind: "evidence", title: n.title, text: n.text, items: n.items, refType: "", refId: "", createdAt: now(), createdBy: who, shares: [] };
+        await erp.put("notices", rec);
+        sendJson(res, 201, { notice: rec });
+        return;
+      }
       const text = String(body.text || "").trim().slice(0, 4000);
       if (!text) { sendJson(res, 400, { error: "보낼 내용을 적어 주세요." }); return; }
       const kind = body.kind === "daily" ? "daily" : "manual";
@@ -13959,6 +13978,22 @@ async function routeApi(req, res, url) {
       return;
     }
 
+    // 출금 리포트(퇴근 보고). ?company=wooof|betters&date=YYYY-MM-DD
+    if (pathname === "/api/cash/payout" && method === "GET") {
+      const companyKey = CASH_COMPANIES.some((c) => c.key === url.searchParams.get("company")) ? url.searchParams.get("company") : "wooof";
+      const company = CASH_COMPANIES.find((c) => c.key === companyKey);
+      const today = kstToday();
+      const date = dateOnly(url.searchParams.get("date")) || today;
+      const rep = cashReport.buildPayoutReport({
+        date,
+        payments: (await erp.list("payments").catch(() => [])).filter((p) => (p.company || "wooof") === companyKey),
+        // 선매입 입금요청은 우프 통장에서 나간다.
+        requests: companyKey === "wooof" ? db.requests : []
+      });
+      sendJson(res, 200, { company, report: rep, text: cashReport.payoutReportText(rep, { companyShort: company.match, today }) });
+      return;
+    }
+
     // 일일 자금보고. ?company=wooof|betters&days=7
     if (pathname === "/api/cash/report" && method === "GET") {
       const companyKey = CASH_COMPANIES.some((c) => c.key === url.searchParams.get("company")) ? url.searchParams.get("company") : "wooof";
@@ -13988,7 +14023,8 @@ async function routeApi(req, res, url) {
             .sort((x, y) => Number(y.favorite) - Number(x.favorite) || Number(x.hidden) - Number(y.hidden) || y.balance - x.balance);
           fund = rep && rep.baseDate ? {
             baseDate: rep.baseDate, transactionDate: rep.transactionDate, cashIn: rep.cashIn, cashOut: rep.cashOut,
-            cashBalance: rep.cashBalance, summaryText: rep.summaryText, templateType: rep.templateType
+            cashBalance: rep.cashBalance, summaryText: rep.summaryText, templateType: rep.templateType,
+            cashInLabels: rep.cashInLabels || [], cashOutLabels: rep.cashOutLabels || []
           } : null;
         } else {
           clobeError = "클로브에 이 회사가 연결돼 있지 않습니다.";
@@ -14012,7 +14048,7 @@ async function routeApi(req, res, url) {
       sendJson(res, 200, {
         company, report, accounts, fund, clobeError,
         // 보고 문구에는 즐겨찾는 계좌만(없으면 숨기지 않은 계좌). 현 잔액 합계는 모든 계좌.
-        text: cashReport.reportText(report, { companyName: company.name, accounts: accounts.some((a) => a.favorite) ? accounts.filter((a) => a.favorite) : accounts.filter((a) => !a.hidden) })
+        text: cashReport.reportText(report, { companyName: company.name, fund, accounts: accounts.some((a) => a.favorite) ? accounts.filter((a) => a.favorite) : accounts.filter((a) => !a.hidden) })
       });
       return;
     }
@@ -14156,8 +14192,7 @@ async function routeApi(req, res, url) {
       log(rec, "create", "", "requested");
       await erp.put("payments", rec);
       sendJson(res, 201, { payment: rec });
-      pushNotice("payment_new", { ...rec, by: who.name }, { type: "payment", id: rec.id });
-      if (body.teamSend) sendTeamManual("payment", paymentBatchNotice([rec], who.name || "")).catch((e) => console.error("team send failed", e.message));
+      pushNotice("payment_new", { ...rec, by: who.name }, { type: "payment", id: rec.id }, { teamSend: body.teamSend === true });
       return;
     }
 
