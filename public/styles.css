@@ -3165,3 +3165,4 @@ tbody tr:hover td.sticky, .requests-table tbody tr:hover td:nth-child(-n+2) { ba
 :is(tr.hub-go, tr.acc-row, tr[data-sales-open], tr[data-rec-open], tr[data-prod-open], tr[data-pricing-open], tr[data-loan-open], tr[data-acc-open], tr[data-rehab-year]) { cursor: pointer; }
 :is(tr.hub-go, tr.acc-row, tr[data-sales-open], tr[data-rec-open], tr[data-prod-open], tr[data-pricing-open], tr[data-loan-open], tr[data-acc-open], tr[data-rehab-year]):hover td { background: var(--primary-weak, #eaf2fe) !important; }
 :is(tr.hub-go, tr.acc-row, tr[data-sales-open], tr[data-rec-open], tr[data-prod-open], tr[data-pricing-open], tr[data-loan-open], tr[data-acc-open], tr[data-rehab-year]):hover td strong:first-of-type { color: var(--primary); text-decoration: underline; text-underline-offset: 3px; }
+.badge.ok { background: #e8f7ef; color: #067647; }
