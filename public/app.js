@@ -11552,7 +11552,8 @@ const PS_ISSUE_LABELS = {
   wooof_missing: ["우프 상품 없음", "ps-yellow"],
   source_unreadable: ["본사 읽기 실패", "ps-gray"],
   filter_empty: ["옵션 필터 확인", "ps-yellow"],
-  option_text: ["옵션명", "ps-blue"]
+  option_text: ["옵션명", "ps-blue"],
+  source_promo: ["본사 할인", "ps-blue"]
 };
 const PS_NOTICE_LABELS = { name_changed: "상품명 변경", image_changed: "대표이미지 변경", options_changed: "옵션 구성 변경" };
 const PS_HISTORY_LABELS = {
@@ -11801,6 +11802,8 @@ function psCandidates() {
   const ps = psState();
   const from = ps.candFrom || psDefaultCandFrom();
   const to = ps.candTo || "9999-12-31";
+  // 일부만 파는 브랜드(패디펫): '판매 시작'한 것만 후보(등록일과 상관없이).
+  if (ps.detail?.partialCatalog) return (ps.detail?.unlinked || []).filter((u) => u.listed && !u.ignored && u.allowed);
   return (ps.detail?.unlinked || [])
     .filter((u) => u.listed && !u.ignored)
     .filter((u) => {
@@ -11938,6 +11941,26 @@ function renderPsCandidates() {
     </article>`;
   }).join("");
   const ignored = (detail.unlinked || []).filter((u) => u.ignored);
+  // 일부만 파는 브랜드: 본사에는 있는데 우프에 없는 상품. 판매 허락이 나면 [판매 시작] → 위 후보로.
+  const notSold = detail.partialCatalog ? (detail.unlinked || []).filter((u) => u.listed && !u.ignored && !u.allowed) : [];
+  const q = String(ps.notSoldQ || "").trim().toLowerCase();
+  const notSoldShown = q ? notSold.filter((u) => String(u.name || "").toLowerCase().includes(q)) : notSold;
+  const notSoldPanel = detail.partialCatalog ? `<section class="panel">
+      <div class="panel-head"><h2>우프 미판매 <span class="muted">${notSold.length}개</span></h2>
+        <input data-ps-notsold-q value="${h(ps.notSoldQ || "")}" placeholder="상품명 검색" style="width:220px"></div>
+      <div class="panel-body">
+        ${helpNote(`${h(detail.name)} 몰에는 있는데 우프에서 팔지 않는 상품입니다(우프 상품과 연결 안 됨). 재고 비교는 우프 상품과 연결된 것만 합니다.
+          판매 허락이 나면 <b>[판매 시작]</b>을 눌러 위 '신상품 후보'로 올린 뒤 등록하세요. 이미 우프에 다른 이름으로 있으면 <b>[이미 우프에 있음]</b>으로 연결하세요.`)}
+        <div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>본사 상품</th><th class="num">정가</th><th class="num">할인가</th><th>상태</th><th></th></tr></thead><tbody>
+          ${notSoldShown.map((u) => `<tr>
+            <td><a href="${h(u.url)}" target="_blank" rel="noreferrer">${h(u.name)}</a> <span class="muted">${h(u.sourceNo)}</span></td>
+            <td class="num">${money.format(u.price || 0)}</td>
+            <td class="num">${u.salePrice && u.salePrice < u.price ? money.format(u.salePrice) : ""}</td>
+            <td class="nowrap">${u.soldOut ? `<span style="color:var(--red)">품절</span>` : "판매중"}</td>
+            <td class="nowrap">${canApply ? `<button class="small primary" data-ps-allow="${h(u.sourceNo)}">판매 시작</button> <button class="small" data-ps-link-existing="${h(u.sourceNo)}">이미 우프에 있음</button>` : ""}</td>
+          </tr>`).join("") || `<tr><td colspan="5" class="empty">${q ? "찾는 상품이 없습니다." : "우프 미판매 상품이 없습니다."}</td></tr>`}
+        </tbody></table></div>
+      </div></section>` : "";
   return `
     <section class="panel">
       <div class="panel-body">${renderPsScanBar()}</div>
@@ -11974,7 +11997,7 @@ function renderPsCandidates() {
           <ul class="ps-plain">${ignored.map((u) => `<li>${h(u.sourceNo)} ${h(u.name)} ${canApply ? `<button class="ghost" data-ps-unignore="${h(u.sourceNo)}">되돌리기</button>` : ""}</li>`).join("")}</ul>
         </details>` : ""}
       </div>
-    </section>`;
+    </section>${notSoldPanel}`;
 }
 
 function renderPsRegisterResult(result) {
@@ -12066,7 +12089,7 @@ function renderPsSuggestions() {
         <button class="primary" data-ps-suggest-save ${picked.size && !sg.saving ? "" : "disabled"}>선택 ${picked.size}개 연결하고 재고 확인</button>
       </div></div>
     <div class="panel-body">
-      <p class="muted">우프에서 이름이 "${h(ps.detail?.namePrefix || "")}"로 시작하는 상품 ${money.format(d.wooofCount)}개를 본사 상품 ${money.format(d.sourceCount)}개와 이름으로 맞춰 봤습니다.
+      <p class="muted">우프에서 ${ps.detail?.supplierCode ? `공급사 ${h(ps.detail.supplierCode)} 상품` : `이름이 "${h(ps.detail?.namePrefix || "")}"로 시작하는 상품`} ${money.format(d.wooofCount)}개를 본사 상품 ${money.format(d.sourceCount)}개와 이름으로 맞춰 봤습니다.
         ${d.alreadyLinked ? `이미 연결된 ${money.format(d.alreadyLinked)}개는 뺐습니다.` : ""}
         <b>이름 일치·옵션으로 나눔</b>은 미리 골라 두었고, <b>비슷한 이름</b>은 본사 링크를 열어 확인한 뒤 고르세요.</p>
       ${!d.sourceCount ? notice("warn", "본사 상품을 아직 읽지 않았습니다", "신상품 등록 화면에서 <b>신상품 찾기</b>를 먼저 한 번 돌려 주세요.") : ""}
@@ -12460,6 +12483,19 @@ function bindProductSync() {
     await api(`${sourcePath}/candidates/${event.currentTarget.dataset.psUnignore}/ignore`, { method: "POST", body: { ignored: false } })
       .catch((e) => showToast(e.message, "error"));
     loadProductSync({ silent: true });
+  });
+  on("[data-ps-allow]", "click", async (event) => {
+    await api(`${sourcePath}/candidates/${event.currentTarget.dataset.psAllow}/allow`, { method: "POST", body: { allowed: true } })
+      .then(() => showToast("신상품 후보로 올렸습니다. 위에서 등록하세요."))
+      .catch((e) => showToast(e.message, "error"));
+    loadProductSync({ silent: true });
+  });
+  on("[data-ps-notsold-q]", "input", (event) => {
+    psState().notSoldQ = event.currentTarget.value;
+    const pos = event.currentTarget.selectionStart;
+    renderApp();
+    const el = app.querySelector("[data-ps-notsold-q]");
+    if (el) { el.focus(); el.setSelectionRange(pos, pos); }
   });
   on("[data-ps-link-existing]", "click", (event) => {
     openPsLinkForm({ sourceNo: event.currentTarget.dataset.psLinkExisting });

@@ -7465,9 +7465,13 @@ async function routeProductSync(req, res, url, actor, db) {
       sendJson(res, 202, { job });
       return;
     }
-    const candMatch = rest.match(/^\/candidates\/(\d+)\/(ignore|register)$/);
+    const candMatch = rest.match(/^\/candidates\/(\d+)\/(ignore|register|allow)$/);
     if (candMatch && method === "POST") {
       const body = await readBody(req);
+      if (candMatch[2] === "allow") {
+        sendJson(res, 200, await productSync.setAllowed(sourceId, candMatch[1], body.allowed !== false, actorInfo));
+        return;
+      }
       if (candMatch[2] === "ignore") {
         sendJson(res, 200, await productSync.setIgnored(sourceId, candMatch[1], body.ignored !== false, actorInfo));
         return;
