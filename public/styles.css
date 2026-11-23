@@ -3166,3 +3166,8 @@ tbody tr:hover td.sticky, .requests-table tbody tr:hover td:nth-child(-n+2) { ba
 :is(tr.hub-go, tr.acc-row, tr[data-sales-open], tr[data-rec-open], tr[data-prod-open], tr[data-pricing-open], tr[data-loan-open], tr[data-acc-open], tr[data-rehab-year]):hover td { background: var(--primary-weak, #eaf2fe) !important; }
 :is(tr.hub-go, tr.acc-row, tr[data-sales-open], tr[data-rec-open], tr[data-prod-open], tr[data-pricing-open], tr[data-loan-open], tr[data-acc-open], tr[data-rehab-year]):hover td strong:first-of-type { color: var(--primary); text-decoration: underline; text-underline-offset: 3px; }
 .badge.ok { background: #e8f7ef; color: #067647; }
+
+/* 단가표 › 상품 매칭 */
+.pm-table tr.pm-product td { background: var(--surface-2, #f8fafc); border-top: 1px solid var(--line); padding-top: 10px; }
+.pm-table td .row-actions button { white-space: nowrap; }
+.pm-table .row-actions { flex-wrap: nowrap; }

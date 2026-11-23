@@ -38,6 +38,8 @@ import * as sellmate from "./lib/sellmate.mjs";
 import * as brandInfo from "./lib/brand-info.mjs";
 import * as rehab from "./lib/rehab-plan.mjs";
 import * as cashFlow from "./lib/cash-flow.mjs";
+import * as productMatch from "./lib/product-match.mjs";
+import { matchOptions as matchSourceOptions } from "./lib/product-sync.mjs";
 import { setAtPath } from "./lib/sync-merge.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -3081,9 +3083,12 @@ function buildCanonPriceMatcher(db, brand) {
     };
     if (!hit.key || hit.price <= 0) continue;
     entries.push(hit);
-    // 품번이 있으면 이름 표기가 흔들려도 정확히 집힌다.
-    const code = strip(entry.itemCode);
-    if (code) byCode.set(code, hit);
+    // 품번이 있으면 이름 표기가 흔들려도 정확히 집힌다. 바코드·단가표 코드(IT-)도 같이 —
+    // 상품 매칭에서 카페24 자체 품목코드에 넣은 값이 주문에 실려 온다.
+    for (const c of [entry.itemCode, entry.barcode, entry.code]) {
+      const code = strip(c);
+      if (code && !byCode.has(code)) byCode.set(code, hit);
+    }
   }
   const today = now().slice(0, 10);
   for (const alias of db.priceAliases || []) {
@@ -3107,9 +3112,11 @@ function buildCanonPriceMatcher(db, brand) {
   }
   return {
     hasCatalog: entries.length > 0,
-    match(productName, itemCode = "") {
-      const code = strip(itemCode);
-      if (code && byCode.has(code)) return byCode.get(code);
+    match(productName, itemCode = "", altCode = "") {
+      for (const c of [itemCode, altCode]) {
+        const code = strip(c);
+        if (code && byCode.has(code)) return byCode.get(code);
+      }
       // ① 낱말 대조: 단가표 품목명의 낱말이 상품명에 모두 있으면 후보다.
       // 낱말이 많이 겹치는 쪽이 이긴다 — "리필 3P"가 "캣모나이트"를 이긴다.
       const nameTokens = new Set(catalogTokens(productName));
@@ -3174,7 +3181,7 @@ function suggestPriceCatalogMatches(db, brand, itemName, limit = 5) {
 // 단가표에 없는 품목은 손대지 않는다 — 조용히 0원으로 만드는 것이 최악이다.
 function applyCanonPricesToItems(items, canon) {
   return items.map((item) => {
-    const hit = canon.match(item.itemName, item.itemCode);
+    const hit = canon.match(item.itemName, item.itemCode, item.customVariantCode);
     if (!hit) return item;
     const quantity = Math.max(1, number(item.quantity, 1));
     return {
@@ -3199,7 +3206,7 @@ function applyCatalogBasisToDraft(db, brand, lineItems) {
   }
   const catalogUnmatched = [];
   const priced = lineItems.map((item) => {
-    const hit = canon.match(item.itemName, item.itemCode);
+    const hit = canon.match(item.itemName, item.itemCode, item.customVariantCode);
     if (!hit) {
       catalogUnmatched.push(item.itemName || item.itemCode);
       return item;
@@ -3524,7 +3531,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
     const detail = useCanonPrices ? applyCanonPricesToItems(rawDetail, canon) : rawDetail;
     if (useCanonPrices) {
       for (const it of rawDetail) {
-        if (!canon.match(it.itemName, it.itemCode)) canonMissed.add(String(it.itemName || it.itemCode || "").trim());
+        if (!canon.match(it.itemName, it.itemCode, it.customVariantCode)) canonMissed.add(String(it.itemName || it.itemCode || "").trim());
       }
     }
     const orderShip = number(req.shippingFee);
@@ -6280,6 +6287,9 @@ function sanitizeLineItems(raw) {
         orderItemCode: String(item.orderItemCode || "").trim(),
         optionName: String(item.optionName || "").trim(),
         itemCode: String(item.itemCode || "").trim(),
+        // 카페24 품목코드·자체 품목코드(상품 매칭 기준 코드). 카페24에서 온 라인만 값이 있다.
+        ...(item.variantCode ? { variantCode: String(item.variantCode).trim().slice(0, 40) } : {}),
+        ...(item.customVariantCode ? { customVariantCode: String(item.customVariantCode).trim().slice(0, 60) } : {}),
         itemName: String(item.itemName || "").trim(),
         spec: String(item.spec || "").trim(),
         unit: String(item.unit || "").trim(),
@@ -6349,6 +6359,89 @@ function getLatestPriceCatalog(db, brandId = "") {
       latestSupplyPrice: number(entry.supplyPrice),
       key: normalizeItemKey(entry.itemCode, entry.itemName)
     }));
+}
+
+// --- 기준 상품 매칭 도우미 ---------------------------------------------------
+// 우프 상품 목록은 카페24에서 매번 받아오면 느려서, 마지막으로 불러온 것을 메모리에 둔다(재시작하면 다시 불러옴).
+const productLinkCache = new Map();
+
+function productLinkEntries(db, brandId) {
+  return getLatestPriceCatalog(db, brandId).map((e) => {
+    const base = productMatch.baseCodeOf(e);
+    return {
+      code: e.code, itemCode: e.itemCode || "", itemName: e.itemName || "", spec: e.spec || "", barcode: e.barcode || "",
+      supplyPrice: number(e.supplyPrice), retailPrice: number(e.consumerPrice || e.originalPrice),
+      salePrice: number(e.currentSalePrice || e.salePrice), baseCode: base.code, baseKind: base.kind,
+      effectiveFrom: e.effectiveFrom || "", effectiveTo: e.effectiveTo || ""
+    };
+  });
+}
+
+function compactWooofProduct(p) {
+  return {
+    productNo: p.product_no, name: p.product_name, price: number(p.price), selling: p.selling === "T", display: p.display === "T",
+    customCode: p.custom_product_code || "", productCode: p.product_code || "",
+    variants: (p.variants || []).map((v) => ({
+      code: v.variant_code, custom: v.custom_variant_code || "",
+      label: (v.options || []).map((o) => o.value).filter(Boolean).join(" / "),
+      options: (v.options || []).map((o) => ({ name: o.name, value: o.value })),
+      add: number(v.additional_amount), selling: v.selling === "T", display: v.display === "T"
+    }))
+  };
+}
+
+// 우프 상품 ↔ 본사 상품(상품동기화 연결) → 우프 품목마다 본사 옵션·가격을 붙인다.
+async function sourceOptionMap(cached) {
+  const out = new Map();
+  let state;
+  try { state = await productSync.readState(); } catch { return out; }
+  const wanted = new Set(cached.products.map((p) => String(p.productNo)));
+  for (const src of Object.values(state.sources || {})) {
+    for (const [wooofNo, link] of Object.entries(src.links || {})) {
+      if (!wanted.has(String(wooofNo))) continue;
+      const snap = src.snapshot?.[String(link.sourceNo)];
+      const product = cached.products.find((p) => String(p.productNo) === String(wooofNo));
+      if (!snap || !product) continue;
+      const raw = product.variants.map((v) => ({ variant_code: v.code, options: v.options }));
+      const { pairs } = matchSourceOptions(snap, raw, {
+        valueMap: src.valueMap, linkValueMap: link.valueMap, optionMap: link.optionMap, sourceFilter: link.sourceFilter
+      });
+      for (const pair of pairs) {
+        const add = number(pair.source?.additionalAmount);
+        out.set(pair.variant.variant_code, {
+          sourceId: src.id, sourceName: src.name, sourceNo: link.sourceNo, name: snap.name, url: snap.url || "",
+          optionLabel: pair.source?.label || "", price: number(snap.price) + add,
+          salePrice: snap.salePrice ? number(snap.salePrice) + add : 0, soldOut: Boolean(snap.soldOut)
+        });
+      }
+    }
+  }
+  return out;
+}
+
+async function productLinkScanView(db, brandId, cached, links) {
+  const entries = productLinkEntries(db, brandId);
+  const linked = Object.fromEntries(links.map((l) => [l.variantCode, l]));
+  const raw = cached.products.map((p) => ({
+    product_no: p.productNo, product_name: p.name, price: p.price,
+    variants: p.variants.map((v) => ({ variant_code: v.code, additional_amount: v.add, options: v.options }))
+  }));
+  const fullEntries = getLatestPriceCatalog(db, brandId);
+  const suggestions = productMatch.suggestProductMatches({ products: raw, entries: fullEntries, links: linked });
+  const suggest = {};
+  for (const s of suggestions) {
+    if (!s.best) continue;
+    for (const pair of s.best.pairs) suggest[pair.variantCode] = { entryCode: pair.entryCode, score: s.best.score, model: s.best.model, priceHit: pair.priceHit };
+  }
+  const sources = await sourceOptionMap(cached);
+  return {
+    at: cached.at,
+    products: cached.products.map((p) => ({
+      ...p,
+      variants: p.variants.map((v) => ({ ...v, retail: p.price + v.add, suggest: suggest[v.code] || null, source: sources.get(v.code) || null }))
+    })),
+    entryCount: entries.length
+  };
 }
 
 function isAliasActive(alias, onDate = "") {
@@ -7845,6 +7938,176 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // --- 기준 상품 매칭(단가표 품목 ↔ 우프 카페24 품목) -------------------------
+  // 연결은 우프 품목코드(variant_code) 하나에 단가표 코드(IT-) 하나. 이름이 아니라 번호로 저장해서
+  // 상품명 앞에 "(1+1)" 이 붙거나 이름이 바뀌어도 끊기지 않는다. 바뀐 이름은 names 에 남긴다.
+  if (pathname === "/api/product-links" && method === "GET") {
+    if (!requirePermission(actor, res, "prices", "view")) return;
+    const brandId = String(url.searchParams.get("brandId") || "");
+    const brand = db.brands.find((b) => b.id === brandId);
+    if (!brand) { sendJson(res, 404, { error: "브랜드를 고르세요." }); return; }
+    const links = (await erp.list("productLinks")).filter((l) => l.brandId === brandId);
+    const cached = productLinkCache.get(brandId) || null;
+    sendJson(res, 200, {
+      brand: { id: brand.id, name: brand.name, cafe24Supplier: brand.cafe24Supplier || "" },
+      entries: productLinkEntries(db, brandId),
+      links,
+      scan: cached ? await productLinkScanView(db, brandId, cached, links) : null
+    });
+    return;
+  }
+
+  if (pathname === "/api/product-links/scan" && method === "POST") {
+    if (!requirePermission(actor, res, "prices", "view")) return;
+    const body = await readBody(req);
+    const brand = db.brands.find((b) => b.id === String(body.brandId || ""));
+    if (!brand) { sendJson(res, 404, { error: "브랜드를 고르세요." }); return; }
+    const supplier = String(brand.cafe24Supplier || "").trim().toUpperCase();
+    if (!supplier) { sendJson(res, 400, { error: "이 브랜드에 카페24 공급사 코드가 없습니다. 브랜드 정보에서 먼저 넣어 주세요." }); return; }
+    const tokenBefore = db.cafe24?.expiresAt;
+    let products;
+    try {
+      products = await withCafe24Token(db, async (token) => {
+        const list = [];
+        for (let offset = 0; offset < 3000; offset += 100) {
+          const page = await cafe24.searchProducts(token, { supplierCode: supplier, limit: 100, offset });
+          list.push(...page);
+          if (page.length < 100) break;
+        }
+        return cafe24.fetchProductsWithVariants(token, list.map((p) => p.product_no));
+      });
+    } catch (error) {
+      sendJson(res, 502, { error: `우프 상품을 불러오지 못했습니다: ${error.message}` });
+      return;
+    }
+    if (db.cafe24?.expiresAt !== tokenBefore) await writeDb(db);
+    const cached = { at: now(), products: products.map(compactWooofProduct) };
+    productLinkCache.set(brand.id, cached);
+    const links = (await erp.list("productLinks")).filter((l) => l.brandId === brand.id);
+    // 연결된 품목의 이름이 바뀌었으면(예: 앞에 "(1+1)") 예전 이름을 기록으로 남긴다.
+    const byVariant = new Map(cached.products.flatMap((p) => p.variants.map((v) => [v.code, { p, v }])));
+    for (const link of links) {
+      const hit = byVariant.get(link.variantCode);
+      if (!hit) continue;
+      const seen = `${hit.p.name}${hit.v.label ? ` / ${hit.v.label}` : ""}`;
+      const last = `${link.productName}${link.optionLabel ? ` / ${link.optionLabel}` : ""}`;
+      if (seen === last) continue;
+      link.names = [...(link.names || []), { name: last, until: cached.at }].slice(-20);
+      link.productName = hit.p.name;
+      link.optionLabel = hit.v.label;
+      await erp.put("productLinks", link);
+    }
+    sendJson(res, 200, { scan: await productLinkScanView(db, brand.id, cached, links), links });
+    return;
+  }
+
+  if (pathname === "/api/product-links" && method === "POST") {
+    if (!requirePermission(actor, res, "prices", "edit")) return;
+    const body = await readBody(req);
+    const brandId = String(body.brandId || "");
+    const brand = db.brands.find((b) => b.id === brandId);
+    if (!brand) { sendJson(res, 404, { error: "브랜드를 고르세요." }); return; }
+    const codes = new Set(productLinkEntries(db, brandId).map((e) => e.code));
+    const items = Array.isArray(body.items) ? body.items.slice(0, 2000) : [];
+    const saved = [];
+    for (const it of items) {
+      const variantCode = String(it.variantCode || "").trim();
+      if (!/^P[0-9A-Z]{7,}$/.test(variantCode)) continue;
+      const status = it.status === "none" ? "none" : "linked";
+      const entryCode = status === "linked" ? String(it.entryCode || "").trim() : "";
+      if (status === "linked" && !codes.has(entryCode)) { sendJson(res, 400, { error: `단가표에 없는 코드입니다: ${entryCode || "(빈 값)"}` }); return; }
+      const id = `c24-${variantCode}`;
+      const prev = await erp.get("productLinks", id);
+      const rec = {
+        ...(prev || {}),
+        id, brandId, channel: "cafe24", variantCode,
+        productNo: Number(it.productNo) || prev?.productNo || 0,
+        productName: String(it.productName ?? prev?.productName ?? "").slice(0, 200),
+        optionLabel: String(it.optionLabel ?? prev?.optionLabel ?? "").slice(0, 200),
+        status, entryCode,
+        qty: Math.max(1, Math.min(99, Math.round(Number(it.qty) || 1))),
+        method: it.method === "auto" ? "auto" : "manual",
+        linkedBy: actor.name || actor.email || "", linkedAt: now()
+      };
+      await erp.put("productLinks", rec);
+      saved.push(rec);
+    }
+    if (saved.length) {
+      addAudit(db, actor, "update", "product_link", brandId, `${brand.name} 상품 매칭 ${saved.length}건 저장`, null, { count: saved.length });
+      await writeDb(db);
+    }
+    sendJson(res, 200, { saved });
+    return;
+  }
+
+  // 연결된 품목의 기준 코드(바코드, 없으면 단가표 코드)를 카페24 '자체 품목코드'에 넣는다.
+  // 카페24 주문에 이 코드가 실려 와서 입금요청·정산 때 단가표를 코드로 바로 찾는다.
+  // 빈 칸만 채운다 — 펫페이스처럼 이 칸을 브랜드 상품코드로 이미 쓰는 곳이 있다.
+  if (pathname === "/api/product-links/write-codes" && method === "POST") {
+    if (!requirePermission(actor, res, "productsync", "apply")) return;
+    const body = await readBody(req);
+    const brand = db.brands.find((b) => b.id === String(body.brandId || ""));
+    if (!brand) { sendJson(res, 404, { error: "브랜드를 고르세요." }); return; }
+    const entries = new Map(productLinkEntries(db, brand.id).map((e) => [e.code, e]));
+    const links = (await erp.list("productLinks")).filter((l) => l.brandId === brand.id && l.status === "linked" && entries.has(l.entryCode));
+    const plan = { write: [], same: [], taken: [], missing: [] };
+    const tokenBefore = db.cafe24?.expiresAt;
+    try {
+      await withCafe24Token(db, async (token) => {
+        const products = await cafe24.fetchProductsWithVariants(token, [...new Set(links.map((l) => l.productNo))]);
+        const variants = new Map(products.flatMap((p) => (p.variants || []).map((v) => [v.variant_code, { p, v }])));
+        for (const link of links) {
+          const hit = variants.get(link.variantCode);
+          const want = productMatch.cafe24CodeFor(entries.get(link.entryCode));
+          const row = { link, want, current: String(hit?.v.custom_variant_code || "").trim() };
+          if (!hit) plan.missing.push(row);
+          else if (row.current === want) plan.same.push(row);
+          else if (row.current) plan.taken.push(row);
+          else plan.write.push(row);
+        }
+        if (body.dryRun) return;
+        const byProduct = new Map();
+        for (const row of plan.write) {
+          if (!byProduct.has(row.link.productNo)) byProduct.set(row.link.productNo, []);
+          byProduct.get(row.link.productNo).push(row);
+        }
+        for (const [productNo, rows] of byProduct) {
+          await cafe24.updateVariants(token, productNo, rows.map((r) => ({ variant_code: r.link.variantCode, custom_variant_code: r.want })));
+        }
+      });
+    } catch (error) {
+      if (db.cafe24?.expiresAt !== tokenBefore) await writeDb(db);
+      sendJson(res, 502, { error: `카페24에 쓰지 못했습니다: ${error.message}` });
+      return;
+    }
+    const at = now();
+    if (!body.dryRun) {
+      for (const row of [...plan.write, ...plan.same]) {
+        row.link.cafe24Code = row.want;
+        row.link.cafe24CodeAt = at;
+        await erp.put("productLinks", row.link);
+      }
+      if (plan.write.length) addAudit(db, actor, "update", "product_link", brand.id, `${brand.name} 카페24 자체 품목코드 ${plan.write.length}건 입력`, null, { count: plan.write.length });
+    }
+    if (!body.dryRun || db.cafe24?.expiresAt !== tokenBefore) await writeDb(db);
+    const brief = (rows) => rows.slice(0, 50).map((r) => ({ variantCode: r.link.variantCode, productName: r.link.productName, optionLabel: r.link.optionLabel, want: r.want, current: r.current }));
+    sendJson(res, 200, {
+      dryRun: Boolean(body.dryRun),
+      counts: { write: plan.write.length, same: plan.same.length, taken: plan.taken.length, missing: plan.missing.length },
+      taken: brief(plan.taken),
+      links: body.dryRun ? undefined : (await erp.list("productLinks")).filter((l) => l.brandId === brand.id)
+    });
+    return;
+  }
+
+  const productLinkMatch = pathname.match(/^\/api\/product-links\/(c24-[A-Z0-9]+)$/);
+  if (productLinkMatch && method === "DELETE") {
+    if (!requirePermission(actor, res, "prices", "edit")) return;
+    await erp.remove("productLinks", productLinkMatch[1]);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
   if (pathname === "/api/promotion-rules" && method === "GET") {
     sendJson(res, 200, {
       promotionRules: (db.promotionRules || [])
@@ -7874,7 +8137,7 @@ async function routeApi(req, res, url) {
       const dedupeKey = `${itemName}::${raw.itemCode || ""}`;
       if (seen.has(dedupeKey)) continue;
       seen.add(dedupeKey);
-      if (canon.hasCatalog && canon.match(itemName, raw.itemCode)) continue;
+      if (canon.hasCatalog && canon.match(itemName, raw.itemCode, raw.customVariantCode)) continue;
       unmatched.push({
         itemName,
         itemCode: raw.itemCode || "",
