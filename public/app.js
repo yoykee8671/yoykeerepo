@@ -1971,7 +1971,8 @@ function renderProductMatch() {
         ${brands.map((b) => `<option value="${b.id}" ${pm.brandId === b.id ? "selected" : ""}>${h(b.name)}</option>`).join("")}
       </select>
       <button type="button" class="primary" data-pm-scan ${pm.brandId && !pm.scanning ? "" : "disabled"}>${pm.scanning ? "불러오는 중…" : scan ? "우프 상품 다시 불러오기" : "우프 상품 불러오기"}</button>
-      ${scan ? `<span class="muted">${h(String(scan.at).slice(0, 16).replace("T", " "))} 기준 · 우프 상품 ${scan.products.length}개 · 품목 ${variants.length}개</span>` : ""}
+      ${scan ? `<span class="muted">${h(new Date(scan.at).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", hour12: false, month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }))} 기준 · 우프 상품 ${scan.products.length}개 · 품목 ${variants.length}개</span>` : ""}
+      ${can("productsync", "apply") && d?.links?.some((l) => l.status === "linked") ? `<button type="button" data-pm-write-codes ${pm.writing ? "disabled" : ""} title="연결된 품목의 바코드(없으면 단가표 코드)를 카페24 자체 품목코드 빈 칸에 넣습니다">${pm.writing ? "넣는 중…" : "카페24 자체 품목코드 넣기"}</button>` : ""}
     </div>`;
   if (!pm.brandId || !d) {
     return `<div class="panel"><div class="panel-head"><h2>상품 매칭</h2>${head}</div>
@@ -2031,7 +2032,8 @@ function renderProductMatch() {
                 : status === "none" ? `<span class="badge muted">단가표 없음</span>`
                 : sug ? `<span class="muted">추천:</span> ${h(pmEntryText(sug))} <span class="muted">${h(sug.code)} · ${Math.round(v.suggest.score * 100)}점</span>${v.suggest.priceHit ? ` <span class="badge ok">가격 일치</span>` : ""}`
                 : `<span class="muted">추천 없음</span>`}</td>
-              <td>${base ? `${h(base.code)}<br><span class="muted">${PM_BASE_KIND[base.kind]}</span>` : `<span class="muted">${h(v.code)}</span>`}</td>
+              <td>${base ? `${h(base.code)}<br><span class="muted">${PM_BASE_KIND[base.kind]}</span>` : `<span class="muted">${h(v.code)}</span>`}
+                ${v.custom ? `<br><span class="muted" title="카페24 자체 품목코드">자체코드 ${h(v.custom)}</span>${l?.cafe24Code && l.cafe24Code === v.custom ? ` <span class="badge ok">넣음</span>` : ""}` : l?.cafe24Code ? `<br><span class="badge ok" title="카페24 자체 품목코드">자체코드 ${h(l.cafe24Code)}</span>` : ""}</td>
               <td><div class="row-actions">${canEdit ? `${status === "todo" ? `<button data-pm-accept="${v.code}">적용</button>` : ""}
                 <button data-pm-pick="${v.code}">${status === "linked" ? "바꾸기" : "선택"}</button>
                 ${status === "linked" || status === "none" ? `<button data-pm-unlink="${v.code}">해제</button>` : `<button data-pm-none="${v.code}" title="단가표에 없는 상품(예전 상품 등)">없음</button>`}` : ""}</div></td>
@@ -2117,6 +2119,22 @@ function bindProductMatch() {
   on("[data-pm-apply-all]", "click", () => {
     const rows = todoRows(() => true).filter((v) => v.suggest.score >= 0.7);
     if (rows.length && confirm(`추천 ${rows.length}건을 적용할까요? 나중에 하나씩 바꾸거나 해제할 수 있습니다.`)) accept(rows);
+  });
+  on("[data-pm-write-codes]", "click", async () => {
+    pm.writing = true; renderApp();
+    try {
+      const pre = await api("/api/product-links/write-codes", { method: "POST", body: { brandId: pm.brandId, dryRun: true } });
+      const c = pre.counts;
+      const takenText = pre.taken.length ? `\n\n이미 다른 값이 있어 건드리지 않는 품목 ${c.taken}건(예: ${pre.taken.slice(0, 3).map((t) => `${t.productName} ${t.optionLabel} = ${t.current}`).join(", ")})` : "";
+      if (!c.write) {
+        showToast(`넣을 품목이 없습니다. (이미 같음 ${c.same} · 다른 값 ${c.taken} · 카페24에 없음 ${c.missing})`);
+      } else if (confirm(`카페24 자체 품목코드 빈 칸 ${c.write}건에 기준 코드(바코드, 없으면 단가표 코드)를 넣을까요?\n이미 같음 ${c.same}건 · 카페24에서 사라진 품목 ${c.missing}건${takenText}`)) {
+        const res = await api("/api/product-links/write-codes", { method: "POST", body: { brandId: pm.brandId } });
+        pm.data.links = res.links;
+        showToast(`카페24 자체 품목코드 ${res.counts.write}건을 넣었습니다.`);
+      }
+    } catch (error) { showToast(error.message, "error"); }
+    pm.writing = false; renderApp();
   });
   on("[data-pm-none]", "click", (e) => pmSave([pmItem(e.currentTarget.dataset.pmNone, { status: "none" })].filter(Boolean)));
   on("[data-pm-unlink]", "click", async (e) => {

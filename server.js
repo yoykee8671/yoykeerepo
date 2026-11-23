@@ -3083,9 +3083,12 @@ function buildCanonPriceMatcher(db, brand) {
     };
     if (!hit.key || hit.price <= 0) continue;
     entries.push(hit);
-    // 품번이 있으면 이름 표기가 흔들려도 정확히 집힌다.
-    const code = strip(entry.itemCode);
-    if (code) byCode.set(code, hit);
+    // 품번이 있으면 이름 표기가 흔들려도 정확히 집힌다. 바코드·단가표 코드(IT-)도 같이 —
+    // 상품 매칭에서 카페24 자체 품목코드에 넣은 값이 주문에 실려 온다.
+    for (const c of [entry.itemCode, entry.barcode, entry.code]) {
+      const code = strip(c);
+      if (code && !byCode.has(code)) byCode.set(code, hit);
+    }
   }
   const today = now().slice(0, 10);
   for (const alias of db.priceAliases || []) {
@@ -3109,9 +3112,11 @@ function buildCanonPriceMatcher(db, brand) {
   }
   return {
     hasCatalog: entries.length > 0,
-    match(productName, itemCode = "") {
-      const code = strip(itemCode);
-      if (code && byCode.has(code)) return byCode.get(code);
+    match(productName, itemCode = "", altCode = "") {
+      for (const c of [itemCode, altCode]) {
+        const code = strip(c);
+        if (code && byCode.has(code)) return byCode.get(code);
+      }
       // ① 낱말 대조: 단가표 품목명의 낱말이 상품명에 모두 있으면 후보다.
       // 낱말이 많이 겹치는 쪽이 이긴다 — "리필 3P"가 "캣모나이트"를 이긴다.
       const nameTokens = new Set(catalogTokens(productName));
@@ -3176,7 +3181,7 @@ function suggestPriceCatalogMatches(db, brand, itemName, limit = 5) {
 // 단가표에 없는 품목은 손대지 않는다 — 조용히 0원으로 만드는 것이 최악이다.
 function applyCanonPricesToItems(items, canon) {
   return items.map((item) => {
-    const hit = canon.match(item.itemName, item.itemCode);
+    const hit = canon.match(item.itemName, item.itemCode, item.customVariantCode);
     if (!hit) return item;
     const quantity = Math.max(1, number(item.quantity, 1));
     return {
@@ -3201,7 +3206,7 @@ function applyCatalogBasisToDraft(db, brand, lineItems) {
   }
   const catalogUnmatched = [];
   const priced = lineItems.map((item) => {
-    const hit = canon.match(item.itemName, item.itemCode);
+    const hit = canon.match(item.itemName, item.itemCode, item.customVariantCode);
     if (!hit) {
       catalogUnmatched.push(item.itemName || item.itemCode);
       return item;
@@ -3526,7 +3531,7 @@ function computeSettlementResult(db, brand, year, month, cafe24Rows, bankRows) {
     const detail = useCanonPrices ? applyCanonPricesToItems(rawDetail, canon) : rawDetail;
     if (useCanonPrices) {
       for (const it of rawDetail) {
-        if (!canon.match(it.itemName, it.itemCode)) canonMissed.add(String(it.itemName || it.itemCode || "").trim());
+        if (!canon.match(it.itemName, it.itemCode, it.customVariantCode)) canonMissed.add(String(it.itemName || it.itemCode || "").trim());
       }
     }
     const orderShip = number(req.shippingFee);
@@ -6282,6 +6287,9 @@ function sanitizeLineItems(raw) {
         orderItemCode: String(item.orderItemCode || "").trim(),
         optionName: String(item.optionName || "").trim(),
         itemCode: String(item.itemCode || "").trim(),
+        // 카페24 품목코드·자체 품목코드(상품 매칭 기준 코드). 카페24에서 온 라인만 값이 있다.
+        ...(item.variantCode ? { variantCode: String(item.variantCode).trim().slice(0, 40) } : {}),
+        ...(item.customVariantCode ? { customVariantCode: String(item.customVariantCode).trim().slice(0, 60) } : {}),
         itemName: String(item.itemName || "").trim(),
         spec: String(item.spec || "").trim(),
         unit: String(item.unit || "").trim(),
@@ -8032,6 +8040,66 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // 연결된 품목의 기준 코드(바코드, 없으면 단가표 코드)를 카페24 '자체 품목코드'에 넣는다.
+  // 카페24 주문에 이 코드가 실려 와서 입금요청·정산 때 단가표를 코드로 바로 찾는다.
+  // 빈 칸만 채운다 — 펫페이스처럼 이 칸을 브랜드 상품코드로 이미 쓰는 곳이 있다.
+  if (pathname === "/api/product-links/write-codes" && method === "POST") {
+    if (!requirePermission(actor, res, "productsync", "apply")) return;
+    const body = await readBody(req);
+    const brand = db.brands.find((b) => b.id === String(body.brandId || ""));
+    if (!brand) { sendJson(res, 404, { error: "브랜드를 고르세요." }); return; }
+    const entries = new Map(productLinkEntries(db, brand.id).map((e) => [e.code, e]));
+    const links = (await erp.list("productLinks")).filter((l) => l.brandId === brand.id && l.status === "linked" && entries.has(l.entryCode));
+    const plan = { write: [], same: [], taken: [], missing: [] };
+    const tokenBefore = db.cafe24?.expiresAt;
+    try {
+      await withCafe24Token(db, async (token) => {
+        const products = await cafe24.fetchProductsWithVariants(token, [...new Set(links.map((l) => l.productNo))]);
+        const variants = new Map(products.flatMap((p) => (p.variants || []).map((v) => [v.variant_code, { p, v }])));
+        for (const link of links) {
+          const hit = variants.get(link.variantCode);
+          const want = productMatch.cafe24CodeFor(entries.get(link.entryCode));
+          const row = { link, want, current: String(hit?.v.custom_variant_code || "").trim() };
+          if (!hit) plan.missing.push(row);
+          else if (row.current === want) plan.same.push(row);
+          else if (row.current) plan.taken.push(row);
+          else plan.write.push(row);
+        }
+        if (body.dryRun) return;
+        const byProduct = new Map();
+        for (const row of plan.write) {
+          if (!byProduct.has(row.link.productNo)) byProduct.set(row.link.productNo, []);
+          byProduct.get(row.link.productNo).push(row);
+        }
+        for (const [productNo, rows] of byProduct) {
+          await cafe24.updateVariants(token, productNo, rows.map((r) => ({ variant_code: r.link.variantCode, custom_variant_code: r.want })));
+        }
+      });
+    } catch (error) {
+      if (db.cafe24?.expiresAt !== tokenBefore) await writeDb(db);
+      sendJson(res, 502, { error: `카페24에 쓰지 못했습니다: ${error.message}` });
+      return;
+    }
+    const at = now();
+    if (!body.dryRun) {
+      for (const row of [...plan.write, ...plan.same]) {
+        row.link.cafe24Code = row.want;
+        row.link.cafe24CodeAt = at;
+        await erp.put("productLinks", row.link);
+      }
+      if (plan.write.length) addAudit(db, actor, "update", "product_link", brand.id, `${brand.name} 카페24 자체 품목코드 ${plan.write.length}건 입력`, null, { count: plan.write.length });
+    }
+    if (!body.dryRun || db.cafe24?.expiresAt !== tokenBefore) await writeDb(db);
+    const brief = (rows) => rows.slice(0, 50).map((r) => ({ variantCode: r.link.variantCode, productName: r.link.productName, optionLabel: r.link.optionLabel, want: r.want, current: r.current }));
+    sendJson(res, 200, {
+      dryRun: Boolean(body.dryRun),
+      counts: { write: plan.write.length, same: plan.same.length, taken: plan.taken.length, missing: plan.missing.length },
+      taken: brief(plan.taken),
+      links: body.dryRun ? undefined : (await erp.list("productLinks")).filter((l) => l.brandId === brand.id)
+    });
+    return;
+  }
+
   const productLinkMatch = pathname.match(/^\/api\/product-links\/(c24-[A-Z0-9]+)$/);
   if (productLinkMatch && method === "DELETE") {
     if (!requirePermission(actor, res, "prices", "edit")) return;
@@ -8069,7 +8137,7 @@ async function routeApi(req, res, url) {
       const dedupeKey = `${itemName}::${raw.itemCode || ""}`;
       if (seen.has(dedupeKey)) continue;
       seen.add(dedupeKey);
-      if (canon.hasCatalog && canon.match(itemName, raw.itemCode)) continue;
+      if (canon.hasCatalog && canon.match(itemName, raw.itemCode, raw.customVariantCode)) continue;
       unmatched.push({
         itemName,
         itemCode: raw.itemCode || "",

@@ -51,4 +51,8 @@ assert.deepEqual(pm.baseCodeOf(entries[0], "P1A"), { code: "6410329340001", kind
 assert.deepEqual(pm.baseCodeOf(entries[2], "P1C"), { code: "P1C", kind: "cafe24" });
 assert.deepEqual(pm.baseCodeOf(entries[2]), { code: "IT-3", kind: "pay" });
 
+// 카페24 자체 품목코드에 넣을 값: 바코드, 없으면 단가표 코드.
+assert.equal(pm.cafe24CodeFor(entries[0]), "6410329340001");
+assert.equal(pm.cafe24CodeFor(entries[2]), "IT-3");
+
 console.log("product_match_verify OK");
