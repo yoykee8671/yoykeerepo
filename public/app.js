@@ -1905,13 +1905,262 @@ function renderBrands() {
   `;
 }
 
+// --- 단가표 › 상품 매칭 --------------------------------------------------------
+// 브랜드 상품의 기준은 단가표 품목이다. 우프 카페24 품목(상품번호+품목코드)을 단가표 품목에 잇고,
+// 상품동기화로 이어진 본사 옵션도 같은 줄에 보여 준다. 기준 코드: 바코드 → 카페24 품목코드.
+const PM_FILTERS = [["todo", "추천 확인"], ["unlinked", "미연결"], ["linked", "연결됨"], ["none", "단가표 없음"], ["all", "전체"]];
+const PM_BASE_KIND = { barcode: "바코드", cafe24: "카페24 품목코드" };
+function pmState() {
+  if (!state.pm) state.pm = { brandId: "", data: null, loading: false, scanning: false, filter: "todo", view: "wooof", q: "", pick: null, pickQ: "" };
+  return state.pm;
+}
+function pmBrands() {
+  const ids = new Set((state.priceEntries || []).filter((e) => e.isActive !== false).map((e) => e.brandId));
+  return state.brands.filter((b) => b.type === "brand" && ids.has(b.id) && b.isActive !== false);
+}
+async function loadProductMatch() {
+  const pm = pmState();
+  if (!pm.brandId) return;
+  pm.loading = true;
+  try {
+    pm.data = await api(`/api/product-links?brandId=${encodeURIComponent(pm.brandId)}`);
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    pm.loading = false;
+    if (state.tab === "prices") renderApp();
+  }
+}
+function pmIndex() {
+  const d = pmState().data || {};
+  const entries = new Map((d.entries || []).map((e) => [e.code, e]));
+  const links = new Map((d.links || []).map((l) => [l.variantCode, l]));
+  return { entries, links };
+}
+function pmStatusOf(v, links) {
+  const l = links.get(v.code);
+  if (l?.status === "linked") return "linked";
+  if (l?.status === "none") return "none";
+  return v.suggest ? "todo" : "unlinked";
+}
+function pmBaseCode(entry, variantCode) {
+  if (entry?.baseKind === "barcode") return { code: entry.baseCode, kind: "barcode" };
+  return { code: variantCode, kind: "cafe24" };
+}
+function pmEntryText(e) {
+  return e ? `${e.itemName}${e.spec ? ` · ${e.spec}` : ""}` : "";
+}
+
+function renderProductMatch() {
+  const pm = pmState();
+  const brands = pmBrands();
+  if (!pm.brandId && state.priceFilters.brandId && brands.some((b) => b.id === state.priceFilters.brandId)) pm.brandId = state.priceFilters.brandId;
+  if (pm.brandId && !pm.data && !pm.loading) loadProductMatch();
+  const d = pm.data && pm.data.brand?.id === pm.brandId ? pm.data : null;
+  const canEdit = can("prices", "edit");
+  const { entries, links } = pmIndex();
+  const scan = d?.scan;
+  const q = pm.q.trim().toLowerCase();
+  const variants = scan ? scan.products.flatMap((p) => p.variants.map((v) => ({ p, v, status: pmStatusOf(v, links) }))) : [];
+  const count = Object.fromEntries(PM_FILTERS.map(([k]) => [k, k === "all" ? variants.length : variants.filter((x) => x.status === k).length]));
+  const linkedEntries = new Set([...links.values()].filter((l) => l.status === "linked").map((l) => l.entryCode));
+  const head = `
+    <div class="toolbar" style="flex-wrap:wrap;gap:8px">
+      <select data-pm-brand>
+        <option value="">브랜드 선택</option>
+        ${brands.map((b) => `<option value="${b.id}" ${pm.brandId === b.id ? "selected" : ""}>${h(b.name)}</option>`).join("")}
+      </select>
+      <button type="button" class="primary" data-pm-scan ${pm.brandId && !pm.scanning ? "" : "disabled"}>${pm.scanning ? "불러오는 중…" : scan ? "우프 상품 다시 불러오기" : "우프 상품 불러오기"}</button>
+      ${scan ? `<span class="muted">${h(String(scan.at).slice(0, 16).replace("T", " "))} 기준 · 우프 상품 ${scan.products.length}개 · 품목 ${variants.length}개</span>` : ""}
+    </div>`;
+  if (!pm.brandId || !d) {
+    return `<div class="panel"><div class="panel-head"><h2>상품 매칭</h2>${head}</div>
+      <div class="panel-body"><p class="muted">${pm.loading ? "불러오는 중…" : "단가표가 있는 브랜드를 고르세요. 우프 카페24 품목을 단가표 품목(기준 상품)에 연결합니다."}</p></div></div>`;
+  }
+  const guide = `<div class="notice"><div>기준 상품은 <b>단가표 품목</b>입니다. 연결은 이름이 아니라 <b>우프 상품번호·품목코드</b>로 저장해서, 상품명 앞에 (1+1)·[아울렛] 같은 말머리가 붙거나 이름이 바뀌어도 그대로 유지됩니다.
+    기준 코드는 바코드가 있으면 바코드, 없으면 카페24 품목코드를 씁니다. 단가표 ${d.entries.length}개 중 <b>${linkedEntries.size}</b>개 연결됨.</div></div>`;
+  const chips = `<div class="npb-subnav" style="margin:8px 0">
+      ${[["wooof", "우프 상품 기준"], ["entries", "단가표 기준"]].map(([k, l]) => `<button class="npb-subtab ${pm.view === k ? "active" : ""}" data-pm-view="${k}">${l}</button>`).join("")}
+      <span class="chip-divider" aria-hidden="true"></span>
+      ${pm.view === "wooof" ? PM_FILTERS.map(([k, l]) => `<button class="npb-subtab ${pm.filter === k ? "active" : ""}" data-pm-filter="${k}">${l} <span class="muted">${count[k] || 0}</span></button>`).join("")
+        : [["unlinked", "우프 미연결", d.entries.length - linkedEntries.size], ["linked", "연결됨", linkedEntries.size], ["all", "전체", d.entries.length]].map(([k, l, n]) => `<button class="npb-subtab ${(pm.entryFilter || "all") === k ? "active" : ""}" data-pm-entry-filter="${k}">${l} <span class="muted">${n}</span></button>`).join("")}
+      <input data-pm-q value="${h(pm.q)}" placeholder="상품명·옵션·코드 검색" style="width:220px;margin-left:auto">
+    </div>`;
+  let body = "";
+  if (pm.view === "entries") {
+    const byEntry = new Map();
+    for (const l of links.values()) if (l.status === "linked") { if (!byEntry.has(l.entryCode)) byEntry.set(l.entryCode, []); byEntry.get(l.entryCode).push(l); }
+    const ef = pm.entryFilter || "all";
+    const list = d.entries.filter((e) => (ef === "all" || (ef === "linked") === byEntry.has(e.code))
+      && (!q || `${e.code} ${e.itemCode} ${e.barcode} ${e.itemName} ${e.spec}`.toLowerCase().includes(q)));
+    body = `<div class="table-wrap"><table class="compact"><thead><tr><th>코드</th><th>바코드 / 품번</th><th>단가표 품목</th><th>옵션</th><th class="num">공급가</th><th class="num">소비자가</th><th>연결된 우프 품목</th></tr></thead><tbody>
+      ${list.map((e) => {
+        const ls = byEntry.get(e.code) || [];
+        return `<tr><td>${h(e.code)}</td><td>${h(e.barcode || "-")}<br><span class="muted">${h(e.itemCode)}</span></td><td class="wrap">${h(e.itemName)}</td><td>${h(e.spec)}</td>
+          <td class="num">${money.format(e.supplyPrice)}</td><td class="num">${money.format(e.retailPrice)}</td>
+          <td class="wrap">${ls.length ? ls.map((l) => `<div>#${h(l.productNo)} ${h(l.productName)}${l.optionLabel ? ` <b>${h(l.optionLabel)}</b>` : ""}${l.qty > 1 ? ` ×${l.qty}` : ""}</div>`).join("") : `<span class="muted">우프 미연결</span>`}</td></tr>`;
+      }).join("") || `<tr><td colspan="7" class="empty">단가표 품목이 없습니다.</td></tr>`}
+    </tbody></table></div>`;
+  } else if (!scan) {
+    body = `<div class="panel-body"><p class="muted">[우프 상품 불러오기]를 누르면 카페24 공급사 코드 ${h(d.brand.cafe24Supplier || "(없음)")} 상품을 불러와 단가표 추천을 붙입니다.${d.links.length ? ` 지금까지 저장된 연결 ${d.links.length}건.` : ""}</p></div>`;
+  } else {
+    const shown = variants.filter((x) => (pm.filter === "all" || x.status === pm.filter)
+      && (!q || `${x.p.productNo} ${x.p.name} ${x.v.label} ${x.v.code} ${pmEntryText(entries.get(links.get(x.v.code)?.entryCode || x.v.suggest?.entryCode))}`.toLowerCase().includes(q)));
+    const groups = new Map();
+    for (const x of shown) { if (!groups.has(x.p.productNo)) groups.set(x.p.productNo, { p: x.p, rows: [] }); groups.get(x.p.productNo).rows.push(x); }
+    const todoAll = shown.filter((x) => x.status === "todo" && x.v.suggest.score >= 0.7).length;
+    body = `${canEdit && todoAll ? `<div class="panel-body" style="padding-bottom:0"><button type="button" data-pm-apply-all>추천 ${todoAll}건 한꺼번에 적용 <span class="muted">(점수 0.7 이상)</span></button></div>` : ""}
+      <div class="table-wrap"><table class="compact pm-table"><thead><tr><th>우프 품목</th><th class="num">우프 판매가</th><th>본사(상품동기화)</th><th>기준 상품(단가표)</th><th>기준 코드</th><th></th></tr></thead><tbody>
+      ${[...groups.values()].map(({ p, rows }) => {
+        const todo = rows.filter((x) => x.status === "todo").length;
+        return `<tr class="pm-product"><td colspan="5"><a href="${h(psWooofUrl(p.productNo))}" target="_blank" rel="noreferrer">#${h(p.productNo)}</a> <b>${h(p.name)}</b>
+            ${p.selling ? "" : ` <span class="badge muted">판매안함</span>`}${p.display ? "" : ` <span class="badge muted">진열안함</span>`}</td>
+          <td>${canEdit && todo ? `<button type="button" data-pm-apply-product="${p.productNo}">추천 ${todo}건 적용</button>` : ""}</td></tr>
+          ${rows.map(({ v, status }) => {
+            const l = links.get(v.code);
+            const e = entries.get(l?.status === "linked" ? l.entryCode : "");
+            const sug = status === "todo" ? entries.get(v.suggest.entryCode) : null;
+            const base = e ? pmBaseCode(e, v.code) : null;
+            const src = v.source;
+            const priceWarn = e && e.retailPrice && e.retailPrice !== v.retail ? ` <span class="badge warn" title="단가표 소비자가 ${money.format(e.retailPrice)}원">정가 다름</span>` : "";
+            return `<tr>
+              <td class="wrap">${h(v.label || "(옵션 없음)")}${v.selling ? "" : ` <span class="badge muted">품절/판매안함</span>`}</td>
+              <td class="num">${money.format(v.retail)}${priceWarn}</td>
+              <td class="wrap">${src ? `${src.optionLabel ? `${h(src.optionLabel)} · ` : ""}${money.format(src.price)}원${src.salePrice && src.salePrice < src.price ? ` → <b>${money.format(src.salePrice)}원</b>` : ""}${src.soldOut ? ` <span class="badge muted">품절</span>` : ""}` : `<span class="muted">-</span>`}</td>
+              <td class="wrap">${status === "linked" ? `${h(pmEntryText(e) || l.entryCode)} <span class="muted">${h(l.entryCode)} · 공급가 ${money.format(e?.supplyPrice || 0)}원</span>${l.qty > 1 ? ` ×${l.qty}` : ""}`
+                : status === "none" ? `<span class="badge muted">단가표 없음</span>`
+                : sug ? `<span class="muted">추천:</span> ${h(pmEntryText(sug))} <span class="muted">${h(sug.code)} · ${Math.round(v.suggest.score * 100)}점</span>${v.suggest.priceHit ? ` <span class="badge ok">가격 일치</span>` : ""}`
+                : `<span class="muted">추천 없음</span>`}</td>
+              <td>${base ? `${h(base.code)}<br><span class="muted">${PM_BASE_KIND[base.kind]}</span>` : `<span class="muted">${h(v.code)}</span>`}</td>
+              <td><div class="row-actions">${canEdit ? `${status === "todo" ? `<button data-pm-accept="${v.code}">적용</button>` : ""}
+                <button data-pm-pick="${v.code}">${status === "linked" ? "바꾸기" : "선택"}</button>
+                ${status === "linked" || status === "none" ? `<button data-pm-unlink="${v.code}">해제</button>` : `<button data-pm-none="${v.code}" title="단가표에 없는 상품(예전 상품 등)">없음</button>`}` : ""}</div></td>
+            </tr>`;
+          }).join("")}`;
+      }).join("") || `<tr><td colspan="6" class="empty">해당하는 품목이 없습니다.</td></tr>`}
+      </tbody></table></div>`;
+  }
+  return `<div class="panel"><div class="panel-head"><h2>상품 매칭 — ${h(d.brand.name)}</h2>${head}</div>
+    <div class="panel-body" style="padding-bottom:0">${guide}${chips}</div>${body}</div>${renderPmPick()}`;
+}
+
+function renderPmPick() {
+  const pm = pmState();
+  if (!pm.pick) return "";
+  const d = pm.data;
+  const found = (d.scan?.products || []).flatMap((p) => p.variants.map((v) => ({ p, v }))).find((x) => x.v.code === pm.pick);
+  if (!found) return "";
+  const q = pm.pickQ.trim().toLowerCase();
+  const words = q.split(/\s+/).filter(Boolean);
+  const list = d.entries.filter((e) => words.every((w) => `${e.code} ${e.itemCode} ${e.barcode} ${e.itemName} ${e.spec}`.toLowerCase().includes(w))).slice(0, 80);
+  return v2Modal(`<div class="panel-head"><h2>단가표 품목 선택</h2><button data-pm-pick-close>닫기</button></div>
+    <div class="panel-body">
+      <p><b>#${h(found.p.productNo)} ${h(found.p.name)}</b>${found.v.label ? ` · ${h(found.v.label)}` : ""} <span class="muted">${money.format(found.v.retail)}원</span></p>
+      <div class="toolbar" style="gap:8px"><input data-pm-pick-q value="${h(pm.pickQ)}" placeholder="품목명·옵션·바코드 (예: monsoon ruby 23)" style="flex:1">
+        <label class="muted">수량 <input type="number" min="1" max="99" value="1" data-pm-pick-qty style="width:60px"></label></div>
+      <div class="table-wrap" style="max-height:420px"><table class="compact"><thead><tr><th>코드</th><th>품목</th><th>옵션</th><th class="num">소비자가</th><th></th></tr></thead><tbody>
+        ${list.map((e) => `<tr><td>${h(e.code)}</td><td class="wrap">${h(e.itemName)}</td><td>${h(e.spec)}</td><td class="num">${money.format(e.retailPrice)}</td><td><button data-pm-pick-entry="${h(e.code)}">선택</button></td></tr>`).join("")
+          || `<tr><td colspan="5" class="empty">찾는 품목이 없습니다.</td></tr>`}
+      </tbody></table></div>
+      <p class="muted">세트·묶음 상품(예: 2.5kg × 3개)은 수량을 넣으세요.</p>
+    </div>`, "data-pm-pick-close");
+}
+
+async function pmSave(items) {
+  const pm = pmState();
+  try {
+    const res = await api("/api/product-links", { method: "POST", body: { brandId: pm.brandId, items } });
+    const map = new Map((pm.data.links || []).map((l) => [l.variantCode, l]));
+    for (const rec of res.saved) map.set(rec.variantCode, rec);
+    pm.data.links = [...map.values()];
+    showToast(`${res.saved.length}건 저장했습니다.`);
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+  renderApp();
+}
+function pmItem(code, extra) {
+  const found = (pmState().data.scan?.products || []).flatMap((p) => p.variants.map((v) => ({ p, v }))).find((x) => x.v.code === code);
+  if (!found) return null;
+  return { variantCode: code, productNo: found.p.productNo, productName: found.p.name, optionLabel: found.v.label, ...extra };
+}
+
+function bindProductMatch() {
+  const pm = pmState();
+  const on = (sel, ev, fn) => app.querySelectorAll(sel).forEach((el) => el.addEventListener(ev, fn));
+  on("[data-pm-brand]", "change", (e) => { pm.brandId = e.currentTarget.value; pm.data = null; pm.filter = "todo"; renderApp(); });
+  on("[data-pm-view]", "click", (e) => { pm.view = e.currentTarget.dataset.pmView; renderApp(); });
+  on("[data-pm-filter]", "click", (e) => { pm.filter = e.currentTarget.dataset.pmFilter; renderApp(); });
+  on("[data-pm-entry-filter]", "click", (e) => { pm.entryFilter = e.currentTarget.dataset.pmEntryFilter; renderApp(); });
+  on("[data-pm-q]", "input", (e) => {
+    pm.q = e.currentTarget.value;
+    const pos = e.currentTarget.selectionStart;
+    renderApp();
+    const el = app.querySelector("[data-pm-q]");
+    if (el) { el.focus(); el.setSelectionRange(pos, pos); }
+  });
+  on("[data-pm-scan]", "click", async () => {
+    pm.scanning = true; renderApp();
+    try {
+      const res = await api("/api/product-links/scan", { method: "POST", body: { brandId: pm.brandId } });
+      pm.data.scan = res.scan;
+      pm.data.links = res.links;
+    } catch (error) { showToast(error.message, "error"); }
+    pm.scanning = false; renderApp();
+  });
+  const accept = (rows) => pmSave(rows.map((v) => pmItem(v.code, { status: "linked", entryCode: v.suggest.entryCode, method: "auto" })).filter(Boolean));
+  const { links } = pmIndex();
+  const todoRows = (filterFn) => (pm.data?.scan?.products || []).filter(filterFn)
+    .flatMap((p) => p.variants).filter((v) => pmStatusOf(v, links) === "todo");
+  on("[data-pm-accept]", "click", (e) => { const v = todoRows(() => true).find((x) => x.code === e.currentTarget.dataset.pmAccept); if (v) accept([v]); });
+  on("[data-pm-apply-product]", "click", (e) => accept(todoRows((p) => String(p.productNo) === e.currentTarget.dataset.pmApplyProduct)));
+  on("[data-pm-apply-all]", "click", () => {
+    const rows = todoRows(() => true).filter((v) => v.suggest.score >= 0.7);
+    if (rows.length && confirm(`추천 ${rows.length}건을 적용할까요? 나중에 하나씩 바꾸거나 해제할 수 있습니다.`)) accept(rows);
+  });
+  on("[data-pm-none]", "click", (e) => pmSave([pmItem(e.currentTarget.dataset.pmNone, { status: "none" })].filter(Boolean)));
+  on("[data-pm-unlink]", "click", async (e) => {
+    const code = e.currentTarget.dataset.pmUnlink;
+    try {
+      await api(`/api/product-links/c24-${encodeURIComponent(code)}`, { method: "DELETE" });
+      pm.data.links = pm.data.links.filter((l) => l.variantCode !== code);
+    } catch (error) { showToast(error.message, "error"); }
+    renderApp();
+  });
+  on("[data-pm-pick]", "click", (e) => { pm.pick = e.currentTarget.dataset.pmPick; pm.pickQ = ""; renderApp(); });
+  on("[data-pm-pick-close]", "click", () => { pm.pick = null; renderApp(); });
+  on("[data-pm-pick-q]", "input", (e) => {
+    pm.pickQ = e.currentTarget.value;
+    const pos = e.currentTarget.selectionStart;
+    renderApp();
+    const el = app.querySelector("[data-pm-pick-q]");
+    if (el) { el.focus(); el.setSelectionRange(pos, pos); }
+  });
+  on("[data-pm-pick-entry]", "click", (e) => {
+    const qty = Number(app.querySelector("[data-pm-pick-qty]")?.value || 1);
+    const item = pmItem(pm.pick, { status: "linked", entryCode: e.currentTarget.dataset.pmPickEntry, qty, method: "manual" });
+    pm.pick = null;
+    if (item) pmSave([item]);
+  });
+  bindV2Modal();
+}
+
 function renderPrices() {
+  const priceTabs = `<div class="npb-subnav" style="margin:0 0 12px">${[["table", "단가표"], ["match", "상품 매칭"]].map(([k, l]) => `<button class="npb-subtab ${(state.pricesView || "table") === k ? "active" : ""}" data-prices-view="${k}">${l}</button>`).join("")}</div>`;
+  if (state.pricesView === "match") {
+    return `${pageHead("단가표", "브랜드별 품목 공급가와 개정 이력을 관리합니다.", "")}${priceTabs}${renderProductMatch()}`;
+  }
+  return renderPricesTable(priceTabs);
+}
+
+function renderPricesTable(priceTabs = "") {
   const rows = filteredPriceCatalog();
   const revisions = filteredPriceEntries();
   const aliases = filteredPriceAliases();
   const selectedBrand = state.brands.find((b) => b.id === state.priceFilters.brandId) || null;
   return `
     ${pageHead("단가표", "브랜드별 품목 공급가와 개정 이력을 관리합니다.", `<button class="primary" data-new-price-entry>새 단가 개정</button>`)}
+    ${priceTabs}
     <section class="layout">
       <div class="panel">
         <div class="panel-head">
@@ -4797,6 +5046,8 @@ function cryptoRandomId() {
 }
 
 function bindPrices() {
+  app.querySelectorAll("[data-prices-view]").forEach((b) => b.addEventListener("click", () => { state.pricesView = b.dataset.pricesView; renderApp(); }));
+  if (state.pricesView === "match") { bindProductMatch(); return; }
   app.querySelector("[data-price-brand-filter]").addEventListener("change", (event) => {
     state.priceFilters.brandId = event.target.value;
     state.priceImportStatus = null;
