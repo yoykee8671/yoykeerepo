@@ -8,7 +8,10 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
        python3 python3-pip python3-openpyxl python3-pil \
        libreoffice-calc-nogui fonts-nanum fontconfig \
+       chromium \
   && rm -rf /var/lib/apt/lists/*
+# chromium: 공급사 사이트(테일릿 등) 자동 주문. 결제 화면이 앱 방식이라 서버 요청만으로는 주문할 수 없다.
+ENV CHROMIUM_PATH=/usr/bin/chromium
 
 COPY docker/fontconfig-korean.conf /etc/fonts/conf.d/99-wooofpay-korean.conf
 # 폰트 대체가 깨져도 변환은 오류 없이 "성공"하고 한글만 빈칸인 PDF가 나간다.

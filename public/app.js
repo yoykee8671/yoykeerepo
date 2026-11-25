@@ -8787,6 +8787,75 @@ function renderPipelineAutoCreated(autoCreated) {
     </details>`;
 }
 
+// --- 공급사 자동 주문(테일릿 등) — 주문매칭 행 -----------------------------------
+function supplierOrderReady(d) {
+  const so = d.supplierOrder;
+  if (!so || so.status !== "placed") return false;
+  const digits = (v) => String(v || "").replace(/\D/g, "");
+  const nm = (v) => String(v || "").replace(/\s+/g, "");
+  return Math.round(Number(so.total || 0)) === Math.round(Number(d.depositAmount || 0))
+    && nm(so.receiverSeen?.name) === nm(so.receiver?.name) && digits(so.receiverSeen?.phone) === digits(so.receiver?.phone);
+}
+function renderSupplierOrderCell(d) {
+  const so = d.supplierOrder;
+  const name = h(d.autoOrder.sourceName);
+  if (!d.autoOrder.hasLogin) return `<span class="badge warn">${name} 계정 없음</span><br><span class="muted">상품동기화 설정에서 넣기</span>`;
+  const job = state.pipeline.soJobs?.[`${d.brandId}:${d.orderNo}`];
+  if (job && job.status === "running") return `<span class="badge muted">${name} 주문 중…</span><br><span class="muted">${h(job.message || "")}</span>`;
+  if (!so) return `<span class="badge warn">${name} 미주문</span>`;
+  if (so.status === "placed") {
+    const ok = supplierOrderReady(d);
+    const due = so.depositDue ? new Date(so.depositDue).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }) : "";
+    return `<span class="badge ${ok ? "ok" : "warn"}">${name} 주문 ${h(so.supplierOrderNo)}</span><br>
+      <span class="muted">${money.format(so.total)}원${so.total !== d.depositAmount ? ` <b class="danger-text">(입금액 ${money.format(d.depositAmount)}원과 다름)</b>` : " · 금액 일치"} · 수령인 ${h(so.receiverSeen?.name || "?")}${ok ? "" : " 확인 필요"}${due ? ` · 입금기한 ${h(due)}` : ""}</span>`;
+  }
+  if (so.status === "dry") return `<span class="badge muted">${name} 연습 OK</span><br><span class="muted">결제 ${money.format(so.total)}원${so.total !== d.depositAmount ? ` <b class="danger-text">(입금액 ${money.format(d.depositAmount)}원과 다름)</b>` : " · 금액 일치"} · 주문 안 함</span>`;
+  const shots = (state.pipeline.soJobs?.[`${d.brandId}:${d.orderNo}`]?.screenshots || []);
+  return `<span class="badge warn">${name} 주문 실패</span><br><span class="danger-text" style="font-size:12px">${h(so.error || "")}</span>${shots.length ? `<br>${shots.map((f) => `<a href="/api/supplier-orders/jobs/${h(state.pipeline.soJobs[`${d.brandId}:${d.orderNo}`].id)}/shots/${h(f)}" target="_blank" rel="noreferrer">캡처 ${h(f.slice(0, 2))}</a>`).join(" ")}` : ""}`;
+}
+async function placeSupplierOrder(i, dryRun, allowAmountDiff = false) {
+  const p = state.pipeline;
+  const d = p.collect?.drafts?.[i];
+  if (!d) return;
+  const name = d.autoOrder.sourceName;
+  if (!dryRun && !allowAmountDiff && !confirm(`${name}에 실제 주문을 넣을까요? (무통장입금)\n\n카페24 주문 ${d.orderNo} · 수령인 정보로 주문합니다.\n결제 금액이 입금액 ${money.format(d.depositAmount)}원과 다르면 주문하지 않고 멈춥니다.`)) return;
+  const key = `${d.brandId}:${d.orderNo}`;
+  p.soJobs = p.soJobs || {};
+  p.soBusy = true;
+  try {
+    const r = await api("/api/supplier-orders/place", { method: "POST", body: { brandId: d.brandId, orderNo: d.orderNo, expectedTotal: d.depositAmount, dryRun, allowAmountDiff } });
+    p.soJobs[key] = { id: r.job.id, status: "running", message: "시작" };
+    renderApp();
+    for (;;) {
+      await new Promise((ok) => setTimeout(ok, 2500));
+      const j = (await api(`/api/supplier-orders/jobs/${r.job.id}`)).job;
+      p.soJobs[key] = { ...j };
+      if (j.status !== "running") {
+        if (j.result) d.supplierOrder = j.result;
+        const res = j.result || {};
+        if (res.status === "placed") showToast(`${name} 주문 완료: ${res.supplierOrderNo} · ${money.format(res.total)}원`);
+        else if (res.status === "dry") showToast(`연습 완료: 결제 ${money.format(res.total)}원 (주문은 넣지 않음)`);
+        else if (res.stopped === "amount" && !dryRun) {
+          // 금액이 달라 주문 직전에 멈췄다. 직원이 보고 그래도 주문할지 고른다(입금요청은 [입금요청 입력]으로 금액을 고쳐 올림).
+          p.soBusy = false;
+          if (confirm(`${res.error}\n\n그래도 ${name}에 주문할까요?\n(입금요청은 자동으로 만들지 않습니다. [입금요청 입력]으로 금액을 확인해 올려 주세요.)`)) {
+            return placeSupplierOrder(i, false, true);
+          }
+        } else showToast(`${name} 주문 실패: ${res.error || "원인 미상"}`, "error");
+        const idx = p.collect.drafts.indexOf(d);
+        if (supplierOrderReady(d) && idx >= 0 && !p.selected.includes(idx)) p.selected = [...p.selected, idx];
+        break;
+      }
+      renderApp();
+    }
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    p.soBusy = false;
+    renderApp();
+  }
+}
+
 function renderPipelineCollect(collect) {
   if (!collect) return "";
   const drafts = collect.drafts || [];
@@ -8814,9 +8883,10 @@ function renderPipelineCollect(collect) {
         ${d.catalogMismatch
           ? `<span class="badge clobe-medium">단가표 확인</span><br><span class="muted">${h(d.catalogNote || `미매칭: ${(d.catalogUnmatched || []).join(", ")}`)}</span>`
           : ""}
-        ${!d.shippingMismatch && !d.catalogMismatch ? `<span class="muted">-</span>` : ""}
+        ${d.autoOrder ? renderSupplierOrderCell(d) : ""}
+        ${!d.shippingMismatch && !d.catalogMismatch && !d.autoOrder ? `<span class="muted">-</span>` : ""}
       </td>
-      <td class="cell-action"><div class="cell-action-btns"><button type="button" class="small" data-pipe-draft-request="${i}">입금요청 입력</button><button type="button" class="small ghost" data-pipe-monthly="${i}" title="위탁(월 정산 후 입금) 업체로 바꾸고 바로 등록합니다">월단위입금</button></div></td>
+      <td class="cell-action"><div class="cell-action-btns">${d.autoOrder && d.supplierOrder?.status !== "placed" ? `<button type="button" class="small primary" data-so-place="${i}" ${state.pipeline.soBusy ? "disabled" : ""}>${h(d.autoOrder.sourceName)} 주문 넣기</button><button type="button" class="small ghost" data-so-dry="${i}" ${state.pipeline.soBusy ? "disabled" : ""} title="결제 직전까지만 채워 보고 주문하지 않습니다">연습</button>` : ""}<button type="button" class="small" data-pipe-draft-request="${i}">입금요청 입력</button><button type="button" class="small ghost" data-pipe-monthly="${i}" title="위탁(월 정산 후 입금) 업체로 바꾸고 바로 등록합니다">월단위입금</button></div></td>
     </tr>`;
   }).join("");
   return `
@@ -9136,7 +9206,7 @@ function bindPipeline() {
       if (p.collect.prepared) showToast(`자동 등록 ${p.collect.autoCreated?.length || 0}건${prepareNote(p.collect.prepared)}`, p.collect.prepared.failed?.length ? "error" : "");
       // 배송비가 어긋나거나 단가표 매칭이 안 된 건은 사람이 먼저 보게 기본 선택에서 뺀다.
       p.selected = (p.collect.drafts || [])
-        .map((d, i) => (d.shippingMismatch || d.catalogMismatch ? null : i))
+        .map((d, i) => (d.shippingMismatch || d.catalogMismatch || (d.autoOrder && !supplierOrderReady(d)) ? null : i))
         .filter((v) => v !== null);
     } catch (error) {
       p.error = error.message || "수집에 실패했습니다.";
@@ -9209,6 +9279,8 @@ function bindPipeline() {
     } catch (error) { showToast(error.message || "바꾸지 못했습니다.", "error"); }
   }));
 
+  app.querySelectorAll("[data-so-place]").forEach((b) => b.addEventListener("click", () => placeSupplierOrder(Number(b.dataset.soPlace), false)));
+  app.querySelectorAll("[data-so-dry]").forEach((b) => b.addEventListener("click", () => placeSupplierOrder(Number(b.dataset.soDry), true)));
   app.querySelectorAll("[data-pipe-shipform]").forEach((b) => b.addEventListener("click", () => downloadShipForm(p.shipForms[Number(b.dataset.pipeShipform)]?.ids || [])));
 
   app.querySelector("[data-pipe-apply]")?.addEventListener("click", async () => {
@@ -9218,6 +9290,7 @@ function bindPipeline() {
     try {
       const result = await api("/api/pipeline/collect/apply", { method: "POST", body: { drafts, ...readTeamSend(app.querySelector(".collect-result")) } });
       showToast(`${result.createdCount}건 생성했습니다.${result.skipped?.length ? ` (중복 ${result.skipped.length}건 제외)` : ""}${prepareNote(result.prepared)}`, result.prepared?.failed?.length ? "error" : "");
+      if (result.blocked?.length) alert(`공급사 주문 확인이 안 돼서 만들지 않은 건 ${result.blocked.length}건:\n\n${result.blocked.map((b) => `${b.orderNo}: ${b.reason}`).join("\n")}`);
       // 발주양식을 쓰는 브랜드 건은 바로 내려받을 수 있게 남겨 둔다.
       const forms = new Map();
       for (const r of result.created || []) {
@@ -11831,6 +11904,7 @@ const PS_ISSUE_LABELS = {
   soldout: ["품절 반영", "ps-red"],
   restock: ["재입고", "ps-green"],
   price: ["판매가", "ps-blue"],
+  supply_price: ["매입가(회원가)", "ps-blue"],
   option_price: ["옵션 추가금", "ps-blue"],
   source_removed: ["본사 삭제", "ps-red"],
   source_unlisted: ["본사 진열 중단", "ps-gray"],
@@ -12501,6 +12575,20 @@ function renderPsSettings() {
         </form>
       </div>
     </section>
+    ${d.login ? `<section class="panel">
+      <div class="panel-head"><h2>${h(d.name || "")} 사이트 계정</h2></div>
+      <div class="panel-body">
+        <p class="muted" style="font-size:12px">이 사이트는 로그인해야 판매가(우리 매입가)가 보입니다. pay 서버가 이 계정으로 로그인해서 읽습니다. 비밀번호는 암호화해 저장하고 화면에 다시 보이지 않습니다. 직원 모두 같은 계정을 씁니다.</p>
+        <p>${d.login.hasPassword ? `<span class="badge ok">계정 저장됨</span> ${h(d.login.uid)}` : `<span class="badge warn">계정 없음</span>`}
+          ${d.login.checkedAt ? ` <span class="muted">· 마지막 시험 ${psFmtTime(d.login.checkedAt)}</span>` : ""}
+          ${d.login.error ? ` <span class="danger-text">${h(d.login.error)}</span>` : d.login.checkedAt && d.login.hasPassword ? ` <span class="badge ok">로그인 됨</span>` : ""}</p>
+        ${canApply ? `<form data-ps-login class="form-grid">
+          <div class="field two"><div><label>아이디</label><input name="uid" value="${h(d.login.uid || "")}" autocomplete="off"></div>
+            <div><label>비밀번호 <span class="muted">${d.login.hasPassword ? "(바꿀 때만 입력)" : ""}</span></label><input name="password" type="password" autocomplete="new-password"></div></div>
+          <div class="toolbar"><button class="primary" type="submit">계정 저장</button><button type="button" data-ps-login-test ${d.login.hasPassword ? "" : "disabled"}>로그인 시험</button></div>
+        </form>` : ""}
+      </div>
+    </section>` : ""}
     <section class="panel">
       <div class="panel-head"><h2>기록 <span class="muted">최근 ${history.length}건</span></h2></div>
       <div class="panel-body">
@@ -12890,6 +12978,23 @@ function bindProductSync() {
   });
 
   // 설정
+  on("[data-ps-login]", "submit", async (event) => {
+    event.preventDefault();
+    const data = formObject(event.currentTarget);
+    try {
+      await api(`${sourcePath}/login`, { method: "PUT", body: { uid: data.uid, password: data.password } });
+      const test = await api(`${sourcePath}/login/test`, { method: "POST" });
+      showToast(test.ok ? "계정을 저장했고 로그인도 확인했습니다." : `저장했지만 로그인 실패: ${test.error}`, test.ok ? "success" : "error");
+      await loadProductSync({ silent: true });
+    } catch (error) { showToast(error.message, "error"); }
+  });
+  on("[data-ps-login-test]", "click", async () => {
+    try {
+      const test = await api(`${sourcePath}/login/test`, { method: "POST" });
+      showToast(test.ok ? "로그인 됩니다." : `로그인 실패: ${test.error}`, test.ok ? "success" : "error");
+      await loadProductSync({ silent: true });
+    } catch (error) { showToast(error.message, "error"); }
+  });
   on("[data-ps-settings]", "submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
