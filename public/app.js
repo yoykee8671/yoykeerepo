@@ -157,6 +157,9 @@ async function ensurePartnerOptions() {
   renderApp();
 }
 const PO_STATUS_LABELS = { ordered: "발주", in_production: "생산중", received: "입고완료", cancelled: "취소" };
+// 거래처 지급 시점(서버 PAYMENT_TIMINGS 와 같음) — 발주서에서 지급요청을 만들 때 기한 기본값.
+const PAYMENT_TIMING_LABELS = { "": "미정", prepay: "선결제(발주·견적 후 바로)", after_receipt: "입고 후", monthly: "월말 묶음", net60: "납품 후 60일" };
+const PO_REASON_TYPES = ["단가변경", "MOQ변경", "수량변경", "품목변경", "기타"];
 // 네 양식은 담기는 내용이 같아 한 목록에 모아 두고 docType으로만 가른다.
 // dateLabel/dueLabel은 같은 날짜 칸이 양식마다 다르게 불리는 이름이고,
 // defaultCategory는 작성 화면에서 수신처로 먼저 보여줄 거래처 분류다
@@ -5930,6 +5933,10 @@ function renderPartnerForm() {
         <div><label>증빙구분</label>${select("invoiceTiming", opt.evidenceTypes, p.invoiceTiming, "evidenceTypes")}</div>
       </div>
       <div class="field">
+        <label>지급 시점 <span class="muted" style="font-weight:400">(발주서에서 지급요청을 만들 때 기한 기본값)</span></label>
+        <select name="paymentTiming">${Object.entries(PAYMENT_TIMING_LABELS).map(([k, l]) => `<option value="${k}" ${(p.paymentTiming || "") === k ? "selected" : ""}>${l}</option>`).join("")}</select>
+      </div>
+      <div class="field">
         <label>금액 계산 방식 <span class="muted" style="font-weight:400">(발주서 단가 기본값 — 문서별로 변경 가능)</span></label>
         <select name="priceMode">
           <option value="supply" ${p.priceMode === "gross" ? "" : "selected"}>부가세 별도 (공급가 기준 — 생산처 일반)</option>
@@ -6689,7 +6696,132 @@ function renderPurchaseOrders() {
       </div>
     </section>
     ${state.procurement.previewPurchaseOrder ? renderPurchaseOrderPreviewOverlay(state.procurement.previewPurchaseOrder) : ""}
+    ${state.procurement.poConfirm ? renderPoConfirm() : ""}
   `;
+}
+
+// --- 발주서 확정 · 지급요청 연결 ---------------------------------------------------
+const PAY_ST_SHORT = { requested: "요청", confirmed: "확인", awaiting_approval: "허가대기", paid: "지급완료", on_hold: "보류", cancelled: "취소" };
+function poPayBadges(po) {
+  const out = [];
+  if (po.confirmedAt && po.ordered && po.ordered.total !== po.total) out.push(`<span class="muted" style="font-size:11px">발주 <s>${money.format(po.ordered.total)}</s> → 확정</span>`);
+  else if (po.confirmedAt) out.push(`<span class="badge ok" style="font-size:11px">확정</span>`);
+  const p = po.pay;
+  if (p?.count) {
+    out.push(p.items.map((x) => `<span class="badge ${x.status === "paid" ? "ok" : "muted"}" style="font-size:11px" title="${h(x.code)} ${money.format(x.amount)}원${x.dueDate ? ` · 기한 ${h(x.dueDate)}` : ""}">${h(x.code)} ${PAY_ST_SHORT[x.status] || x.status}</span>`).join(" "));
+    if (p.diff > 0) out.push(`<span class="badge warn" style="font-size:11px">지급요청 부족 ${money.format(p.diff)}원</span>`);
+    if (p.diff < 0) out.push(`<span class="badge warn" style="font-size:11px">더 냄 ${money.format(-p.diff)}원</span>`);
+  }
+  return out.length ? `<br>${out.join(" ")}` : "";
+}
+function renderPoConfirm() {
+  const c = state.procurement.poConfirm;
+  const po = (state.purchaseOrders || []).find((x) => x.id === c.poId);
+  if (!po) return "";
+  const partner = (state.partners || []).find((p) => p.id === po.partnerId);
+  const mat = (id) => (state.materials || []).find((m) => m.id === id);
+  if (c.stage === "diff") {
+    const d = po.pay?.diff || 0;
+    return v2Modal(`<div class="panel-head"><h2>차액 처리 — ${h(po.docNo)}</h2><button data-poc-close>닫기</button></div>
+      <div class="panel-body">
+        <p>확정 금액 <b>${money.format(po.total)}원</b>, 지급요청 합계 <b>${money.format(po.pay?.requested || 0)}원</b>(이미 지급완료). 차액 <b class="${d > 0 ? "danger-text" : ""}">${d > 0 ? "" : "−"}${money.format(Math.abs(d))}원</b>을 어떻게 할까요?</p>
+        <div class="toolbar" style="flex-wrap:wrap;gap:8px">
+          ${d > 0 ? `<button class="primary" data-poc-diff="extra">차액 ${money.format(d)}원 추가 지급요청</button>` : `<button class="primary" data-poc-diff="refund">${money.format(-d)}원 환불 받기</button>`}
+          <button data-poc-diff="offset">다음 발주에서 상계</button>
+          <button data-poc-diff="ignore">처리 안 함(기록만)</button>
+        </div>
+        <label style="margin-top:8px;display:block">메모 <input data-poc-diff-memo placeholder="예: 다음 발주 때 빼 주기로 함"></label>
+      </div>`, "data-poc-close");
+  }
+  const rows = (c.lines || []).map((l, i) => {
+    const m = mat(l.materialId);
+    const base = Number(m?.basePrice || 0);
+    const changed = m && Number(l.unitPrice) > 0 && Number(l.unitPrice) !== base;
+    return `<tr><td class="wrap">${h(l.itemName)}${m?.code ? ` <span class="muted">${h(m.code)}</span>` : ""}</td>
+      <td><input data-poc-qty="${i}" inputmode="decimal" value="${h(l.quantity)}" style="width:80px"> ${h(l.unit || "")}</td>
+      <td><input data-poc-price="${i}" inputmode="numeric" value="${h(l.unitPrice)}" style="width:100px"></td>
+      <td class="num">${money.format(Math.round(Number(l.quantity || 0) * Number(l.unitPrice || 0)))}</td>
+      <td>${changed ? `<label style="font-size:12px"><input type="checkbox" data-poc-rev="${i}" ${l.revise !== false ? "checked" : ""}> 단가 이력에 개정으로 남기기<br><span class="muted">${base ? `${money.format(base)} → ` : ""}${money.format(l.unitPrice)}원</span></label>` : ""}</td></tr>`;
+  }).join("");
+  return v2Modal(`<div class="panel-head"><h2>발주서 확정 — ${h(po.docNo)} ${h(partner?.name || "")}</h2><button data-poc-close>닫기</button></div>
+    <div class="panel-body">
+      <p class="muted" style="font-size:12px">견적서·거래명세서를 받아 수량·단가가 바뀌었으면 고치세요. 처음 발주 금액(${money.format(po.ordered?.total ?? po.total)}원)은 기록으로 남고, 아직 지급 전인 지급요청은 확정 금액으로 맞춰집니다. 단가는 부가세 별도.</p>
+      <div class="table-wrap"><table class="compact"><thead><tr><th>품목</th><th>수량</th><th>단가(VAT별도)</th><th class="num">공급가</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="field two" style="margin-top:8px"><div><label>바뀐 이유</label><select data-poc-reason-type>${PO_REASON_TYPES.map((t) => `<option ${c.reasonType === t ? "selected" : ""}>${t}</option>`).join("")}</select></div>
+        <div><label>메모</label><input data-poc-reason value="${h(c.reason || "")}" placeholder="예: MOQ 300 → 350yd, 단가 50원 인상"></div></div>
+      ${(po.revisions || []).length ? `<details style="margin-top:8px"><summary class="muted">지난 확정 ${po.revisions.length}번</summary>${po.revisions.map((r) => `<div class="muted" style="font-size:12px">${h(String(r.at).slice(0, 10))} ${h(r.by)} · ${h(r.reasonType || "")} ${money.format(r.beforeTotal)} → ${money.format(r.afterTotal)}원 ${h(r.reason || "")}</div>`).join("")}</details>` : ""}
+      <div class="toolbar" style="margin-top:12px"><button class="primary" data-poc-save>확정 저장</button></div>
+    </div>`, "data-poc-close");
+}
+function bindPoConfirm() {
+  const pr = state.procurement;
+  const on = (sel, ev, fn) => app.querySelectorAll(sel).forEach((el) => el.addEventListener(ev, fn));
+  on("[data-po-confirm]", "click", (e) => {
+    const po = (state.purchaseOrders || []).find((x) => x.id === e.currentTarget.dataset.poConfirm);
+    if (!po) return;
+    pr.poConfirm = { poId: po.id, stage: "edit", reasonType: PO_REASON_TYPES[0], reason: "", lines: (po.lineItems || []).map((l) => ({ ...l })) };
+    renderApp();
+  });
+  on("[data-po-payreq]", "click", async (e) => {
+    const po = (state.purchaseOrders || []).find((x) => x.id === e.currentTarget.dataset.poPayreq);
+    if (!po) return;
+    const partner = (state.partners || []).find((p) => p.id === po.partnerId);
+    const amount = po.pay ? po.pay.diff : po.total;
+    if (!confirm(`${partner?.name || ""} ${po.docNo} ${money.format(amount)}원 지급요청을 만들까요? (이미 따로 지급요청을 만들었다면 취소하세요)\n지급 시점: ${PAYMENT_TIMING_LABELS[partner?.paymentTiming || ""]}${partner?.bankAccount ? `\n계좌: ${partner.bankName || ""} ${partner.bankAccount}` : "\n(거래처에 계좌가 없습니다 — 지급요청에서 넣어 주세요)"}`)) return;
+    try {
+      const res = await api("/api/payments/from-po", { method: "POST", body: { poId: po.id } });
+      showToast(`지급요청 ${res.payment.code}을 만들었습니다.`);
+      await refreshAndRender();
+    } catch (error) { showToast(error.message, "error"); }
+  });
+  if (!pr.poConfirm) return;
+  bindV2Modal();
+  on("[data-poc-close]", "click", () => { pr.poConfirm = null; renderApp(); });
+  const read = () => {
+    const c = pr.poConfirm;
+    c.lines = c.lines.map((l, i) => ({ ...l,
+      quantity: Number(String(app.querySelector(`[data-poc-qty="${i}"]`)?.value ?? l.quantity).replace(/,/g, "")) || 0,
+      unitPrice: Math.round(Number(String(app.querySelector(`[data-poc-price="${i}"]`)?.value ?? l.unitPrice).replace(/,/g, "")) || 0),
+      revise: app.querySelector(`[data-poc-rev="${i}"]`) ? app.querySelector(`[data-poc-rev="${i}"]`).checked : l.revise }));
+    c.reasonType = app.querySelector("[data-poc-reason-type]")?.value || c.reasonType;
+    c.reason = app.querySelector("[data-poc-reason]")?.value ?? c.reason;
+  };
+  on("[data-poc-qty], [data-poc-price]", "change", () => { read(); renderApp(); });
+  on("[data-poc-save]", "click", async () => {
+    read();
+    const c = pr.poConfirm;
+    const priceRevisions = c.lines.filter((l, i) => l.materialId && app.querySelector(`[data-poc-rev="${i}"]`)?.checked).map((l) => ({ materialId: l.materialId, unitPrice: l.unitPrice }));
+    try {
+      const res = await api(`/api/purchase-orders/${c.poId}/confirm`, { method: "POST", body: {
+        lineItems: c.lines.map((l) => ({ ...l, grossUnitPrice: 0 })), reasonType: c.reasonType, reason: c.reason, priceRevisions } });
+      showToast(`확정했습니다.${res.adjusted ? ` 지급요청 ${res.adjusted.code} 금액 ${money.format(res.adjusted.from)} → ${money.format(res.adjusted.to)}원` : ""}${res.revised.length ? ` · 단가개정 ${res.revised.join(", ")}` : ""}`);
+      await refreshAndRender();
+      const po = (state.purchaseOrders || []).find((x) => x.id === c.poId);
+      const p = po?.pay;
+      // 이미 다 지급했는데 금액이 바뀌었으면 차액 처리를 고르게 한다.
+      if (p && p.diff !== 0 && p.paid >= p.requested) { pr.poConfirm = { poId: c.poId, stage: "diff" }; }
+      else pr.poConfirm = null;
+      renderApp();
+    } catch (error) { showToast(error.message, "error"); }
+  });
+  on("[data-poc-diff]", "click", async (e) => {
+    const c = pr.poConfirm;
+    const po = (state.purchaseOrders || []).find((x) => x.id === c.poId);
+    const d = po?.pay?.diff || 0;
+    const action = e.currentTarget.dataset.pocDiff;
+    const memo = app.querySelector("[data-poc-diff-memo]")?.value || "";
+    try {
+      if (action === "extra") {
+        const res = await api("/api/payments/from-po", { method: "POST", body: { poId: c.poId, extra: true, amount: d } });
+        showToast(`차액 지급요청 ${res.payment.code}을 만들었습니다.`);
+      } else {
+        await api(`/api/purchase-orders/${c.poId}/diff`, { method: "POST", body: { action, amount: d, memo } });
+        showToast("차액 처리를 기록했습니다.");
+      }
+      pr.poConfirm = null;
+      await refreshAndRender();
+    } catch (error) { showToast(error.message, "error"); }
+  });
 }
 
 // 다운로드하기 전에 실제로 어떤 내용이 들어가는지 한눈에 보여주는 미리보기다
@@ -6907,8 +7039,10 @@ function renderPurchaseOrderRow(item) {
       <td class="m-title">${h(partner?.name || "")}</td>
       <td class="m-sub">${h(item.orderDate)}${item.dueDate ? `<br><span class="muted" style="font-size:11px">${h(tradeDocMeta(item.docType).dueLabel)} ${h(item.dueDate)}</span>` : ""}</td>
       <td class="m-status"><span class="pill po-st-${h(item.status)}">${PO_STATUS_LABELS[item.status] || item.status}</span></td>
-      <td class="num m-amount"><strong>${money.format(item.total)}원</strong><br><span class="muted" style="font-size:11px">공급가 ${money.format(Number(item.subtotal || 0))} · 부가세 ${money.format(Number(item.vat || 0))}</span></td>
+      <td class="num m-amount"><strong>${money.format(item.total)}원</strong><br><span class="muted" style="font-size:11px">공급가 ${money.format(Number(item.subtotal || 0))} · 부가세 ${money.format(Number(item.vat || 0))}</span>${poPayBadges(item)}</td>
       <td class="m-actions"><div class="row-actions">
+        ${(item.docType || "purchase_order") === "purchase_order" && item.status !== "cancelled" ? `<button type="button" data-po-confirm="${item.id}" title="견적서·거래명세서를 받아 수량·단가가 바뀌었으면 고칩니다">확정</button>
+          ${can("payments", "create") && (!item.pay || item.pay.diff > 0) ? `<button type="button" data-po-payreq="${item.id}">지급요청</button>` : ""}` : ""}
         <button data-edit-purchase-order="${item.id}">수정</button>
         <button type="button" data-preview-purchase-order="${item.id}">미리보기</button>
         <a href="/api/purchase-orders/${item.id}/excel"><button type="button">엑셀</button></a>
@@ -7122,6 +7256,7 @@ function renderPurchaseOrderSummary(items, priceMode) {
 }
 
 function bindPurchaseOrders() {
+  bindPoConfirm();
   app.querySelectorAll("[data-doc-type-tab]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const key = btn.dataset.docTypeTab;

@@ -313,6 +313,23 @@ const PARTNER_CATEGORY_LABEL_TO_KEY = Object.fromEntries(
   Object.entries(PARTNER_CATEGORY_LABELS).map(([key, label]) => [label, key])
 );
 const purchaseOrderStatuses = new Set(["ordered", "in_production", "received", "cancelled"]);
+// 거래처별 지급 시점(발주서에서 지급요청을 만들 때 기한 기본값). 2026-11-25 사용자: 거래처마다 다름.
+export const PAYMENT_TIMINGS = { prepay: "선결제(발주·견적 후 바로)", after_receipt: "입고 후", monthly: "월말 묶음", net60: "납품 후 60일" };
+const money = (n) => `${Math.round(Number(n || 0)).toLocaleString("ko-KR")}원`;
+function poPaymentDueDate(partner, po) {
+  const t = partner?.paymentTiming || "";
+  if (t === "prepay") return kstToday();
+  if (t === "monthly") { const d = new Date(`${(po.orderDate || kstToday()).slice(0, 7)}-01T00:00:00Z`); d.setUTCMonth(d.getUTCMonth() + 1); d.setUTCDate(0); return d.toISOString().slice(0, 10); }
+  return ""; // 입고 후·납품 후 60일은 입고(납품)일이 정해지면 그때 정한다
+}
+// 발주서에 이어진 지급요청 요약(목록·확정 화면에서 쓴다).
+function poPaySummary(po, list) {
+  const linked = list.filter((p) => p.poId === po.id && p.status !== "cancelled");
+  const paid = linked.filter((p) => p.status === "paid").reduce((s, p) => s + Number(p.amount || 0), 0);
+  const requested = linked.reduce((s, p) => s + Number(p.amount || 0), 0);
+  return { count: linked.length, requested, paid, open: requested - paid, diff: Number(po.total || 0) - requested - Number(po.diffSettled || 0),
+    items: linked.map((p) => ({ id: p.id, code: p.code || "", amount: p.amount, status: p.status, dueDate: p.dueDate || "", paidAt: p.paidAt || "" })) };
+}
 // 발주서·거래명세서·청구서·견적서는 담기는 내용(수신처/품목/금액)이 같아서 한
 // 컬렉션에 두고 docType으로만 가른다. 문서번호 앞자리는 양식마다 달리 준다.
 const tradeDocTypes = new Set(["purchase_order", "statement", "invoice", "quote"]);
@@ -11599,6 +11616,7 @@ async function routeApi(req, res, url) {
       // 기준으로 쓸지의 이 거래처 기본값 — 문서 작성 시 자동 선택되고
       // 문서별로 바꿀 수 있다.
       priceMode: body.priceMode === "gross" ? "gross" : "supply",
+      paymentTiming: PAYMENT_TIMINGS[body.paymentTiming] ? body.paymentTiming : "",
       contactName: String(body.contactName || "").trim(),
       contactPhone: String(body.contactPhone || "").trim(),
       contactEmail: String(body.contactEmail || "").trim(),
@@ -11817,6 +11835,7 @@ async function routeApi(req, res, url) {
     }
     if (!partnerCategories.has(partner.category)) partner.category = "production";
     if ("priceMode" in body) partner.priceMode = body.priceMode === "gross" ? "gross" : "supply";
+    if ("paymentTiming" in body) partner.paymentTiming = PAYMENT_TIMINGS[body.paymentTiming] ? body.paymentTiming : "";
     if ("attachments" in body) {
       partner.attachments = Array.isArray(body.attachments)
         ? body.attachments.map((item) => String(item || "").trim()).filter(Boolean)
@@ -12179,7 +12198,82 @@ async function routeApi(req, res, url) {
       .filter((item) => !partnerId || item.partnerId === partnerId)
       .slice()
       .sort((a, b) => (b.orderDate || "").localeCompare(a.orderDate || "") || (b.updatedAt || "").localeCompare(a.updatedAt || ""));
-    sendJson(res, 200, { purchaseOrders: rows });
+    const pays = await erp.list("payments").catch(() => []);
+    const linked = new Set(pays.filter((p) => p.poId).map((p) => p.poId));
+    sendJson(res, 200, { purchaseOrders: rows.map((po) => (linked.has(po.id) || po.confirmedAt ? { ...po, pay: poPaySummary(po, pays) } : po)) });
+    return;
+  }
+
+  // 발주서 확정: 견적서·거래명세서를 받아 수량·단가가 바뀐 대로 고친다. 처음 발주 금액은 ordered 에 남기고,
+  // 바뀐 이유는 revisions 에 쌓는다. 이어진 지급요청이 아직 지급 전이면 금액을 맞추고, 이미 지급했으면
+  // 차액(diff)을 돌려줘 담당자가 추가 지급요청 / 다음 발주에서 상계 / 환불 받기 중에 고르게 한다.
+  const poConfirm = pathname.match(/^\/api\/purchase-orders\/([^/]+)\/(confirm|diff)$/);
+  if (poConfirm && method === "POST") {
+    const po = db.purchaseOrders.find((item) => item.id === poConfirm[1]);
+    if (!po) { sendJson(res, 404, { error: "발주서를 찾을 수 없습니다." }); return; }
+    const body = await readBody(req);
+    const by = actor.name || actor.email || "";
+    const pays = await erp.list("payments");
+    if (poConfirm[2] === "diff") {
+      const action = ["offset", "refund", "ignore"].includes(body.action) ? body.action : "";
+      const amount = Math.round(number(body.amount));
+      if (!action || !amount) { sendJson(res, 400, { error: "처리 방법과 금액이 필요합니다." }); return; }
+      po.diffSettled = Number(po.diffSettled || 0) + amount;
+      po.diffNotes = [...(po.diffNotes || []), { at: now(), by, action, amount, memo: String(body.memo || "").slice(0, 200) }];
+      po.updatedAt = now();
+      addAudit(db, actor, "update", "purchaseOrder", po.id, `${po.docNo} 차액 ${money(amount)} ${{ offset: "다음 발주에서 상계", refund: "환불 받기", ignore: "처리 안 함" }[action]}`, null, po.diffNotes.at(-1));
+      await writeDb(db);
+      sendJson(res, 200, { purchaseOrder: { ...po, pay: poPaySummary(po, pays) } });
+      return;
+    }
+    const lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
+    if (!lineItems.length) { sendJson(res, 400, { error: "품목을 한 줄 이상 남겨 주세요." }); return; }
+    const reasonType = String(body.reasonType || "").slice(0, 20);
+    const reason = String(body.reason || "").trim().slice(0, 300);
+    const before = { total: po.total, subtotal: po.subtotal, vat: po.vat, lineItems: po.lineItems };
+    if (!po.ordered) po.ordered = { ...before, at: po.createdAt };
+    // 금액이 다시 바뀌면 예전 차액 처리(상계·환불)는 기록으로만 두고 차액을 새로 계산한다.
+    if (po.diffSettled) { po.diffNotes = [...(po.diffNotes || []), { at: now(), by, action: "reset", amount: -po.diffSettled, memo: "확정 금액이 바뀌어 차액을 다시 계산" }]; po.diffSettled = 0; }
+    po.lineItems = lineItems;
+    Object.assign(po, purchaseOrderTotals(po.lineItems, po.priceMode));
+    po.confirmedAt = now();
+    po.confirmedBy = by;
+    po.revisions = [...(po.revisions || []), { at: now(), by, reasonType, reason, beforeTotal: before.total, afterTotal: po.total,
+      changes: lineItems.map((l) => { const b = (before.lineItems || []).find((x) => x.id === l.id); return b && (b.quantity !== l.quantity || b.unitPrice !== l.unitPrice) ? { itemName: l.itemName, quantity: [b.quantity, l.quantity], unitPrice: [b.unitPrice, l.unitPrice] } : null; }).filter(Boolean) }].slice(-30);
+    // 단가 개정: 고른 품목만 단가 이력에 새 줄(과거 단가는 그대로).
+    const revised = [];
+    for (const r of Array.isArray(body.priceRevisions) ? body.priceRevisions : []) {
+      const material = db.materials.find((m) => m.id === r.materialId);
+      const price = Math.round(number(r.unitPrice));
+      if (!material || !(price > 0)) continue;
+      await erp.put("itemPrices", { id: id("ip"), itemId: material.id, partnerId: po.partnerId, partnerName: db.partners.find((x) => x.id === po.partnerId)?.name || "",
+        price, vatMode: "excluded", unit: material.orderUnit || "", effectiveFrom: kstToday(), reason: `${po.docNo} 확정${reasonType ? ` (${reasonType})` : ""}`, by, createdAt: now() });
+      material.basePrice = price;
+      material.updatedAt = now();
+      revised.push(material.itemName);
+    }
+    // 이어진 지급요청 맞추기: 지급 전인 것 중 가장 최근 것에 차액을 더한다.
+    const linked = pays.filter((p) => p.poId === po.id && p.status !== "cancelled");
+    const diff = Number(po.total || 0) - linked.reduce((s, p) => s + Number(p.amount || 0), 0) - Number(po.diffSettled || 0);
+    let adjusted = null;
+    const open = linked.filter((p) => p.status !== "paid").sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
+    if (diff && open && Number(open.amount) + diff > 0) {
+      const from = open.amount;
+      open.amount = Number(open.amount) + diff;
+      if (open.status === "confirmed" || open.status === "awaiting_approval") {
+        const settings = { ...PAYMENT_SETTING_DEFAULTS, ...((await erp.get("settings", "payments")) || {}) };
+        open.status = payments.statusAfterConfirm(open.amount, settings.approvalThreshold);
+      }
+      open.history = [...(open.history || []), { at: now(), by, action: "amount", from: String(from), to: String(open.amount), note: `발주서 ${po.docNo} 확정 금액 반영${reasonType ? ` (${reasonType})` : ""}` }].slice(-50);
+      open.updatedAt = now();
+      await erp.put("payments", open);
+      adjusted = { code: open.code, from, to: open.amount };
+    }
+    po.updatedAt = now();
+    addAudit(db, actor, "update", "purchaseOrder", po.id, `${po.docNo} 확정 ${money(before.total)} → ${money(po.total)}${reasonType ? ` (${reasonType})` : ""}${revised.length ? ` · 단가개정 ${revised.join(", ")}` : ""}`, before, { total: po.total });
+    await writeDb(db);
+    const fresh = await erp.list("payments");
+    sendJson(res, 200, { purchaseOrder: { ...po, pay: poPaySummary(po, fresh) }, adjusted, revised });
     return;
   }
 
@@ -14641,6 +14735,37 @@ async function routeApi(req, res, url) {
       log(rec, "create", "", "requested");
       await erp.put("payments", rec);
       sendJson(res, 201, { payment: rec });
+      pushNotice("payment_new", { ...rec, by: who.name }, { type: "payment", id: rec.id }, { teamSend: body.teamSend === true });
+      return;
+    }
+
+    // 발주서에서 지급요청 만들기. 금액 = 발주서 금액 − 이미 만든 지급요청(차액분이면 body.amount).
+    if (pathname === "/api/payments/from-po" && method === "POST") {
+      if (!requirePermission(actor, res, "payments", "create")) return;
+      const body = await readBody(req);
+      const po = db.purchaseOrders.find((x) => x.id === String(body.poId || ""));
+      if (!po) { sendJson(res, 404, { error: "발주서를 찾을 수 없습니다." }); return; }
+      const partner = db.partners.find((x) => x.id === po.partnerId);
+      const all = await erp.list("payments");
+      const sum = poPaySummary(po, all);
+      const amount = body.extra ? Math.round(number(body.amount)) : sum.diff;
+      if (!(amount > 0)) { sendJson(res, 400, { error: "이미 발주서 금액만큼 지급요청이 있습니다." }); return; }
+      const lines = po.lineItems || [];
+      const isMaterial = lines.some((l) => { const m = db.materials.find((x) => x.id === l.materialId); return m && (m.itemKind || "material") === "material"; });
+      const rec = {
+        id: id("pay"), status: "requested", files: [], requestedBy: who, createdAt: now(),
+        title: `${partner?.name || ""} ${po.docNo} — ${lines[0]?.itemName || ""}${lines.length > 1 ? ` 외 ${lines.length - 1}건` : ""}${body.extra ? " (차액)" : ""}`.trim(),
+        amount, payeeName: partner?.name || "", partnerCode: partner?.code || "", category: isMaterial ? "생산" : "매입",
+        bankName: payments.normalizeBankName(partner?.bankName || ""), accountNumber: normalizeAccountNumber(partner?.bankAccount || ""), holder: partner?.depositorName || "",
+        dueDate: dateOnly(body.dueDate) || poPaymentDueDate(partner, po),
+        memo: lines.map((l) => `${l.itemName} ${l.quantity}${l.unit || ""} × ${money(l.unitPrice)}(VAT별도)`).join("\n").slice(0, 2000),
+        poId: po.id, poDocNo: po.docNo
+      };
+      rec.code = nextPaymentCode(all, rec.createdAt);
+      rec.updatedAt = now();
+      log(rec, "create", "", "requested", `발주서 ${po.docNo}에서 만듦`);
+      await erp.put("payments", rec);
+      sendJson(res, 201, { payment: rec, purchaseOrder: { ...po, pay: poPaySummary(po, [...all, rec]) } });
       pushNotice("payment_new", { ...rec, by: who.name }, { type: "payment", id: rec.id }, { teamSend: body.teamSend === true });
       return;
     }
