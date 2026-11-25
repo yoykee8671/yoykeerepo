@@ -12730,9 +12730,27 @@ async function routeApi(req, res, url) {
       const body = await readBody(req);
       const prior = productMatch[1] ? await erp.get("stockProducts", productMatch[1]) : null;
       if (productMatch[1] && !prior) { sendJson(res, 404, { error: "제품을 찾을 수 없습니다." }); return; }
-      const lines = (Array.isArray(body.lines) ? body.lines : [])
-        .map((l) => ({ materialId: String(l.materialId || ""), perUnit: Math.max(0, qtyOf(l.perUnit)), lossRate: Math.min(100, Math.max(0, qtyOf(l.lossRate))) }))
-        .filter((l) => l.materialId && l.perUnit > 0 && (db.materials || []).some((m) => m.id === l.materialId));
+      // 줄 방식: unit = 완제품 1개당 수량(재고에서 빠짐), lot = 생산(발주) 1회당 금액(염색비·금형비처럼 건당 비용, 재고 영향 없음).
+      // 숫자로 못 읽는 줄은 예전처럼 조용히 버리지 않고 몇 번째 줄인지 알려 준다.
+      const lines = [];
+      const problems = [];
+      (Array.isArray(body.lines) ? body.lines : []).forEach((l, i) => {
+        const materialId = String(l.materialId || "");
+        const basis = l.basis === "lot" ? "lot" : "unit";
+        const raw = String(basis === "lot" ? (l.perLot ?? "") : (l.perUnit ?? "")).trim();
+        if (!materialId && !raw) return; // 빈 줄
+        const n = i + 1;
+        if (!materialId || !(db.materials || []).some((m) => m.id === materialId)) { problems.push(`${n}번째 줄: 원부자재를 목록에서 고르세요.`); return; }
+        const value = Math.max(0, qtyOf(raw));
+        if (!/^[\d,]*\.?\d+$/.test(raw.replace(/,/g, "")) || value <= 0) {
+          problems.push(`${n}번째 줄: ${basis === "lot" ? "1회당 금액(원)" : "1개당 수량"}을 숫자로만 적으세요${raw ? ` (지금: "${raw.slice(0, 20)}")` : ""}.`);
+          return;
+        }
+        lines.push(basis === "lot"
+          ? { materialId, basis, perLot: Math.round(value), memo: String(l.memo || "").trim().slice(0, 100) }
+          : { materialId, basis, perUnit: value, lossRate: Math.min(100, Math.max(0, qtyOf(l.lossRate))) });
+      });
+      if (problems.length) { sendJson(res, 400, { error: problems.join(" ") }); return; }
       const rec = {
         ...(prior || { id: id("bom"), createdAt: now() }),
         name: String(body.name || prior?.name || "").trim().slice(0, 200),

@@ -839,7 +839,7 @@ function enhanceLayouts() {
     const [list, side] = layout.children;
     if (!list || !side || layout.children.length !== 2 || !side.querySelector("form")) return;
     const key = `${view}#${i}`;
-    const editing = /수정/.test(side.querySelector(".panel-head h2, h2")?.textContent || "");
+    const editing = /수정|복사/.test(side.querySelector(".panel-head h2, h2")?.textContent || "");
     const pref = formPrefs()[key];
     const collapsed = !editing && (pref ?? FORM_COLLAPSED_DEFAULT.has(view));
     layout.classList.add("layout-collapsible");
@@ -6142,7 +6142,7 @@ function renderMaterials() {
         </div>
       </div>
       <div class="panel">
-        <div class="panel-head"><h2>${state.procurement.editingMaterial ? "품목 수정" : "품목 입력"}</h2></div>
+        <div class="panel-head"><h2>${state.procurement.editingMaterial ? "품목 수정" : state.procurement.copyMaterial ? "품목 복사 — 새 품목으로 저장" : "품목 입력"}</h2></div>
         <div class="panel-body">${renderMaterialForm()}</div>
       </div>
     </section>
@@ -6160,7 +6160,7 @@ function renderMaterialRow(item, isMat) {
       <td>${h(item.storage || "")}</td>
       <td class="num">${item.basePrice ? money.format(item.basePrice) : "-"}${item.sellmateCost ? `<br><span class="muted" style="font-size:11px">셀메이트 ${money.format(item.sellmateCost)}</span>` : ""}</td>
       <td style="font-size:12px">${h(item.barcode || item.itemCode || "")}${item.cafe24VariantCode || item.cafe24Code ? `<br><span class="muted">${h(item.cafe24VariantCode || item.cafe24Code)}</span>` : ""}</td>
-      <td><div class="row-actions"><button data-edit-material="${item.id}">수정</button><button class="danger icon-btn" data-delete-material="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
+      <td><div class="row-actions"><button data-edit-material="${item.id}">수정</button><button data-copy-material="${item.id}" title="이 품목을 바탕으로 새 품목 만들기">복사</button><button class="danger icon-btn" data-delete-material="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
     </tr>`;
   }
   const partner = (state.partners || []).find((p) => p.id === item.partnerId);
@@ -6173,13 +6173,13 @@ function renderMaterialRow(item, isMat) {
       <td>${h(item.orderUnit || item.baseUnit || "")}${item.moq ? ` · MOQ ${money.format(item.moq)}` : ""}${item.orderMultiple ? ` · ${money.format(item.orderMultiple)}단위` : ""}</td>
       <td class="num">${item.basePrice ? money.format(item.basePrice) : "-"}</td>
       ${isMat ? `<td>${item.leadTimeDays ? `${item.leadTimeDays}일` : "-"}</td>` : `<td>${h(item.barcode || item.itemCode || "")}</td>`}
-      <td><div class="row-actions"><button data-edit-material="${item.id}">수정</button><button class="danger icon-btn" data-delete-material="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
+      <td><div class="row-actions"><button data-edit-material="${item.id}">수정</button><button data-copy-material="${item.id}" title="이 품목을 바탕으로 새 품목 만들기">복사</button><button class="danger icon-btn" data-delete-material="${item.id}" aria-label="삭제" title="삭제">×</button></div></td>
     </tr>`;
 }
 
 function renderMaterialForm() {
   const pr = itemView();
-  const m = state.procurement.editingMaterial || { itemKind: pr.itemKind, materialType: pr.materialType || "SB" };
+  const m = state.procurement.editingMaterial || state.procurement.copyMaterial || { itemKind: pr.itemKind, materialType: pr.materialType || "SB" };
   const kind = itemKindOf(m);
   const isMat = kind === "material";
   const prices = pr.itemPrices && pr.itemPrices.itemId === m.id ? pr.itemPrices.list : null;
@@ -6231,7 +6231,7 @@ function renderMaterialForm() {
       ${(m.legacyCodes || []).length ? `<p class="muted" style="font-size:12px">예전 코드: ${h(m.legacyCodes.join(", "))}</p>` : ""}
       <div class="toolbar">
         <button class="primary" type="submit">${m.id ? "수정 저장" : "품목 추가"}</button>
-        ${state.procurement.editingMaterial ? `<button type="button" data-cancel-edit-material>취소</button>` : ""}
+        ${state.procurement.editingMaterial || state.procurement.copyMaterial ? `<button type="button" data-cancel-edit-material>취소</button>` : ""}
       </div>
     </form>
     ${m.id ? `<div class="price-history" style="margin-top:14px">
@@ -6313,16 +6313,33 @@ function bindMaterials() {
   });
   app.querySelector("[data-new-material]")?.addEventListener("click", () => {
     state.procurement.editingMaterial = null;
+    state.procurement.copyMaterial = null;
     renderApp();
   });
   app.querySelectorAll("[data-edit-material]").forEach((button) => {
     button.addEventListener("click", () => {
+      state.procurement.copyMaterial = null;
       state.procurement.editingMaterial = state.materials.find((item) => item.id === button.dataset.editMaterial);
       renderApp();
     });
   });
+  // 복사: 종류·거래처·단위·단가·메모 등을 그대로 채운 새 품목 입력칸. 코드·단가 이력은 새로 생긴다.
+  app.querySelectorAll("[data-copy-material]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const src = state.materials.find((item) => item.id === button.dataset.copyMaterial);
+      if (!src) return;
+      const { id, code, legacyCodes, createdAt, updatedAt, ...rest } = src;
+      state.procurement.editingMaterial = null;
+      state.procurement.copyMaterial = { ...rest, itemName: `${src.itemName} (복사)` };
+      renderApp();
+      const input = app.querySelector("[data-material-form] [name=itemName]");
+      if (input) { input.focus(); input.select(); input.scrollIntoView({ block: "center" }); }
+    });
+  });
   app.querySelector("[data-cancel-edit-material]")?.addEventListener("click", () => {
     state.procurement.editingMaterial = null;
+    state.procurement.copyMaterial = null;
     renderApp();
   });
   app.querySelectorAll("[data-delete-material]").forEach((button) => {
@@ -6351,6 +6368,7 @@ function bindMaterials() {
       await api("/api/materials", { method: "POST", body });
     }
     state.procurement.editingMaterial = null;
+    state.procurement.copyMaterial = null;
     afterProcurementSave("material", editing ? "수정되었습니다." : "저장되었습니다.");
     await refreshAndRender();
   });
@@ -15433,11 +15451,13 @@ function renderStockProducts() {
   return `
     <section class="layout">
       <div class="panel">
-        <div class="panel-head"><h2>제품 구성(BOM)</h2><span class="muted">완제품 1개를 만들 때 드는 원부자재와 손실률</span></div>
+        <div class="panel-head"><h2>제품 구성(BOM)</h2><span class="muted">완제품 1개당 원부자재·손실률, 그리고 생산 1회당 드는 비용(염색비 등)</span></div>
         <div class="table-wrap"><table class="compact stock-table">
-          <thead><tr><th>제품</th><th>원부자재 (1${"개"}당)</th><th></th></tr></thead>
+          <thead><tr><th>제품</th><th>구성 (1개당 · 생산 1회당)</th><th></th></tr></thead>
           <tbody>${(d.products || []).map((p) => `<tr><td>${h(p.name)}</td>
-            <td class="muted" style="font-size:12px">${(p.lines || []).map((l) => `${h(matName(l.materialId))} ${qtyFmt(l.perUnit)}${l.lossRate ? ` (+손실 ${l.lossRate}%)` : ""}`).join("<br>")}</td>
+            <td class="muted" style="font-size:12px">${(p.lines || []).map((l) => l.basis === "lot"
+              ? `${h(matName(l.materialId))} <b>1회당 ${money.format(l.perLot || 0)}원</b>${l.memo ? ` · ${h(l.memo)}` : ""}`
+              : `${h(matName(l.materialId))} ${qtyFmt(l.perUnit)}${l.lossRate ? ` (+손실 ${l.lossRate}%)` : ""}`).join("<br>")}</td>
             <td>${can("stock", "edit") ? `<button data-stock-product-edit="${p.id}">수정</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="3" class="empty">등록된 제품이 없습니다. 예: 포포타올 = 스텝온 1 + 옆솜 2 + 앞솜 1</td></tr>`}</tbody>
         </table></div>
       </div>
@@ -15447,11 +15467,14 @@ function renderStockProducts() {
           <form class="form-grid" data-stock-product-form>
             <div class="field two"><div><label>제품명</label><input name="name" value="${h(e.name || "")}" required placeholder="예: 필바이츠 45g (5P)"></div>
               <div><label>단위</label><input name="unit" value="${h(e.unit || "개")}"></div></div>
-            <table class="sales-lines"><thead><tr><th>원부자재</th><th>1개당 수량</th><th>손실률%</th></tr></thead><tbody>
-              ${(e.lines || []).map((l, i) => `<tr><td><select data-bom-mat="${i}"><option value="">선택</option>${materialOptions(l.materialId)}</select></td>
-                <td><input data-bom-per="${i}" inputmode="decimal" value="${h(l.perUnit ?? "")}" style="width:80px"></td>
-                <td><input data-bom-loss="${i}" inputmode="decimal" value="${h(l.lossRate ?? "")}" style="width:60px"></td></tr>`).join("")}
+            <table class="sales-lines bom-lines"><colgroup><col style="width:34%"><col style="width:26%"><col style="width:40%"></colgroup>
+              <thead><tr><th>방식</th><th>수량·금액</th><th>손실%·메모</th></tr></thead><tbody>
+              ${(e.lines || []).map((l, i) => { const lot = l.basis === "lot"; return `<tr class="bom-mat-row"><td colspan="3"><select data-bom-mat="${i}"><option value="">${i + 1}. 원부자재 선택</option>${materialOptions(l.materialId)}</select></td></tr>
+                <tr class="bom-val-row"><td><select data-bom-basis="${i}"><option value="unit" ${lot ? "" : "selected"}>1개당 수량</option><option value="lot" ${lot ? "selected" : ""}>1회당 금액</option></select></td>
+                <td><input data-bom-per="${i}" inputmode="decimal" value="${h(lot ? (l.perLot ?? "") : (l.perUnit ?? ""))}" placeholder="${lot ? "30000" : "1.5"}"></td>
+                <td>${lot ? `<input data-bom-memo="${i}" value="${h(l.memo || "")}" placeholder="메모(예: 1롤 기준)">` : `<input data-bom-loss="${i}" inputmode="decimal" value="${h(l.lossRate ?? "")}" placeholder="손실률 %">`}</td></tr>`; }).join("")}
             </tbody></table>
+            <p class="muted" style="font-size:12px"><b>1개당 수량</b>: 야드·개수처럼 완제품 하나에 들어가는 양(생산 완료 때 재고에서 빠짐). <b>1회당 금액</b>: 염색비·금형비처럼 생산(발주) 한 번에 드는 비용 — 수량·금액 칸에는 숫자만 적습니다.</p>
             <div class="toolbar"><button type="button" data-bom-add>줄 추가</button></div>
             <p class="muted" style="font-size:12px">원부자재가 목록에 없으면 거래관리 &gt; 원부자재관리에서 먼저 등록하세요(우프코드가 붙습니다).</p>
             <div class="toolbar"><button class="primary" type="submit">저장</button>${e.id ? `<button type="button" data-stock-product-cancel>취소</button>` : ""}</div>
@@ -15488,10 +15511,19 @@ function bindStock() {
   const readBom = () => {
     const form = app.querySelector("[data-stock-product-form]");
     const f = formObject(form);
-    const lines = [...form.querySelectorAll("[data-bom-mat]")].map((el) => ({ materialId: el.value, perUnit: form.querySelector(`[data-bom-per="${el.dataset.bomMat}"]`).value, lossRate: form.querySelector(`[data-bom-loss="${el.dataset.bomMat}"]`).value }));
+    const lines = [...form.querySelectorAll("[data-bom-mat]")].map((el) => {
+      const i = el.dataset.bomMat;
+      const basis = form.querySelector(`[data-bom-basis="${i}"]`)?.value === "lot" ? "lot" : "unit";
+      const v = form.querySelector(`[data-bom-per="${i}"]`).value;
+      return basis === "lot"
+        ? { materialId: el.value, basis, perLot: v, memo: form.querySelector(`[data-bom-memo="${i}"]`)?.value || "" }
+        : { materialId: el.value, basis, perUnit: v, lossRate: form.querySelector(`[data-bom-loss="${i}"]`)?.value || "" };
+    });
     return { ...(st.editingProduct || {}), ...f, lines };
   };
   app.querySelector("[data-bom-add]")?.addEventListener("click", () => { const p = readBom(); p.lines.push({}); st.editingProduct = p; renderApp(); });
+  // 방식을 바꾸면 그 줄 칸(손실률 ↔ 메모)이 바뀌므로 지금 적은 값을 살려 다시 그린다.
+  app.querySelectorAll("[data-bom-basis]").forEach((sel) => sel.addEventListener("change", () => { st.editingProduct = readBom(); renderApp(); }));
   app.querySelectorAll("[data-stock-product-edit]").forEach((b) => b.addEventListener("click", () => { const p = st.data.products.find((x) => x.id === b.dataset.stockProductEdit); st.editingProduct = p ? { ...p, lines: [...p.lines, {}] } : null; renderApp(); }));
   app.querySelector("[data-stock-product-cancel]")?.addEventListener("click", () => { st.editingProduct = null; renderApp(); });
   app.querySelector("[data-stock-product-form]")?.addEventListener("submit", (e) => {

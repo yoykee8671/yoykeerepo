@@ -3171,3 +3171,8 @@ tbody tr:hover td.sticky, .requests-table tbody tr:hover td:nth-child(-n+2) { ba
 .pm-table tr.pm-product td { background: var(--surface-2, #f8fafc); border-top: 1px solid var(--line); padding-top: 10px; }
 .pm-table td .row-actions button { white-space: nowrap; }
 .pm-table .row-actions { flex-wrap: nowrap; }
+/* 제품 구성(BOM) 입력 줄: 좁은 입력 패널 안에 네 칸이 다 보이게 */
+.bom-lines { width: 100%; table-layout: fixed; }
+.bom-lines select, .bom-lines input { width: 100%; min-width: 0; box-sizing: border-box; }
+.bom-lines tr.bom-mat-row td { padding-bottom: 2px; border-bottom: none; }
+.bom-lines tr.bom-val-row td { padding-top: 2px; }
