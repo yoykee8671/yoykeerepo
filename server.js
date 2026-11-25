@@ -40,6 +40,7 @@ import * as rehab from "./lib/rehab-plan.mjs";
 import * as cashFlow from "./lib/cash-flow.mjs";
 import * as productMatch from "./lib/product-match.mjs";
 import * as prodItems from "./lib/prod-items.mjs";
+import * as poReceipt from "./lib/po-receipt.mjs";
 import { matchOptions as matchSourceOptions } from "./lib/product-sync.mjs";
 import { setAtPath } from "./lib/sync-merge.mjs";
 
@@ -6469,6 +6470,53 @@ async function productLinkScanView(db, brandId, cached, links) {
   };
 }
 
+// 재고 보관처: 우프 창고 + 생산처(공장). 납품지의 '재고 위치'로 고를 수 있다.
+function stockLocationsOf(db) {
+  return [
+    { key: "HQ", name: "우프 창고" },
+    ...(db.partners || []).filter((p) => p.category === "production" && p.isActive !== false).map((p) => ({ key: p.id, name: p.name }))
+  ];
+}
+async function receiptCtx(db) {
+  return { materials: db.materials || [], partners: db.partners || [], deliveryPlaces: db.deliveryPlaces || [],
+    locations: stockLocationsOf(db), payments: await erp.list("payments").catch(() => []) };
+}
+// 발주서 입고: 재고(+) 기록을 쓰고 발주서를 입고완료로.
+async function receivePurchaseOrder(db, po, plan, { date, location, qtys, by, auto }) {
+  const moves = poReceipt.receiptMoves(po, plan, { date, location, qtys, by, auto });
+  if (!moves.length) throw new Error("재고에 넣을 줄이 없습니다(입고 위치·수량 확인).");
+  const ids = [];
+  for (const m of moves) {
+    const rec = { ...m, id: id("mv"), createdAt: now() };
+    await erp.put("stockMoves", rec);
+    ids.push(rec.id);
+  }
+  const loc = stockLocationsOf(db).find((l) => l.key === moves[0].location);
+  po.status = "received";
+  po.receipt = { at: now(), date, by, auto: Boolean(auto), location: moves[0].location, locationName: loc?.name || "", moveIds: ids,
+    lines: moves.map((m) => ({ materialId: m.materialId, qty: m.qty })) };
+  po.updatedAt = now();
+  addAudit(db, { id: "system", name: by || "자동" }, "update", "purchaseOrder", po.id, `${po.docNo} ${auto ? "자동 " : ""}입고 — ${loc?.name || ""} ${moves.length}줄`, null, po.receipt);
+}
+// 예정일이 된 발주서를 자동 입고(운영에서 30분마다).
+async function poReceiptTick() {
+  try {
+    const db = await readDb();
+    const ctx = await receiptCtx(db);
+    const today = kstToday();
+    let done = 0;
+    for (const po of db.purchaseOrders || []) {
+      const plan = poReceipt.receiptPlan(po, ctx, today);
+      if (!plan || !plan.autoOk || plan.expected > today) continue;
+      await receivePurchaseOrder(db, po, plan, { date: plan.expected, location: plan.location.key, by: "자동", auto: true });
+      done += 1;
+    }
+    if (done) await writeDb(db);
+  } catch (error) {
+    console.error("po receipt tick failed", error.message);
+  }
+}
+
 // 생산처 상세내역 줄 + 품목 연결/추천 + 단가개정 표시.
 async function prodItemView(db, partner, details) {
   const preset = prodItems.PRESETS[String(partner.name || "").replace(/\s+/g, "")];
@@ -12192,6 +12240,67 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // 입고예정 목록(대시보드 '입고예정'): 아직 입고 안 된 발주서 + 최근 2주 입고(되돌리기용).
+  if (pathname === "/api/purchase-orders/receipts" && method === "GET") {
+    const ctx = await receiptCtx(db);
+    const today = kstToday();
+    const pending = (db.purchaseOrders || []).map((po) => poReceipt.receiptPlan(po, ctx, today)).filter(Boolean)
+      .sort((a, b) => a.expected.localeCompare(b.expected));
+    const since = poReceipt.addDays(today, -14);
+    const recent = (db.purchaseOrders || []).filter((po) => po.receipt && String(po.receipt.date || "") >= since)
+      .map((po) => ({ poId: po.id, docNo: po.docNo, partnerName: db.partners.find((p) => p.id === po.partnerId)?.name || "", ...po.receipt,
+        names: (po.receipt.lines || []).map((l) => `${db.materials.find((m) => m.id === l.materialId)?.itemName || ""} ${l.qty}`) }))
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    sendJson(res, 200, { pending, recent, locations: ctx.locations, today });
+    return;
+  }
+  const poReceiveMatch = pathname.match(/^\/api\/purchase-orders\/([^/]+)\/(receive|receive-undo|receipt-plan)$/);
+  if (poReceiveMatch && method === "POST") {
+    if (!can(actor, "procurement", "edit") && !can(actor, "stock", "edit")) { sendJson(res, 403, { error: "입고를 처리할 권한이 없습니다." }); return; }
+    const po = db.purchaseOrders.find((x) => x.id === poReceiveMatch[1]);
+    if (!po) { sendJson(res, 404, { error: "발주서를 찾을 수 없습니다." }); return; }
+    const body = await readBody(req);
+    const by = actor.name || actor.email || "";
+    if (poReceiveMatch[2] === "receipt-plan") {
+      if ("expectedDate" in body) po.expectedDate = dateOnly(body.expectedDate) || "";
+      if ("autoReceive" in body) po.autoReceive = body.autoReceive !== false;
+      po.updatedAt = now();
+      addAudit(db, actor, "update", "purchaseOrder", po.id, `${po.docNo} 입고 예정 변경${po.expectedDate ? ` ${po.expectedDate}` : ""}${po.autoReceive === false ? " · 자동 입고 끔" : ""}`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (poReceiveMatch[2] === "receive-undo") {
+      if (!po.receipt) { sendJson(res, 400, { error: "입고 기록이 없습니다." }); return; }
+      for (const mid of po.receipt.moveIds || []) {
+        const m = await erp.get("stockMoves", mid);
+        if (m && !m.voided) await erp.put("stockMoves", { ...m, voided: true, voidedAt: now(), voidedBy: by });
+      }
+      addAudit(db, actor, "update", "purchaseOrder", po.id, `${po.docNo} 입고 되돌림`, po.receipt, null);
+      po.receiptUndone = [...(po.receiptUndone || []), { ...po.receipt, undoneAt: now(), undoneBy: by }].slice(-10);
+      delete po.receipt;
+      po.status = "ordered";
+      po.autoReceive = false; // 되돌린 건은 다시 자동으로 넣지 않는다 — 사람이 [입고 확인]으로
+      po.updatedAt = now();
+      await writeDb(db);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    const ctx = await receiptCtx(db);
+    const plan = poReceipt.receiptPlan(po, ctx, kstToday());
+    if (!plan) { sendJson(res, 400, { error: "입고할 자재 줄이 없거나 이미 입고됐습니다." }); return; }
+    const location = String(body.location || plan.location?.key || "");
+    if (!ctx.locations.some((l) => l.key === location)) { sendJson(res, 400, { error: "입고 위치(보관처)를 고르세요." }); return; }
+    const qtys = {};
+    for (const [mid, q] of Object.entries(body.qtys || {})) qtys[mid] = Math.max(0, Number(String(q).replace(/,/g, "")) || 0);
+    try {
+      await receivePurchaseOrder(db, po, plan, { date: dateOnly(body.date) || kstToday(), location, qtys, by, auto: false });
+    } catch (error) { sendJson(res, 400, { error: error.message }); return; }
+    await writeDb(db);
+    sendJson(res, 200, { ok: true, receipt: po.receipt });
+    return;
+  }
+
   if (pathname === "/api/purchase-orders" && method === "GET") {
     const partnerId = url.searchParams.get("partnerId") || "";
     const rows = (db.purchaseOrders || [])
@@ -12200,7 +12309,14 @@ async function routeApi(req, res, url) {
       .sort((a, b) => (b.orderDate || "").localeCompare(a.orderDate || "") || (b.updatedAt || "").localeCompare(a.updatedAt || ""));
     const pays = await erp.list("payments").catch(() => []);
     const linked = new Set(pays.filter((p) => p.poId).map((p) => p.poId));
-    sendJson(res, 200, { purchaseOrders: rows.map((po) => (linked.has(po.id) || po.confirmedAt ? { ...po, pay: poPaySummary(po, pays) } : po)) });
+    const rctx = { ...(await receiptCtx(db)), payments: pays };
+    const today = kstToday();
+    sendJson(res, 200, { purchaseOrders: rows.map((po) => {
+      const out = linked.has(po.id) || po.confirmedAt ? { ...po, pay: poPaySummary(po, pays) } : { ...po };
+      const plan = poReceipt.receiptPlan(po, rctx, today);
+      if (plan) out.receiptPlan = { expected: plan.expected, basis: plan.basis, location: plan.location?.name || "", blockers: plan.blockers, autoOk: plan.autoOk };
+      return out;
+    }) });
     return;
   }
 
@@ -12721,11 +12837,7 @@ async function routeApi(req, res, url) {
   if (pathname === "/api/stock" || pathname.startsWith("/api/stock/")) {
     if (!requirePermission(actor, res, "stock", "view")) return;
     const who = actor.name || actor.email || "";
-    const locations = [
-      { key: "HQ", name: "우프 창고" },
-      ...(db.partners || []).filter((p) => p.category === "production" && p.isActive !== false)
-        .map((p) => ({ key: p.id, name: p.name }))
-    ];
+    const locations = stockLocationsOf(db);
     const qtyOf = (v) => Math.round(number(String(v ?? "").replace(/,/g, "")) * 1000) / 1000;
     const loadAll = async () => {
       const [moves, runs, products, settingsList] = await Promise.all([
@@ -12992,6 +13104,13 @@ async function routeApi(req, res, url) {
       const today = kstToday();
       push("pay", "지급할 지급요청", pays.filter((p) => p.status === "confirmed"), (p) => p.amount, { tab: "payments" });
       push("payLate", "기한 지난 지급요청", pays.filter((p) => ["requested", "confirmed", "awaiting_approval"].includes(p.status) && p.dueDate && p.dueDate < today), (p) => p.amount, { tab: "payments" }, "danger");
+    }
+    if (owner || can(actor, "procurement", "view") || can(actor, "stock", "view")) {
+      const ctx = await receiptCtx(db);
+      const today = kstToday();
+      const soon = poReceipt.addDays(today, 7);
+      const plans = (db.purchaseOrders || []).map((po) => poReceipt.receiptPlan(po, ctx, today)).filter((p) => p && (p.expected <= soon || p.blockers.length));
+      push("receipts", "입고예정 발주", plans, null, { tab: "dashboard", modal: "receipts" }, plans.some((p) => p.overdue) ? "warn" : "");
     }
     if (owner || can(actor, "sales", "view")) {
       const so = await erp.list("salesOrders").catch(() => []);
@@ -15160,6 +15279,7 @@ async function routeApi(req, res, url) {
       contactName: String(body.contactName || "").trim(),
       contactPhone: String(body.contactPhone || "").trim(),
       note: String(body.note || "").trim(),
+      stockLocation: stockLocationsOf(db).some((l) => l.key === body.stockLocation) ? body.stockLocation : "",
       createdAt: now(),
       updatedAt: now()
     };
@@ -15192,6 +15312,7 @@ async function routeApi(req, res, url) {
     for (const key of ["address", "contactName", "contactPhone", "note"]) {
       if (key in body) deliveryPlace[key] = String(body[key] || "").trim();
     }
+    if ("stockLocation" in body) deliveryPlace.stockLocation = stockLocationsOf(db).some((l) => l.key === body.stockLocation) ? body.stockLocation : "";
     deliveryPlace.updatedAt = now();
     addAudit(db, actor, "update", "deliveryPlace", deliveryPlace.id, `${deliveryPlace.name} 납품장소 수정`, before, deliveryPlace);
     await writeDb(db);
@@ -15400,8 +15521,14 @@ if (isMainModule) {
   const syncSchedule = String(process.env.PRODUCT_SYNC_SCHEDULE || (process.env.NODE_ENV === "production" ? "on" : "off")).toLowerCase();
   if (syncSchedule === "on") productSync.startSchedule();
   // 카페24 자동 입금확인: 10분마다(설정이 off 면 아무것도 안 함). 운영에서만(테스트 사이트는 카페24 미연결).
+  // 발주서 자동 입고: 30분마다 예정일이 된 건을 납품지 재고에 넣는다(운영. 시험은 PO_RECEIPT_TICK=on 으로 이것만).
+  if (syncSchedule === "on" || process.env.PO_RECEIPT_TICK === "on") {
+    const first = process.env.PO_RECEIPT_TICK === "on" ? 5000 : KEEPALIVE_START_DELAY_MS + 120000;
+    setTimeout(() => { poReceiptTick(); setInterval(poReceiptTick, 30 * 60 * 1000).unref(); }, first).unref();
+  }
   if (syncSchedule === "on") {
     setTimeout(() => { depositConfirmTick(); setInterval(depositConfirmTick, 10 * 60 * 1000).unref(); }, KEEPALIVE_START_DELAY_MS + 60000).unref();
     setTimeout(() => { shipNotifyTick(); setInterval(shipNotifyTick, 2 * 60 * 1000).unref(); }, KEEPALIVE_START_DELAY_MS + 90000).unref();
+
   }
 }

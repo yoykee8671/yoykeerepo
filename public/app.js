@@ -1385,7 +1385,7 @@ function renderMultiFilter({ key, title, allLabel, options, selectedValues }) {
 function renderTodo() {
   const t = state.todo;
   if (!t) return `<section class="panel todo-panel"><div class="panel-head"><h2>오늘 할 일</h2></div><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
-  const cards = t.items.map((it) => `<button type="button" class="todo-card ${it.tone ? `tone-${h(it.tone)}` : ""}" data-todo-go="${h(it.go.tab)}${it.go.sub ? `:${h(it.go.sub)}` : ""}">
+  const cards = t.items.map((it) => `<button type="button" class="todo-card ${it.tone ? `tone-${h(it.tone)}` : ""}" ${it.go.modal ? `data-todo-modal="${h(it.go.modal)}"` : `data-todo-go="${h(it.go.tab)}${it.go.sub ? `:${h(it.go.sub)}` : ""}"`}>
       <span class="todo-label">${h(it.label)}</span>
       <strong>${it.count != null ? `${money.format(it.count)}건` : "확인"}</strong>
       ${it.amount != null ? `<span class="todo-amount">${money.format(Math.round(it.amount))}원</span>` : ""}</button>`).join("");
@@ -1399,6 +1399,8 @@ function bindTodo() {
     api("/api/todo").then((r) => { state.todo = r; state.todoAt = Date.now(); }).catch(() => { state.todo = { items: [] }; state.todoAt = Date.now(); }).finally(() => { state.todoLoading = false; if (state.tab === "dashboard") renderApp(); });
   }
   app.querySelector("[data-todo-refresh]")?.addEventListener("click", () => { state.todo = null; renderApp(); });
+  app.querySelectorAll("[data-todo-modal]").forEach((b) => b.addEventListener("click", () => { if (b.dataset.todoModal === "receipts") openReceipts(); }));
+  bindReceiptsModal();
   app.querySelectorAll("[data-todo-go]").forEach((b) => b.addEventListener("click", () => {
     const [tab, sub] = b.dataset.todoGo.split(":");
     state.tab = tab;
@@ -1411,11 +1413,79 @@ function bindTodo() {
   }));
 }
 
+// --- 입고예정(발주서 자동 입고) ------------------------------------------------------
+function openReceipts(focus = "") {
+  state.receipts = { open: true, data: null, focus, form: focus ? { [focus]: "receive" } : {} };
+  renderApp();
+  api("/api/purchase-orders/receipts").then((d) => { if (state.receipts) state.receipts.data = d; renderApp(); })
+    .catch((e) => { showToast(e.message, "error"); state.receipts = null; renderApp(); });
+}
+function renderReceiptsModal() {
+  const r = state.receipts;
+  const d = r.data;
+  if (!d) return v2Modal(`<div class="panel-body"><p class="muted">불러오는 중…</p></div>`, "data-rcv-close");
+  const canEdit = can("procurement", "edit") || can("stock", "edit");
+  const locOpts = (cur) => d.locations.map((l) => `<option value="${h(l.key)}" ${cur === l.key ? "selected" : ""}>${h(l.name)}</option>`).join("");
+  const item = (p) => {
+    const mode = r.form[p.poId] || "";
+    return `<div class="rcv-item ${r.focus === p.poId ? "focus" : ""}">
+      <p style="margin:0 0 4px"><b>${h(p.message)}</b></p>
+      <p class="muted" style="margin:0;font-size:12px">${h(p.docNo)} · 기준: ${h(p.basis)} · ${p.lines.map((l) => `${h(l.code)} ${h(l.name)} ${money.format(l.qty)}${h(l.unit)}`).join(", ")}</p>
+      <p style="margin:4px 0">${p.autoOk ? `<span class="badge muted">${p.expected <= d.today ? "곧 자동 입고" : `${h(p.expected.slice(5).replace("-", "/"))} 자동 입고 예정`}</span>` : p.blockers.map((b) => `<span class="badge warn">${h(b)}</span>`).join(" ")}</p>
+      ${canEdit ? `<div class="toolbar" style="gap:6px;flex-wrap:wrap">
+        <button class="primary small" data-rcv-mode="${h(p.poId)}:receive">입고 확인</button>
+        <button class="small" data-rcv-mode="${h(p.poId)}:date">날짜 바꾸기</button>
+        <button class="small" data-rcv-auto="${h(p.poId)}:${p.blockers.includes("자동 입고 꺼짐") ? "on" : "off"}">${p.blockers.includes("자동 입고 꺼짐") ? "자동 입고 켜기" : "자동 입고 끄기"}</button></div>` : ""}
+      ${mode === "receive" ? `<form class="form-grid rcv-form" data-rcv-receive="${h(p.poId)}">
+        ${p.lines.map((l) => `<div class="field two"><div><label>${h(l.name)} 실제 수량(${h(l.unit || "단위")})</label><input name="q:${h(l.materialId)}" inputmode="decimal" value="${h(l.qty)}"></div><div></div></div>`).join("")}
+        <div class="field two"><div><label>입고 위치</label><select name="location"><option value="">고르기…</option>${locOpts(p.location?.key || "")}</select></div>
+          <div><label>입고일</label><input type="date" name="date" value="${h(d.today)}"></div></div>
+        <div class="toolbar"><button class="primary" type="submit">재고에 넣기</button></div></form>` : ""}
+      ${mode === "date" ? `<form class="toolbar" data-rcv-date="${h(p.poId)}" style="gap:6px"><input type="date" name="expectedDate" value="${h(p.expected)}"><button type="submit">예정일 저장</button></form>` : ""}
+    </div>`;
+  };
+  return v2Modal(`<div class="panel-head"><h2>입고예정 <span class="count">${d.pending.length}건</span></h2><button data-rcv-close>닫기</button></div>
+    <div class="panel-body">
+      <p class="muted" style="font-size:12px">기본은 예정일에 자동으로 납품지 재고에 들어갑니다. 수량이 다르거나 일찍·늦게 왔으면 [입고 확인]으로 직접 넣고, 늦어지면 날짜를 바꾸세요.</p>
+      ${d.pending.map(item).join("") || `<p class="muted">입고예정인 발주가 없습니다.</p>`}
+      ${d.recent.length ? `<h3 style="margin-top:14px">최근 2주 입고</h3>${d.recent.map((x) => `<div class="rcv-recent"><span>${h(String(x.date).slice(5).replace("-", "/"))} ${h(x.partnerName)} → ${h(x.locationName)} · ${h(x.names.join(", "))}${x.auto ? ` <span class="badge muted">자동</span>` : ""}</span>
+        ${canEdit ? `<button class="small" data-rcv-undo="${h(x.poId)}">되돌리기</button>` : ""}</div>`).join("")}` : ""}
+    </div>`, "data-rcv-close");
+}
+function bindReceiptsModal() {
+  const on = (sel, ev, fn) => app.querySelectorAll(sel).forEach((el) => el.addEventListener(ev, fn));
+  on("[data-open-receipts]", "click", (e) => { e.stopPropagation(); openReceipts(e.currentTarget.dataset.openReceipts); });
+  if (!state.receipts?.open) return;
+  bindV2Modal();
+  const reload = () => { state.todo = null; openReceipts(); refreshAndRender?.(); };
+  on("[data-rcv-close]", "click", () => { state.receipts = null; state.todo = null; renderApp(); });
+  on("[data-rcv-mode]", "click", (e) => { const [id, mode] = e.currentTarget.dataset.rcvMode.split(":"); const f = state.receipts.form; f[id] = f[id] === mode ? "" : mode; renderApp(); });
+  on("[data-rcv-auto]", "click", async (e) => {
+    const [id, v] = e.currentTarget.dataset.rcvAuto.split(":");
+    try { await api(`/api/purchase-orders/${id}/receipt-plan`, { method: "POST", body: { autoReceive: v === "on" } }); showToast(v === "on" ? "자동 입고를 켰습니다." : "자동 입고를 껐습니다. 도착하면 [입고 확인]을 눌러 주세요."); reload(); } catch (err) { showToast(err.message, "error"); }
+  });
+  on("[data-rcv-date]", "submit", async (e) => {
+    e.preventDefault();
+    try { await api(`/api/purchase-orders/${e.currentTarget.dataset.rcvDate}/receipt-plan`, { method: "POST", body: { expectedDate: e.currentTarget.expectedDate.value } }); showToast("입고 예정일을 바꿨습니다."); reload(); } catch (err) { showToast(err.message, "error"); }
+  });
+  on("[data-rcv-receive]", "submit", async (e) => {
+    e.preventDefault();
+    const f = formObject(e.currentTarget);
+    const qtys = Object.fromEntries(Object.entries(f).filter(([k]) => k.startsWith("q:")).map(([k, v]) => [k.slice(2), v]));
+    try { await api(`/api/purchase-orders/${e.currentTarget.dataset.rcvReceive}/receive`, { method: "POST", body: { qtys, location: f.location, date: f.date } }); showToast("재고에 넣었습니다."); reload(); } catch (err) { showToast(err.message, "error"); }
+  });
+  on("[data-rcv-undo]", "click", async (e) => {
+    if (!confirm("이 입고를 되돌릴까요? 재고에서 빠지고, 이 발주서는 자동 입고가 꺼집니다(다시 [입고 확인]으로 넣기).")) return;
+    try { await api(`/api/purchase-orders/${e.currentTarget.dataset.rcvUndo}/receive-undo`, { method: "POST", body: {} }); showToast("입고를 되돌렸습니다."); reload(); } catch (err) { showToast(err.message, "error"); }
+  });
+}
+
 function renderDashboard() {
   const d = state.dashboard;
   return `
     ${pageHead("대시보드", "오늘 처리할 일과 입금요청 현황을 한눈에 봅니다.")}
     ${renderTodo()}
+    ${state.receipts?.open ? renderReceiptsModal() : ""}
     <section class="stats">
       <div class="stat"><span>입금요청</span><strong>${money.format(d.requestCount)}</strong></div>
       <div class="stat"><span>대기 건수</span><strong>${money.format(d.pendingCount)}</strong></div>
@@ -6587,6 +6657,10 @@ function renderDeliveryPlaceRow(item) {
     </tr>`;
 }
 
+// 재고 보관처(서버 stockLocationsOf 와 같음): 우프 창고 + 생산처.
+function stockLocationChoices() {
+  return [{ key: "HQ", name: "우프 창고" }, ...(state.partners || []).filter((p) => p.category === "production" && p.isActive !== false).map((p) => ({ key: p.id, name: p.name }))];
+}
 function renderDeliveryPlaceForm() {
   const d = state.procurement.editingDeliveryPlace || {};
   return `
@@ -6597,6 +6671,8 @@ function renderDeliveryPlaceForm() {
         <div><label>담당자명</label><input name="contactName" value="${h(d.contactName)}"></div>
         <div><label>전화번호</label><input name="contactPhone" value="${h(d.contactPhone)}"></div>
       </div>
+      <div class="field"><label>재고 위치 <span class="muted" style="font-weight:400">(이 납품지로 보낸 자재가 들어갈 보관처 — 발주서 자동 입고에 씀)</span></label>
+        <select name="stockLocation"><option value="">재고 안 셈(연결 없음)</option>${stockLocationChoices().map((l) => `<option value="${h(l.key)}" ${d.stockLocation === l.key ? "selected" : ""}>${h(l.name)}</option>`).join("")}</select></div>
       <div class="field"><label>메모</label><textarea name="note">${h(d.note)}</textarea></div>
       <div class="toolbar">
         <button class="primary" type="submit">${d.id ? "수정 저장" : "납품지 추가"}</button>
@@ -6697,11 +6773,18 @@ function renderPurchaseOrders() {
     </section>
     ${state.procurement.previewPurchaseOrder ? renderPurchaseOrderPreviewOverlay(state.procurement.previewPurchaseOrder) : ""}
     ${state.procurement.poConfirm ? renderPoConfirm() : ""}
+    ${state.receipts?.open ? renderReceiptsModal() : ""}
   `;
 }
 
 // --- 발주서 확정 · 지급요청 연결 ---------------------------------------------------
 const PAY_ST_SHORT = { requested: "요청", confirmed: "확인", awaiting_approval: "허가대기", paid: "지급완료", on_hold: "보류", cancelled: "취소" };
+function poReceiptBadge(po) {
+  if (po.receipt) return `<br><span class="badge ok" style="font-size:11px" title="${h(po.receipt.by)}">입고 ${h(String(po.receipt.date).slice(5).replace("-", "/"))} · ${h(po.receipt.locationName || "")}${po.receipt.auto ? " (자동)" : ""}</span>`;
+  const r = po.receiptPlan;
+  if (!r) return "";
+  return `<br><button type="button" class="badge ${r.autoOk ? "muted" : "warn"}" style="font-size:11px;border:none;cursor:pointer" data-open-receipts="${h(po.id)}" title="${h(r.basis)}${r.blockers.length ? ` · ${h(r.blockers.join(", "))}` : ""}">입고예정 ${h(r.expected.slice(5).replace("-", "/"))}${r.location ? ` · ${h(r.location)}` : ""}${r.autoOk ? " (자동)" : " — 확인 필요"}</button>`;
+}
 function poPayBadges(po) {
   const out = [];
   if (po.confirmedAt && po.ordered && po.ordered.total !== po.total) out.push(`<span class="muted" style="font-size:11px">발주 <s>${money.format(po.ordered.total)}</s> → 확정</span>`);
@@ -7039,7 +7122,7 @@ function renderPurchaseOrderRow(item) {
       <td class="m-title">${h(partner?.name || "")}</td>
       <td class="m-sub">${h(item.orderDate)}${item.dueDate ? `<br><span class="muted" style="font-size:11px">${h(tradeDocMeta(item.docType).dueLabel)} ${h(item.dueDate)}</span>` : ""}</td>
       <td class="m-status"><span class="pill po-st-${h(item.status)}">${PO_STATUS_LABELS[item.status] || item.status}</span></td>
-      <td class="num m-amount"><strong>${money.format(item.total)}원</strong><br><span class="muted" style="font-size:11px">공급가 ${money.format(Number(item.subtotal || 0))} · 부가세 ${money.format(Number(item.vat || 0))}</span>${poPayBadges(item)}</td>
+      <td class="num m-amount"><strong>${money.format(item.total)}원</strong><br><span class="muted" style="font-size:11px">공급가 ${money.format(Number(item.subtotal || 0))} · 부가세 ${money.format(Number(item.vat || 0))}</span>${poPayBadges(item)}${poReceiptBadge(item)}</td>
       <td class="m-actions"><div class="row-actions">
         ${(item.docType || "purchase_order") === "purchase_order" && item.status !== "cancelled" ? `<button type="button" data-po-confirm="${item.id}" title="견적서·거래명세서를 받아 수량·단가가 바뀌었으면 고칩니다">확정</button>
           ${can("payments", "create") && (!item.pay || item.pay.diff > 0) ? `<button type="button" data-po-payreq="${item.id}">지급요청</button>` : ""}` : ""}
@@ -7257,6 +7340,7 @@ function renderPurchaseOrderSummary(items, priceMode) {
 
 function bindPurchaseOrders() {
   bindPoConfirm();
+  bindReceiptsModal();
   app.querySelectorAll("[data-doc-type-tab]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const key = btn.dataset.docTypeTab;
