@@ -40,6 +40,7 @@ import * as rehab from "./lib/rehab-plan.mjs";
 import * as cashFlow from "./lib/cash-flow.mjs";
 import * as productMatch from "./lib/product-match.mjs";
 import * as imwebSource from "./lib/brand-source-imweb.mjs";
+import * as supplierOrder from "./lib/supplier-order-imweb.mjs";
 import * as prodItems from "./lib/prod-items.mjs";
 import { matchOptions as matchSourceOptions } from "./lib/product-sync.mjs";
 import { setAtPath } from "./lib/sync-merge.mjs";
@@ -7874,6 +7875,64 @@ async function runBatch(req, res, url) {
   sendJson(res, 200, { results: Object.fromEntries(paths.map((p, i) => [p, results[i]])) });
 }
 
+// --- 공급사 자동 주문(테일릿 등) ----------------------------------------------
+// 주문매칭에서 [테일릿 주문 넣기] → pay 서버 안의 크롬이 공급사 사이트에 주문(무통장)한다.
+// 결과는 erp supplierOrders(id = 브랜드id:카페24주문번호)에 남기고, 입금요청은 공급사 결제금액·수령인이
+// 우리 계산과 맞을 때만 만든다(2026-11-25 사용자 결정: 카페24 주문 1건 = 공급사 주문 1건).
+const supplierOrderJobs = new Map();
+let supplierOrderBusy = false;
+const supplierOrderId = (brandId, orderNo) => `${brandId}:${orderNo}`;
+
+// 입금요청을 막을 이유(없으면 ""). 금액은 공급사 결제금액 = 주문매칭 입금액, 수령인은 이름·연락처.
+function supplierOrderProblem(so, draft, src) {
+  const name = src.name;
+  if (!so || so.status === "dry") return `${name} 주문을 아직 넣지 않았습니다. [${name} 주문 넣기]를 먼저 하세요.`;
+  if (so.status !== "placed") return `${name} 주문이 실패했습니다: ${so.error || "원인 미상"}`;
+  const expected = Math.round(number(draft.depositAmount));
+  if (Math.round(number(so.total)) !== expected) return `${name} 결제금액 ${Number(so.total).toLocaleString("ko-KR")}원 ≠ 주문매칭 ${expected.toLocaleString("ko-KR")}원`;
+  const digitsOf = (v) => String(v || "").replace(/\D/g, "");
+  const nm = (v) => String(v || "").replace(/\s+/g, "");
+  if (!so.receiverSeen || nm(so.receiverSeen.name) !== nm(so.receiver?.name) || digitsOf(so.receiverSeen.phone) !== digitsOf(so.receiver?.phone)) return `${name} 주문의 수령인이 카페24 수령인과 다릅니다.`;
+  return "";
+}
+
+async function autoOrderSourceFor(brand) {
+  const code = String(brand?.cafe24Supplier || "").trim().toUpperCase();
+  if (!code) return null;
+  const state = await productSync.readState();
+  return Object.values(state.sources || {}).find((x) => x.autoOrder && String(x.supplierCode || "").toUpperCase() === code) || null;
+}
+
+// 카페24 주문의 이 공급사 품목 → 공급사 상품번호·옵션·수량, 수령인.
+async function planSupplierOrder(db, brand, src, orderNo) {
+  const orders = await withCafe24Token(db, (token) => cafe24.fetchOrdersByIds(token, [orderNo], { shopNos: cafe24ShopNos(db) }));
+  const order = orders.find((o) => String(o.order_id) === String(orderNo));
+  if (!order) throw new Error(`카페24에서 주문 ${orderNo}을 찾지 못했습니다.`);
+  const supplier = String(brand.cafe24Supplier || "").trim().toUpperCase();
+  const live = (order.items || []).filter((it) => String(it.supplier_id || "").toUpperCase() === supplier && !/^[CR]/.test(String(it.order_status || "")));
+  if (!live.length) throw new Error("이 주문에 이 공급사 상품이 없습니다(취소·반품 제외).");
+  const products = await withCafe24Token(db, (token) => cafe24.fetchProductsWithVariants(token, [...new Set(live.map((it) => Number(it.product_no)))]));
+  const items = [];
+  for (const it of live) {
+    const link = src.links?.[String(it.product_no)];
+    if (!link) throw new Error(`우프 상품 ${it.product_no}(${it.product_name})이 상품동기화 연결표에 없습니다. 먼저 ${src.name} 상품과 연결하세요.`);
+    const snap = src.snapshot?.[String(link.sourceNo)] || null;
+    const wooof = products.find((p) => Number(p.product_no) === Number(it.product_no));
+    let optionLabel = "";
+    if (snap?.options?.length > 1 && wooof) {
+      const { pairs } = matchSourceOptions(snap, wooof.variants || [], { valueMap: src.valueMap, linkValueMap: link.valueMap, optionMap: link.optionMap, sourceFilter: link.sourceFilter });
+      const pair = pairs.find((x) => x.variant.variant_code === it.variant_code);
+      if (!pair?.source) throw new Error(`우프 품목 ${it.variant_code}(${it.option_value || ""})에 맞는 ${src.name} 옵션을 찾지 못했습니다. 연결표의 옵션 연결을 확인하세요.`);
+      optionLabel = pair.source.label;
+    }
+    items.push({ sourceNo: link.sourceNo, optionLabel, qty: Number(it.quantity) || 1, name: snap?.name || it.product_name, wooofProductNo: Number(it.product_no), orderItemCode: it.order_item_code });
+  }
+  const r = (order.receivers || [])[0] || {};
+  const receiver = { name: String(r.name || "").trim(), phone: String(r.cellphone || r.phone || "").trim(), zip: String(r.zipcode || "").trim(),
+    addr1: String(r.address1 || "").trim(), addr2: String(r.address2 || "").trim(), memo: String(r.shipping_message || "").trim() };
+  return { items, receiver };
+}
+
 // 아임웹 공급사 로그인 계정을 읽기 모듈에 건넨다. 상품마다 묻기 때문에 1분 동안 기억한다.
 const supplierLoginCache = new Map();
 imwebSource.setCredentialResolver(async (origin) => {
@@ -9705,6 +9764,88 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // --- 공급사 자동 주문 -------------------------------------------------------
+  if (pathname === "/api/supplier-orders/place" && method === "POST") {
+    if (!requirePermission(actor, res, "pipeline", "apply")) return;
+    const body = await readBody(req);
+    const brand = db.brands.find((b) => b.id === String(body.brandId || ""));
+    const orderNo = normalizeOrderNo(body.orderNo);
+    if (!brand || !orderNo) { sendJson(res, 400, { error: "브랜드와 주문번호가 필요합니다." }); return; }
+    const src = await autoOrderSourceFor(brand);
+    if (!src) { sendJson(res, 400, { error: "이 브랜드는 자동 주문을 쓰지 않습니다." }); return; }
+    if (!src.login?.passSealed) { sendJson(res, 400, { error: `${src.name} 사이트 계정이 없습니다. 상품동기화 › ${src.name} › 설정에서 넣어 주세요.` }); return; }
+    const recId = supplierOrderId(brand.id, orderNo);
+    const prev = await erp.get("supplierOrders", recId);
+    const dryRun = body.dryRun === true;
+    if (!dryRun && prev?.status === "placed") { sendJson(res, 409, { error: `이미 ${src.name}에 주문했습니다(주문번호 ${prev.supplierOrderNo}). 다시 넣으면 중복 주문이 됩니다.` }); return; }
+    if (supplierOrderBusy) { sendJson(res, 409, { error: "다른 공급사 주문을 넣는 중입니다. 잠시 뒤 다시 하세요." }); return; }
+    let plan;
+    try { plan = await planSupplierOrder(db, brand, src, orderNo); } catch (error) { sendJson(res, 400, { error: error.message }); return; }
+    const expectedTotal = Math.round(number(body.expectedTotal));
+    const jobId = id("sojob");
+    const job = { id: jobId, status: "running", message: "시작", startedAt: now(), result: null };
+    supplierOrderJobs.set(jobId, job);
+    supplierOrderBusy = true;
+    const by = actor.name || actor.email || "";
+    (async () => {
+      const shotDir = path.join(os.tmpdir(), `supplier-order-${jobId}`);
+      try {
+        await mkdir(shotDir, { recursive: true });
+        const result = await supplierOrder.placeImwebOrder({
+          baseUrl: src.baseUrl, uid: src.login.uid, passwd: clobe.openSecret(src.login.passSealed),
+          items: plan.items, receiver: plan.receiver, expectedTotal: body.allowAmountDiff ? 0 : expectedTotal, dryRun,
+          screenshotDir: shotDir, log: (m) => { job.message = m; }
+        });
+        const rec = {
+          id: recId, brandId: brand.id, brandName: brand.name, sourceId: src.id, sourceName: src.name, orderNo,
+          status: result.ok ? (dryRun ? "dry" : "placed") : "failed", dryRun,
+          supplierOrderNo: result.supplierOrderNo || "", total: result.total || 0, shippingFee: result.shippingFee || 0,
+          expectedTotal, amountMatch: Boolean(expectedTotal) && result.total === expectedTotal,
+          receiver: plan.receiver, receiverSeen: result.receiverSeen || null, items: plan.items,
+          bankInfo: result.bankInfo || "", error: result.error || "", stopped: result.stopped || "",
+          depositDue: result.ok && !dryRun ? new Date(Date.now() + 72 * 3600 * 1000).toISOString() : "",
+          at: now(), by, history: [...(prev?.history || []), ...(prev ? [{ status: prev.status, at: prev.at, error: prev.error || "" }] : [])].slice(-10)
+        };
+        // 연습·실패 기록이 진짜 주문 기록을 덮지 않게
+        if (!(prev?.status === "placed" && rec.status !== "placed")) await erp.put("supplierOrders", rec);
+        job.result = rec;
+        if (result.ok) await rm(shotDir, { recursive: true, force: true }).catch(() => {});
+        else { job.screenshots = (result.screenshots || []).map((f) => path.basename(f)); job.shotDir = shotDir; }
+        if (!dryRun && result.ok) {
+          const db2 = await readDb();
+          addAudit(db2, actor, "create", "supplier_order", recId, `${src.name} 자동 주문 ${rec.supplierOrderNo} (${orderNo}, ${Number(rec.total).toLocaleString("ko-KR")}원)`, null, rec);
+          await writeDb(db2);
+        }
+      } catch (error) {
+        job.result = { status: "failed", error: error.message };
+      } finally {
+        job.status = "done";
+        supplierOrderBusy = false;
+        setTimeout(() => { supplierOrderJobs.delete(jobId); rm(shotDir, { recursive: true, force: true }).catch(() => {}); }, 30 * 60 * 1000).unref?.();
+      }
+    })();
+    sendJson(res, 202, { job: { id: jobId, status: "running" }, plan: { items: plan.items, receiverName: plan.receiver.name } });
+    return;
+  }
+  const soJob = pathname.match(/^\/api\/supplier-orders\/jobs\/([^/]+)$/);
+  if (soJob && method === "GET") {
+    if (!requirePermission(actor, res, "pipeline", "view")) return;
+    const job = supplierOrderJobs.get(soJob[1]);
+    if (!job) { sendJson(res, 404, { error: "작업을 찾을 수 없습니다(30분 지나면 지워집니다)." }); return; }
+    const { shotDir, ...pub } = job;
+    sendJson(res, 200, { job: pub });
+    return;
+  }
+  // 실패한 자동 주문의 화면 캡처(원인 확인용, 30분 보관)
+  const soShot = pathname.match(/^\/api\/supplier-orders\/jobs\/([^/]+)\/shots\/([\w.-]+\.png)$/);
+  if (soShot && method === "GET") {
+    if (!requirePermission(actor, res, "pipeline", "view")) return;
+    const job = supplierOrderJobs.get(soShot[1]);
+    if (!job?.shotDir || !(job.screenshots || []).includes(soShot[2])) { sendJson(res, 404, { error: "없음" }); return; }
+    sendBuffer(res, 200, await readFile(path.join(job.shotDir, soShot[2])), "image/png");
+    return;
+  }
+
   // --- 반자동 파이프라인 ---------------------------------------------------
   // 각 단계는 버튼 하나에 대응하고, 수집·확인은 미리보기만 하고 아무것도 쓰지
   // 않는다. 실제 생성/전환은 사람이 확인한 뒤 apply 로만 일어난다.
@@ -9762,6 +9903,15 @@ async function routeApi(req, res, url) {
       if (autoCreated.length) pushNotice("request_batch", { items: autoCreated, source: "주문 수집 자동등록", by: actor.name || "" }, { type: "request", id: "" });
       db.cafe24.lastSyncAt = now();
       await writeDb(db);
+      // 자동 주문 공급사(테일릿 등) 건: 공급사 주문 기록을 붙인다.
+      const soRecords = new Map((await erp.list("supplierOrders")).map((r) => [r.id, r]));
+      for (const draft of drafts) {
+        const brand = db.brands.find((item) => item.id === draft.brandId);
+        const src = await autoOrderSourceFor(brand).catch(() => null);
+        if (!src) continue;
+        draft.autoOrder = { sourceId: src.id, sourceName: src.name, hasLogin: Boolean(src.login?.passSealed) };
+        draft.supplierOrder = soRecords.get(supplierOrderId(draft.brandId, normalizeOrderNo(draft.orderNo))) || null;
+      }
       sendJson(res, 200, {
         range: { startDate, endDate },
         orderCount: orders.length,
@@ -9788,6 +9938,7 @@ async function routeApi(req, res, url) {
     const created = [];
     const createdDrafts = [];
     const skipped = [];
+    const blocked = [];
     for (const draft of drafts) {
       const brand = db.brands.find((item) => item.id === draft.brandId);
       const orderNo = normalizeOrderNo(draft.orderNo);
@@ -9800,7 +9951,20 @@ async function routeApi(req, res, url) {
         skipped.push(orderNo);
         continue;
       }
+      // 자동 주문 공급사: 공급사 주문이 들어갔고 결제금액·수령인이 맞아야 만든다.
+      const src = await autoOrderSourceFor(brand).catch(() => null);
+      let so = null;
+      if (src) {
+        so = await erp.get("supplierOrders", supplierOrderId(brand.id, orderNo));
+        const problem = supplierOrderProblem(so, draft, src);
+        if (problem) { blocked.push({ orderNo, reason: problem }); continue; }
+      }
       const request = buildRequestFromDraft(db, brand, draft);
+      if (so) {
+        request.supplierOrder = { sourceName: so.sourceName, orderNo: so.supplierOrderNo, total: so.total, depositDue: so.depositDue, bankInfo: so.bankInfo || "" };
+        const due = so.depositDue ? new Date(new Date(so.depositDue).getTime() + 9 * 3600 * 1000).toISOString().slice(0, 16).replace("T", " ") : "";
+        request.notes = [request.notes, `${so.sourceName} 주문 ${so.supplierOrderNo} · ${Number(so.total).toLocaleString("ko-KR")}원${due ? ` · 입금기한 ${due}` : ""}`].filter(Boolean).join("\n");
+      }
       db.requests.unshift(request);
       addAudit(db, actor, "create", "request", request.id,
         `${request.orderNo} 입금요청 자동수집 (${brand.name})`, null, request);
@@ -9809,7 +9973,7 @@ async function routeApi(req, res, url) {
     }
     const prepared = await prepareOnCafe24(db, actor, createdDrafts);
     if (created.length || prepared) await writeDb(db);
-    sendJson(res, 200, { created, createdCount: created.length, skipped, prepared });
+    sendJson(res, 200, { created, createdCount: created.length, skipped, blocked, prepared });
     if (created.length) pushNotice("request_batch", { items: created.map((r) => ({ brandName: r.brandName, orderNo: r.orderNo, customerName: r.customerName, depositAmount: r.depositAmount, expectedDepositDate: r.expectedDepositDate })), source: "주문매칭", by: actor.name || "" }, { type: "request", id: created[0].id }, { teamSend: body.teamSend === true });
     return;
   }

@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "nodemailer": "^6.9.16",
-    "pg": "^8.20.0"
+    "pg": "^8.20.0",
+    "playwright-core": "1.48.2"
   }
 }

@@ -8787,6 +8787,75 @@ function renderPipelineAutoCreated(autoCreated) {
     </details>`;
 }
 
+// --- 공급사 자동 주문(테일릿 등) — 주문매칭 행 -----------------------------------
+function supplierOrderReady(d) {
+  const so = d.supplierOrder;
+  if (!so || so.status !== "placed") return false;
+  const digits = (v) => String(v || "").replace(/\D/g, "");
+  const nm = (v) => String(v || "").replace(/\s+/g, "");
+  return Math.round(Number(so.total || 0)) === Math.round(Number(d.depositAmount || 0))
+    && nm(so.receiverSeen?.name) === nm(so.receiver?.name) && digits(so.receiverSeen?.phone) === digits(so.receiver?.phone);
+}
+function renderSupplierOrderCell(d) {
+  const so = d.supplierOrder;
+  const name = h(d.autoOrder.sourceName);
+  if (!d.autoOrder.hasLogin) return `<span class="badge warn">${name} 계정 없음</span><br><span class="muted">상품동기화 설정에서 넣기</span>`;
+  const job = state.pipeline.soJobs?.[`${d.brandId}:${d.orderNo}`];
+  if (job && job.status === "running") return `<span class="badge muted">${name} 주문 중…</span><br><span class="muted">${h(job.message || "")}</span>`;
+  if (!so) return `<span class="badge warn">${name} 미주문</span>`;
+  if (so.status === "placed") {
+    const ok = supplierOrderReady(d);
+    const due = so.depositDue ? new Date(so.depositDue).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }) : "";
+    return `<span class="badge ${ok ? "ok" : "warn"}">${name} 주문 ${h(so.supplierOrderNo)}</span><br>
+      <span class="muted">${money.format(so.total)}원${so.total !== d.depositAmount ? ` <b class="danger-text">(입금액 ${money.format(d.depositAmount)}원과 다름)</b>` : " · 금액 일치"} · 수령인 ${h(so.receiverSeen?.name || "?")}${ok ? "" : " 확인 필요"}${due ? ` · 입금기한 ${h(due)}` : ""}</span>`;
+  }
+  if (so.status === "dry") return `<span class="badge muted">${name} 연습 OK</span><br><span class="muted">결제 ${money.format(so.total)}원${so.total !== d.depositAmount ? ` <b class="danger-text">(입금액 ${money.format(d.depositAmount)}원과 다름)</b>` : " · 금액 일치"} · 주문 안 함</span>`;
+  const shots = (state.pipeline.soJobs?.[`${d.brandId}:${d.orderNo}`]?.screenshots || []);
+  return `<span class="badge warn">${name} 주문 실패</span><br><span class="danger-text" style="font-size:12px">${h(so.error || "")}</span>${shots.length ? `<br>${shots.map((f) => `<a href="/api/supplier-orders/jobs/${h(state.pipeline.soJobs[`${d.brandId}:${d.orderNo}`].id)}/shots/${h(f)}" target="_blank" rel="noreferrer">캡처 ${h(f.slice(0, 2))}</a>`).join(" ")}` : ""}`;
+}
+async function placeSupplierOrder(i, dryRun, allowAmountDiff = false) {
+  const p = state.pipeline;
+  const d = p.collect?.drafts?.[i];
+  if (!d) return;
+  const name = d.autoOrder.sourceName;
+  if (!dryRun && !allowAmountDiff && !confirm(`${name}에 실제 주문을 넣을까요? (무통장입금)\n\n카페24 주문 ${d.orderNo} · 수령인 정보로 주문합니다.\n결제 금액이 입금액 ${money.format(d.depositAmount)}원과 다르면 주문하지 않고 멈춥니다.`)) return;
+  const key = `${d.brandId}:${d.orderNo}`;
+  p.soJobs = p.soJobs || {};
+  p.soBusy = true;
+  try {
+    const r = await api("/api/supplier-orders/place", { method: "POST", body: { brandId: d.brandId, orderNo: d.orderNo, expectedTotal: d.depositAmount, dryRun, allowAmountDiff } });
+    p.soJobs[key] = { id: r.job.id, status: "running", message: "시작" };
+    renderApp();
+    for (;;) {
+      await new Promise((ok) => setTimeout(ok, 2500));
+      const j = (await api(`/api/supplier-orders/jobs/${r.job.id}`)).job;
+      p.soJobs[key] = { ...j };
+      if (j.status !== "running") {
+        if (j.result) d.supplierOrder = j.result;
+        const res = j.result || {};
+        if (res.status === "placed") showToast(`${name} 주문 완료: ${res.supplierOrderNo} · ${money.format(res.total)}원`);
+        else if (res.status === "dry") showToast(`연습 완료: 결제 ${money.format(res.total)}원 (주문은 넣지 않음)`);
+        else if (res.stopped === "amount" && !dryRun) {
+          // 금액이 달라 주문 직전에 멈췄다. 직원이 보고 그래도 주문할지 고른다(입금요청은 [입금요청 입력]으로 금액을 고쳐 올림).
+          p.soBusy = false;
+          if (confirm(`${res.error}\n\n그래도 ${name}에 주문할까요?\n(입금요청은 자동으로 만들지 않습니다. [입금요청 입력]으로 금액을 확인해 올려 주세요.)`)) {
+            return placeSupplierOrder(i, false, true);
+          }
+        } else showToast(`${name} 주문 실패: ${res.error || "원인 미상"}`, "error");
+        const idx = p.collect.drafts.indexOf(d);
+        if (supplierOrderReady(d) && idx >= 0 && !p.selected.includes(idx)) p.selected = [...p.selected, idx];
+        break;
+      }
+      renderApp();
+    }
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    p.soBusy = false;
+    renderApp();
+  }
+}
+
 function renderPipelineCollect(collect) {
   if (!collect) return "";
   const drafts = collect.drafts || [];
@@ -8814,9 +8883,10 @@ function renderPipelineCollect(collect) {
         ${d.catalogMismatch
           ? `<span class="badge clobe-medium">단가표 확인</span><br><span class="muted">${h(d.catalogNote || `미매칭: ${(d.catalogUnmatched || []).join(", ")}`)}</span>`
           : ""}
-        ${!d.shippingMismatch && !d.catalogMismatch ? `<span class="muted">-</span>` : ""}
+        ${d.autoOrder ? renderSupplierOrderCell(d) : ""}
+        ${!d.shippingMismatch && !d.catalogMismatch && !d.autoOrder ? `<span class="muted">-</span>` : ""}
       </td>
-      <td class="cell-action"><div class="cell-action-btns"><button type="button" class="small" data-pipe-draft-request="${i}">입금요청 입력</button><button type="button" class="small ghost" data-pipe-monthly="${i}" title="위탁(월 정산 후 입금) 업체로 바꾸고 바로 등록합니다">월단위입금</button></div></td>
+      <td class="cell-action"><div class="cell-action-btns">${d.autoOrder && d.supplierOrder?.status !== "placed" ? `<button type="button" class="small primary" data-so-place="${i}" ${state.pipeline.soBusy ? "disabled" : ""}>${h(d.autoOrder.sourceName)} 주문 넣기</button><button type="button" class="small ghost" data-so-dry="${i}" ${state.pipeline.soBusy ? "disabled" : ""} title="결제 직전까지만 채워 보고 주문하지 않습니다">연습</button>` : ""}<button type="button" class="small" data-pipe-draft-request="${i}">입금요청 입력</button><button type="button" class="small ghost" data-pipe-monthly="${i}" title="위탁(월 정산 후 입금) 업체로 바꾸고 바로 등록합니다">월단위입금</button></div></td>
     </tr>`;
   }).join("");
   return `
@@ -9136,7 +9206,7 @@ function bindPipeline() {
       if (p.collect.prepared) showToast(`자동 등록 ${p.collect.autoCreated?.length || 0}건${prepareNote(p.collect.prepared)}`, p.collect.prepared.failed?.length ? "error" : "");
       // 배송비가 어긋나거나 단가표 매칭이 안 된 건은 사람이 먼저 보게 기본 선택에서 뺀다.
       p.selected = (p.collect.drafts || [])
-        .map((d, i) => (d.shippingMismatch || d.catalogMismatch ? null : i))
+        .map((d, i) => (d.shippingMismatch || d.catalogMismatch || (d.autoOrder && !supplierOrderReady(d)) ? null : i))
         .filter((v) => v !== null);
     } catch (error) {
       p.error = error.message || "수집에 실패했습니다.";
@@ -9209,6 +9279,8 @@ function bindPipeline() {
     } catch (error) { showToast(error.message || "바꾸지 못했습니다.", "error"); }
   }));
 
+  app.querySelectorAll("[data-so-place]").forEach((b) => b.addEventListener("click", () => placeSupplierOrder(Number(b.dataset.soPlace), false)));
+  app.querySelectorAll("[data-so-dry]").forEach((b) => b.addEventListener("click", () => placeSupplierOrder(Number(b.dataset.soDry), true)));
   app.querySelectorAll("[data-pipe-shipform]").forEach((b) => b.addEventListener("click", () => downloadShipForm(p.shipForms[Number(b.dataset.pipeShipform)]?.ids || [])));
 
   app.querySelector("[data-pipe-apply]")?.addEventListener("click", async () => {
@@ -9218,6 +9290,7 @@ function bindPipeline() {
     try {
       const result = await api("/api/pipeline/collect/apply", { method: "POST", body: { drafts, ...readTeamSend(app.querySelector(".collect-result")) } });
       showToast(`${result.createdCount}건 생성했습니다.${result.skipped?.length ? ` (중복 ${result.skipped.length}건 제외)` : ""}${prepareNote(result.prepared)}`, result.prepared?.failed?.length ? "error" : "");
+      if (result.blocked?.length) alert(`공급사 주문 확인이 안 돼서 만들지 않은 건 ${result.blocked.length}건:\n\n${result.blocked.map((b) => `${b.orderNo}: ${b.reason}`).join("\n")}`);
       // 발주양식을 쓰는 브랜드 건은 바로 내려받을 수 있게 남겨 둔다.
       const forms = new Map();
       for (const r of result.created || []) {
