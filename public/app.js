@@ -15082,7 +15082,8 @@ function renderProdPartner() {
   const { partner: p, summary: s, open = [], entries = [], details = [], rates = [], checks = {} } = st.prodDetail;
   const canEdit = st.prod?.canEdit;
   const tab = st.prodTab || "open";
-  const sub = [["open", `미지급 ${open.length}`], ["ledger", "원장"], ["check", `공임 대조 ${(checks.mismatches || []).length + (checks.unknown || []).length}`], ["details", "상세내역"]];
+  const pliTodo = (st.prodDetail.lines || []).filter((l) => !l.link).length;
+  const sub = [["open", `미지급 ${open.length}`], ["ledger", "원장"], ["check", `공임 대조 ${(checks.mismatches || []).length + (checks.unknown || []).length}`], ["details", `상세내역 · 품목 연결${pliTodo ? ` ${pliTodo}` : ""}`], ["items", "품목·단가 이력"]];
   let body = "";
   if (tab === "open") {
     body = `<div class="table-wrap"><table class="compact" data-unit="원"><thead><tr><th>청구일</th><th>내용</th><th>남은 금액</th><th>경과</th></tr></thead><tbody>
@@ -15123,10 +15124,10 @@ function renderProdPartner() {
       ${canEdit ? `<form class="form-grid" data-prod-rate style="margin-top:8px"><div class="field two"><div><label>품목</label><input name="item" required></div><div><label>옵션</label><input name="option"></div></div>
         <div class="field two"><div><label>단가(VAT별도)</label><input name="unitPrice" inputmode="numeric" required></div><div><label>시작일</label><input type="date" name="from"></div></div>
         <div class="toolbar"><button type="submit">공임 단가 추가</button></div></form>` : ""}`;
+  } else if (tab === "items") {
+    body = renderProdItems(st.prodDetail, canEdit);
   } else {
-    body = details.map((d) => `<div class="prod-detail"><strong>${h(d.date)}</strong> <span class="muted">합계 ${money.format(d.total || 0)}</span>
-      <table class="compact" data-unit="원"><tbody>${(d.lines || []).map((l) => `<tr><td>${h(l.item)}</td><td class="num">${l.qty}</td><td class="num">${money.format(l.unitPrice)}</td><td class="num">${money.format(l.gross || 0)}</td></tr>`).join("")}</tbody></table></div>`).join("")
-      || `<p class="muted">상세내역이 없습니다.</p>`;
+    body = renderProdLines(st.prodDetail, details, canEdit);
   }
   return `
     <div class="panel-head"><h2>${h(p.code || "")} ${h(p.name)}</h2><button data-prod-close>닫기</button></div>
@@ -15135,6 +15136,114 @@ function renderProdPartner() {
       <div class="npb-subnav">${sub.map(([k, l]) => `<button class="npb-subtab ${tab === k ? "active" : ""}" data-prod-tab="${k}">${l}</button>`).join("")}</div>
       ${body}
     </div>`;
+}
+
+// --- 생산처 상세내역 ↔ 품목 코드 연결 ----------------------------------------------
+const PLI_FILTERS = [["todo", "확인 필요"], ["unsized", "사이즈 미기재"], ["linked", "연결됨"], ["none", "추천 없음"], ["money", "금액 확인"], ["all", "전체"]];
+function pliItemLabel(item, revision = "") {
+  if (!item) return "";
+  return `<span class="muted">${h(item.code)}</span> ${h(item.name)}${revision ? ` <span class="badge warn" title="이 날짜에 적용된 단가가 개정된 단가입니다">${h(revision)}</span>` : ""}`;
+}
+function pliStatus(l) {
+  if (l.link) return l.link.status === "unsized" ? "unsized" : l.link.status === "skip" ? "skip" : "linked";
+  return l.suggest ? "todo" : "none";
+}
+function renderProdLines(d, details, canEdit) {
+  const st = stockState();
+  const f = st.pliFilter || "todo";
+  const items = new Map((d.items || []).map((i) => [i.id, i]));
+  const lines = d.lines || [];
+  const count = (k) => lines.filter((l) => (k === "all" ? true : k === "money" ? l.suspicious : pliStatus(l) === k)).length;
+  const shown = lines.filter((l) => f === "all" || (f === "money" ? l.suspicious : pliStatus(l) === f));
+  const byDetail = new Map();
+  for (const l of shown) { if (!byDetail.has(l.detailId)) byDetail.set(l.detailId, []); byDetail.get(l.detailId).push(l); }
+  const totals = new Map(details.map((x) => [x.id, x.total]));
+  const opts = (sel) => `<option value="">품목 선택…</option>${Object.entries(MATERIAL_TYPE_LABELS).map(([t, label]) => {
+    const list = (d.items || []).filter((i) => (i.type || "SB") === t);
+    return list.length ? `<optgroup label="${h(label)}">${list.map((i) => `<option value="${i.id}" ${sel === i.id ? "selected" : ""}>${h(i.code)} ${h(i.name)}</option>`).join("")}</optgroup>` : "";
+  }).join("")}`;
+  const todoCount = lines.filter((l) => !l.link && l.suggest).length;
+  const head = `
+    ${d.hasPreset && !d.presetDone && canEdit ? `<div class="notice" style="margin-bottom:8px"><div>이 생산처는 확인된 <b>기본 품목 후보표</b>가 있습니다. 품목 코드와 날짜별 단가 이력을 만들고 아래 줄에 추천을 붙입니다. 이미 있는 품목은 그대로 둡니다.
+      <button type="button" data-pli-preset style="margin-left:8px">기본 품목 만들기</button></div></div>` : ""}
+    <p class="muted" style="font-size:12px">팩스 줄마다 품목 코드를 한 번 확인해 두면, 단가가 바뀐 줄에는 <span class="badge warn">(YYMMDD단가개정)</span>이 붙고 같은 이름·단가는 다음부터 자동으로 연결됩니다.</p>
+    <div class="npb-subnav">${PLI_FILTERS.map(([k, l]) => `<button class="npb-subtab ${f === k ? "active" : ""}" data-pli-filter="${k}">${l} <span class="muted">${count(k)}</span></button>`).join("")}
+      ${canEdit && todoCount ? `<button type="button" class="primary" data-pli-accept-all style="margin-left:auto">추천 ${todoCount}건 모두 적용</button>` : ""}</div>`;
+  const row = (l) => {
+    const status = pliStatus(l);
+    let cell = "";
+    if (status === "linked") {
+      cell = pliItemLabel(items.get(l.link.itemId), l.revision);
+      if (l.expected != null && l.expected !== l.unitPrice && items.get(l.link.itemId)?.prices.length) cell += ` <span class="badge muted" title="품목 단가 이력의 그날 단가">기준 ${money.format(l.expected)}</span>`;
+    } else if (status === "unsized") {
+      cell = `<span class="badge muted">사이즈 미기재</span> ${(l.link.itemIds || []).map((x) => items.get(x)).filter(Boolean).map((i) => canEdit ? `<button data-pli-pick="${h(l.lineId)}" data-item="${i.id}">${h(i.sizeTag || i.name)}</button>` : h(i.name)).join(" ")}`;
+    } else if (status === "skip") {
+      cell = `<span class="badge muted">연결 안 함</span>`;
+    } else if (l.suggest?.status === "linked") {
+      cell = `<span class="muted">추천:</span> ${pliItemLabel(items.get(l.suggest.itemId))} <span class="muted" style="font-size:11px">${h(l.suggest.why)}</span>`;
+    } else if (l.suggest?.status === "unsized") {
+      cell = `<span class="muted">추천: 사이즈 미기재 —</span> ${(l.suggest.itemIds || []).map((x) => items.get(x)).filter(Boolean).map((i) => canEdit ? `<button data-pli-pick="${h(l.lineId)}" data-item="${i.id}">${h(i.sizeTag || i.name)}</button>` : h(i.name)).join(" ")}`;
+    } else {
+      cell = `<span class="muted">추천 없음</span>`;
+    }
+    return `<tr><td class="wrap">${h(l.item)}${l.suspicious ? ` <span class="badge warn" title="수량은 있는데 단가가 0원이거나 10원 미만 — 시트에서 옮길 때 깨진 것 같습니다">금액 확인</span>` : ""}</td>
+      <td class="num">${l.qty}</td><td class="num">${money.format(l.unitPrice)}</td><td class="num">${money.format(l.gross || 0)}</td>
+      <td class="wrap">${cell}</td>
+      <td>${canEdit ? `<div class="row-actions">${status === "todo" ? `<button data-pli-accept="${h(l.lineId)}">적용</button>` : ""}
+        <select data-pli-select="${h(l.lineId)}" style="max-width:150px">${opts(l.link?.itemId || "")}</select>
+        ${l.link ? `<button data-pli-clear="${h(l.lineId)}" title="연결 지우기">해제</button>` : `<button data-pli-skip="${h(l.lineId)}" title="품목에 잇지 않음">안 함</button>`}</div>` : ""}</td></tr>`;
+  };
+  const body = [...byDetail.entries()].map(([detailId, ls]) => `<div class="prod-detail"><strong>${h(ls[0].date)}</strong> <span class="muted">합계 ${money.format(totals.get(detailId) || 0)}</span>
+    <table class="compact" data-unit="원"><thead><tr><th>팩스 품목명</th><th data-nounit="1">수량</th><th>단가</th><th>금액</th><th data-nounit="1">품목 코드</th><th data-nounit="1"></th></tr></thead>
+    <tbody>${ls.map(row).join("")}</tbody></table></div>`).join("");
+  return head + (body || `<p class="muted">해당하는 줄이 없습니다.</p>`);
+}
+function renderProdItems(d, canEdit) {
+  const items = d.items || [];
+  if (!items.length) return `<p class="muted">이 생산처에 연결된 품목이 없습니다.${d.hasPreset ? " '상세내역 · 품목 연결' 탭에서 기본 품목을 만들 수 있습니다." : ""}</p>`;
+  const steps = (i) => i.prices.map((p, k) => `${k ? `<span class="badge warn">(${h(String(p.from).slice(2, 10).replace(/-/g, ""))}단가개정)</span> ` : `<span class="muted">${h(p.from)}~</span> `}${money.format(p.price)}`).join(" → ");
+  return `<p class="muted" style="font-size:12px">단가는 VAT 별도. 단가를 바꾸려면 거래 › 품목에서 '단가 이력'에 새 줄을 더합니다(과거 단가는 고치지 않음).</p>
+    <div class="table-wrap"><table class="compact"><thead><tr><th>코드</th><th>품목</th><th>종류</th><th>팩스 표기</th><th>단가 이력</th></tr></thead><tbody>
+    ${items.map((i) => `<tr><td>${h(i.code)}</td><td class="wrap">${h(i.name)}${i.validFrom ? ` <span class="muted" style="font-size:11px">${h(i.validFrom)}부터</span>` : ""}</td><td>${h(MATERIAL_TYPE_LABELS[i.type] || i.type)}</td>
+      <td class="wrap muted">${h((i.aliases || []).join(", "))}</td><td class="wrap">${steps(i) || `<span class="muted">${["FR", "OT"].includes(i.type) ? "매번 금액 입력" : "단가 미정"}</span>`}</td></tr>`).join("")}
+    </tbody></table></div>`;
+}
+async function pliSave(items) {
+  const st = stockState();
+  try {
+    const res = await api("/api/production/line-links", { method: "POST", body: { partnerId: st.prodDetail.partner.id, items } });
+    st.prodDetail = { ...st.prodDetail, items: res.items, lines: res.lines };
+    if (res.saved.length) showToast(`${res.saved.length}줄 저장했습니다.`);
+  } catch (error) { showToast(error.message, "error"); }
+  renderApp();
+}
+function bindProdLines() {
+  const st = stockState();
+  const d = st.prodDetail;
+  if (!d) return;
+  const byId = new Map((d.lines || []).map((l) => [l.lineId, l]));
+  const base = (l) => ({ lineId: l.lineId, lineName: l.item, unitPrice: l.unitPrice });
+  const fromSuggest = (l) => l.suggest.status === "linked" ? { ...base(l), status: "linked", itemId: l.suggest.itemId } : { ...base(l), status: "unsized", itemIds: l.suggest.itemIds };
+  const on = (sel, ev, fn) => app.querySelectorAll(sel).forEach((el) => el.addEventListener(ev, fn));
+  on("[data-pli-filter]", "click", (e) => { st.pliFilter = e.currentTarget.dataset.pliFilter; renderApp(); });
+  on("[data-pli-accept]", "click", (e) => { const l = byId.get(e.currentTarget.dataset.pliAccept); if (l?.suggest) pliSave([fromSuggest(l)]); });
+  on("[data-pli-accept-all]", "click", () => {
+    const list = (d.lines || []).filter((l) => !l.link && l.suggest);
+    if (list.length && confirm(`추천 ${list.length}줄을 적용할까요? 사이즈 미기재 줄은 '사이즈 미기재'로 저장되고, 나중에 S/M 등을 눌러 바꿀 수 있습니다.`)) pliSave(list.map(fromSuggest));
+  });
+  on("[data-pli-pick]", "click", (e) => { const l = byId.get(e.currentTarget.dataset.pliPick); if (l) pliSave([{ ...base(l), status: "linked", itemId: e.currentTarget.dataset.item }]); });
+  on("[data-pli-select]", "change", (e) => { const l = byId.get(e.currentTarget.dataset.pliSelect); if (l && e.currentTarget.value) pliSave([{ ...base(l), status: "linked", itemId: e.currentTarget.value }]); });
+  on("[data-pli-skip]", "click", (e) => { const l = byId.get(e.currentTarget.dataset.pliSkip); if (l) pliSave([{ ...base(l), status: "skip" }]); });
+  on("[data-pli-clear]", "click", (e) => pliSave([{ lineId: e.currentTarget.dataset.pliClear, status: "clear" }]));
+  on("[data-pli-preset]", "click", async () => {
+    if (!confirm("확인된 후보표대로 이 생산처의 품목 코드와 날짜별 단가 이력을 만들까요? 이미 있는 품목은 그대로 쓰고 빠진 것만 더합니다.")) return;
+    try {
+      const res = await api("/api/production/preset-items", { method: "POST", body: { partnerId: d.partner.id } });
+      st.prodDetail = { ...st.prodDetail, items: res.items, lines: res.lines };
+      showToast(`품목 ${res.created}개 · 단가 이력 ${res.priced}건을 만들었습니다.`);
+    } catch (error) { showToast(error.message, "error"); }
+    renderApp();
+  });
 }
 
 function bindProdCost() {
@@ -15150,6 +15259,7 @@ function bindProdCost() {
   app.querySelectorAll("[data-prod-open]").forEach((tr) => tr.addEventListener("click", () => refresh(tr.dataset.prodOpen).catch((e) => showToast(e.message, "error"))));
   app.querySelector("[data-prod-close]")?.addEventListener("click", () => { st.prodSel = ""; st.prodDetail = null; renderApp(); });
   app.querySelectorAll("[data-prod-tab]").forEach((b) => b.addEventListener("click", () => { st.prodTab = b.dataset.prodTab; renderApp(); }));
+  bindProdLines();
   app.querySelector("[data-prod-import]")?.addEventListener("click", async () => {
     if (!confirm("생산비 구글시트를 읽어 청구·지급·상세내역·공임표를 가져옵니다. 이미 가져온 줄은 덮어쓰고, 여기서 고치거나 취소한 줄은 그대로 둡니다. 진행할까요?")) return;
     try {
