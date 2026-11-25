@@ -157,6 +157,9 @@ async function ensurePartnerOptions() {
   renderApp();
 }
 const PO_STATUS_LABELS = { ordered: "발주", in_production: "생산중", received: "입고완료", cancelled: "취소" };
+// 거래처 지급 시점(서버 PAYMENT_TIMINGS 와 같음) — 발주서에서 지급요청을 만들 때 기한 기본값.
+const PAYMENT_TIMING_LABELS = { "": "미정", prepay: "선결제(발주·견적 후 바로)", after_receipt: "입고 후", monthly: "월말 묶음", net60: "납품 후 60일" };
+const PO_REASON_TYPES = ["단가변경", "MOQ변경", "수량변경", "품목변경", "기타"];
 // 네 양식은 담기는 내용이 같아 한 목록에 모아 두고 docType으로만 가른다.
 // dateLabel/dueLabel은 같은 날짜 칸이 양식마다 다르게 불리는 이름이고,
 // defaultCategory는 작성 화면에서 수신처로 먼저 보여줄 거래처 분류다
@@ -1382,7 +1385,7 @@ function renderMultiFilter({ key, title, allLabel, options, selectedValues }) {
 function renderTodo() {
   const t = state.todo;
   if (!t) return `<section class="panel todo-panel"><div class="panel-head"><h2>오늘 할 일</h2></div><div class="panel-body"><p class="muted">불러오는 중…</p></div></section>`;
-  const cards = t.items.map((it) => `<button type="button" class="todo-card ${it.tone ? `tone-${h(it.tone)}` : ""}" data-todo-go="${h(it.go.tab)}${it.go.sub ? `:${h(it.go.sub)}` : ""}">
+  const cards = t.items.map((it) => `<button type="button" class="todo-card ${it.tone ? `tone-${h(it.tone)}` : ""}" ${it.go.modal ? `data-todo-modal="${h(it.go.modal)}"` : `data-todo-go="${h(it.go.tab)}${it.go.sub ? `:${h(it.go.sub)}` : ""}"`}>
       <span class="todo-label">${h(it.label)}</span>
       <strong>${it.count != null ? `${money.format(it.count)}건` : "확인"}</strong>
       ${it.amount != null ? `<span class="todo-amount">${money.format(Math.round(it.amount))}원</span>` : ""}</button>`).join("");
@@ -1396,6 +1399,8 @@ function bindTodo() {
     api("/api/todo").then((r) => { state.todo = r; state.todoAt = Date.now(); }).catch(() => { state.todo = { items: [] }; state.todoAt = Date.now(); }).finally(() => { state.todoLoading = false; if (state.tab === "dashboard") renderApp(); });
   }
   app.querySelector("[data-todo-refresh]")?.addEventListener("click", () => { state.todo = null; renderApp(); });
+  app.querySelectorAll("[data-todo-modal]").forEach((b) => b.addEventListener("click", () => { if (b.dataset.todoModal === "receipts") openReceipts(); }));
+  bindReceiptsModal();
   app.querySelectorAll("[data-todo-go]").forEach((b) => b.addEventListener("click", () => {
     const [tab, sub] = b.dataset.todoGo.split(":");
     state.tab = tab;
@@ -1408,11 +1413,79 @@ function bindTodo() {
   }));
 }
 
+// --- 입고예정(발주서 자동 입고) ------------------------------------------------------
+function openReceipts(focus = "") {
+  state.receipts = { open: true, data: null, focus, form: focus ? { [focus]: "receive" } : {} };
+  renderApp();
+  api("/api/purchase-orders/receipts").then((d) => { if (state.receipts) state.receipts.data = d; renderApp(); })
+    .catch((e) => { showToast(e.message, "error"); state.receipts = null; renderApp(); });
+}
+function renderReceiptsModal() {
+  const r = state.receipts;
+  const d = r.data;
+  if (!d) return v2Modal(`<div class="panel-body"><p class="muted">불러오는 중…</p></div>`, "data-rcv-close");
+  const canEdit = can("procurement", "edit") || can("stock", "edit");
+  const locOpts = (cur) => d.locations.map((l) => `<option value="${h(l.key)}" ${cur === l.key ? "selected" : ""}>${h(l.name)}</option>`).join("");
+  const item = (p) => {
+    const mode = r.form[p.poId] || "";
+    return `<div class="rcv-item ${r.focus === p.poId ? "focus" : ""}">
+      <p style="margin:0 0 4px"><b>${h(p.message)}</b></p>
+      <p class="muted" style="margin:0;font-size:12px">${h(p.docNo)} · 기준: ${h(p.basis)} · ${p.lines.map((l) => `${h(l.code)} ${h(l.name)} ${money.format(l.qty)}${h(l.unit)}`).join(", ")}</p>
+      <p style="margin:4px 0">${p.autoOk ? `<span class="badge muted">${p.expected <= d.today ? "곧 자동 입고" : `${h(p.expected.slice(5).replace("-", "/"))} 자동 입고 예정`}</span>` : p.blockers.map((b) => `<span class="badge warn">${h(b)}</span>`).join(" ")}</p>
+      ${canEdit ? `<div class="toolbar" style="gap:6px;flex-wrap:wrap">
+        <button class="primary small" data-rcv-mode="${h(p.poId)}:receive">입고 확인</button>
+        <button class="small" data-rcv-mode="${h(p.poId)}:date">날짜 바꾸기</button>
+        <button class="small" data-rcv-auto="${h(p.poId)}:${p.blockers.includes("자동 입고 꺼짐") ? "on" : "off"}">${p.blockers.includes("자동 입고 꺼짐") ? "자동 입고 켜기" : "자동 입고 끄기"}</button></div>` : ""}
+      ${mode === "receive" ? `<form class="form-grid rcv-form" data-rcv-receive="${h(p.poId)}">
+        ${p.lines.map((l) => `<div class="field two"><div><label>${h(l.name)} 실제 수량(${h(l.unit || "단위")})</label><input name="q:${h(l.materialId)}" inputmode="decimal" value="${h(l.qty)}"></div><div></div></div>`).join("")}
+        <div class="field two"><div><label>입고 위치</label><select name="location"><option value="">고르기…</option>${locOpts(p.location?.key || "")}</select></div>
+          <div><label>입고일</label><input type="date" name="date" value="${h(d.today)}"></div></div>
+        <div class="toolbar"><button class="primary" type="submit">재고에 넣기</button></div></form>` : ""}
+      ${mode === "date" ? `<form class="toolbar" data-rcv-date="${h(p.poId)}" style="gap:6px"><input type="date" name="expectedDate" value="${h(p.expected)}"><button type="submit">예정일 저장</button></form>` : ""}
+    </div>`;
+  };
+  return v2Modal(`<div class="panel-head"><h2>입고예정 <span class="count">${d.pending.length}건</span></h2><button data-rcv-close>닫기</button></div>
+    <div class="panel-body">
+      <p class="muted" style="font-size:12px">기본은 예정일에 자동으로 납품지 재고에 들어갑니다. 수량이 다르거나 일찍·늦게 왔으면 [입고 확인]으로 직접 넣고, 늦어지면 날짜를 바꾸세요.</p>
+      ${d.pending.map(item).join("") || `<p class="muted">입고예정인 발주가 없습니다.</p>`}
+      ${d.recent.length ? `<h3 style="margin-top:14px">최근 2주 입고</h3>${d.recent.map((x) => `<div class="rcv-recent"><span>${h(String(x.date).slice(5).replace("-", "/"))} ${h(x.partnerName)} → ${h(x.locationName)} · ${h(x.names.join(", "))}${x.auto ? ` <span class="badge muted">자동</span>` : ""}</span>
+        ${canEdit ? `<button class="small" data-rcv-undo="${h(x.poId)}">되돌리기</button>` : ""}</div>`).join("")}` : ""}
+    </div>`, "data-rcv-close");
+}
+function bindReceiptsModal() {
+  const on = (sel, ev, fn) => app.querySelectorAll(sel).forEach((el) => el.addEventListener(ev, fn));
+  on("[data-open-receipts]", "click", (e) => { e.stopPropagation(); openReceipts(e.currentTarget.dataset.openReceipts); });
+  if (!state.receipts?.open) return;
+  bindV2Modal();
+  const reload = () => { state.todo = null; openReceipts(); refreshAndRender?.(); };
+  on("[data-rcv-close]", "click", () => { state.receipts = null; state.todo = null; renderApp(); });
+  on("[data-rcv-mode]", "click", (e) => { const [id, mode] = e.currentTarget.dataset.rcvMode.split(":"); const f = state.receipts.form; f[id] = f[id] === mode ? "" : mode; renderApp(); });
+  on("[data-rcv-auto]", "click", async (e) => {
+    const [id, v] = e.currentTarget.dataset.rcvAuto.split(":");
+    try { await api(`/api/purchase-orders/${id}/receipt-plan`, { method: "POST", body: { autoReceive: v === "on" } }); showToast(v === "on" ? "자동 입고를 켰습니다." : "자동 입고를 껐습니다. 도착하면 [입고 확인]을 눌러 주세요."); reload(); } catch (err) { showToast(err.message, "error"); }
+  });
+  on("[data-rcv-date]", "submit", async (e) => {
+    e.preventDefault();
+    try { await api(`/api/purchase-orders/${e.currentTarget.dataset.rcvDate}/receipt-plan`, { method: "POST", body: { expectedDate: e.currentTarget.expectedDate.value } }); showToast("입고 예정일을 바꿨습니다."); reload(); } catch (err) { showToast(err.message, "error"); }
+  });
+  on("[data-rcv-receive]", "submit", async (e) => {
+    e.preventDefault();
+    const f = formObject(e.currentTarget);
+    const qtys = Object.fromEntries(Object.entries(f).filter(([k]) => k.startsWith("q:")).map(([k, v]) => [k.slice(2), v]));
+    try { await api(`/api/purchase-orders/${e.currentTarget.dataset.rcvReceive}/receive`, { method: "POST", body: { qtys, location: f.location, date: f.date } }); showToast("재고에 넣었습니다."); reload(); } catch (err) { showToast(err.message, "error"); }
+  });
+  on("[data-rcv-undo]", "click", async (e) => {
+    if (!confirm("이 입고를 되돌릴까요? 재고에서 빠지고, 이 발주서는 자동 입고가 꺼집니다(다시 [입고 확인]으로 넣기).")) return;
+    try { await api(`/api/purchase-orders/${e.currentTarget.dataset.rcvUndo}/receive-undo`, { method: "POST", body: {} }); showToast("입고를 되돌렸습니다."); reload(); } catch (err) { showToast(err.message, "error"); }
+  });
+}
+
 function renderDashboard() {
   const d = state.dashboard;
   return `
     ${pageHead("대시보드", "오늘 처리할 일과 입금요청 현황을 한눈에 봅니다.")}
     ${renderTodo()}
+    ${state.receipts?.open ? renderReceiptsModal() : ""}
     <section class="stats">
       <div class="stat"><span>입금요청</span><strong>${money.format(d.requestCount)}</strong></div>
       <div class="stat"><span>대기 건수</span><strong>${money.format(d.pendingCount)}</strong></div>
@@ -5930,6 +6003,10 @@ function renderPartnerForm() {
         <div><label>증빙구분</label>${select("invoiceTiming", opt.evidenceTypes, p.invoiceTiming, "evidenceTypes")}</div>
       </div>
       <div class="field">
+        <label>지급 시점 <span class="muted" style="font-weight:400">(발주서에서 지급요청을 만들 때 기한 기본값)</span></label>
+        <select name="paymentTiming">${Object.entries(PAYMENT_TIMING_LABELS).map(([k, l]) => `<option value="${k}" ${(p.paymentTiming || "") === k ? "selected" : ""}>${l}</option>`).join("")}</select>
+      </div>
+      <div class="field">
         <label>금액 계산 방식 <span class="muted" style="font-weight:400">(발주서 단가 기본값 — 문서별로 변경 가능)</span></label>
         <select name="priceMode">
           <option value="supply" ${p.priceMode === "gross" ? "" : "selected"}>부가세 별도 (공급가 기준 — 생산처 일반)</option>
@@ -6580,6 +6657,10 @@ function renderDeliveryPlaceRow(item) {
     </tr>`;
 }
 
+// 재고 보관처(서버 stockLocationsOf 와 같음): 우프 창고 + 생산처.
+function stockLocationChoices() {
+  return [{ key: "HQ", name: "우프 창고" }, ...(state.partners || []).filter((p) => p.category === "production" && p.isActive !== false).map((p) => ({ key: p.id, name: p.name }))];
+}
 function renderDeliveryPlaceForm() {
   const d = state.procurement.editingDeliveryPlace || {};
   return `
@@ -6590,6 +6671,8 @@ function renderDeliveryPlaceForm() {
         <div><label>담당자명</label><input name="contactName" value="${h(d.contactName)}"></div>
         <div><label>전화번호</label><input name="contactPhone" value="${h(d.contactPhone)}"></div>
       </div>
+      <div class="field"><label>재고 위치 <span class="muted" style="font-weight:400">(이 납품지로 보낸 자재가 들어갈 보관처 — 발주서 자동 입고에 씀)</span></label>
+        <select name="stockLocation"><option value="">재고 안 셈(연결 없음)</option>${stockLocationChoices().map((l) => `<option value="${h(l.key)}" ${d.stockLocation === l.key ? "selected" : ""}>${h(l.name)}</option>`).join("")}</select></div>
       <div class="field"><label>메모</label><textarea name="note">${h(d.note)}</textarea></div>
       <div class="toolbar">
         <button class="primary" type="submit">${d.id ? "수정 저장" : "납품지 추가"}</button>
@@ -6689,7 +6772,139 @@ function renderPurchaseOrders() {
       </div>
     </section>
     ${state.procurement.previewPurchaseOrder ? renderPurchaseOrderPreviewOverlay(state.procurement.previewPurchaseOrder) : ""}
+    ${state.procurement.poConfirm ? renderPoConfirm() : ""}
+    ${state.receipts?.open ? renderReceiptsModal() : ""}
   `;
+}
+
+// --- 발주서 확정 · 지급요청 연결 ---------------------------------------------------
+const PAY_ST_SHORT = { requested: "요청", confirmed: "확인", awaiting_approval: "허가대기", paid: "지급완료", on_hold: "보류", cancelled: "취소" };
+function poReceiptBadge(po) {
+  if (po.receipt) return `<br><span class="badge ok" style="font-size:11px" title="${h(po.receipt.by)}">입고 ${h(String(po.receipt.date).slice(5).replace("-", "/"))} · ${h(po.receipt.locationName || "")}${po.receipt.auto ? " (자동)" : ""}</span>`;
+  const r = po.receiptPlan;
+  if (!r) return "";
+  return `<br><button type="button" class="badge ${r.autoOk ? "muted" : "warn"}" style="font-size:11px;border:none;cursor:pointer" data-open-receipts="${h(po.id)}" title="${h(r.basis)}${r.blockers.length ? ` · ${h(r.blockers.join(", "))}` : ""}">입고예정 ${h(r.expected.slice(5).replace("-", "/"))}${r.location ? ` · ${h(r.location)}` : ""}${r.autoOk ? " (자동)" : " — 확인 필요"}</button>`;
+}
+function poPayBadges(po) {
+  const out = [];
+  if (po.confirmedAt && po.ordered && po.ordered.total !== po.total) out.push(`<span class="muted" style="font-size:11px">발주 <s>${money.format(po.ordered.total)}</s> → 확정</span>`);
+  else if (po.confirmedAt) out.push(`<span class="badge ok" style="font-size:11px">확정</span>`);
+  const p = po.pay;
+  if (p?.count) {
+    out.push(p.items.map((x) => `<span class="badge ${x.status === "paid" ? "ok" : "muted"}" style="font-size:11px" title="${h(x.code)} ${money.format(x.amount)}원${x.dueDate ? ` · 기한 ${h(x.dueDate)}` : ""}">${h(x.code)} ${PAY_ST_SHORT[x.status] || x.status}</span>`).join(" "));
+    if (p.diff > 0) out.push(`<span class="badge warn" style="font-size:11px">지급요청 부족 ${money.format(p.diff)}원</span>`);
+    if (p.diff < 0) out.push(`<span class="badge warn" style="font-size:11px">더 냄 ${money.format(-p.diff)}원</span>`);
+  }
+  return out.length ? `<br>${out.join(" ")}` : "";
+}
+function renderPoConfirm() {
+  const c = state.procurement.poConfirm;
+  const po = (state.purchaseOrders || []).find((x) => x.id === c.poId);
+  if (!po) return "";
+  const partner = (state.partners || []).find((p) => p.id === po.partnerId);
+  const mat = (id) => (state.materials || []).find((m) => m.id === id);
+  if (c.stage === "diff") {
+    const d = po.pay?.diff || 0;
+    return v2Modal(`<div class="panel-head"><h2>차액 처리 — ${h(po.docNo)}</h2><button data-poc-close>닫기</button></div>
+      <div class="panel-body">
+        <p>확정 금액 <b>${money.format(po.total)}원</b>, 지급요청 합계 <b>${money.format(po.pay?.requested || 0)}원</b>(이미 지급완료). 차액 <b class="${d > 0 ? "danger-text" : ""}">${d > 0 ? "" : "−"}${money.format(Math.abs(d))}원</b>을 어떻게 할까요?</p>
+        <div class="toolbar" style="flex-wrap:wrap;gap:8px">
+          ${d > 0 ? `<button class="primary" data-poc-diff="extra">차액 ${money.format(d)}원 추가 지급요청</button>` : `<button class="primary" data-poc-diff="refund">${money.format(-d)}원 환불 받기</button>`}
+          <button data-poc-diff="offset">다음 발주에서 상계</button>
+          <button data-poc-diff="ignore">처리 안 함(기록만)</button>
+        </div>
+        <label style="margin-top:8px;display:block">메모 <input data-poc-diff-memo placeholder="예: 다음 발주 때 빼 주기로 함"></label>
+      </div>`, "data-poc-close");
+  }
+  const rows = (c.lines || []).map((l, i) => {
+    const m = mat(l.materialId);
+    const base = Number(m?.basePrice || 0);
+    const changed = m && Number(l.unitPrice) > 0 && Number(l.unitPrice) !== base;
+    return `<tr><td class="wrap">${h(l.itemName)}${m?.code ? ` <span class="muted">${h(m.code)}</span>` : ""}</td>
+      <td><input data-poc-qty="${i}" inputmode="decimal" value="${h(l.quantity)}" style="width:80px"> ${h(l.unit || "")}</td>
+      <td><input data-poc-price="${i}" inputmode="numeric" value="${h(l.unitPrice)}" style="width:100px"></td>
+      <td class="num">${money.format(Math.round(Number(l.quantity || 0) * Number(l.unitPrice || 0)))}</td>
+      <td>${changed ? `<label style="font-size:12px"><input type="checkbox" data-poc-rev="${i}" ${l.revise !== false ? "checked" : ""}> 단가 이력에 개정으로 남기기<br><span class="muted">${base ? `${money.format(base)} → ` : ""}${money.format(l.unitPrice)}원</span></label>` : ""}</td></tr>`;
+  }).join("");
+  return v2Modal(`<div class="panel-head"><h2>발주서 확정 — ${h(po.docNo)} ${h(partner?.name || "")}</h2><button data-poc-close>닫기</button></div>
+    <div class="panel-body">
+      <p class="muted" style="font-size:12px">견적서·거래명세서를 받아 수량·단가가 바뀌었으면 고치세요. 처음 발주 금액(${money.format(po.ordered?.total ?? po.total)}원)은 기록으로 남고, 아직 지급 전인 지급요청은 확정 금액으로 맞춰집니다. 단가는 부가세 별도.</p>
+      <div class="table-wrap"><table class="compact"><thead><tr><th>품목</th><th>수량</th><th>단가(VAT별도)</th><th class="num">공급가</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="field two" style="margin-top:8px"><div><label>바뀐 이유</label><select data-poc-reason-type>${PO_REASON_TYPES.map((t) => `<option ${c.reasonType === t ? "selected" : ""}>${t}</option>`).join("")}</select></div>
+        <div><label>메모</label><input data-poc-reason value="${h(c.reason || "")}" placeholder="예: MOQ 300 → 350yd, 단가 50원 인상"></div></div>
+      ${(po.revisions || []).length ? `<details style="margin-top:8px"><summary class="muted">지난 확정 ${po.revisions.length}번</summary>${po.revisions.map((r) => `<div class="muted" style="font-size:12px">${h(String(r.at).slice(0, 10))} ${h(r.by)} · ${h(r.reasonType || "")} ${money.format(r.beforeTotal)} → ${money.format(r.afterTotal)}원 ${h(r.reason || "")}</div>`).join("")}</details>` : ""}
+      <div class="toolbar" style="margin-top:12px"><button class="primary" data-poc-save>확정 저장</button></div>
+    </div>`, "data-poc-close");
+}
+function bindPoConfirm() {
+  const pr = state.procurement;
+  const on = (sel, ev, fn) => app.querySelectorAll(sel).forEach((el) => el.addEventListener(ev, fn));
+  on("[data-po-confirm]", "click", (e) => {
+    const po = (state.purchaseOrders || []).find((x) => x.id === e.currentTarget.dataset.poConfirm);
+    if (!po) return;
+    pr.poConfirm = { poId: po.id, stage: "edit", reasonType: PO_REASON_TYPES[0], reason: "", lines: (po.lineItems || []).map((l) => ({ ...l })) };
+    renderApp();
+  });
+  on("[data-po-payreq]", "click", async (e) => {
+    const po = (state.purchaseOrders || []).find((x) => x.id === e.currentTarget.dataset.poPayreq);
+    if (!po) return;
+    const partner = (state.partners || []).find((p) => p.id === po.partnerId);
+    const amount = po.pay ? po.pay.diff : po.total;
+    if (!confirm(`${partner?.name || ""} ${po.docNo} ${money.format(amount)}원 지급요청을 만들까요? (이미 따로 지급요청을 만들었다면 취소하세요)\n지급 시점: ${PAYMENT_TIMING_LABELS[partner?.paymentTiming || ""]}${partner?.bankAccount ? `\n계좌: ${partner.bankName || ""} ${partner.bankAccount}` : "\n(거래처에 계좌가 없습니다 — 지급요청에서 넣어 주세요)"}`)) return;
+    try {
+      const res = await api("/api/payments/from-po", { method: "POST", body: { poId: po.id } });
+      showToast(`지급요청 ${res.payment.code}을 만들었습니다.`);
+      await refreshAndRender();
+    } catch (error) { showToast(error.message, "error"); }
+  });
+  if (!pr.poConfirm) return;
+  bindV2Modal();
+  on("[data-poc-close]", "click", () => { pr.poConfirm = null; renderApp(); });
+  const read = () => {
+    const c = pr.poConfirm;
+    c.lines = c.lines.map((l, i) => ({ ...l,
+      quantity: Number(String(app.querySelector(`[data-poc-qty="${i}"]`)?.value ?? l.quantity).replace(/,/g, "")) || 0,
+      unitPrice: Math.round(Number(String(app.querySelector(`[data-poc-price="${i}"]`)?.value ?? l.unitPrice).replace(/,/g, "")) || 0),
+      revise: app.querySelector(`[data-poc-rev="${i}"]`) ? app.querySelector(`[data-poc-rev="${i}"]`).checked : l.revise }));
+    c.reasonType = app.querySelector("[data-poc-reason-type]")?.value || c.reasonType;
+    c.reason = app.querySelector("[data-poc-reason]")?.value ?? c.reason;
+  };
+  on("[data-poc-qty], [data-poc-price]", "change", () => { read(); renderApp(); });
+  on("[data-poc-save]", "click", async () => {
+    read();
+    const c = pr.poConfirm;
+    const priceRevisions = c.lines.filter((l, i) => l.materialId && app.querySelector(`[data-poc-rev="${i}"]`)?.checked).map((l) => ({ materialId: l.materialId, unitPrice: l.unitPrice }));
+    try {
+      const res = await api(`/api/purchase-orders/${c.poId}/confirm`, { method: "POST", body: {
+        lineItems: c.lines.map((l) => ({ ...l, grossUnitPrice: 0 })), reasonType: c.reasonType, reason: c.reason, priceRevisions } });
+      showToast(`확정했습니다.${res.adjusted ? ` 지급요청 ${res.adjusted.code} 금액 ${money.format(res.adjusted.from)} → ${money.format(res.adjusted.to)}원` : ""}${res.revised.length ? ` · 단가개정 ${res.revised.join(", ")}` : ""}`);
+      await refreshAndRender();
+      const po = (state.purchaseOrders || []).find((x) => x.id === c.poId);
+      const p = po?.pay;
+      // 이미 다 지급했는데 금액이 바뀌었으면 차액 처리를 고르게 한다.
+      if (p && p.diff !== 0 && p.paid >= p.requested) { pr.poConfirm = { poId: c.poId, stage: "diff" }; }
+      else pr.poConfirm = null;
+      renderApp();
+    } catch (error) { showToast(error.message, "error"); }
+  });
+  on("[data-poc-diff]", "click", async (e) => {
+    const c = pr.poConfirm;
+    const po = (state.purchaseOrders || []).find((x) => x.id === c.poId);
+    const d = po?.pay?.diff || 0;
+    const action = e.currentTarget.dataset.pocDiff;
+    const memo = app.querySelector("[data-poc-diff-memo]")?.value || "";
+    try {
+      if (action === "extra") {
+        const res = await api("/api/payments/from-po", { method: "POST", body: { poId: c.poId, extra: true, amount: d } });
+        showToast(`차액 지급요청 ${res.payment.code}을 만들었습니다.`);
+      } else {
+        await api(`/api/purchase-orders/${c.poId}/diff`, { method: "POST", body: { action, amount: d, memo } });
+        showToast("차액 처리를 기록했습니다.");
+      }
+      pr.poConfirm = null;
+      await refreshAndRender();
+    } catch (error) { showToast(error.message, "error"); }
+  });
 }
 
 // 다운로드하기 전에 실제로 어떤 내용이 들어가는지 한눈에 보여주는 미리보기다
@@ -6907,8 +7122,10 @@ function renderPurchaseOrderRow(item) {
       <td class="m-title">${h(partner?.name || "")}</td>
       <td class="m-sub">${h(item.orderDate)}${item.dueDate ? `<br><span class="muted" style="font-size:11px">${h(tradeDocMeta(item.docType).dueLabel)} ${h(item.dueDate)}</span>` : ""}</td>
       <td class="m-status"><span class="pill po-st-${h(item.status)}">${PO_STATUS_LABELS[item.status] || item.status}</span></td>
-      <td class="num m-amount"><strong>${money.format(item.total)}원</strong><br><span class="muted" style="font-size:11px">공급가 ${money.format(Number(item.subtotal || 0))} · 부가세 ${money.format(Number(item.vat || 0))}</span></td>
+      <td class="num m-amount"><strong>${money.format(item.total)}원</strong><br><span class="muted" style="font-size:11px">공급가 ${money.format(Number(item.subtotal || 0))} · 부가세 ${money.format(Number(item.vat || 0))}</span>${poPayBadges(item)}${poReceiptBadge(item)}</td>
       <td class="m-actions"><div class="row-actions">
+        ${(item.docType || "purchase_order") === "purchase_order" && item.status !== "cancelled" ? `<button type="button" data-po-confirm="${item.id}" title="견적서·거래명세서를 받아 수량·단가가 바뀌었으면 고칩니다">확정</button>
+          ${can("payments", "create") && (!item.pay || item.pay.diff > 0) ? `<button type="button" data-po-payreq="${item.id}">지급요청</button>` : ""}` : ""}
         <button data-edit-purchase-order="${item.id}">수정</button>
         <button type="button" data-preview-purchase-order="${item.id}">미리보기</button>
         <a href="/api/purchase-orders/${item.id}/excel"><button type="button">엑셀</button></a>
@@ -7122,6 +7339,8 @@ function renderPurchaseOrderSummary(items, priceMode) {
 }
 
 function bindPurchaseOrders() {
+  bindPoConfirm();
+  bindReceiptsModal();
   app.querySelectorAll("[data-doc-type-tab]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const key = btn.dataset.docTypeTab;

@@ -42,6 +42,7 @@ import * as productMatch from "./lib/product-match.mjs";
 import * as imwebSource from "./lib/brand-source-imweb.mjs";
 import * as supplierOrder from "./lib/supplier-order-imweb.mjs";
 import * as prodItems from "./lib/prod-items.mjs";
+import * as poReceipt from "./lib/po-receipt.mjs";
 import { matchOptions as matchSourceOptions } from "./lib/product-sync.mjs";
 import { setAtPath } from "./lib/sync-merge.mjs";
 
@@ -315,6 +316,23 @@ const PARTNER_CATEGORY_LABEL_TO_KEY = Object.fromEntries(
   Object.entries(PARTNER_CATEGORY_LABELS).map(([key, label]) => [label, key])
 );
 const purchaseOrderStatuses = new Set(["ordered", "in_production", "received", "cancelled"]);
+// 거래처별 지급 시점(발주서에서 지급요청을 만들 때 기한 기본값). 2026-11-25 사용자: 거래처마다 다름.
+export const PAYMENT_TIMINGS = { prepay: "선결제(발주·견적 후 바로)", after_receipt: "입고 후", monthly: "월말 묶음", net60: "납품 후 60일" };
+const money = (n) => `${Math.round(Number(n || 0)).toLocaleString("ko-KR")}원`;
+function poPaymentDueDate(partner, po) {
+  const t = partner?.paymentTiming || "";
+  if (t === "prepay") return kstToday();
+  if (t === "monthly") { const d = new Date(`${(po.orderDate || kstToday()).slice(0, 7)}-01T00:00:00Z`); d.setUTCMonth(d.getUTCMonth() + 1); d.setUTCDate(0); return d.toISOString().slice(0, 10); }
+  return ""; // 입고 후·납품 후 60일은 입고(납품)일이 정해지면 그때 정한다
+}
+// 발주서에 이어진 지급요청 요약(목록·확정 화면에서 쓴다).
+function poPaySummary(po, list) {
+  const linked = list.filter((p) => p.poId === po.id && p.status !== "cancelled");
+  const paid = linked.filter((p) => p.status === "paid").reduce((s, p) => s + Number(p.amount || 0), 0);
+  const requested = linked.reduce((s, p) => s + Number(p.amount || 0), 0);
+  return { count: linked.length, requested, paid, open: requested - paid, diff: Number(po.total || 0) - requested - Number(po.diffSettled || 0),
+    items: linked.map((p) => ({ id: p.id, code: p.code || "", amount: p.amount, status: p.status, dueDate: p.dueDate || "", paidAt: p.paidAt || "" })) };
+}
 // 발주서·거래명세서·청구서·견적서는 담기는 내용(수신처/품목/금액)이 같아서 한
 // 컬렉션에 두고 docType으로만 가른다. 문서번호 앞자리는 양식마다 달리 준다.
 const tradeDocTypes = new Set(["purchase_order", "statement", "invoice", "quote"]);
@@ -6454,6 +6472,53 @@ async function productLinkScanView(db, brandId, cached, links) {
   };
 }
 
+// 재고 보관처: 우프 창고 + 생산처(공장). 납품지의 '재고 위치'로 고를 수 있다.
+function stockLocationsOf(db) {
+  return [
+    { key: "HQ", name: "우프 창고" },
+    ...(db.partners || []).filter((p) => p.category === "production" && p.isActive !== false).map((p) => ({ key: p.id, name: p.name }))
+  ];
+}
+async function receiptCtx(db) {
+  return { materials: db.materials || [], partners: db.partners || [], deliveryPlaces: db.deliveryPlaces || [],
+    locations: stockLocationsOf(db), payments: await erp.list("payments").catch(() => []) };
+}
+// 발주서 입고: 재고(+) 기록을 쓰고 발주서를 입고완료로.
+async function receivePurchaseOrder(db, po, plan, { date, location, qtys, by, auto }) {
+  const moves = poReceipt.receiptMoves(po, plan, { date, location, qtys, by, auto });
+  if (!moves.length) throw new Error("재고에 넣을 줄이 없습니다(입고 위치·수량 확인).");
+  const ids = [];
+  for (const m of moves) {
+    const rec = { ...m, id: id("mv"), createdAt: now() };
+    await erp.put("stockMoves", rec);
+    ids.push(rec.id);
+  }
+  const loc = stockLocationsOf(db).find((l) => l.key === moves[0].location);
+  po.status = "received";
+  po.receipt = { at: now(), date, by, auto: Boolean(auto), location: moves[0].location, locationName: loc?.name || "", moveIds: ids,
+    lines: moves.map((m) => ({ materialId: m.materialId, qty: m.qty })) };
+  po.updatedAt = now();
+  addAudit(db, { id: "system", name: by || "자동" }, "update", "purchaseOrder", po.id, `${po.docNo} ${auto ? "자동 " : ""}입고 — ${loc?.name || ""} ${moves.length}줄`, null, po.receipt);
+}
+// 예정일이 된 발주서를 자동 입고(운영에서 30분마다).
+async function poReceiptTick() {
+  try {
+    const db = await readDb();
+    const ctx = await receiptCtx(db);
+    const today = kstToday();
+    let done = 0;
+    for (const po of db.purchaseOrders || []) {
+      const plan = poReceipt.receiptPlan(po, ctx, today);
+      if (!plan || !plan.autoOk || plan.expected > today) continue;
+      await receivePurchaseOrder(db, po, plan, { date: plan.expected, location: plan.location.key, by: "자동", auto: true });
+      done += 1;
+    }
+    if (done) await writeDb(db);
+  } catch (error) {
+    console.error("po receipt tick failed", error.message);
+  }
+}
+
 // 생산처 상세내역 줄 + 품목 연결/추천 + 단가개정 표시.
 async function prodItemView(db, partner, details) {
   const preset = prodItems.PRESETS[String(partner.name || "").replace(/\s+/g, "")];
@@ -11812,6 +11877,7 @@ async function routeApi(req, res, url) {
       // 기준으로 쓸지의 이 거래처 기본값 — 문서 작성 시 자동 선택되고
       // 문서별로 바꿀 수 있다.
       priceMode: body.priceMode === "gross" ? "gross" : "supply",
+      paymentTiming: PAYMENT_TIMINGS[body.paymentTiming] ? body.paymentTiming : "",
       contactName: String(body.contactName || "").trim(),
       contactPhone: String(body.contactPhone || "").trim(),
       contactEmail: String(body.contactEmail || "").trim(),
@@ -12030,6 +12096,7 @@ async function routeApi(req, res, url) {
     }
     if (!partnerCategories.has(partner.category)) partner.category = "production";
     if ("priceMode" in body) partner.priceMode = body.priceMode === "gross" ? "gross" : "supply";
+    if ("paymentTiming" in body) partner.paymentTiming = PAYMENT_TIMINGS[body.paymentTiming] ? body.paymentTiming : "";
     if ("attachments" in body) {
       partner.attachments = Array.isArray(body.attachments)
         ? body.attachments.map((item) => String(item || "").trim()).filter(Boolean)
@@ -12386,13 +12453,156 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  // 입고예정 목록(대시보드 '입고예정'): 아직 입고 안 된 발주서 + 최근 2주 입고(되돌리기용).
+  if (pathname === "/api/purchase-orders/receipts" && method === "GET") {
+    const ctx = await receiptCtx(db);
+    const today = kstToday();
+    const pending = (db.purchaseOrders || []).map((po) => poReceipt.receiptPlan(po, ctx, today)).filter(Boolean)
+      .sort((a, b) => a.expected.localeCompare(b.expected));
+    const since = poReceipt.addDays(today, -14);
+    const recent = (db.purchaseOrders || []).filter((po) => po.receipt && String(po.receipt.date || "") >= since)
+      .map((po) => ({ poId: po.id, docNo: po.docNo, partnerName: db.partners.find((p) => p.id === po.partnerId)?.name || "", ...po.receipt,
+        names: (po.receipt.lines || []).map((l) => `${db.materials.find((m) => m.id === l.materialId)?.itemName || ""} ${l.qty}`) }))
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    sendJson(res, 200, { pending, recent, locations: ctx.locations, today });
+    return;
+  }
+  const poReceiveMatch = pathname.match(/^\/api\/purchase-orders\/([^/]+)\/(receive|receive-undo|receipt-plan)$/);
+  if (poReceiveMatch && method === "POST") {
+    if (!can(actor, "procurement", "edit") && !can(actor, "stock", "edit")) { sendJson(res, 403, { error: "입고를 처리할 권한이 없습니다." }); return; }
+    const po = db.purchaseOrders.find((x) => x.id === poReceiveMatch[1]);
+    if (!po) { sendJson(res, 404, { error: "발주서를 찾을 수 없습니다." }); return; }
+    const body = await readBody(req);
+    const by = actor.name || actor.email || "";
+    if (poReceiveMatch[2] === "receipt-plan") {
+      if ("expectedDate" in body) po.expectedDate = dateOnly(body.expectedDate) || "";
+      if ("autoReceive" in body) po.autoReceive = body.autoReceive !== false;
+      po.updatedAt = now();
+      addAudit(db, actor, "update", "purchaseOrder", po.id, `${po.docNo} 입고 예정 변경${po.expectedDate ? ` ${po.expectedDate}` : ""}${po.autoReceive === false ? " · 자동 입고 끔" : ""}`, null, null);
+      await writeDb(db);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (poReceiveMatch[2] === "receive-undo") {
+      if (!po.receipt) { sendJson(res, 400, { error: "입고 기록이 없습니다." }); return; }
+      for (const mid of po.receipt.moveIds || []) {
+        const m = await erp.get("stockMoves", mid);
+        if (m && !m.voided) await erp.put("stockMoves", { ...m, voided: true, voidedAt: now(), voidedBy: by });
+      }
+      addAudit(db, actor, "update", "purchaseOrder", po.id, `${po.docNo} 입고 되돌림`, po.receipt, null);
+      po.receiptUndone = [...(po.receiptUndone || []), { ...po.receipt, undoneAt: now(), undoneBy: by }].slice(-10);
+      delete po.receipt;
+      po.status = "ordered";
+      po.autoReceive = false; // 되돌린 건은 다시 자동으로 넣지 않는다 — 사람이 [입고 확인]으로
+      po.updatedAt = now();
+      await writeDb(db);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    const ctx = await receiptCtx(db);
+    const plan = poReceipt.receiptPlan(po, ctx, kstToday());
+    if (!plan) { sendJson(res, 400, { error: "입고할 자재 줄이 없거나 이미 입고됐습니다." }); return; }
+    const location = String(body.location || plan.location?.key || "");
+    if (!ctx.locations.some((l) => l.key === location)) { sendJson(res, 400, { error: "입고 위치(보관처)를 고르세요." }); return; }
+    const qtys = {};
+    for (const [mid, q] of Object.entries(body.qtys || {})) qtys[mid] = Math.max(0, Number(String(q).replace(/,/g, "")) || 0);
+    try {
+      await receivePurchaseOrder(db, po, plan, { date: dateOnly(body.date) || kstToday(), location, qtys, by, auto: false });
+    } catch (error) { sendJson(res, 400, { error: error.message }); return; }
+    await writeDb(db);
+    sendJson(res, 200, { ok: true, receipt: po.receipt });
+    return;
+  }
+
   if (pathname === "/api/purchase-orders" && method === "GET") {
     const partnerId = url.searchParams.get("partnerId") || "";
     const rows = (db.purchaseOrders || [])
       .filter((item) => !partnerId || item.partnerId === partnerId)
       .slice()
       .sort((a, b) => (b.orderDate || "").localeCompare(a.orderDate || "") || (b.updatedAt || "").localeCompare(a.updatedAt || ""));
-    sendJson(res, 200, { purchaseOrders: rows });
+    const pays = await erp.list("payments").catch(() => []);
+    const linked = new Set(pays.filter((p) => p.poId).map((p) => p.poId));
+    const rctx = { ...(await receiptCtx(db)), payments: pays };
+    const today = kstToday();
+    sendJson(res, 200, { purchaseOrders: rows.map((po) => {
+      const out = linked.has(po.id) || po.confirmedAt ? { ...po, pay: poPaySummary(po, pays) } : { ...po };
+      const plan = poReceipt.receiptPlan(po, rctx, today);
+      if (plan) out.receiptPlan = { expected: plan.expected, basis: plan.basis, location: plan.location?.name || "", blockers: plan.blockers, autoOk: plan.autoOk };
+      return out;
+    }) });
+    return;
+  }
+
+  // 발주서 확정: 견적서·거래명세서를 받아 수량·단가가 바뀐 대로 고친다. 처음 발주 금액은 ordered 에 남기고,
+  // 바뀐 이유는 revisions 에 쌓는다. 이어진 지급요청이 아직 지급 전이면 금액을 맞추고, 이미 지급했으면
+  // 차액(diff)을 돌려줘 담당자가 추가 지급요청 / 다음 발주에서 상계 / 환불 받기 중에 고르게 한다.
+  const poConfirm = pathname.match(/^\/api\/purchase-orders\/([^/]+)\/(confirm|diff)$/);
+  if (poConfirm && method === "POST") {
+    const po = db.purchaseOrders.find((item) => item.id === poConfirm[1]);
+    if (!po) { sendJson(res, 404, { error: "발주서를 찾을 수 없습니다." }); return; }
+    const body = await readBody(req);
+    const by = actor.name || actor.email || "";
+    const pays = await erp.list("payments");
+    if (poConfirm[2] === "diff") {
+      const action = ["offset", "refund", "ignore"].includes(body.action) ? body.action : "";
+      const amount = Math.round(number(body.amount));
+      if (!action || !amount) { sendJson(res, 400, { error: "처리 방법과 금액이 필요합니다." }); return; }
+      po.diffSettled = Number(po.diffSettled || 0) + amount;
+      po.diffNotes = [...(po.diffNotes || []), { at: now(), by, action, amount, memo: String(body.memo || "").slice(0, 200) }];
+      po.updatedAt = now();
+      addAudit(db, actor, "update", "purchaseOrder", po.id, `${po.docNo} 차액 ${money(amount)} ${{ offset: "다음 발주에서 상계", refund: "환불 받기", ignore: "처리 안 함" }[action]}`, null, po.diffNotes.at(-1));
+      await writeDb(db);
+      sendJson(res, 200, { purchaseOrder: { ...po, pay: poPaySummary(po, pays) } });
+      return;
+    }
+    const lineItems = sanitizePurchaseOrderLineItems(body.lineItems);
+    if (!lineItems.length) { sendJson(res, 400, { error: "품목을 한 줄 이상 남겨 주세요." }); return; }
+    const reasonType = String(body.reasonType || "").slice(0, 20);
+    const reason = String(body.reason || "").trim().slice(0, 300);
+    const before = { total: po.total, subtotal: po.subtotal, vat: po.vat, lineItems: po.lineItems };
+    if (!po.ordered) po.ordered = { ...before, at: po.createdAt };
+    // 금액이 다시 바뀌면 예전 차액 처리(상계·환불)는 기록으로만 두고 차액을 새로 계산한다.
+    if (po.diffSettled) { po.diffNotes = [...(po.diffNotes || []), { at: now(), by, action: "reset", amount: -po.diffSettled, memo: "확정 금액이 바뀌어 차액을 다시 계산" }]; po.diffSettled = 0; }
+    po.lineItems = lineItems;
+    Object.assign(po, purchaseOrderTotals(po.lineItems, po.priceMode));
+    po.confirmedAt = now();
+    po.confirmedBy = by;
+    po.revisions = [...(po.revisions || []), { at: now(), by, reasonType, reason, beforeTotal: before.total, afterTotal: po.total,
+      changes: lineItems.map((l) => { const b = (before.lineItems || []).find((x) => x.id === l.id); return b && (b.quantity !== l.quantity || b.unitPrice !== l.unitPrice) ? { itemName: l.itemName, quantity: [b.quantity, l.quantity], unitPrice: [b.unitPrice, l.unitPrice] } : null; }).filter(Boolean) }].slice(-30);
+    // 단가 개정: 고른 품목만 단가 이력에 새 줄(과거 단가는 그대로).
+    const revised = [];
+    for (const r of Array.isArray(body.priceRevisions) ? body.priceRevisions : []) {
+      const material = db.materials.find((m) => m.id === r.materialId);
+      const price = Math.round(number(r.unitPrice));
+      if (!material || !(price > 0)) continue;
+      await erp.put("itemPrices", { id: id("ip"), itemId: material.id, partnerId: po.partnerId, partnerName: db.partners.find((x) => x.id === po.partnerId)?.name || "",
+        price, vatMode: "excluded", unit: material.orderUnit || "", effectiveFrom: kstToday(), reason: `${po.docNo} 확정${reasonType ? ` (${reasonType})` : ""}`, by, createdAt: now() });
+      material.basePrice = price;
+      material.updatedAt = now();
+      revised.push(material.itemName);
+    }
+    // 이어진 지급요청 맞추기: 지급 전인 것 중 가장 최근 것에 차액을 더한다.
+    const linked = pays.filter((p) => p.poId === po.id && p.status !== "cancelled");
+    const diff = Number(po.total || 0) - linked.reduce((s, p) => s + Number(p.amount || 0), 0) - Number(po.diffSettled || 0);
+    let adjusted = null;
+    const open = linked.filter((p) => p.status !== "paid").sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
+    if (diff && open && Number(open.amount) + diff > 0) {
+      const from = open.amount;
+      open.amount = Number(open.amount) + diff;
+      if (open.status === "confirmed" || open.status === "awaiting_approval") {
+        const settings = { ...PAYMENT_SETTING_DEFAULTS, ...((await erp.get("settings", "payments")) || {}) };
+        open.status = payments.statusAfterConfirm(open.amount, settings.approvalThreshold);
+      }
+      open.history = [...(open.history || []), { at: now(), by, action: "amount", from: String(from), to: String(open.amount), note: `발주서 ${po.docNo} 확정 금액 반영${reasonType ? ` (${reasonType})` : ""}` }].slice(-50);
+      open.updatedAt = now();
+      await erp.put("payments", open);
+      adjusted = { code: open.code, from, to: open.amount };
+    }
+    po.updatedAt = now();
+    addAudit(db, actor, "update", "purchaseOrder", po.id, `${po.docNo} 확정 ${money(before.total)} → ${money(po.total)}${reasonType ? ` (${reasonType})` : ""}${revised.length ? ` · 단가개정 ${revised.join(", ")}` : ""}`, before, { total: po.total });
+    await writeDb(db);
+    const fresh = await erp.list("payments");
+    sendJson(res, 200, { purchaseOrder: { ...po, pay: poPaySummary(po, fresh) }, adjusted, revised });
     return;
   }
 
@@ -12840,11 +13050,7 @@ async function routeApi(req, res, url) {
   if (pathname === "/api/stock" || pathname.startsWith("/api/stock/")) {
     if (!requirePermission(actor, res, "stock", "view")) return;
     const who = actor.name || actor.email || "";
-    const locations = [
-      { key: "HQ", name: "우프 창고" },
-      ...(db.partners || []).filter((p) => p.category === "production" && p.isActive !== false)
-        .map((p) => ({ key: p.id, name: p.name }))
-    ];
+    const locations = stockLocationsOf(db);
     const qtyOf = (v) => Math.round(number(String(v ?? "").replace(/,/g, "")) * 1000) / 1000;
     const loadAll = async () => {
       const [moves, runs, products, settingsList] = await Promise.all([
@@ -13111,6 +13317,13 @@ async function routeApi(req, res, url) {
       const today = kstToday();
       push("pay", "지급할 지급요청", pays.filter((p) => p.status === "confirmed"), (p) => p.amount, { tab: "payments" });
       push("payLate", "기한 지난 지급요청", pays.filter((p) => ["requested", "confirmed", "awaiting_approval"].includes(p.status) && p.dueDate && p.dueDate < today), (p) => p.amount, { tab: "payments" }, "danger");
+    }
+    if (owner || can(actor, "procurement", "view") || can(actor, "stock", "view")) {
+      const ctx = await receiptCtx(db);
+      const today = kstToday();
+      const soon = poReceipt.addDays(today, 7);
+      const plans = (db.purchaseOrders || []).map((po) => poReceipt.receiptPlan(po, ctx, today)).filter((p) => p && (p.expected <= soon || p.blockers.length));
+      push("receipts", "입고예정 발주", plans, null, { tab: "dashboard", modal: "receipts" }, plans.some((p) => p.overdue) ? "warn" : "");
     }
     if (owner || can(actor, "sales", "view")) {
       const so = await erp.list("salesOrders").catch(() => []);
@@ -14858,6 +15071,37 @@ async function routeApi(req, res, url) {
       return;
     }
 
+    // 발주서에서 지급요청 만들기. 금액 = 발주서 금액 − 이미 만든 지급요청(차액분이면 body.amount).
+    if (pathname === "/api/payments/from-po" && method === "POST") {
+      if (!requirePermission(actor, res, "payments", "create")) return;
+      const body = await readBody(req);
+      const po = db.purchaseOrders.find((x) => x.id === String(body.poId || ""));
+      if (!po) { sendJson(res, 404, { error: "발주서를 찾을 수 없습니다." }); return; }
+      const partner = db.partners.find((x) => x.id === po.partnerId);
+      const all = await erp.list("payments");
+      const sum = poPaySummary(po, all);
+      const amount = body.extra ? Math.round(number(body.amount)) : sum.diff;
+      if (!(amount > 0)) { sendJson(res, 400, { error: "이미 발주서 금액만큼 지급요청이 있습니다." }); return; }
+      const lines = po.lineItems || [];
+      const isMaterial = lines.some((l) => { const m = db.materials.find((x) => x.id === l.materialId); return m && (m.itemKind || "material") === "material"; });
+      const rec = {
+        id: id("pay"), status: "requested", files: [], requestedBy: who, createdAt: now(),
+        title: `${partner?.name || ""} ${po.docNo} — ${lines[0]?.itemName || ""}${lines.length > 1 ? ` 외 ${lines.length - 1}건` : ""}${body.extra ? " (차액)" : ""}`.trim(),
+        amount, payeeName: partner?.name || "", partnerCode: partner?.code || "", category: isMaterial ? "생산" : "매입",
+        bankName: payments.normalizeBankName(partner?.bankName || ""), accountNumber: normalizeAccountNumber(partner?.bankAccount || ""), holder: partner?.depositorName || "",
+        dueDate: dateOnly(body.dueDate) || poPaymentDueDate(partner, po),
+        memo: lines.map((l) => `${l.itemName} ${l.quantity}${l.unit || ""} × ${money(l.unitPrice)}(VAT별도)`).join("\n").slice(0, 2000),
+        poId: po.id, poDocNo: po.docNo
+      };
+      rec.code = nextPaymentCode(all, rec.createdAt);
+      rec.updatedAt = now();
+      log(rec, "create", "", "requested", `발주서 ${po.docNo}에서 만듦`);
+      await erp.put("payments", rec);
+      sendJson(res, 201, { payment: rec, purchaseOrder: { ...po, pay: poPaySummary(po, [...all, rec]) } });
+      pushNotice("payment_new", { ...rec, by: who.name }, { type: "payment", id: rec.id }, { teamSend: body.teamSend === true });
+      return;
+    }
+
     const actionMatch = pathname.match(/^\/api\/payments\/([^/]+)\/action$/);
     if (actionMatch && method === "POST") {
       const body = await readBody(req);
@@ -15248,6 +15492,7 @@ async function routeApi(req, res, url) {
       contactName: String(body.contactName || "").trim(),
       contactPhone: String(body.contactPhone || "").trim(),
       note: String(body.note || "").trim(),
+      stockLocation: stockLocationsOf(db).some((l) => l.key === body.stockLocation) ? body.stockLocation : "",
       createdAt: now(),
       updatedAt: now()
     };
@@ -15280,6 +15525,7 @@ async function routeApi(req, res, url) {
     for (const key of ["address", "contactName", "contactPhone", "note"]) {
       if (key in body) deliveryPlace[key] = String(body[key] || "").trim();
     }
+    if ("stockLocation" in body) deliveryPlace.stockLocation = stockLocationsOf(db).some((l) => l.key === body.stockLocation) ? body.stockLocation : "";
     deliveryPlace.updatedAt = now();
     addAudit(db, actor, "update", "deliveryPlace", deliveryPlace.id, `${deliveryPlace.name} 납품장소 수정`, before, deliveryPlace);
     await writeDb(db);
@@ -15488,8 +15734,14 @@ if (isMainModule) {
   const syncSchedule = String(process.env.PRODUCT_SYNC_SCHEDULE || (process.env.NODE_ENV === "production" ? "on" : "off")).toLowerCase();
   if (syncSchedule === "on") productSync.startSchedule();
   // 카페24 자동 입금확인: 10분마다(설정이 off 면 아무것도 안 함). 운영에서만(테스트 사이트는 카페24 미연결).
+  // 발주서 자동 입고: 30분마다 예정일이 된 건을 납품지 재고에 넣는다(운영. 시험은 PO_RECEIPT_TICK=on 으로 이것만).
+  if (syncSchedule === "on" || process.env.PO_RECEIPT_TICK === "on") {
+    const first = process.env.PO_RECEIPT_TICK === "on" ? 5000 : KEEPALIVE_START_DELAY_MS + 120000;
+    setTimeout(() => { poReceiptTick(); setInterval(poReceiptTick, 30 * 60 * 1000).unref(); }, first).unref();
+  }
   if (syncSchedule === "on") {
     setTimeout(() => { depositConfirmTick(); setInterval(depositConfirmTick, 10 * 60 * 1000).unref(); }, KEEPALIVE_START_DELAY_MS + 60000).unref();
     setTimeout(() => { shipNotifyTick(); setInterval(shipNotifyTick, 2 * 60 * 1000).unref(); }, KEEPALIVE_START_DELAY_MS + 90000).unref();
+
   }
 }

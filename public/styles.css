@@ -3176,3 +3176,8 @@ tbody tr:hover td.sticky, .requests-table tbody tr:hover td:nth-child(-n+2) { ba
 .bom-lines select, .bom-lines input { width: 100%; min-width: 0; box-sizing: border-box; }
 .bom-lines tr.bom-mat-row td { padding-bottom: 2px; border-bottom: none; }
 .bom-lines tr.bom-val-row td { padding-top: 2px; }
+/* 입고예정 팝업 */
+.rcv-item { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin: 8px 0; }
+.rcv-item.focus { border-color: var(--accent, #2563eb); }
+.rcv-item .rcv-form { margin-top: 8px; }
+.rcv-recent { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
