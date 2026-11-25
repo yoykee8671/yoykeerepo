@@ -39,6 +39,7 @@ import * as brandInfo from "./lib/brand-info.mjs";
 import * as rehab from "./lib/rehab-plan.mjs";
 import * as cashFlow from "./lib/cash-flow.mjs";
 import * as productMatch from "./lib/product-match.mjs";
+import * as prodItems from "./lib/prod-items.mjs";
 import { matchOptions as matchSourceOptions } from "./lib/product-sync.mjs";
 import { setAtPath } from "./lib/sync-merge.mjs";
 
@@ -2416,6 +2417,13 @@ function applyItemExtras(item, body) {
   if ("needsReview" in body) item.needsReview = body.needsReview === true || body.needsReview === "true";
   // 단종·마지막 재고(다시 주문 안 함). 재고가 남아 있는 동안은 보이고, 발주 목록에서는 경고한다.
   if ("discontinued" in body) item.discontinued = body.discontinued === true || body.discontinued === "true" || body.discontinued === "on";
+  // 생산처 팩스(상세내역)에 적히는 이름들 — 상세내역 줄을 이 품목에 추천할 때 쓴다.
+  if ("aliases" in body) {
+    const list = Array.isArray(body.aliases) ? body.aliases : String(body.aliases || "").split(/[,\n]/);
+    item.aliases = [...new Set(list.map((x) => String(x).trim()).filter(Boolean))].slice(0, 30);
+  }
+  if ("sizeTag" in body) item.sizeTag = String(body.sizeTag || "").trim().toUpperCase().slice(0, 10);
+  if ("validFrom" in body) item.validFrom = dateOnly(body.validFrom) || "";
   for (const k of ["baseUnit", "orderNote", "barcode", "group", "spec", "storage"]) {
     if (k in body) item[k] = String(body[k] ?? "").trim().slice(0, k === "orderNote" ? 1000 : 200);
   }
@@ -6441,6 +6449,35 @@ async function productLinkScanView(db, brandId, cached, links) {
       variants: p.variants.map((v) => ({ ...v, retail: p.price + v.add, suggest: suggest[v.code] || null, source: sources.get(v.code) || null }))
     })),
     entryCount: entries.length
+  };
+}
+
+// 생산처 상세내역 줄 + 품목 연결/추천 + 단가개정 표시.
+async function prodItemView(db, partner, details) {
+  const preset = prodItems.PRESETS[String(partner.name || "").replace(/\s+/g, "")];
+  const items = db.materials.filter((m) => m.isActive !== false && m.itemKind !== "vendorProduct"
+    && (m.partnerId === partner.id || (m.altPartnerIds || []).includes(partner.id)));
+  const itemIds = new Set(items.map((m) => m.id));
+  const [allPrices, allLinks] = await Promise.all([erp.list("itemPrices"), erp.list("prodLineLinks")]);
+  const prices = allPrices.filter((p) => itemIds.has(p.itemId));
+  const links = new Map(allLinks.filter((l) => l.partnerId === partner.id).map((l) => [l.id, l]));
+  // 확정한 연결에서 배운다: 같은 이름·같은 단가 → 같은 품목.
+  const learned = new Map();
+  for (const l of links.values()) if (l.status === "linked" && l.itemId) learned.set(`${prodItems.lineKey(l.lineName)}|${l.unitPrice}`, l.itemId);
+  const lines = prodItems.flattenDetails(details).map((line) => {
+    const link = links.get(line.lineId) || null;
+    const suggest = link ? null : prodItems.suggestLine(line, { items, prices, learned });
+    const itemId = link?.status === "linked" ? link.itemId : "";
+    return { ...line, link, suggest, suspicious: prodItems.amountSuspicious(line),
+      revision: itemId ? prodItems.revisionLabel(prices, itemId, line.date) : "",
+      expected: itemId ? (prodItems.priceAt(prices, itemId, line.date)?.price ?? null) : null };
+  });
+  return {
+    items: items.map((m) => ({ id: m.id, code: m.code || "", name: m.itemName, type: m.materialType || "", group: m.group || "", aliases: m.aliases || [],
+      sizeTag: m.sizeTag || "", validFrom: m.validFrom || "",
+      prices: prodItems.priceSteps(prices, m.id).map((p) => ({ from: p.effectiveFrom, price: p.price })) })),
+    lines, hasPreset: Boolean(preset),
+    presetDone: Boolean(preset) && preset.every((p) => items.some((m) => String(m.itemName).replace(/\s+/g, "") === p.name.replace(/\s+/g, "")))
   };
 }
 
@@ -13641,16 +13678,80 @@ async function routeApi(req, res, url) {
       const rates = all.rates.filter((r) => r.partnerId === partner.id && !r.voided);
       const checks = production.rateChecks({ details, rates, bills: mine.bills, since: `${today.slice(0, 4)}-01-01` });
       const ledger = production.partnerLedger(mine);
+      const itemMatch = await prodItemView(db, partner, details);
       sendJson(res, 200, {
+        ...itemMatch,
         partner: { id: partner.id, code: partner.code || "", name: partner.name, bankName: partner.bankName || "", bankAccount: partner.bankAccount || "",
           accountHolder: partner.accountHolder || "", company: partner.productionCompany || "wooof" },
         summary: production.partnerSummary(mine, today), open: production.openBills(mine, today),
-        entries: ledger.entries.slice().reverse().slice(0, 300), details: details.slice(0, 60), rates, checks
+        entries: ledger.entries.slice().reverse().slice(0, 300), details: details.slice(0, 300), rates, checks
       });
       return;
     }
 
     if (!canEdit) { sendJson(res, 403, { error: "생산비를 고칠 권한이 없습니다." }); return; }
+
+    // 상세내역 줄 ↔ 품목 코드 연결 저장. status: linked(품목 하나) · unsized(사이즈 미기재, 후보 여럿) · skip(연결 안 함)
+    if (pathname === "/api/production/line-links" && method === "POST") {
+      const body = await readBody(req);
+      const partner = db.partners.find((p) => p.id === String(body.partnerId || ""));
+      if (!partner) { sendJson(res, 404, { error: "거래처를 찾을 수 없습니다." }); return; }
+      const itemIds = new Set(db.materials.map((m) => m.id));
+      const saved = [];
+      for (const it of (Array.isArray(body.items) ? body.items : []).slice(0, 1000)) {
+        const lineId = String(it.lineId || "").slice(0, 160);
+        if (!lineId.includes("#")) continue;
+        if (it.status === "clear") { await erp.remove("prodLineLinks", lineId); continue; }
+        const status = ["linked", "unsized", "skip"].includes(it.status) ? it.status : "linked";
+        const rec = { id: lineId, partnerId: partner.id, status, lineName: String(it.lineName || "").slice(0, 120), unitPrice: Math.round(number(it.unitPrice)),
+          itemId: status === "linked" && itemIds.has(it.itemId) ? it.itemId : "",
+          itemIds: status === "unsized" ? (it.itemIds || []).filter((x) => itemIds.has(x)).slice(0, 6) : [],
+          by: who, at: now() };
+        if (status === "linked" && !rec.itemId) { sendJson(res, 400, { error: "연결할 품목을 고르세요." }); return; }
+        await erp.put("prodLineLinks", rec);
+        saved.push(rec);
+      }
+      sendJson(res, 200, { saved, ...(await prodItemView(db, partner, (await erp.list("prodDetails")).filter((d) => d.partnerId === partner.id))) });
+      return;
+    }
+
+    // 생산처 기본 품목 만들기(세림 후보표). 이미 있는 이름은 그대로 쓰고, 빠진 단가 이력·팩스 표기만 더한다.
+    if (pathname === "/api/production/preset-items" && method === "POST") {
+      const body = await readBody(req);
+      const partner = db.partners.find((p) => p.id === String(body.partnerId || ""));
+      const preset = partner && prodItems.PRESETS[String(partner.name || "").replace(/\s+/g, "")];
+      if (!preset) { sendJson(res, 400, { error: "이 생산처에는 준비된 품목 후보가 없습니다." }); return; }
+      const key = (s) => String(s || "").replace(/\s+/g, "");
+      const prices = await erp.list("itemPrices");
+      let created = 0, priced = 0;
+      for (const p of preset) {
+        let item = db.materials.find((m) => m.partnerId === partner.id && key(m.itemName) === key(p.name));
+        if (!item) {
+          item = { id: id("material"), partnerId: partner.id, itemName: p.name, itemCode: "", category: "", orderUnit: "", basePrice: 0, consumerPrice: 0,
+            leadTimeDays: 0, note: "", isActive: true, createdAt: now(), updatedAt: now() };
+          applyItemExtras(item, { itemKind: "material", materialType: p.type });
+          db.materials.push(item);
+          created += 1;
+        }
+        applyItemExtras(item, { aliases: [...new Set([...(item.aliases || []), ...p.aliases])], ...(p.sizeTag ? { sizeTag: p.sizeTag } : {}),
+          ...(p.validFrom ? { validFrom: p.validFrom } : {}), ...(p.group && !item.group ? { group: p.group } : {}) });
+        for (const [from, price] of p.prices) {
+          if (prices.some((x) => x.itemId === item.id && x.effectiveFrom === from)) continue;
+          const rec = { id: id("ip"), itemId: item.id, partnerId: partner.id, partnerName: partner.name, price, vatMode: "excluded", unit: "",
+            effectiveFrom: from, reason: "생산비 상세내역에서 확인한 단가", by: who, createdAt: now() };
+          await erp.put("itemPrices", rec);
+          prices.push(rec);
+          priced += 1;
+        }
+        const last = p.prices[p.prices.length - 1];
+        if (last && !item.basePrice) item.basePrice = last[1];
+        item.updatedAt = now();
+      }
+      addAudit(db, actor, "create", "material", partner.id, `${partner.name} 기본 품목 ${created}개 · 단가 이력 ${priced}건 만들기`, null, { created, priced });
+      await writeDb(db);
+      sendJson(res, 200, { created, priced, ...(await prodItemView(db, partner, (await erp.list("prodDetails")).filter((d) => d.partnerId === partner.id))) });
+      return;
+    }
 
     // 시트 추출본 넣기(오너). 거래처가 없으면 생산처로 만든다.
     if ((pathname === "/api/production/import" || pathname === "/api/production/import-sheet") && method === "POST") {
