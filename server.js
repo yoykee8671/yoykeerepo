@@ -39,6 +39,7 @@ import * as brandInfo from "./lib/brand-info.mjs";
 import * as rehab from "./lib/rehab-plan.mjs";
 import * as cashFlow from "./lib/cash-flow.mjs";
 import * as productMatch from "./lib/product-match.mjs";
+import * as imwebSource from "./lib/brand-source-imweb.mjs";
 import * as prodItems from "./lib/prod-items.mjs";
 import { matchOptions as matchSourceOptions } from "./lib/product-sync.mjs";
 import { setAtPath } from "./lib/sync-merge.mjs";
@@ -7549,8 +7550,41 @@ async function routeProductSync(req, res, url, actor, db) {
       sendJson(res, 200, await productSync.clearNotices(sourceId, (body.ids || []).map(String)));
       return;
     }
+    // 공급사 사이트 계정(회원가가 로그인해야 보이는 곳). 비밀번호는 여기서 암호화해 넘기고 다시 내보내지 않는다.
+    if (rest === "/login" && method === "PUT") {
+      const body = await readBody(req);
+      if (body.clear) {
+        await productSync.updateSettings(sourceId, { login: null }, actorInfo);
+      } else {
+        const uid = String(body.uid || "").trim();
+        const password = String(body.password || "");
+        if (!uid) { sendJson(res, 400, { error: "아이디를 적으세요." }); return; }
+        await productSync.updateSettings(sourceId, { login: { uid, ...(password ? { passSealed: clobe.sealSecret(password) } : {}), error: "" } }, actorInfo);
+      }
+      supplierLoginCache.clear();
+      await audit(`상품동기화 공급사 계정 ${body.clear ? "삭제" : "저장"} (${sourceId})`, sourceId);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (rest === "/login/test" && method === "POST") {
+      const state = await productSync.readState();
+      const src = state.sources?.[sourceId];
+      if (!src || src.platform !== "imweb") { sendJson(res, 400, { error: "로그인 시험은 아임웹 공급사만 됩니다." }); return; }
+      supplierLoginCache.clear();
+      let result;
+      try {
+        const ok = await imwebSource.ensureLogin(src.baseUrl, { force: true });
+        result = ok ? { ok: true } : { ok: false, error: "저장된 계정이 없습니다." };
+      } catch (error) {
+        result = { ok: false, error: error.message };
+      }
+      await productSync.updateSettings(sourceId, { login: { error: result.ok ? "" : result.error, checkedAt: now() } }, actorInfo);
+      sendJson(res, 200, result);
+      return;
+    }
     if (rest === "/settings" && method === "PUT") {
       const body = await readBody(req);
+      delete body.login; // 계정은 /login 으로만 바꾼다(암호화)
       const result = await productSync.updateSettings(sourceId, body, actorInfo);
       await audit(`상품동기화 설정 변경 (${sourceId})`, sourceId);
       sendJson(res, 200, result);
@@ -7839,6 +7873,21 @@ async function runBatch(req, res, url) {
   })));
   sendJson(res, 200, { results: Object.fromEntries(paths.map((p, i) => [p, results[i]])) });
 }
+
+// 아임웹 공급사 로그인 계정을 읽기 모듈에 건넨다. 상품마다 묻기 때문에 1분 동안 기억한다.
+const supplierLoginCache = new Map();
+imwebSource.setCredentialResolver(async (origin) => {
+  const hit = supplierLoginCache.get(origin);
+  if (hit && Date.now() - hit.at < 60000) return hit.creds;
+  let creds = null;
+  try {
+    const state = await productSync.readState();
+    const src = Object.values(state.sources || {}).find((x) => x.platform === "imweb" && x.login?.passSealed && new URL(x.baseUrl).origin === origin);
+    if (src) creds = { uid: src.login.uid, passwd: clobe.openSecret(src.login.passSealed) };
+  } catch { creds = null; }
+  supplierLoginCache.set(origin, { creds, at: Date.now() });
+  return creds;
+});
 
 async function routeApi(req, res, url) {
   const pathname = url.pathname;

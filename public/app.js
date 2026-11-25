@@ -11831,6 +11831,7 @@ const PS_ISSUE_LABELS = {
   soldout: ["품절 반영", "ps-red"],
   restock: ["재입고", "ps-green"],
   price: ["판매가", "ps-blue"],
+  supply_price: ["매입가(회원가)", "ps-blue"],
   option_price: ["옵션 추가금", "ps-blue"],
   source_removed: ["본사 삭제", "ps-red"],
   source_unlisted: ["본사 진열 중단", "ps-gray"],
@@ -12501,6 +12502,20 @@ function renderPsSettings() {
         </form>
       </div>
     </section>
+    ${d.login ? `<section class="panel">
+      <div class="panel-head"><h2>${h(d.name || "")} 사이트 계정</h2></div>
+      <div class="panel-body">
+        <p class="muted" style="font-size:12px">이 사이트는 로그인해야 판매가(우리 매입가)가 보입니다. pay 서버가 이 계정으로 로그인해서 읽습니다. 비밀번호는 암호화해 저장하고 화면에 다시 보이지 않습니다. 직원 모두 같은 계정을 씁니다.</p>
+        <p>${d.login.hasPassword ? `<span class="badge ok">계정 저장됨</span> ${h(d.login.uid)}` : `<span class="badge warn">계정 없음</span>`}
+          ${d.login.checkedAt ? ` <span class="muted">· 마지막 시험 ${psFmtTime(d.login.checkedAt)}</span>` : ""}
+          ${d.login.error ? ` <span class="danger-text">${h(d.login.error)}</span>` : d.login.checkedAt && d.login.hasPassword ? ` <span class="badge ok">로그인 됨</span>` : ""}</p>
+        ${canApply ? `<form data-ps-login class="form-grid">
+          <div class="field two"><div><label>아이디</label><input name="uid" value="${h(d.login.uid || "")}" autocomplete="off"></div>
+            <div><label>비밀번호 <span class="muted">${d.login.hasPassword ? "(바꿀 때만 입력)" : ""}</span></label><input name="password" type="password" autocomplete="new-password"></div></div>
+          <div class="toolbar"><button class="primary" type="submit">계정 저장</button><button type="button" data-ps-login-test ${d.login.hasPassword ? "" : "disabled"}>로그인 시험</button></div>
+        </form>` : ""}
+      </div>
+    </section>` : ""}
     <section class="panel">
       <div class="panel-head"><h2>기록 <span class="muted">최근 ${history.length}건</span></h2></div>
       <div class="panel-body">
@@ -12890,6 +12905,23 @@ function bindProductSync() {
   });
 
   // 설정
+  on("[data-ps-login]", "submit", async (event) => {
+    event.preventDefault();
+    const data = formObject(event.currentTarget);
+    try {
+      await api(`${sourcePath}/login`, { method: "PUT", body: { uid: data.uid, password: data.password } });
+      const test = await api(`${sourcePath}/login/test`, { method: "POST" });
+      showToast(test.ok ? "계정을 저장했고 로그인도 확인했습니다." : `저장했지만 로그인 실패: ${test.error}`, test.ok ? "success" : "error");
+      await loadProductSync({ silent: true });
+    } catch (error) { showToast(error.message, "error"); }
+  });
+  on("[data-ps-login-test]", "click", async () => {
+    try {
+      const test = await api(`${sourcePath}/login/test`, { method: "POST" });
+      showToast(test.ok ? "로그인 됩니다." : `로그인 실패: ${test.error}`, test.ok ? "success" : "error");
+      await loadProductSync({ silent: true });
+    } catch (error) { showToast(error.message, "error"); }
+  });
   on("[data-ps-settings]", "submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
