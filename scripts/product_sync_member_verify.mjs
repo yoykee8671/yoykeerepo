@@ -31,6 +31,18 @@ assert.deepEqual(same.filter((i) => ["price", "supply_price", "source_promo"].in
 const changed = ps.computeIssues({ ...base, source: { name: "x", price: 21800, salePrice: 14900, options: [] }, wooof });
 assert.deepEqual(changed.filter((i) => ["price", "supply_price"].includes(i.type)).map((i) => [i.type, i.to]).sort(), [["price", 21800], ["supply_price", 14900]]);
 
+// 옵션명 자동 맞춤: 앞의 [브랜드] 표시는 맞추지 않고, '옵션 1개 = 상품명'도 맞추지 않는다. 뒤의 안내 문구는 그대로 맞춘다.
+const variant = (code, value) => ({ variant_code: code, options: [{ name: "종류", value }], selling: "T", display: "T", quantity: 99 });
+const two = { price: "5000.00", supply_price: "3000.00", variants: [variant("P1", "소세지"), variant("P2", "수박")] };
+const texts = (opts) => ps.computeIssues({ ...base, settings: { restockQuantity: 99 }, wooof: two,
+  source: { name: "x", price: 5000, salePrice: 5000, options: opts } }).filter((i) => i.type === "option_text").map((i) => i.to);
+assert.deepEqual(texts([{ label: "[하울고]소세지", values: ["[하울고]소세지"], selling: true }, { label: "[하울고]수박", values: ["[하울고]수박"], selling: true }]), []);
+assert.deepEqual(texts([{ label: "소세지 (12/1 순차배송)", values: ["소세지 (12/1 순차배송)"], selling: true }, { label: "수박", values: ["수박"], selling: true }]), ["소세지 (12/1 순차배송)"]);
+const one = { price: "5000.00", supply_price: "3000.00", variants: [variant("P1", "소세지 바스락 토이")] };
+assert.deepEqual(ps.computeIssues({ ...base, settings: { restockQuantity: 99 }, wooof: one,
+  source: { name: "x", price: 5000, salePrice: 5000, options: [{ label: "[하울고]소세지 바스락 토이", values: ["[하울고]소세지 바스락 토이"], selling: true }] } })
+  .filter((i) => i.type === "option_text"), []);
+
 // 로그인 안 된 상세 페이지는 회원가가 숨겨진 것으로 본다
 assert.ok(im.memberPriceHidden('<span class="real_price">판매가 회원공개</span>'));
 assert.ok(!im.memberPriceHidden('<span class="real_price">14,200원</span>'));
