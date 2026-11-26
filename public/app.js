@@ -12406,6 +12406,7 @@ function psFilteredIssues() {
   if (ps.issueFilter === "info") return issues.filter((issue) => !issue.action);
   if (["soldout", "restock"].includes(ps.issueFilter)) return issues.filter((issue) => issue.type === ps.issueFilter);
   if (ps.issueFilter === "price") return issues.filter((issue) => issue.type === "price" || issue.type === "option_price");
+  if (ps.issueFilter === "hidden") return issues.filter((issue) => String(issue.wooofState || "").startsWith("F"));
   return issues.filter((issue) => issue.action);
 }
 
@@ -12421,11 +12422,13 @@ function renderPsIssues() {
     ["restock", "재입고", count((i) => i.type === "restock")],
     ["price", "가격", count((i) => i.type === "price" || i.type === "option_price")],
     ["info", "확인만", count((i) => !i.action)],
+    ["hidden", "우프 미진열", count((i) => String(i.wooofState || "").startsWith("F"))],
     ["all", "전체", all.length]
   ];
   const selected = new Set(ps.selected);
   const canApply = can("productsync", "apply");
   const actionable = issues.filter((i) => i.action);
+  const selectedActionable = all.filter((i) => i.action && selected.has(i.key)).length;
   let lastProduct = null;
   const rows = issues.map((issue) => {
     const [label, cls] = PS_ISSUE_LABELS[issue.type] || [issue.type, "ps-gray"];
@@ -12433,7 +12436,7 @@ function renderPsIssues() {
     lastProduct = issue.wooofProductNo;
     // 같은 상품의 옵션이 이어지면 상품명을 흐리게 다시 적는다("〃"만 두면 빈 줄처럼 보인다).
     return `<tr class="${sameProduct ? "ps-cont" : ""}">
-      <td>${issue.action && canApply ? `<input type="checkbox" data-ps-issue="${h(issue.key)}" ${selected.has(issue.key) ? "checked" : ""}>` : ""}</td>
+      <td>${canApply ? `<input type="checkbox" data-ps-issue="${h(issue.key)}" ${selected.has(issue.key) ? "checked" : ""}>` : ""}</td>
       <td><span class="ps-badge ${cls}">${h(label)}</span></td>
       <td class="ps-opt">${h(issue.optionLabel || issue.wooofOptionLabel || "-")}</td>
       <td class="ps-change">${issue.from !== undefined ? `${h(psFmtValue(issue.from))} → <strong>${h(psFmtValue(issue.to))}</strong>` : ""}
@@ -12441,7 +12444,7 @@ function renderPsIssues() {
         ${issue.autoError ? `<div class="danger-text">자동 변경 실패: ${h(issue.autoError)}</div>` : ""}</td>
       <td>${sameProduct
         ? `<span class="muted">${h(issue.productName)}</span>`
-        : `<a href="${psWooofUrl(issue.wooofProductNo)}" target="_blank" rel="noreferrer">${h(issue.productName)}</a>
+        : `<a href="${psWooofUrl(issue.wooofProductNo)}" target="_blank" rel="noreferrer">${h(issue.productName)}</a>${String(issue.wooofState || "").startsWith("F") ? ` <span class="ps-badge ps-gray">우프 미진열</span>` : ""}
         <div class="muted">우프 ${h(issue.wooofProductNo)} · 본사 <a href="${h(psSourceUrl(detail, issue.sourceNo))}" target="_blank" rel="noreferrer">${h(issue.sourceNo)}</a>${issue.sourceFilter ? ` (${h(issue.sourceFilter)})` : ""}</div>`}</td>
     </tr>`;
   }).join("");
@@ -12461,13 +12464,14 @@ function renderPsIssues() {
           : !issues.length ? `<p class="muted">이 조건에 해당하는 항목이 없습니다.${ps.issueFilter === "action" ? " 우프가 본사와 같습니다." : ""}</p>`
             : `<div class="table-wrap" style="max-height:560px"><table class="ps-table">
               <thead><tr>
-                <th>${canApply && actionable.length ? `<input type="checkbox" data-ps-issue-all ${actionable.every((i) => selected.has(i.key)) ? "checked" : ""}>` : ""}</th>
+                <th>${canApply && issues.length ? `<input type="checkbox" data-ps-issue-all ${issues.every((i) => selected.has(i.key)) ? "checked" : ""}>` : ""}</th>
                 <th>구분</th><th>옵션</th><th>우프 → 본사 기준</th><th>우프 상품</th>
               </tr></thead><tbody>${rows}</tbody></table></div>`}
         ${canApply && all.length ? `<div class="toolbar">
           ${renderPsJob("apply")}
-          <button class="primary" data-ps-apply ${selected.size && psJob("apply")?.status !== "running" ? "" : "disabled"}>선택 ${selected.size}건 우프에 반영</button>
+          <button class="primary" data-ps-apply ${selectedActionable && psJob("apply")?.status !== "running" ? "" : "disabled"}>선택 ${selectedActionable}건 우프에 반영</button>
           <button data-ps-dismiss ${selected.size ? "" : "disabled"}>선택 무시</button>
+          <button data-ps-park-issues ${selected.size ? "" : "disabled"} title="판매를 접은 상품: 동기화·매칭에서 빼고 다시 보여 주지 않습니다(카페24는 그대로)">선택 상품 운영하지 않음</button>
           <span class="muted">품절 = 재고 0(품절표시), 재입고 = 재고 ${h(detail.restockQuantity || 99)}. 무시한 항목은 값이 또 바뀔 때만 다시 뜹니다.</span>
         </div>` : ""}
       </div>
@@ -12617,7 +12621,8 @@ function renderPsLinks() {
     <td><a href="${h(link.sourceUrl)}" target="_blank" rel="noreferrer">${h(link.sourceNo)}</a></td>
     <td>${h(link.sourceName || "-")}${link.sourceFilter ? `<div class="muted">옵션 필터: ${h(link.sourceFilter)}</div>` : ""}
       ${link.sourceMissing ? `<span class="ps-badge ps-red">본사 삭제</span>` : !link.sourceListed ? `<span class="ps-badge ps-gray">본사 진열 중단</span>` : ""}
-      ${link.sourceSoldOut ? `<span class="ps-badge ps-red">본사 전체 품절</span>` : ""}</td>
+      ${link.sourceSoldOut ? `<span class="ps-badge ps-red">본사 전체 품절</span>` : ""}
+      ${detail.parked?.[String(link.wooofProductNo)] ? `<span class="ps-badge ps-gray">운영하지 않음</span>` : ""}</td>
     <td class="num">${link.issueCount ? `<a href="#" data-ps-goto-issues>${link.issueCount}건</a>` : `<span class="muted">0</span>`}</td>
     <td>${canApply ? `<button data-ps-link-edit="${h(link.wooofProductNo)}">수정·확인</button>` : ""}</td>
   </tr>`).join("");
@@ -12637,8 +12642,32 @@ function renderPsLinks() {
           <thead><tr><th>우프</th><th>우프 상품명</th><th>본사</th><th>본사 상품명</th><th>확인필요</th><th></th></tr></thead>
           <tbody>${rows}</tbody></table></div>
         ${renderPsUnlinked()}
+        ${renderPsParked()}
       </div>
     </section>`;
+}
+
+// 운영하지 않음(판매를 접은 우프 상품) — 동기화·매칭에서 빠진다. [운영 재개] 또는 카페24에서 다시 진열하면 돌아온다.
+function renderPsParked() {
+  const ps = psState();
+  const parked = Object.entries(ps.detail?.parked || {}).map(([no, v]) => ({ wooofProductNo: Number(no), ...v }))
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  if (!parked.length) return "";
+  const picked = new Set(ps.parkedPick || []);
+  const canApply = can("productsync", "apply");
+  return `<details style="margin-top:12px" ${ps.showParked ? "open" : ""} data-ps-parked-toggle>
+    <summary class="muted">운영하지 않음 ${parked.length}개 <span class="muted">— 재고·가격 확인, 확인 필요, 연결 추천에서 뺀 우프 상품</span></summary>
+    ${canApply ? `<div class="toolbar" style="margin-top:8px"><button data-ps-unpark ${picked.size ? "" : "disabled"}>선택 ${picked.size}개 운영 재개</button>
+      <span class="muted">카페24에서 다시 진열하면 자동으로 재개됩니다.</span></div>` : ""}
+    <div class="table-wrap" style="max-height:360px;margin-top:8px"><table class="ps-table">
+      <thead><tr><th>${canApply ? `<input type="checkbox" data-ps-parked-all ${picked.size === parked.length ? "checked" : ""}>` : ""}</th><th>우프</th><th>상품명</th><th>구분</th><th>언제</th></tr></thead>
+      <tbody>${parked.map((p) => `<tr>
+        <td>${canApply ? `<input type="checkbox" data-ps-parked-pick="${p.wooofProductNo}" ${picked.has(p.wooofProductNo) ? "checked" : ""}>` : ""}</td>
+        <td><a href="${psWooofUrl(p.wooofProductNo)}" target="_blank" rel="noreferrer">${h(p.wooofProductNo)}</a></td>
+        <td>${h(p.name || "-")}</td>
+        <td><span class="ps-badge ps-gray">${p.auto ? "자동(진열·판매 안 함)" : `직접 ${h(p.by || "")}`}</span></td>
+        <td>${psFmtTime(p.at)}</td></tr>`).join("")}</tbody></table></div>
+  </details>`;
 }
 
 const PS_CONFIDENCE = {
@@ -12673,17 +12702,20 @@ function renderPsSuggestions() {
       <div class="toolbar">
         <button data-ps-suggest-close>닫기</button>
         <button class="primary" data-ps-suggest-save ${picked.size && !sg.saving ? "" : "disabled"}>선택 ${picked.size}개 연결하고 재고 확인</button>
+        <button data-ps-suggest-park ${picked.size && !sg.saving ? "" : "disabled"} title="판매를 접은 상품: 연결하지 않고 다시 추천하지 않습니다">선택 ${picked.size}개 운영하지 않음</button>
       </div></div>
     <div class="panel-body">
       <p class="muted">우프에서 ${ps.detail?.supplierCode ? `공급사 ${h(ps.detail.supplierCode)} 상품` : `이름이 "${h(ps.detail?.namePrefix || "")}"로 시작하는 상품`} ${money.format(d.wooofCount)}개를 본사 상품 ${money.format(d.sourceCount)}개와 이름으로 맞춰 봤습니다.
         ${d.alreadyLinked ? `이미 연결된 ${money.format(d.alreadyLinked)}개는 뺐습니다.` : ""}
+        ${d.parkedCount ? `운영하지 않음 ${money.format(d.parkedCount)}개(카페24 진열·판매 안 함 포함)도 뺐습니다.` : ""}
         <b>이름 일치·옵션으로 나눔</b>은 미리 골라 두었고, <b>비슷한 이름</b>은 본사 링크를 열어 확인한 뒤 고르세요.</p>
       ${!d.sourceCount ? notice("warn", "본사 상품을 아직 읽지 않았습니다", "신상품 등록 화면에서 <b>신상품 찾기</b>를 먼저 한 번 돌려 주세요.") : ""}
       ${rows ? `<div class="table-wrap" style="max-height:520px"><table class="ps-table">
         <thead><tr><th><input type="checkbox" data-ps-suggest-all ${picked.size === d.suggestions.length ? "checked" : ""}></th><th>우프</th><th>우프 상품명</th><th>본사</th><th>본사 상품명</th><th>근거</th></tr></thead>
         <tbody>${rows}</tbody></table></div>` : ""}
       ${d.unmatched.length ? `<details style="margin-top:12px"><summary class="muted">짝을 못 찾은 우프 상품 ${d.unmatched.length}개 (본사에서 내렸거나 이름이 많이 다름 — 필요하면 "연결 추가"로 직접)</summary>
-        <ul class="ps-plain">${d.unmatched.map((w) => `<li><a href="${psWooofUrl(w.wooofProductNo)}" target="_blank" rel="noreferrer">${h(w.wooofProductNo)}</a> ${h(w.wooofName)}</li>`).join("")}</ul></details>` : ""}
+        <ul class="ps-plain">${d.unmatched.map((w) => `<li><a href="${psWooofUrl(w.wooofProductNo)}" target="_blank" rel="noreferrer">${h(w.wooofProductNo)}</a> ${h(w.wooofName)}${w.wooofDisplay === "F" ? ` <span class="ps-badge ps-gray">미진열</span>` : ""}
+          ${can("productsync", "apply") ? `<button class="small ghost" data-ps-park-one="${h(w.wooofProductNo)}">운영하지 않음</button>` : ""}</li>`).join("")}</ul></details>` : ""}
     </div></section>`;
 }
 
@@ -12964,9 +12996,10 @@ function bindProductSync() {
     renderApp();
   });
   on("[data-ps-apply]", "click", async () => {
-    const keys = [...ps.selected];
+    // '확인만' 항목도 운영하지 않음용으로 고를 수 있어서, 반영은 반영 가능한 것만 보낸다.
+    const issues = (ps.detail?.issues || []).filter((i) => i.action && ps.selected.includes(i.key));
+    const keys = issues.map((i) => i.key);
     if (!keys.length) return;
-    const issues = (ps.detail?.issues || []).filter((i) => keys.includes(i.key));
     const products = new Set(issues.map((i) => i.wooofProductNo)).size;
     if (!confirm(`우프 상품 ${products}개, ${keys.length}건을 카페24에 반영합니다.\n반영 직전에 본사·우프를 다시 확인해서, 그사이 바뀐 항목은 건너뜁니다.`)) return;
     try {
@@ -12998,6 +13031,55 @@ function bindProductSync() {
     } catch (error) {
       showToast(error.message, "error");
     }
+  });
+  const parkNos = async (nos, parked, ok) => {
+    if (!nos.length) return;
+    try {
+      await api(`${sourcePath}/parked`, { method: "POST", body: { wooofNos: nos, parked } });
+      showToast(ok);
+      await loadProductSync({ silent: true });
+    } catch (error) { showToast(error.message, "error"); }
+  };
+  on("[data-ps-park-issues]", "click", async () => {
+    const keys = new Set(ps.selected);
+    const nos = [...new Set((ps.detail?.issues || []).filter((i) => keys.has(i.key)).map((i) => Number(i.wooofProductNo)))];
+    if (!nos.length || !confirm(`우프 상품 ${nos.length}개를 '운영하지 않음'으로 보냅니다.\n재고·가격 확인과 매칭에서 빠지고 다시 보이지 않습니다(카페24는 그대로).\n상품 연결표 아래 '운영하지 않음'에서 다시 재개할 수 있습니다.`)) return;
+    ps.selected = [];
+    await parkNos(nos, true, `${nos.length}개를 운영하지 않음으로 보냈습니다.`);
+  });
+  on("[data-ps-suggest-park]", "click", async () => {
+    const nos = [...(ps.suggest?.picked || [])].map(Number);
+    if (!nos.length || !confirm(`우프 상품 ${nos.length}개를 연결하지 않고 '운영하지 않음'으로 보냅니다. 계속할까요?`)) return;
+    await parkNos(nos, true, `${nos.length}개를 운영하지 않음으로 보냈습니다.`);
+    if (ps.suggest?.data) {
+      const set = new Set(nos);
+      ps.suggest.data.suggestions = ps.suggest.data.suggestions.filter((x) => !set.has(Number(x.wooofProductNo)));
+      ps.suggest.picked = new Set();
+      renderApp();
+    }
+  });
+  on("[data-ps-park-one]", "click", async (event) => {
+    const no = Number(event.currentTarget.dataset.psParkOne);
+    await parkNos([no], true, "운영하지 않음으로 보냈습니다.");
+    if (ps.suggest?.data) { ps.suggest.data.unmatched = ps.suggest.data.unmatched.filter((w) => Number(w.wooofProductNo) !== no); renderApp(); }
+  });
+  on("[data-ps-parked-toggle]", "toggle", (event) => { ps.showParked = event.currentTarget.open; });
+  on("[data-ps-parked-pick]", "change", (event) => {
+    const no = Number(event.currentTarget.dataset.psParkedPick);
+    const set = new Set(ps.parkedPick || []);
+    if (event.currentTarget.checked) set.add(no); else set.delete(no);
+    ps.parkedPick = [...set];
+    renderApp();
+  });
+  on("[data-ps-parked-all]", "change", (event) => {
+    ps.parkedPick = event.currentTarget.checked ? Object.keys(ps.detail?.parked || {}).map(Number) : [];
+    renderApp();
+  });
+  on("[data-ps-unpark]", "click", async () => {
+    const nos = [...(ps.parkedPick || [])];
+    if (!nos.length || !confirm(`${nos.length}개를 운영 재개합니다. 다음 재고 확인부터 다시 비교합니다.`)) return;
+    ps.parkedPick = [];
+    await parkNos(nos, false, `${nos.length}개를 운영 재개했습니다. [재고 확인하기]를 누르면 바로 비교합니다.`);
   });
   on("[data-ps-notices-clear]", "click", async () => {
     await api(`${sourcePath}/notices/clear`, { method: "POST", body: { ids: [] } }).catch((e) => showToast(e.message, "error"));

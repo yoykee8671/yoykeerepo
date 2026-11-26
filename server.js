@@ -7667,6 +7667,14 @@ async function routeProductSync(req, res, url, actor, db) {
       sendJson(res, 200, await productSync.linkSuggestions(sourceId));
       return;
     }
+    // 운영하지 않음 / 운영 재개 (pay 안에서만, 카페24는 그대로)
+    if (rest === "/parked" && method === "POST") {
+      const body = await readBody(req);
+      const result = await productSync.setParked(sourceId, body.wooofNos, body.parked !== false, actorInfo);
+      await audit(`상품동기화 ${body.parked !== false ? "운영하지 않음" : "운영 재개"} ${(body.wooofNos || []).length}개 (${sourceId})`, sourceId);
+      sendJson(res, 200, result);
+      return;
+    }
     if (rest === "/links/bulk" && method === "POST") {
       const body = await readBody(req);
       const result = await productSync.saveLinks(sourceId, body.items, actorInfo);
