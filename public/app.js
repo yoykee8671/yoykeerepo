@@ -12145,6 +12145,12 @@ function psState() {
   return state.productSync;
 }
 
+// 본사 상품 주소: 아임웹은 /shop_view/?idx=, 카페24는 /product/detail.html?product_no=
+function psSourceUrl(detail, no) {
+  const base = String(detail?.baseUrl || "").replace(/\/+$/, "");
+  return detail?.platform === "imweb" ? `${base}/shop_view/?idx=${encodeURIComponent(no)}` : `${base}/product/detail.html?product_no=${encodeURIComponent(no)}`;
+}
+
 function psWooofUrl(no) {
   return `https://wooof.co.kr/product/detail.html?product_no=${encodeURIComponent(no)}`;
 }
@@ -12436,7 +12442,7 @@ function renderPsIssues() {
       <td>${sameProduct
         ? `<span class="muted">${h(issue.productName)}</span>`
         : `<a href="${psWooofUrl(issue.wooofProductNo)}" target="_blank" rel="noreferrer">${h(issue.productName)}</a>
-        <div class="muted">우프 ${h(issue.wooofProductNo)} · 본사 <a href="${h(`${detail.baseUrl}/product/detail.html?product_no=${issue.sourceNo}`)}" target="_blank" rel="noreferrer">${h(issue.sourceNo)}</a>${issue.sourceFilter ? ` (${h(issue.sourceFilter)})` : ""}</div>`}</td>
+        <div class="muted">우프 ${h(issue.wooofProductNo)} · 본사 <a href="${h(psSourceUrl(detail, issue.sourceNo))}" target="_blank" rel="noreferrer">${h(issue.sourceNo)}</a>${issue.sourceFilter ? ` (${h(issue.sourceFilter)})` : ""}</div>`}</td>
     </tr>`;
   }).join("");
   const notices = detail.notices || [];
@@ -12475,7 +12481,7 @@ function renderPsIssues() {
           <thead><tr><th>구분</th><th>본사 상품</th><th>이전</th><th>지금</th><th>감지</th><th></th></tr></thead>
           <tbody>${notices.map((n) => `<tr>
             <td><span class="ps-badge ps-gray">${h(PS_NOTICE_LABELS[n.type] || n.type)}</span></td>
-            <td><a href="${h(`${detail.baseUrl}/product/detail.html?product_no=${n.sourceNo}`)}" target="_blank" rel="noreferrer">${h(n.sourceNo)}</a></td>
+            <td><a href="${h(psSourceUrl(detail, n.sourceNo))}" target="_blank" rel="noreferrer">${h(n.sourceNo)}</a></td>
             <td>${n.type === "image_changed" ? `<img src="${h(n.from)}" class="ps-thumb-sm" alt="">` : h(n.from)}</td>
             <td>${n.type === "image_changed" ? `<img src="${h(n.to)}" class="ps-thumb-sm" alt="">` : h(n.to)}</td>
             <td>${psFmtTime(n.at)}</td>
