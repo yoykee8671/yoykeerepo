@@ -12441,7 +12441,8 @@ function renderPsIssues() {
       <td class="ps-opt">${h(issue.optionLabel || issue.wooofOptionLabel || "-")}</td>
       <td class="ps-change">${issue.from !== undefined ? `${h(psFmtValue(issue.from))} → <strong>${h(psFmtValue(issue.to))}</strong>` : ""}
         <div class="muted">${h(issue.message)}</div>
-        ${issue.autoError ? `<div class="danger-text">자동 변경 실패: ${h(issue.autoError)}</div>` : ""}</td>
+        ${issue.autoError ? `<div class="danger-text">자동 변경 실패: ${h(issue.autoError)}</div>` : ""}
+        ${canApply && ["option_unmatched", "variant_unmatched", "filter_empty"].includes(issue.type) && !sameProduct ? `<button class="small ghost" data-ps-issue-link="${h(issue.wooofProductNo)}" title="이 상품의 연결(옵션 필터·옵션 이름 맞춤)을 고칩니다">옵션 연결</button>` : ""}</td>
       <td>${sameProduct
         ? `<span class="muted">${h(issue.productName)}</span>`
         : `<a href="${psWooofUrl(issue.wooofProductNo)}" target="_blank" rel="noreferrer">${h(issue.productName)}</a>${String(issue.wooofState || "").startsWith("F") ? ` <span class="ps-badge ps-gray">우프 미진열</span>` : ""}
@@ -12469,10 +12470,12 @@ function renderPsIssues() {
               </tr></thead><tbody>${rows}</tbody></table></div>`}
         ${canApply && all.length ? `<div class="toolbar">
           ${renderPsJob("apply")}
-          <button class="primary" data-ps-apply ${selectedActionable && psJob("apply")?.status !== "running" ? "" : "disabled"}>선택 ${selectedActionable}건 우프에 반영</button>
+          <button class="primary" data-ps-apply ${selectedActionable && psJob("apply")?.status !== "running" ? "" : "disabled"}>${selected.size && selected.size !== selectedActionable ? `선택 ${selected.size}건 중 ${selectedActionable}건 우프에 반영` : `선택 ${selectedActionable}건 우프에 반영`}</button>
           <button data-ps-dismiss ${selected.size ? "" : "disabled"}>선택 무시</button>
           <button data-ps-park-issues ${selected.size ? "" : "disabled"} title="판매를 접은 상품: 동기화·매칭에서 빼고 다시 보여 주지 않습니다(카페24는 그대로)">선택 상품 운영하지 않음</button>
-          <span class="muted">품절 = 재고 0(품절표시), 재입고 = 재고 ${h(detail.restockQuantity || 99)}. 무시한 항목은 값이 또 바뀔 때만 다시 뜹니다.</span>
+          <span class="muted">${selected.size && !selectedActionable
+            ? `고른 항목은 <b>확인만</b> 항목이라 우프에 자동으로 바꿀 값이 없습니다. 옵션 짝이 없으면 줄의 <b>[옵션 연결]</b>로 맞추고, 필요 없으면 <b>[선택 무시]</b> 또는 <b>[운영하지 않음]</b>을 누르세요.`
+            : `품절 = 재고 0(품절표시), 재입고 = 재고 ${h(detail.restockQuantity || 99)}. 무시한 항목은 값이 또 바뀔 때만 다시 뜹니다.`}</span>
         </div>` : ""}
       </div>
     </section>
@@ -12986,7 +12989,8 @@ function bindProductSync() {
     renderApp();
   });
   on("[data-ps-issue-all]", "change", (event) => {
-    const keys = psFilteredIssues().filter((i) => i.action).map((i) => i.key);
+    // 지금 보이는 항목 전부(확인만 항목도 무시·운영하지 않음에 쓸 수 있어서). 반영은 반영 가능한 것만 보낸다.
+    const keys = psFilteredIssues().map((i) => i.key);
     const set = new Set(ps.selected);
     for (const key of keys) {
       if (event.currentTarget.checked) set.add(key);
@@ -13184,6 +13188,13 @@ function bindProductSync() {
   });
 
   // 연결표
+  on("[data-ps-issue-link]", "click", (event) => {
+    const no = event.currentTarget.dataset.psIssueLink;
+    ps.screen = "links";
+    renderApp();
+    app.querySelector(`[data-ps-link-edit="${no}"]`)?.click();
+    app.querySelector("[data-ps-link-form], .ps-link-form")?.scrollIntoView({ block: "start" });
+  });
   on("[data-ps-goto-issues]", "click", (event) => {
     event.preventDefault();
     ps.screen = "issues";
